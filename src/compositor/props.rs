@@ -40,7 +40,11 @@ pub struct LayerProps {
     pub layer_mode: Option<String>,
     /// 精灵裁剪矩形 `[x, y, w, h]`（纹理像素坐标）。用于从一张精灵图集里
     /// 取出子区域显示——标题菜单的多个按钮就共用一张 `btn.png`，靠 `clip` 区分。
+    /// 注意：若同时设置了 `intermediate_render`，clip 应被忽略（见 `clip_rect()`）。
     pub clip: Option<[f32; 4]>,
+    /// Artemis 离屏中间渲染标记。设置后该图层作为渲染目标，`clip` 为目标尺寸而
+    /// 非可视裁剪，不应影响纹理的采样区域。
+    pub intermediate_render: Option<u8>,
     /// 未被识别的属性，原样保留。
     pub custom: HashMap<String, String>,
 }
@@ -90,6 +94,13 @@ impl LayerProps {
             "colormultiply" => self.color_multiply = parse_rgb(v).or(self.color_multiply),
             "layermode" => self.layer_mode = Some(v.to_string()),
             "clip" => self.clip = parse_clip(v).or(self.clip),
+            // intermediate_render 是离屏中间渲染标记，记录下来以便 clip_rect() 能
+            // 正确忽略同组的 clip（那是渲染目标尺寸，不是可视裁剪）。
+            "intermediate_render" => {
+                self.intermediate_render = v.parse::<u8>().ok().or(self.intermediate_render);
+            }
+            // file 属性在 SetProperties 事件里偶尔出现，但图层文件已在 Create 时确定，忽略。
+            "file" => {}
             _ => {
                 self.custom.insert(key.to_string(), value.to_string());
             }
@@ -125,6 +136,10 @@ impl LayerProps {
 
     /// 精灵裁剪矩形 `[x, y, w, h]`（纹理像素），未设置时返回 `None`（画整张）。
     pub fn clip_rect(&self) -> Option<[f32; 4]> {
+        // intermediate_render 图层的 clip 是渲染目标尺寸，不是可视裁剪，忽略。
+        if self.intermediate_render.is_some() {
+            return None;
+        }
         self.clip
     }
 

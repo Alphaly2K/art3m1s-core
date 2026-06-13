@@ -1,0 +1,39 @@
+[package]
+name = "art3m1s-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pfs-upk-rust = { path = "../pfs-upk-rust" }
+asb-interpreter = { path = "../asb-interpreter" }
+encoding_rs = "0.8"
+glam = "0.30"
+# GL 渲染后端：实现合成器的 Renderer / TextureProvider trait。
+# 关闭 gl-backend feature 时核心合成器保持零 GPU 依赖。
+glow = { version = "0.16", optional = true }
+# 素材解码（PNG 等）。只随 gl-backend 启用，且只开 png 解码以保持精简。
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
+# 窗口管理和 GL 上下文创建（示例程序需要）
+winit = { version = "0.30", optional = true }
+glutin = { version = "0.32", optional = true }
+glutin-winit = { version = "0.5", optional = true }
+raw-window-handle = { version = "0.6", optional = true }
+
+[features]
+default = ["gl-backend"]
+gl-backend = ["dep:glow", "dep:image"]
+window = ["gl-backend", "dep:winit", "dep:glutin", "dep:glutin-winit", "dep:raw-window-handle"]
+
+[dev-dependencies]
+# 离屏像素回读测试需要在 macOS 上创建一个 CGL headless 上下文。
+libc = "0.2"
+# 测试里用来在内存中编码一张 PNG 喂给解码路径。
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# 窗口示例依赖 winit/glutin，这些是 window feature 才启用的可选依赖。
+# 声明 required-features 后，未开 window feature 的 `cargo test`/`build` 会跳过它，
+# 而不是因缺少依赖而编译失败。
+[[example]]
+name = "window"
+required-features = ["window"]
+
