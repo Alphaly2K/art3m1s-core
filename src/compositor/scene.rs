@@ -134,6 +134,11 @@ impl Scene {
         self.nodes.keys().cloned().collect()
     }
 
+    /// 遍历场景中所有图层节点。
+    pub fn all_layers(&self) -> impl Iterator<Item = &Layer> {
+        self.nodes.values()
+    }
+
     /// 确保某 ID 的节点存在（含祖先链接），不改动已有属性。
     pub fn ensure(&mut self, id: &str) {
         self.ensure_path(id);

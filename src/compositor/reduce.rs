@@ -14,12 +14,31 @@ use crate::compositor::scene::Scene;
 use asb_interpreter::event::{Event, LayerEvent};
 use std::collections::HashMap;
 
+/// 已注册的输入事件处理器。
+///
+/// 由 Lua 脚本通过 `e:tag{"setonpush", key=..., handler="calllua", function="..."}` 注册。
+/// 宿主在检测到相应输入（鼠标点击、按键）时查找并调用。
+#[derive(Debug, Clone)]
+pub struct InputHandler {
+    /// Lua 回调函数名（来自标签的 `function` 字段）。
+    pub function: String,
+    /// 注册时附带的元数据（key、adv、ui、btn 等），触发时作为 param 表传给 Lua。
+    pub params: HashMap<String, String>,
+}
+
 /// 后端无关的合成器：场景树 + 时钟 + 事件归约。
 #[derive(Debug, Default)]
 pub struct Compositor {
     scene: Scene,
     /// 合成器时钟（毫秒），缓动与转场都基于它。
     clock_ms: u64,
+    /// 舞台到物理像素的缩放因子（HiDPI）。
+    /// 纹理尺寸是物理像素，props 的 left/top 是逻辑坐标，
+    /// 命中测试需要把纹理尺寸除以这个值才能与逻辑鼠标坐标对齐。
+    stage_scale: f32,
+    /// 输入事件处理器注册表，按 (event_name, key) 索引。
+    /// key 来自 setonpush 标签的参数（如 "1" 表示鼠标左键）。
+    input_handlers: HashMap<(String, String), InputHandler>,
 }
 
 impl Compositor {
@@ -33,6 +52,20 @@ impl Compositor {
 
     pub fn clock_ms(&self) -> u64 {
         self.clock_ms
+    }
+
+    /// 设置舞台缩放因子（HiDPI scale）。宿主在窗口初始化/缩放变化时调用。
+    pub fn set_stage_scale(&mut self, scale: f32) {
+        self.stage_scale = scale.max(1.0);
+    }
+
+    pub fn stage_scale(&self) -> f32 {
+        self.stage_scale
+    }
+
+    /// 查询指定事件/键组合的已注册处理器。宿主在检测到输入后调用。
+    pub fn get_input_handler(&self, event_name: &str, key: &str) -> Option<&InputHandler> {
+        self.input_handlers.get(&(event_name.to_string(), key.to_string()))
     }
 
     /// 推进合成器时钟。宿主每帧用累计的真实时间调用一次。
@@ -61,13 +94,86 @@ impl Compositor {
                 // 强制完成：把该图层所有缓动直接落到终值并清空。
                 self.finish_tweens(id);
             }
-            Event::LayerEventHandler { id, click, over, out, extra_params, .. } => {
+            Event::LayerEventHandler { id, event_type, click, over, out, extra_params, mode, .. } => {
+                // mode="disable" 表示移除该事件类型的回调，mode="init" 表示注册。
+                let disabling = mode.as_str() == "disable";
+                let et = event_type.as_str();
+
                 self.scene.ensure(id);
                 if let Some(layer) = self.scene.get_mut(id) {
-                    if let Some(f) = click { layer.click_lua_fn = Some(f.clone()); }
-                    if let Some(f) = over  { layer.over_lua_fn  = Some(f.clone()); }
-                    if let Some(f) = out   { layer.out_lua_fn   = Some(f.clone()); }
-                    layer.event_params = extra_params.clone();
+                    // 方式一：直接带 click/over/out 字段（参数直接传）
+                    // 方式二：通过 e:tag{..., type="click", ["function"]="fn_name"} 调用
+                    // Lua 的 lyevent() 会把 click/over/out 各拆成一个 e:tag 调用，
+                    // tcopy 会带上原始的 click/over/out 字段，所以必须按 event_type
+                    // 过滤，避免 rollover 事件里的 click="btn_click" 覆盖 click_lua_fn。
+                    let fn_name = extra_params.get("function").cloned();
+                    match et {
+                        "click" => {
+                            // function 字段优先（lyevent 桥接用它覆盖原函数名），
+                            // 没有则回退到 click 字段（直接形式）
+                            let f = fn_name.as_ref().or(click.as_ref());
+                            if disabling { layer.click_lua_fn = None; }
+                            else if let Some(f) = f { layer.click_lua_fn = Some(f.clone()); }
+                        }
+                        "rollover" => {
+                            let f = fn_name.as_ref().or(over.as_ref());
+                            if disabling { layer.over_lua_fn = None; }
+                            else if let Some(f) = f { layer.over_lua_fn = Some(f.clone()); }
+                        }
+                        "rollout" => {
+                            let f = fn_name.as_ref().or(out.as_ref());
+                            if disabling { layer.out_lua_fn = None; }
+                            else if let Some(f) = f { layer.out_lua_fn = Some(f.clone()); }
+                        }
+                        _ => {
+                            // event_type 未指定（直接形式），各字段对应各回调
+                            if let Some(f) = click {
+                                if disabling { layer.click_lua_fn = None; }
+                                else { layer.click_lua_fn = Some(f.clone()); }
+                            }
+                            if let Some(f) = over {
+                                if disabling { layer.over_lua_fn = None; }
+                                else { layer.over_lua_fn = Some(f.clone()); }
+                            }
+                            if let Some(f) = out {
+                                if disabling { layer.out_lua_fn = None; }
+                                else { layer.out_lua_fn = Some(f.clone()); }
+                            }
+                        }
+                    }
+
+                    // 把 name/key/se 等按钮元数据存入，供回调使用
+                    for (k, v) in extra_params {
+                        if k != "function" {
+                            layer.event_params.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+            }
+            // 输入事件处理器注册（setonpush 等）
+            Event::SetEventHandler { event_name, handler, extra_params, .. } => {
+                // 只处理 calllua 类型的 push 事件处理器
+                if handler.as_deref() == Some("calllua") {
+                    if let Some(func) = extra_params.get("function") {
+                        // key 字段标识处理器响应的按键/输入（"1" = 鼠标左键）
+                        let key = extra_params.get("key").cloned().unwrap_or_default();
+                        self.input_handlers.insert(
+                            (event_name.clone(), key),
+                            InputHandler {
+                                function: func.clone(),
+                                params: extra_params.clone(),
+                            },
+                        );
+                    }
+                }
+            }
+            Event::DelEventHandler { event_name, key } => {
+                if let Some(key) = key {
+                    // 只移除指定 key 的处理器
+                    self.input_handlers.remove(&(event_name.clone(), key.clone()));
+                } else {
+                    // 移除该事件类型的所有处理器
+                    self.input_handlers.retain(|(name, _), _| name != event_name);
                 }
             }
             // 其余事件（音频、文本、存档、系统 UI…）不影响图层合成。
@@ -219,7 +325,26 @@ impl Compositor {
         provider: &mut dyn TextureProvider,
     ) -> Option<(String, Option<String>, Option<String>, std::collections::HashMap<String, String>)>
     {
-        self.hit_test_subtree("1", 0.0, 0.0, x, y, provider)
+        self.hit_test_with_id(x, y, provider)
+            .map(|(_id, click, over, out, params)| (click, over, out, params))
+    }
+
+    /// 命中测试 + 图层 ID。用于 hover 跟踪：宿主用 ID 判断鼠标进出。
+    pub fn hit_test_with_id(
+        &self,
+        x: f32,
+        y: f32,
+        provider: &mut dyn TextureProvider,
+    ) -> Option<(String, String, Option<String>, Option<String>, std::collections::HashMap<String, String>)>
+    {
+        let roots = self.scene.roots();
+        let scale = self.stage_scale;
+        for root in roots.iter().rev() {
+            if let Some(hit) = self.hit_test_subtree(root, 0.0, 0.0, x, y, scale, provider) {
+                return Some(hit);
+            }
+        }
+        None
     }
 
     fn hit_test_subtree(
@@ -229,8 +354,9 @@ impl Compositor {
         parent_y: f32,
         mx: f32,
         my: f32,
+        scale: f32,
         provider: &mut dyn TextureProvider,
-    ) -> Option<(String, Option<String>, Option<String>, std::collections::HashMap<String, String>)>
+    ) -> Option<(String, String, Option<String>, Option<String>, std::collections::HashMap<String, String>)>
     {
         let layer = self.scene.get(id)?;
         let props = &layer.props;
@@ -246,19 +372,25 @@ impl Compositor {
         // 先递归检测子层（高 z-order 优先，reverse 遍历）
         let children: Vec<String> = layer.children.clone();
         for child_id in children.iter().rev() {
-            if let Some(hit) = self.hit_test_subtree(child_id, abs_x, abs_y, mx, my, provider) {
+            if let Some(hit) = self.hit_test_subtree(child_id, abs_x, abs_y, mx, my, scale, provider) {
                 return Some(hit);
             }
         }
 
         // 再检测本层
         if layer.click_lua_fn.is_some() {
-            // 宽高优先取 props，没有则取纹理真实尺寸（与 build.rs 保持一致）。
+            // 宽高优先级：
+            // 1. props.width/height（显式设置的逻辑尺寸）
+            // 2. clip 的宽高（精灵表裁剪区域，已经是逻辑坐标）
+            // 3. 纹理物理尺寸 / scale（整张纹理的逻辑尺寸）
             let (w, h) = if let (Some(w), Some(h)) = (props.width, props.height) {
                 (w, h)
+            } else if let Some(clip) = props.clip_rect() {
+                // clip = [x, y, w, h]，取 w 和 h
+                (clip[2], clip[3])
             } else if let Some(file) = &layer.file {
                 if let Some((_, info)) = provider.resolve(file) {
-                    (info.width as f32, info.height as f32)
+                    (info.width as f32 / scale, info.height as f32 / scale)
                 } else {
                     return None;
                 }
@@ -268,6 +400,7 @@ impl Compositor {
 
             if mx >= abs_x && mx < abs_x + w && my >= abs_y && my < abs_y + h {
                 return Some((
+                    id.to_string(),
                     layer.click_lua_fn.clone().unwrap(),
                     layer.over_lua_fn.clone(),
                     layer.out_lua_fn.clone(),
