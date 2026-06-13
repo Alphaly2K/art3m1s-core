@@ -61,6 +61,15 @@ impl Compositor {
                 // 强制完成：把该图层所有缓动直接落到终值并清空。
                 self.finish_tweens(id);
             }
+            Event::LayerEventHandler { id, click, over, out, extra_params, .. } => {
+                self.scene.ensure(id);
+                if let Some(layer) = self.scene.get_mut(id) {
+                    if let Some(f) = click { layer.click_lua_fn = Some(f.clone()); }
+                    if let Some(f) = over  { layer.over_lua_fn  = Some(f.clone()); }
+                    if let Some(f) = out   { layer.out_lua_fn   = Some(f.clone()); }
+                    layer.event_params = extra_params.clone();
+                }
+            }
             // 其余事件（音频、文本、存档、系统 UI…）不影响图层合成。
             _ => {}
         }
@@ -196,6 +205,78 @@ impl Compositor {
     pub fn render(&self, renderer: &mut dyn Renderer, provider: &mut dyn TextureProvider) {
         let frame = self.build(provider);
         renderer.render(&frame);
+    }
+
+    /// 命中测试：返回舞台坐标 (x, y) 处最上层有 click 回调的图层信息。
+    ///
+    /// 返回 `(click_fn, over_fn, out_fn, extra_params)`。
+    /// 只考虑 visible != false 的图层，使用图层 left/top/width/height 做 AABB 判定。
+    /// 没有 width/height 时跳过（纯分组节点）。
+    pub fn hit_test(
+        &self,
+        x: f32,
+        y: f32,
+        provider: &mut dyn TextureProvider,
+    ) -> Option<(String, Option<String>, Option<String>, std::collections::HashMap<String, String>)>
+    {
+        self.hit_test_subtree("1", 0.0, 0.0, x, y, provider)
+    }
+
+    fn hit_test_subtree(
+        &self,
+        id: &str,
+        parent_x: f32,
+        parent_y: f32,
+        mx: f32,
+        my: f32,
+        provider: &mut dyn TextureProvider,
+    ) -> Option<(String, Option<String>, Option<String>, std::collections::HashMap<String, String>)>
+    {
+        let layer = self.scene.get(id)?;
+        let props = &layer.props;
+
+        if props.visible == Some(false) {
+            return None;
+        }
+
+        let (lx, ly) = props.offset();
+        let abs_x = parent_x + lx;
+        let abs_y = parent_y + ly;
+
+        // 先递归检测子层（高 z-order 优先，reverse 遍历）
+        let children: Vec<String> = layer.children.clone();
+        for child_id in children.iter().rev() {
+            if let Some(hit) = self.hit_test_subtree(child_id, abs_x, abs_y, mx, my, provider) {
+                return Some(hit);
+            }
+        }
+
+        // 再检测本层
+        if layer.click_lua_fn.is_some() {
+            // 宽高优先取 props，没有则取纹理真实尺寸（与 build.rs 保持一致）。
+            let (w, h) = if let (Some(w), Some(h)) = (props.width, props.height) {
+                (w, h)
+            } else if let Some(file) = &layer.file {
+                if let Some((_, info)) = provider.resolve(file) {
+                    (info.width as f32, info.height as f32)
+                } else {
+                    return None;
+                }
+            } else {
+                return None;
+            };
+
+            if mx >= abs_x && mx < abs_x + w && my >= abs_y && my < abs_y + h {
+                return Some((
+                    layer.click_lua_fn.clone().unwrap(),
+                    layer.over_lua_fn.clone(),
+                    layer.out_lua_fn.clone(),
+                    layer.event_params.clone(),
+                ));
+            }
+        }
+
+        None
     }
 
     /// 仅构建当前帧的绘制列表（不渲染），供测试或自定义循环使用。

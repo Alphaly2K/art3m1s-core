@@ -8,6 +8,7 @@ pfs-upk-rust = { path = "../pfs-upk-rust" }
 asb-interpreter = { path = "../asb-interpreter" }
 encoding_rs = "0.8"
 glam = "0.30"
+mlua = { version = "0.10", features = ["lua51", "send", "serialize", "vendored"], optional = true }
 # GL 渲染后端：实现合成器的 Renderer / TextureProvider trait。
 # 关闭 gl-backend feature 时核心合成器保持零 GPU 依赖。
 glow = { version = "0.16", optional = true }
@@ -22,7 +23,7 @@ raw-window-handle = { version = "0.6", optional = true }
 [features]
 default = ["gl-backend"]
 gl-backend = ["dep:glow", "dep:image"]
-window = ["gl-backend", "dep:winit", "dep:glutin", "dep:glutin-winit", "dep:raw-window-handle"]
+window = ["gl-backend", "dep:winit", "dep:glutin", "dep:glutin-winit", "dep:raw-window-handle", "dep:mlua"]
 
 [dev-dependencies]
 # 离屏像素回读测试需要在 macOS 上创建一个 CGL headless 上下文。

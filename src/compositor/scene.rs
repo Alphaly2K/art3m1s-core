@@ -25,6 +25,14 @@ pub struct Layer {
     pub tweens: Vec<Tween>,
     /// 直接子节点的完整 ID，按插入顺序保存以保证稳定的绘制次序。
     pub children: Vec<String>,
+    /// [lyevent] 注册的鼠标点击 Lua 回调函数名（如 "btn_click"）。
+    pub click_lua_fn: Option<String>,
+    /// [lyevent] 注册的鼠标移入 Lua 回调函数名（如 "btn_over"）。
+    pub over_lua_fn: Option<String>,
+    /// [lyevent] 注册的鼠标移出 Lua 回调函数名（如 "btn_out"）。
+    pub out_lua_fn: Option<String>,
+    /// [lyevent] 附带的按钮参数（name、key 等），透传给 Lua 回调。
+    pub event_params: std::collections::HashMap<String, String>,
 }
 
 impl Layer {

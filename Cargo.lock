@@ -86,6 +86,7 @@ dependencies = [
  "glutin-winit",
  "image",
  "libc",
+ "mlua",
  "pfs-upk-rust",
  "raw-window-handle",
  "winit",
