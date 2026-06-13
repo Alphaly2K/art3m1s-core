@@ -54,8 +54,13 @@ fn visit(
     let world = parent_transform * local;
     let opacity = parent_opacity * props.opacity();
 
-    // 只有绑定了纹理且能解析到资源的节点才产出绘制命令；纯分组节点只传递变换。
+    // 只有绑定了非空文件名且能解析到资源的节点才产出绘制命令；纯分组节点只传
+    // 递变换。空文件名（如 config 的纯色图层 `lyc2{color=...}`，无 file，Create
+    // 事件 file=""）不是纹理引用——跳过，否则 provider.resolve("") 会回退到品红
+    // 占位纹理，在屏幕左上角显示紫黑块。注：合成器暂无纯色矩形渲染路径，故这类
+    // 纯色图层（透明锚点 / 白条 / 黑底等）目前不绘制。
     if let Some(file) = &layer.file
+        && !file.is_empty()
         && let Some((texture, info)) = provider.resolve(file)
     {
         // 计算裁剪矩形
