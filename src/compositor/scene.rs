@@ -25,14 +25,31 @@ pub struct Layer {
     pub tweens: Vec<Tween>,
     /// 直接子节点的完整 ID，按插入顺序保存以保证稳定的绘制次序。
     pub children: Vec<String>,
-    /// [lyevent] 注册的鼠标点击 Lua 回调函数名（如 "btn_click"）。
-    pub click_lua_fn: Option<String>,
-    /// [lyevent] 注册的鼠标移入 Lua 回调函数名（如 "btn_over"）。
-    pub over_lua_fn: Option<String>,
-    /// [lyevent] 注册的鼠标移出 Lua 回调函数名（如 "btn_out"）。
-    pub out_lua_fn: Option<String>,
-    /// [lyevent] 附带的按钮参数（name、key 等），透传给 Lua 回调。
-    pub event_params: std::collections::HashMap<String, String>,
+    /// [lyevent] 注册的事件处理器，按事件类型（click/rollover/rollout/...）索引。
+    /// 引擎只负责命中后把对应处理器交还解释器执行，不解释其内容。
+    pub event_handlers: HashMap<String, LayerEventHandler>,
+}
+
+/// 一个 [lyevent] 注册的图层事件处理器。
+///
+/// 完全对应 Artemis `lyevent` 标签语义：命中后引擎执行 `handler` 标签（若有），
+/// 并跳转/调用到 `(file, label)`（若有），其余参数原样透传。引擎不认识其中任何
+/// 游戏函数名或参数含义。
+#[derive(Debug, Clone, Default)]
+pub struct LayerEventHandler {
+    /// 命中时先就地执行的标签名（如 `"calllua"`）；`None` 表示不执行内联标签。
+    pub handler: Option<String>,
+    /// 跳转/调用目标脚本文件；与 jump/call 标签的 file 参数同义。
+    pub file: Option<String>,
+    /// 跳转/调用目标标签；与 jump/call 标签的 label 参数同义。
+    pub label: Option<String>,
+    /// `call=1` 时把当前执行位置压入调用栈（对应 call 标签），否则等同 jump。
+    pub call: bool,
+    /// 图层重叠时是否穿透到下层（penetration=1）。
+    pub penetration: bool,
+    /// lyevent 标签里除已知字段外的所有参数（function、name、key、se 等），
+    /// 触发时原样塞进 handler 标签的参数表。
+    pub params: HashMap<String, String>,
 }
 
 impl Layer {

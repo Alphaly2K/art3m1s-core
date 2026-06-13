@@ -10,19 +10,27 @@
 use crate::compositor::anim::{Easing, Tween};
 use crate::compositor::build::build_frame;
 use crate::compositor::renderer::{DrawList, Renderer, TextureProvider};
-use crate::compositor::scene::Scene;
+use crate::compositor::scene::{LayerEventHandler, Scene};
 use asb_interpreter::event::{Event, LayerEvent};
 use std::collections::HashMap;
 
 /// 已注册的输入事件处理器。
 ///
-/// 由 Lua 脚本通过 `e:tag{"setonpush", key=..., handler="calllua", function="..."}` 注册。
-/// 宿主在检测到相应输入（鼠标点击、按键）时查找并调用。
-#[derive(Debug, Clone)]
+/// 由 Lua 脚本通过 `e:tag{"setonpush", key=..., handler="calllua", function="..."}`
+/// 之类的 seton* 标签注册。引擎在检测到相应输入时把它交还解释器执行，自身不解释
+/// handler/function 的含义——与 [`LayerEventHandler`] 同构。
+#[derive(Debug, Clone, Default)]
 pub struct InputHandler {
-    /// Lua 回调函数名（来自标签的 `function` 字段）。
-    pub function: String,
-    /// 注册时附带的元数据（key、adv、ui、btn 等），触发时作为 param 表传给 Lua。
+    /// 命中时先就地执行的标签名（如 `"calllua"`）。
+    pub handler: Option<String>,
+    /// 跳转/调用目标脚本文件。
+    pub file: Option<String>,
+    /// 跳转/调用目标标签。
+    pub label: Option<String>,
+    /// call=1 时压调用栈（对应 call 标签），否则等同 jump。
+    pub call: bool,
+    /// 标签里除已知字段外的所有参数（function、key、adv、ui、btn 等），
+    /// 触发时原样塞进 handler 标签的参数表。
     pub params: HashMap<String, String>,
 }
 
@@ -94,78 +102,67 @@ impl Compositor {
                 // 强制完成：把该图层所有缓动直接落到终值并清空。
                 self.finish_tweens(id);
             }
-            Event::LayerEventHandler { id, event_type, click, over, out, extra_params, mode, .. } => {
-                // mode="disable" 表示移除该事件类型的回调，mode="init" 表示注册。
-                let disabling = mode.as_str() == "disable";
-                let et = event_type.as_str();
-
+            Event::LayerEventHandler {
+                id,
+                event_type,
+                mode,
+                file,
+                label,
+                call,
+                handler,
+                penetration,
+                extra_params,
+            } => {
+                // mode 语义见 lyevent spec：
+                //   init    -> 注册/覆盖该事件类型的处理器
+                //   reset   -> 移除该事件类型的处理器
+                //   disable -> 保留信息但暂停执行（这里以移除近似；脚本随后会 enable 重设）
+                //   enable  -> 重新启用（脚本通常配合 init 重新注册，无需特殊处理）
                 self.scene.ensure(id);
                 if let Some(layer) = self.scene.get_mut(id) {
-                    // 方式一：直接带 click/over/out 字段（参数直接传）
-                    // 方式二：通过 e:tag{..., type="click", ["function"]="fn_name"} 调用
-                    // Lua 的 lyevent() 会把 click/over/out 各拆成一个 e:tag 调用，
-                    // tcopy 会带上原始的 click/over/out 字段，所以必须按 event_type
-                    // 过滤，避免 rollover 事件里的 click="btn_click" 覆盖 click_lua_fn。
-                    let fn_name = extra_params.get("function").cloned();
-                    match et {
-                        "click" => {
-                            // function 字段优先（lyevent 桥接用它覆盖原函数名），
-                            // 没有则回退到 click 字段（直接形式）
-                            let f = fn_name.as_ref().or(click.as_ref());
-                            if disabling { layer.click_lua_fn = None; }
-                            else if let Some(f) = f { layer.click_lua_fn = Some(f.clone()); }
+                    match mode.as_str() {
+                        "reset" | "disable" => {
+                            layer.event_handlers.remove(event_type);
                         }
-                        "rollover" => {
-                            let f = fn_name.as_ref().or(over.as_ref());
-                            if disabling { layer.over_lua_fn = None; }
-                            else if let Some(f) = f { layer.over_lua_fn = Some(f.clone()); }
-                        }
-                        "rollout" => {
-                            let f = fn_name.as_ref().or(out.as_ref());
-                            if disabling { layer.out_lua_fn = None; }
-                            else if let Some(f) = f { layer.out_lua_fn = Some(f.clone()); }
-                        }
+                        // "init"、"enable" 以及未指定都视为注册。
                         _ => {
-                            // event_type 未指定（直接形式），各字段对应各回调
-                            if let Some(f) = click {
-                                if disabling { layer.click_lua_fn = None; }
-                                else { layer.click_lua_fn = Some(f.clone()); }
-                            }
-                            if let Some(f) = over {
-                                if disabling { layer.over_lua_fn = None; }
-                                else { layer.over_lua_fn = Some(f.clone()); }
-                            }
-                            if let Some(f) = out {
-                                if disabling { layer.out_lua_fn = None; }
-                                else { layer.out_lua_fn = Some(f.clone()); }
-                            }
-                        }
-                    }
-
-                    // 把 name/key/se 等按钮元数据存入，供回调使用
-                    for (k, v) in extra_params {
-                        if k != "function" {
-                            layer.event_params.insert(k.clone(), v.clone());
+                            layer.event_handlers.insert(
+                                event_type.clone(),
+                                LayerEventHandler {
+                                    handler: handler.clone(),
+                                    file: file.clone(),
+                                    label: label.clone(),
+                                    call: *call,
+                                    penetration: *penetration,
+                                    params: extra_params.clone(),
+                                },
+                            );
                         }
                     }
                 }
             }
-            // 输入事件处理器注册（setonpush 等）
-            Event::SetEventHandler { event_name, handler, extra_params, .. } => {
-                // 只处理 calllua 类型的 push 事件处理器
-                if handler.as_deref() == Some("calllua") {
-                    if let Some(func) = extra_params.get("function") {
-                        // key 字段标识处理器响应的按键/输入（"1" = 鼠标左键）
-                        let key = extra_params.get("key").cloned().unwrap_or_default();
-                        self.input_handlers.insert(
-                            (event_name.clone(), key),
-                            InputHandler {
-                                function: func.clone(),
-                                params: extra_params.clone(),
-                            },
-                        );
-                    }
-                }
+            // 输入事件处理器注册（setonpush 等 seton* 标签）。
+            Event::SetEventHandler {
+                event_name,
+                file,
+                label,
+                call,
+                handler,
+                extra_params,
+            } => {
+                // key 字段标识处理器响应的按键/输入（"1" = 鼠标左键）。
+                // 引擎按 (event_name, key) 索引，不解释 handler/function 的语义。
+                let key = extra_params.get("key").cloned().unwrap_or_default();
+                self.input_handlers.insert(
+                    (event_name.clone(), key),
+                    InputHandler {
+                        handler: handler.clone(),
+                        file: file.clone(),
+                        label: label.clone(),
+                        call: *call,
+                        params: extra_params.clone(),
+                    },
+                );
             }
             Event::DelEventHandler { event_name, key } => {
                 if let Some(key) = key {
@@ -313,30 +310,18 @@ impl Compositor {
         renderer.render(&frame);
     }
 
-    /// 命中测试：返回舞台坐标 (x, y) 处最上层有 click 回调的图层信息。
+    /// 命中测试：返回舞台坐标 (x, y) 处最上层注册了事件处理器的图层 ID。
     ///
-    /// 返回 `(click_fn, over_fn, out_fn, extra_params)`。
-    /// 只考虑 visible != false 的图层，使用图层 left/top/width/height 做 AABB 判定。
-    /// 没有 width/height 时跳过（纯分组节点）。
+    /// 只考虑 visible != false 且 `event_handlers` 非空的图层，使用图层
+    /// left/top/width/height 做 AABB 判定。没有可推断宽高的纯分组节点跳过。
+    /// 拿到 ID 后，宿主通过 [`Compositor::scene`] 读取该图层的 `event_handlers`
+    /// 取出对应事件类型（click/rollover/rollout/...）的处理器。引擎不解释处理器内容。
     pub fn hit_test(
         &self,
         x: f32,
         y: f32,
         provider: &mut dyn TextureProvider,
-    ) -> Option<(String, Option<String>, Option<String>, std::collections::HashMap<String, String>)>
-    {
-        self.hit_test_with_id(x, y, provider)
-            .map(|(_id, click, over, out, params)| (click, over, out, params))
-    }
-
-    /// 命中测试 + 图层 ID。用于 hover 跟踪：宿主用 ID 判断鼠标进出。
-    pub fn hit_test_with_id(
-        &self,
-        x: f32,
-        y: f32,
-        provider: &mut dyn TextureProvider,
-    ) -> Option<(String, String, Option<String>, Option<String>, std::collections::HashMap<String, String>)>
-    {
+    ) -> Option<String> {
         let roots = self.scene.roots();
         let scale = self.stage_scale;
         for root in roots.iter().rev() {
@@ -356,8 +341,7 @@ impl Compositor {
         my: f32,
         scale: f32,
         provider: &mut dyn TextureProvider,
-    ) -> Option<(String, String, Option<String>, Option<String>, std::collections::HashMap<String, String>)>
-    {
+    ) -> Option<String> {
         let layer = self.scene.get(id)?;
         let props = &layer.props;
 
@@ -377,8 +361,8 @@ impl Compositor {
             }
         }
 
-        // 再检测本层
-        if layer.click_lua_fn.is_some() {
+        // 再检测本层：注册了任意事件处理器才参与命中。
+        if !layer.event_handlers.is_empty() {
             // 宽高优先级：
             // 1. props.width/height（显式设置的逻辑尺寸）
             // 2. clip 的宽高（精灵表裁剪区域，已经是逻辑坐标）
@@ -399,13 +383,7 @@ impl Compositor {
             };
 
             if mx >= abs_x && mx < abs_x + w && my >= abs_y && my < abs_y + h {
-                return Some((
-                    id.to_string(),
-                    layer.click_lua_fn.clone().unwrap(),
-                    layer.over_lua_fn.clone(),
-                    layer.out_lua_fn.clone(),
-                    layer.event_params.clone(),
-                ));
+                return Some(id.to_string());
             }
         }
 

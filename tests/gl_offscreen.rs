@@ -18,6 +18,7 @@ use glow::HasContext;
 use std::collections::HashMap;
 use std::ffi::{c_void, CString};
 use std::os::raw::{c_int, c_uint};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 // ── 最小 CGL 离屏上下文 ─────────────────────────────────────────────
@@ -329,7 +330,7 @@ fn layer_offset_positions_correctly() {
 
 /// 定位 example 项目根。测试运行目录是 crate 根。
 fn sample_project_root() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("example/project")
+    PathBuf::from("/Users/alphaly/lfpm/hamidashi")
 }
 
 /// 用真实 PNG 素材跑通整条「项目文件加载 → image 解码 → GL 上传 → 渲染 → 像素回读」

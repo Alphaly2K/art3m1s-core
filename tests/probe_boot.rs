@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 #[test]
 fn probe_boot_full() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("example/project");
+    let root = Path::new("/Users/alphaly/lfpm/hamidashi");
     let project = Project::open(root, "WINDOWS").unwrap();
     let mut it = project.create_interpreter();
 

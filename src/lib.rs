@@ -339,7 +339,7 @@ fn ini_bool(value: Option<&String>) -> bool {
         .unwrap_or(false)
 }
 
-fn resolve_project_path(root: &Path, virtual_path: &str) -> Result<PathBuf> {
+pub fn resolve_project_path(root: &Path, virtual_path: &str) -> Result<PathBuf> {
     let normalized = virtual_path.replace('\\', "/");
     let relative = Path::new(&normalized);
 
@@ -379,7 +379,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     fn sample_project_root() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("example/project")
+        PathBuf::from("/Users/alphaly/lfpm/hamidashi")
     }
 
     #[test]
