@@ -7,6 +7,7 @@
 
 use crate::compositor::anim::Tween;
 use crate::compositor::props::LayerProps;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 /// 一个图层节点。
@@ -35,6 +36,41 @@ impl Layer {
     }
 }
 
+/// Artemis 图层 ID 排序：按点号分割，数字部分按数值比较，字符串部分按字典序。
+/// 数字部分优先于字符串部分（数字在前）。
+fn compare_layer_id(a: &str, b: &str) -> Ordering {
+    let parts_a: Vec<&str> = a.split('.').collect();
+    let parts_b: Vec<&str> = b.split('.').collect();
+
+    for i in 0.. {
+        match (parts_a.get(i), parts_b.get(i)) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(&pa), Some(&pb)) => {
+                let ord = compare_id_part(pa, pb);
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+        }
+    }
+    Ordering::Equal
+}
+
+/// 比较单个 ID 部分：数字按数值，字符串按字典序，数字优先于字符串。
+fn compare_id_part(a: &str, b: &str) -> Ordering {
+    let a_num: Option<i64> = a.parse().ok();
+    let b_num: Option<i64> = b.parse().ok();
+
+    match (a_num, b_num) {
+        (Some(na), Some(nb)) => na.cmp(&nb),
+        (Some(_), None) => Ordering::Less,      // 数字优先
+        (None, Some(_)) => Ordering::Greater,   // 字符串在后
+        (None, None) => a.cmp(b),               // 都是字符串，按字典序
+    }
+}
+
 /// 整棵场景树。
 ///
 /// 节点存在扁平的 `HashMap` 里（键为完整 ID），父子关系通过 ID 推导，子节点顺序
@@ -59,6 +95,17 @@ impl Scene {
         self.nodes.get_mut(id)
     }
 
+    /// 获取指定图层的子图层 ID，按 Artemis 图层顺序排序。
+    pub fn children(&self, id: &str) -> Vec<String> {
+        self.get(id)
+            .map(|layer| {
+                let mut sorted = layer.children.clone();
+                sorted.sort_by(|a, b| compare_layer_id(a, b));
+                sorted
+            })
+            .unwrap_or_default()
+    }
+
     pub fn len(&self) -> usize {
         self.nodes.len()
     }
@@ -67,9 +114,11 @@ impl Scene {
         self.nodes.is_empty()
     }
 
-    /// 顶层节点 ID，按插入顺序。
-    pub fn roots(&self) -> &[String] {
-        &self.roots
+    /// 顶层节点 ID，按 Artemis 图层顺序排序（数字优先，数字按值，字符串按字典序）。
+    pub fn roots(&self) -> Vec<String> {
+        let mut sorted = self.roots.clone();
+        sorted.sort_by(|a, b| compare_layer_id(a, b));
+        sorted
     }
 
     /// 所有节点的 ID（无序），供需要遍历全树的调用方使用。

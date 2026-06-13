@@ -81,6 +81,31 @@ pub struct DrawCommand {
     pub opacity: f32,
     pub blend: BlendMode,
     pub color: ColorFilter,
+    /// 精灵裁剪：要采样的纹理子区域。
+    ///
+    /// `uv_offset` / `uv_scale` 是归一化 0..1 的 UV 起点与跨度；`quad_size` 是该子
+    /// 区域在像素下的绘制尺寸（顶点用它展开，而不是整张纹理尺寸）。无裁剪时
+    /// 为整张纹理：offset=(0,0)、scale=(1,1)、quad_size=纹理原始尺寸。
+    pub clip: ClipRect,
+}
+
+/// 绘制时的纹理裁剪矩形，UV 归一化、尺寸为像素。详见 [`DrawCommand::clip`]。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClipRect {
+    pub uv_offset: [f32; 2],
+    pub uv_scale: [f32; 2],
+    pub quad_size: [f32; 2],
+}
+
+impl ClipRect {
+    /// 整张纹理（不裁剪）。
+    pub fn full(size: TextureInfo) -> Self {
+        Self {
+            uv_offset: [0.0, 0.0],
+            uv_scale: [1.0, 1.0],
+            quad_size: [size.width as f32, size.height as f32],
+        }
+    }
 }
 
 /// 一帧的有序绘制列表，按从底到顶的绘制顺序排列（先画的在底层）。

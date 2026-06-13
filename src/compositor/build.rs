@@ -7,7 +7,7 @@
 
 use crate::compositor::props::LayerProps;
 use crate::compositor::renderer::{
-    BlendMode, ColorFilter, DrawCommand, DrawList, TextureProvider,
+    BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, TextureProvider,
 };
 use crate::compositor::scene::Scene;
 use glam::{Affine2, Vec2};
@@ -23,7 +23,7 @@ pub fn build_frame(
 ) -> DrawList {
     let mut frame = DrawList::new();
     for root in scene.roots() {
-        visit(scene, root, now_ms, Affine2::IDENTITY, 1.0, provider, &mut frame);
+        visit(scene, &root, now_ms, Affine2::IDENTITY, 1.0, provider, &mut frame);
     }
     frame
 }
@@ -58,6 +58,20 @@ fn visit(
     if let Some(file) = &layer.file
         && let Some((texture, info)) = provider.resolve(file)
     {
+        // 计算裁剪矩形
+        let clip = if let Some(clip_rect) = props.clip_rect() {
+            let [x, y, w, h] = clip_rect;
+            let tex_w = info.width as f32;
+            let tex_h = info.height as f32;
+            ClipRect {
+                uv_offset: [x / tex_w, y / tex_h],
+                uv_scale: [w / tex_w, h / tex_h],
+                quad_size: [w, h],
+            }
+        } else {
+            ClipRect::full(info)
+        };
+
         frame.push(DrawCommand {
             texture,
             size: info,
@@ -65,11 +79,13 @@ fn visit(
             opacity,
             blend: blend_mode(&props),
             color: color_filter(&props),
+            clip,
         });
     }
 
-    for child in &layer.children {
-        visit(scene, child, now_ms, world, opacity, provider, frame);
+    // 按 Artemis 图层顺序遍历子图层（数字优先，数字按值，字符串按字典序）。
+    for child in scene.children(id) {
+        visit(scene, &child, now_ms, world, opacity, provider, frame);
     }
 }
 
@@ -175,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn draw_order_is_root_then_children_in_insertion_order() {
+    fn draw_order_follows_artemis_layer_id_order() {
         let mut scene = Scene::new();
         scene.create("1", Some("a".into()));
         scene.create("1.1", Some("b".into()));
@@ -188,8 +204,8 @@ mod tests {
             .iter()
             .map(|c| provider.name_of(c.texture))
             .collect();
-        // 父先画，子按插入顺序（先 1.1 后 1.0）。
-        assert_eq!(names, vec!["a", "b", "c"]);
+        // 父先画，子按 Artemis 图层顺序（数字部分按值排序：1.0 < 1.1）。
+        assert_eq!(names, vec!["a", "c", "b"]);
     }
 
     #[test]
@@ -259,5 +275,45 @@ mod tests {
         let mut provider = MockProvider::new();
         let frame = build_frame(&scene, 0, &mut provider);
         assert_eq!(frame.commands[0].size.width, TEXTURE_SIZE);
+    }
+
+    #[test]
+    fn clip_rect_is_computed_from_props() {
+        let mut scene = Scene::new();
+        scene.create("1", Some("a".into()));
+        // 纹理是 TEXTURE_SIZE x TEXTURE_SIZE (256x256)
+        // 裁剪矩形：从 (10,20) 开始，宽高 (100,50)
+        scene.set_props("1", &raw(&[("clip", "10,20,100,50")]));
+
+        let mut provider = MockProvider::new();
+        let frame = build_frame(&scene, 0, &mut provider);
+        let cmd = &frame.commands[0];
+
+        // quad_size 应该是裁剪矩形的宽高
+        assert_eq!(cmd.clip.quad_size, [100.0, 50.0]);
+        // UV offset 应该是裁剪起点除以纹理尺寸
+        assert!((cmd.clip.uv_offset[0] - 10.0 / 256.0).abs() < 1e-6);
+        assert!((cmd.clip.uv_offset[1] - 20.0 / 256.0).abs() < 1e-6);
+        // UV scale 应该是裁剪宽高除以纹理尺寸
+        assert!((cmd.clip.uv_scale[0] - 100.0 / 256.0).abs() < 1e-6);
+        assert!((cmd.clip.uv_scale[1] - 50.0 / 256.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn no_clip_defaults_to_full_texture() {
+        let mut scene = Scene::new();
+        scene.create("1", Some("a".into()));
+        // 不设置 clip
+
+        let mut provider = MockProvider::new();
+        let frame = build_frame(&scene, 0, &mut provider);
+        let cmd = &frame.commands[0];
+
+        // 无裁剪时，quad_size 等于纹理尺寸
+        assert_eq!(cmd.clip.quad_size, [TEXTURE_SIZE as f32, TEXTURE_SIZE as f32]);
+        // UV offset 为 0
+        assert_eq!(cmd.clip.uv_offset, [0.0, 0.0]);
+        // UV scale 为 1
+        assert_eq!(cmd.clip.uv_scale, [1.0, 1.0]);
     }
 }

@@ -38,6 +38,9 @@ pub struct LayerProps {
     pub color_multiply: Option<[f32; 3]>,
     /// 合成/混合模式（`add` / `alpha` / `screen` …），原样保留交给后端解释。
     pub layer_mode: Option<String>,
+    /// 精灵裁剪矩形 `[x, y, w, h]`（纹理像素坐标）。用于从一张精灵图集里
+    /// 取出子区域显示——标题菜单的多个按钮就共用一张 `btn.png`，靠 `clip` 区分。
+    pub clip: Option<[f32; 4]>,
     /// 未被识别的属性，原样保留。
     pub custom: HashMap<String, String>,
 }
@@ -86,6 +89,7 @@ impl LayerProps {
             "negative" => self.negative = parse_bool(v).or(self.negative),
             "colormultiply" => self.color_multiply = parse_rgb(v).or(self.color_multiply),
             "layermode" => self.layer_mode = Some(v.to_string()),
+            "clip" => self.clip = parse_clip(v).or(self.clip),
             _ => {
                 self.custom.insert(key.to_string(), value.to_string());
             }
@@ -117,6 +121,11 @@ impl LayerProps {
 
     pub fn rotation_radians(&self) -> f32 {
         self.rotate.unwrap_or(0.0).to_radians()
+    }
+
+    /// 精灵裁剪矩形 `[x, y, w, h]`（纹理像素），未设置时返回 `None`（画整张）。
+    pub fn clip_rect(&self) -> Option<[f32; 4]> {
+        self.clip
     }
 
     /// 本图层自身的不透明度，归一化到 0.0-1.0。
@@ -158,6 +167,16 @@ fn parse_rgb(value: &str) -> Option<[f32; 3]> {
     let g = it.next()?.ok()?;
     let b = it.next()?.ok()?;
     Some([r / 255.0, g / 255.0, b / 255.0])
+}
+
+/// 解析 `"x,y,w,h"`（纹理像素）为裁剪矩形。四个分量缺一不可。
+fn parse_clip(value: &str) -> Option<[f32; 4]> {
+    let mut it = value.split(',').map(|c| c.trim().parse::<f32>());
+    let x = it.next()?.ok()?;
+    let y = it.next()?.ok()?;
+    let w = it.next()?.ok()?;
+    let h = it.next()?.ok()?;
+    Some([x, y, w, h])
 }
 
 #[cfg(test)]
@@ -203,8 +222,12 @@ mod tests {
     #[test]
     fn unknown_properties_go_to_custom() {
         let props = LayerProps::from_raw(&raw(&[("clip", "0,0,100,100"), ("draggable", "1")]));
-        assert_eq!(props.custom.get("clip").map(String::as_str), Some("0,0,100,100"));
+        // clip 是已识别属性，应被解析到 typed 字段。
+        assert_eq!(props.clip, Some([0.0, 0.0, 100.0, 100.0]));
+        // draggable 是未识别属性，应留在 custom 里。
         assert_eq!(props.custom.get("draggable").map(String::as_str), Some("1"));
+        // clip 不应出现在 custom 里。
+        assert_eq!(props.custom.get("clip"), None);
     }
 
     #[test]

@@ -42,10 +42,19 @@ pub struct GlRenderer {
     vbo: glow::Buffer,
     stage_width: f32,
     stage_height: f32,
+    /// GL 视口的物理像素尺寸。
+    ///
+    /// 与 [`stage_width`]/[`stage_height`]（游戏设计分辨率，用于投影矩阵）区分开：
+    /// 在 Retina/HiDPI 显示器上，窗口可绘制表面的物理像素数是逻辑尺寸乘以缩放因子，
+    /// 视口必须用物理像素，否则画面只占左下角并出现拉伸/花屏。默认等于舞台尺寸。
+    viewport_width: i32,
+    viewport_height: i32,
     // uniform location 缓存
     u_projection: Option<glow::UniformLocation>,
     u_transform: Option<glow::UniformLocation>,
     u_size: Option<glow::UniformLocation>,
+    u_uv_offset: Option<glow::UniformLocation>,
+    u_uv_scale: Option<glow::UniformLocation>,
     u_opacity: Option<glow::UniformLocation>,
     u_multiply: Option<glow::UniformLocation>,
     u_grayscale: Option<glow::UniformLocation>,
@@ -108,6 +117,8 @@ impl GlRenderer {
                 u_projection: u("u_projection"),
                 u_transform: u("u_transform"),
                 u_size: u("u_size"),
+                u_uv_offset: u("u_uv_offset"),
+                u_uv_scale: u("u_uv_scale"),
                 u_opacity: u("u_opacity"),
                 u_multiply: u("u_multiply"),
                 u_grayscale: u("u_grayscale"),
@@ -119,9 +130,22 @@ impl GlRenderer {
                 vbo,
                 stage_width: stage_width as f32,
                 stage_height: stage_height as f32,
+                // 默认视口等于舞台尺寸；HiDPI 宿主应在拿到可绘制表面后调用
+                // [`set_viewport_size`] 传入物理像素尺寸。
+                viewport_width: stage_width as i32,
+                viewport_height: stage_height as i32,
             };
             Ok(renderer)
         }
+    }
+
+    /// 设置 GL 视口的物理像素尺寸（用于 HiDPI/Retina）。
+    ///
+    /// 投影矩阵仍按舞台设计分辨率工作，因此图层坐标无需改动；这里只调整光栅化
+    /// 时映射到帧缓冲的像素范围。宿主应在创建表面后以及每次 resize 后调用。
+    pub fn set_viewport_size(&mut self, width: u32, height: u32) {
+        self.viewport_width = width as i32;
+        self.viewport_height = height as i32;
     }
 
     /// 把舞台像素坐标映射到 NDC 的正交投影（行主序 3x3，列向量约定）。
@@ -176,11 +200,11 @@ impl GlRenderer {
                 t.x, t.y, 1.0, // col 2
             ];
             gl.uniform_matrix_3_f32_slice(self.u_transform.as_ref(), false, &transform3);
-            gl.uniform_2_f32(
-                self.u_size.as_ref(),
-                cmd.size.width as f32,
-                cmd.size.height as f32,
-            );
+            // 用裁剪后的 quad 尺寸（而不是整张纹理尺寸）展开单位方块。
+            gl.uniform_2_f32(self.u_size.as_ref(), cmd.clip.quad_size[0], cmd.clip.quad_size[1]);
+            // UV 重映射：把 0..1 的顶点 UV 映射到裁剪子区域。
+            gl.uniform_2_f32(self.u_uv_offset.as_ref(), cmd.clip.uv_offset[0], cmd.clip.uv_offset[1]);
+            gl.uniform_2_f32(self.u_uv_scale.as_ref(), cmd.clip.uv_scale[0], cmd.clip.uv_scale[1]);
             gl.uniform_1_f32(self.u_opacity.as_ref(), cmd.opacity);
             let c = cmd.color;
             gl.uniform_3_f32(
@@ -207,7 +231,7 @@ impl Renderer for GlRenderer {
     fn render(&mut self, frame: &DrawList) {
         let gl = &self.gl;
         unsafe {
-            gl.viewport(0, 0, self.stage_width as i32, self.stage_height as i32);
+            gl.viewport(0, 0, self.viewport_width, self.viewport_height);
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
 

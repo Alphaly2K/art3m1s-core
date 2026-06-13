@@ -31,17 +31,20 @@ layout(location = 1) in vec2 a_uv;
 
 uniform mat3 u_projection;  // 舞台像素 → NDC
 uniform mat3 u_transform;   // 图层世界变换（像素空间）
-uniform vec2 u_size;        // 纹理像素尺寸
+uniform vec2 u_size;        // 绘制区域像素尺寸（裁剪时=clip宽高，否则=纹理尺寸）
+uniform vec2 u_uv_offset;   // UV 起点（归一化 0..1）
+uniform vec2 u_uv_scale;    // UV 跨度（归一化 0..1）
 
 out vec2 v_uv;
 
 void main() {
-    // 单位方块按纹理尺寸展开，再过世界变换到舞台像素，最后投影到 NDC。
+    // 单位方块按绘制区域尺寸展开，再过世界变换到舞台像素，最后投影到 NDC。
     vec2 local = a_pos * u_size;
     vec3 world = u_transform * vec3(local, 1.0);
     vec3 ndc = u_projection * vec3(world.xy, 1.0);
     gl_Position = vec4(ndc.xy, 0.0, 1.0);
-    v_uv = a_uv;
+    // 把 0..1 的顶点 UV 映射到裁剪子区域。
+    v_uv = u_uv_offset + a_uv * u_uv_scale;
 }
 "#;
 
