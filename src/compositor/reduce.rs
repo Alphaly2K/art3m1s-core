@@ -310,12 +310,19 @@ impl Compositor {
         renderer.render(&frame);
     }
 
-    /// 命中测试：返回舞台坐标 (x, y) 处最上层注册了事件处理器的图层 ID。
+    /// 命中测试：返回舞台坐标 (x, y) 处最上层、可接收指针输入的图层 ID。
     ///
-    /// 只考虑 visible != false 且 `event_handlers` 非空的图层，使用图层
-    /// left/top/width/height 做 AABB 判定。没有可推断宽高的纯分组节点跳过。
-    /// 拿到 ID 后，宿主通过 [`Compositor::scene`] 读取该图层的 `event_handlers`
-    /// 取出对应事件类型（click/rollover/rollout/...）的处理器。引擎不解释处理器内容。
+    /// Artemis 的命中是「单次取最上层」的：找到顶端的可交互图层后，宿主再按事件
+    /// 类型（click/rollover/...）去它的 `event_handlers` 取处理器——并**不**分事件
+    /// 类型各做一次命中。
+    ///
+    /// 「可交互」需同时满足：visible != false、注册了至少一个事件处理器、且未被
+    /// `clickablethreshold` 判为透明。`clickablethreshold` 是 Artemis 的指针命中
+    /// 阈值：图层有效 alpha 低于该阈值时对指针透明（不吃事件）。tablet 的
+    /// `mw.zmask` 正是一张 alpha=0、clickablethreshold=128 的全宽透明遮罩，只用于
+    /// 程序化拖拽，不应拦截落到其下工具栏按钮的 hover/click——靠这个阈值放行。
+    ///
+    /// 命中用图层 left/top/width/height 做 AABB 判定。没有可推断宽高的纯分组节点跳过。
     pub fn hit_test(
         &self,
         x: f32,
@@ -353,16 +360,19 @@ impl Compositor {
         let abs_x = parent_x + lx;
         let abs_y = parent_y + ly;
 
-        // 先递归检测子层（高 z-order 优先，reverse 遍历）
-        let children: Vec<String> = layer.children.clone();
+        // 先递归检测子层（高 z-order 优先，reverse 遍历）。
+        // 注意按 Artemis 图层顺序排序（与绘制次序一致），不能用原始插入顺序，
+        // 否则命中的 z-order 与画面不符。
+        let children = self.scene.children(id);
         for child_id in children.iter().rev() {
-            if let Some(hit) = self.hit_test_subtree(child_id, abs_x, abs_y, mx, my, scale, provider) {
+            if let Some(hit) = self.hit_test_subtree(child_id, abs_x, abs_y, mx, my, scale, provider)
+            {
                 return Some(hit);
             }
         }
 
-        // 再检测本层：注册了任意事件处理器才参与命中。
-        if !layer.event_handlers.is_empty() {
+        // 再检测本层：注册了任意事件处理器、且未被 clickablethreshold 判为透明。
+        if !layer.event_handlers.is_empty() && !self.is_pointer_transparent(props) {
             // 宽高优先级：
             // 1. props.width/height（显式设置的逻辑尺寸）
             // 2. clip 的宽高（精灵表裁剪区域，已经是逻辑坐标）
@@ -388,6 +398,24 @@ impl Compositor {
         }
 
         None
+    }
+
+    /// 按 `clickablethreshold` 判断图层是否对指针透明（不接收 hover/click）。
+    ///
+    /// Artemis 的 `clickablethreshold` 是指针命中的 alpha 阈值：被点处的有效
+    /// alpha 低于阈值时，指针穿透该图层。我们没有逐像素 alpha，但用图层级
+    /// alpha 近似——这足以放行像 `mw.zmask` 这种整层 alpha=0 的全透明拖拽遮罩
+    /// （threshold=128 而 alpha=0 → 透明）。未设阈值的图层一律可点（默认行为不变）。
+    fn is_pointer_transparent(&self, props: &crate::compositor::props::LayerProps) -> bool {
+        let Some(threshold) = props
+            .custom
+            .get("clickablethreshold")
+            .and_then(|v| v.trim().parse::<i32>().ok())
+        else {
+            return false;
+        };
+        let alpha = props.alpha.unwrap_or(255) as i32;
+        alpha < threshold
     }
 
     /// 仅构建当前帧的绘制列表（不渲染），供测试或自定义循环使用。

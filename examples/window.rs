@@ -23,8 +23,9 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 use winit::{
-    event::{ElementState, Event as WinitEvent, MouseButton, WindowEvent},
+    event::{ElementState, Event as WinitEvent, KeyEvent, MouseButton, WindowEvent},
     event_loop::EventLoop,
+    keyboard::PhysicalKey,
     window::Window,
 };
 
@@ -37,9 +38,83 @@ struct InputState {
     mouse_y: i32,
     /// 本帧是否有鼠标左键单击（读取后清除）
     clicked: bool,
+    /// 当前按住的键（Windows 虚拟键码）。鼠标左键以 VK=1 记入，使 isDown(1) 生效。
+    keys_down: std::collections::HashSet<u32>,
+    /// 本帧刚按下的键（边沿），帧末清除。
+    keys_down_edge: std::collections::HashSet<u32>,
+    /// 本帧刚松开的键（边沿），帧末清除。
+    keys_up_edge: std::collections::HashSet<u32>,
+    /// e:overrideKey{key,status} 注入的状态覆盖：status==32 强制按下、0 清除覆盖。
+    /// 优先级高于真实按键状态，供脚本做 PS ○× 互换等重映射。
+    key_overrides: HashMap<u32, bool>,
+}
+
+impl InputState {
+    /// 帧末清除边沿状态（down/up edge 只在触发的那一帧为真）。
+    fn clear_edges(&mut self) {
+        self.keys_down_edge.clear();
+        self.keys_up_edge.clear();
+    }
+
+    /// 综合覆盖后的「按住」判定：override 优先，否则看真实按键。
+    fn key_down(&self, vk: u32) -> bool {
+        match self.key_overrides.get(&vk) {
+            Some(&forced) => forced,
+            None => self.keys_down.contains(&vk),
+        }
+    }
 }
 
 // ── EngineCallbacks 实现 ─────────────────────────────────────────
+
+/// 把 winit 的物理键映射到 Artemis 脚本使用的 Windows 虚拟键码（VK）。
+///
+/// 脚本里的 `e:isDown(13)` / `isDownEdge(27)` 等用的是 Windows VK 码
+/// （13=Enter、27=Esc、18=Alt、112-123=F1-F12、37-40=方向键、32=Space 等，
+/// 见 adv/vsync.lua、keyconfig.lua）。这里只映射脚本实际查询到的键；未覆盖的
+/// 返回 None（不参与按键状态）。
+fn keycode_to_vk(code: winit::keyboard::KeyCode) -> Option<u32> {
+    use winit::keyboard::KeyCode as K;
+    let vk = match code {
+        K::Enter | K::NumpadEnter => 13,
+        K::Escape => 27,
+        K::Space => 32,
+        K::Backspace => 8,
+        K::Tab => 9,
+        K::ShiftLeft | K::ShiftRight => 16,
+        K::ControlLeft | K::ControlRight => 17,
+        K::AltLeft | K::AltRight => 18,
+        K::ArrowLeft => 37,
+        K::ArrowUp => 38,
+        K::ArrowRight => 39,
+        K::ArrowDown => 40,
+        K::F1 => 112,
+        K::F2 => 113,
+        K::F3 => 114,
+        K::F4 => 115,
+        K::F5 => 116,
+        K::F6 => 117,
+        K::F7 => 118,
+        K::F8 => 119,
+        K::F9 => 120,
+        K::F10 => 121,
+        K::F11 => 122,
+        K::F12 => 123,
+        // 数字键 0-9：VK 与 ASCII 一致（0x30-0x39）。
+        K::Digit0 => 48,
+        K::Digit1 => 49,
+        K::Digit2 => 50,
+        K::Digit3 => 51,
+        K::Digit4 => 52,
+        K::Digit5 => 53,
+        K::Digit6 => 54,
+        K::Digit7 => 55,
+        K::Digit8 => 56,
+        K::Digit9 => 57,
+        _ => return None,
+    };
+    Some(vk)
+}
 
 /// 解析 PNG 的 `tEXt` 块为 `keyword → text` 映射。
 ///
@@ -126,9 +201,25 @@ impl EngineCallbacks for WinitCallbacks {
             .insert(name.to_string(), path.to_string());
     }
     fn get_script_status(&self) -> u8 { 0 }
-    fn is_key_down(&self, _key_id: u32) -> bool { false }
-    fn is_key_down_edge(&self, _key_id: u32) -> bool { false }
-    fn is_key_up_edge(&self, _key_id: u32) -> bool { false }
+    fn is_key_down(&self, key_id: u32) -> bool {
+        self.input.lock().unwrap().key_down(key_id)
+    }
+    fn is_key_down_edge(&self, key_id: u32) -> bool {
+        self.input.lock().unwrap().keys_down_edge.contains(&key_id)
+    }
+    fn is_key_up_edge(&self, key_id: u32) -> bool {
+        self.input.lock().unwrap().keys_up_edge.contains(&key_id)
+    }
+    /// e:overrideKey{key, status}：status==32 强制该键为按下，==0 清除覆盖。
+    /// 参数经 lua_engine 映射为 (from=key, to=status)。
+    fn override_key(&self, from: u32, to: u32) {
+        let mut s = self.input.lock().unwrap();
+        if to == 0 {
+            s.key_overrides.remove(&from);
+        } else {
+            s.key_overrides.insert(from, true);
+        }
+    }
     fn is_decide(&self) -> bool {
         self.input.lock().unwrap().clicked
     }
@@ -158,7 +249,6 @@ impl EngineCallbacks for WinitCallbacks {
     }
     fn file_operation(&self, _command: &str, _params: HashMap<String, String>) {}
     fn include(&self, _path: &str) {}
-    fn override_key(&self, _from: u32, _to: u32) {}
     fn set_flick_sensitivity(&self, _sensitivity: f64) {}
     fn get_script_block(&self) -> HashMap<String, String> { HashMap::new() }
     fn get_script_stack(&self) -> Vec<HashMap<String, String>> { vec![] }
@@ -469,8 +559,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     s.mouse_x = sx;
                     s.mouse_y = sy;
                 }
-                WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
-                    input.lock().unwrap().clicked = true;
+                WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+                    let mut s = input.lock().unwrap();
+                    match state {
+                        // 鼠标左键以 VK=1（VK_LBUTTON）记入按键状态，使脚本里的
+                        // isDown(1)/isDownEdge(1)/isUpEdge(1)（游戏退出、点击判定等）生效。
+                        ElementState::Pressed => {
+                            s.clicked = true;
+                            if s.keys_down.insert(1) {
+                                s.keys_down_edge.insert(1);
+                            }
+                        }
+                        ElementState::Released => {
+                            if s.keys_down.remove(&1) {
+                                s.keys_up_edge.insert(1);
+                            }
+                        }
+                    }
+                }
+                WindowEvent::KeyboardInput {
+                    event: KeyEvent { physical_key, state, repeat, .. },
+                    ..
+                } => {
+                    if let PhysicalKey::Code(code) = physical_key {
+                        if let Some(vk) = keycode_to_vk(code) {
+                            let mut s = input.lock().unwrap();
+                            match state {
+                                ElementState::Pressed => {
+                                    // 系统按键重复（长按）不产生新的 down 边沿。
+                                    if s.keys_down.insert(vk) && !repeat {
+                                        s.keys_down_edge.insert(vk);
+                                    }
+                                }
+                                ElementState::Released => {
+                                    if s.keys_down.remove(&vk) {
+                                        s.keys_up_edge.insert(vk);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 WindowEvent::RedrawRequested => {
                     let now = std::time::Instant::now();
@@ -507,7 +635,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
-                    // 命中测试：返回最上层注册了事件处理器的图层 ID。
+                    // 命中测试：返回最上层、可接收指针的图层 ID（透明遮罩按
+                    // clickablethreshold 自动放行，见 Compositor::hit_test）。
                     // 引擎不认识任何游戏函数；它只把已注册的 handler 标签交还
                     // 解释器执行（见下方 enqueue_layer_handler / enqueue_input_handler）。
                     let new_hover_id = compositor.hit_test(mouse_x, mouse_y, &mut texture_provider);
@@ -660,6 +789,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // 渲染
                     compositor.render(&mut renderer, &mut texture_provider);
                     surface.swap_buffers(&gl_context).unwrap();
+
+                    // 帧末清除按键边沿：down/up edge 只在发生的那一帧对脚本可见，
+                    // 本帧的解释器执行已读过（vsync.lua 的 isDownEdge 等）。
+                    input.lock().unwrap().clear_edges();
                 }
                 _ => {}
             },

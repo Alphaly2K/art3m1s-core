@@ -12,6 +12,7 @@ use std::path::{Component, Path, PathBuf};
 
 pub mod backend;
 pub mod compositor;
+pub mod text;
 
 pub use asb_interpreter as script;
 pub use pfs_upk as archive;
