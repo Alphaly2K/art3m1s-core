@@ -76,7 +76,6 @@ fn visit(
         } else {
             ClipRect::full(info)
         };
-
         frame.push(DrawCommand {
             texture,
             size: info,
