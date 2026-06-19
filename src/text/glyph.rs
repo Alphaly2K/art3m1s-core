@@ -95,20 +95,20 @@ impl TextRenderer for GlyphTextRenderer<'_> {
     }
     fn font_default(&mut self, s: &HashMap<String, String>) { self.state.default_font.merge_raw(s); }
     fn switch_message_layer(&mut self, id: Option<&str>) {
-        let prev = {
-            let l = self.state.active_layer_mut();
-            (l.left, l.top, l.width, l.height, l.font.clone(), l.id.clone())
-        };
-        // 保存当前层到栈
+        let prev_state = self.state.active_layer.as_ref().and_then(|aid| {
+            self.state.layers.get(aid).map(|l| (l.left, l.top, l.width, l.height, l.font.clone()))
+        });
         if let Some(ref prev_id) = self.state.active_layer {
             self.state.layer_stack.push(prev_id.clone());
         }
         self.state.active_layer = id.map(|s| s.to_string());
         let layer = self.state.active_layer_mut();
-        if layer.left == 0.0 && layer.top == 0.0 {
-            layer.left = prev.0; layer.top = prev.1;
-            layer.width = prev.2; layer.height = prev.3;
-            layer.font = prev.4;
+        if let Some((left, top, width, height, font)) = prev_state {
+            if layer.left == 0.0 && layer.top == 0.0 {
+                layer.left = left; layer.top = top;
+                layer.width = width; layer.height = height;
+                layer.font = font;
+            }
         }
         layer.text_buffer.clear();
     }
@@ -126,8 +126,8 @@ impl TextRenderer for GlyphTextRenderer<'_> {
         let scale = PxScale::from(sz);
         let sf = scaled(&self.font, scale);
         let sf = match sf { Some(s) => s, None => return };
-        // 首个 push 前清空——MessageLayerSwitch 已清，此处兜底
-        layer.text_buffer.clear();
+        // 清理由 switch_message_layer（新层）和 push_page_break（翻页）负责，
+        // push_text 累加到当前缓冲。
 
         for c in content.chars() {
             let q = sf.outline_glyph(sf.glyph_id(c).with_scale(sz));
@@ -176,66 +176,73 @@ impl TextRenderer for GlyphTextRenderer<'_> {
         if let Some(l) = self.state.layers.get_mut(&lid) { l.text_buffer.clear(); }
     }
 
-    fn build_draw_commands(&mut self, p: &mut dyn TextureProvider) -> Vec<DrawCommand> {
+    fn build_text_commands(&mut self, p: &mut dyn TextureProvider) -> HashMap<String, Vec<DrawCommand>> {
         let (tex, _) = self.atlas.flush(p);
-        let mut v = Vec::new();
-        let lid = self.state.active_layer.clone().unwrap_or_default();
-        let ly = match self.state.layers.get(&lid) { Some(l) => l.clone(), None => return v };
-        let sz = ly.font.size.unwrap_or(40.0);
-        let scale = PxScale::from(sz);
-        let sf = scaled(&self.font, scale);
-        let sf = match sf { Some(s) => s, None => return v };
-        let lh = sf.height();
-        let lw = if ly.width > 0.0 { ly.width } else { f32::MAX };
+        let mut out: HashMap<String, Vec<DrawCommand>> = HashMap::new();
 
-        let color = ly.font.color.as_deref().map(parse).unwrap_or([1.0; 3]);
-        let oc = ly.font.outline_color.as_deref().map(parse).unwrap_or([0.0, 0.0, 0.0]);
-        let st = ly.font.style.as_deref().unwrap_or("");
-        let has_outline = st.contains("outline");
-        let has_shadow = st.contains("shadow");
+        let lids: Vec<String> = self.state.layers.keys().cloned().collect();
+        for lid in &lids {
+            let ly = match self.state.layers.get(lid) { Some(l) => l.clone(), None => continue };
+            if ly.text_buffer.is_empty() { continue; }
+            let sz = ly.font.size.unwrap_or(40.0);
+            let scale = PxScale::from(sz);
+            let sf = scaled(&self.font, scale);
+            let sf = match sf { Some(s) => s, None => continue };
+            let lh = sf.height();
+            let lw = if ly.width > 0.0 { ly.width } else { f32::MAX };
 
-        let mut cx: f32 = 0.0;
-        let mut line_y: f32 = 0.0;
-        let mut ls: usize = 0;
-        for (i, g) in ly.text_buffer.iter().enumerate() {
-            if g.character == "\n" { cx = 0.0; line_y += lh; ls = i + 1; continue; }
-            // wrap: 用 layer 内部坐标比较
-            if cx + g.width > lw && i > ls { cx = 0.0; line_y += lh; ls = i; }
-            let fx = ly.left + cx + g.offset_x;
-            let fy = ly.top + g.offset_y + line_y;
-            if g.atlas_w > 0.0 && g.atlas_h > 0.0 {
-                let clip = ClipRect {
-                    uv_offset: [g.atlas_x / ATLAS_SZ as f32, g.atlas_y / ATLAS_SZ as f32],
-                    uv_scale: [g.atlas_w / ATLAS_SZ as f32, g.atlas_h / ATLAS_SZ as f32],
-                    quad_size: [g.atlas_w, g.atlas_h],
-                };
-                let base = DrawCommand {
-                    texture: tex,
-                    size: TextureInfo { width: ATLAS_SZ, height: ATLAS_SZ },
-                    transform: Affine2::from_translation(glam::Vec2::new(fx, fy)),
-                    opacity: 1.0, blend: BlendMode::Alpha,
-                    color: ColorFilter { multiply: color, grayscale: false, negative: false },
-                    clip: clip.clone(),
-                };
-                if has_shadow {
-                    let mut sc = base;
-                    sc.color.multiply = oc;
-                    sc.transform = Affine2::from_translation(glam::Vec2::new(fx + 2.0, fy + 2.0));
-                    v.push(sc);
-                }
-                if has_outline {
-                    for &(ox, oy) in &OUTLINE_OFFSETS {
-                        let mut ocp = base;
-                        ocp.color.multiply = oc;
-                        ocp.transform = Affine2::from_translation(glam::Vec2::new(fx + ox, fy + oy));
-                        v.push(ocp);
+            let color = ly.font.color.as_deref().map(parse).unwrap_or([1.0; 3]);
+            let oc = ly.font.outline_color.as_deref().map(parse).unwrap_or([0.0, 0.0, 0.0]);
+            let st = ly.font.style.as_deref().unwrap_or("");
+            let has_outline = st.contains("outline");
+            let has_shadow = st.contains("shadow");
+
+            let mut cx: f32 = 0.0;
+            let mut line_y: f32 = 0.0;
+            let mut ls: usize = 0;
+            let mut v = Vec::new();
+            for (i, g) in ly.text_buffer.iter().enumerate() {
+                if g.character == "\n" { cx = 0.0; line_y += lh; ls = i + 1; continue; }
+                if cx + g.width > lw && i > ls { cx = 0.0; line_y += lh; ls = i; }
+                let fx = ly.left + cx + g.offset_x;
+                let fy = ly.top + g.offset_y + line_y;
+                if g.atlas_w > 0.0 && g.atlas_h > 0.0 {
+                    let clip = ClipRect {
+                        uv_offset: [g.atlas_x / ATLAS_SZ as f32, g.atlas_y / ATLAS_SZ as f32],
+                        uv_scale: [g.atlas_w / ATLAS_SZ as f32, g.atlas_h / ATLAS_SZ as f32],
+                        quad_size: [g.atlas_w, g.atlas_h],
+                    };
+                    let base = DrawCommand {
+                        texture: tex,
+                        size: TextureInfo { width: ATLAS_SZ, height: ATLAS_SZ },
+                        transform: Affine2::from_translation(glam::Vec2::new(fx, fy)),
+                        opacity: 1.0, blend: BlendMode::Alpha,
+                        color: ColorFilter { multiply: color, grayscale: false, negative: false },
+                        clip: clip.clone(),
+                    };
+                    if has_shadow {
+                        let mut sc = base;
+                        sc.color.multiply = oc;
+                        sc.transform = Affine2::from_translation(glam::Vec2::new(fx + 2.0, fy + 2.0));
+                        v.push(sc);
                     }
+                    if has_outline {
+                        for &(ox, oy) in &OUTLINE_OFFSETS {
+                            let mut ocp = base;
+                            ocp.color.multiply = oc;
+                            ocp.transform = Affine2::from_translation(glam::Vec2::new(fx + ox, fy + oy));
+                            v.push(ocp);
+                        }
+                    }
+                    v.push(base);
                 }
-                v.push(base);
+                cx += g.advance_x;
             }
-            cx += g.advance_x;
+            if !v.is_empty() {
+                out.insert(lid.clone(), v);
+            }
         }
-        v
+        out
     }
 
     fn font_state(&self) -> &FontState { &self.state }

@@ -16,14 +16,19 @@ use glam::{Affine2, Vec2};
 ///
 /// 纹理通过 `provider` 解析；解析不到的图层会被跳过（但其子图层仍会被处理，因为
 /// 分组节点本就常常没有自己的纹理）。
+///
+/// `text_for` 是可选的文本注入回调：遍历到某层时，调用它获取该层对应的文本绘制
+/// 命令，注入到子节点之后。这使文本子系统能正确继承 compositor 层的 z-order 与
+/// visible 属性。
 pub fn build_frame(
     scene: &Scene,
     now_ms: u64,
     provider: &mut dyn TextureProvider,
+    text_for: Option<&dyn Fn(&str) -> Vec<DrawCommand>>,
 ) -> DrawList {
     let mut frame = DrawList::new();
     for root in scene.roots() {
-        visit(scene, &root, now_ms, Affine2::IDENTITY, 1.0, provider, &mut frame);
+        visit(scene, &root, now_ms, Affine2::IDENTITY, 1.0, provider, &mut frame, text_for);
     }
     frame
 }
@@ -37,6 +42,7 @@ fn visit(
     parent_opacity: f32,
     provider: &mut dyn TextureProvider,
     frame: &mut DrawList,
+    text_for: Option<&dyn Fn(&str) -> Vec<DrawCommand>>,
 ) {
     let Some(layer) = scene.get(id) else {
         return;
@@ -89,7 +95,14 @@ fn visit(
 
     // 按 Artemis 图层顺序遍历子图层（数字优先，数字按值，字符串按字典序）。
     for child in scene.children(id) {
-        visit(scene, &child, now_ms, world, opacity, provider, frame);
+        visit(scene, &child, now_ms, world, opacity, provider, frame, text_for);
+    }
+
+    // 文本注入：遍历完该层及其子节点后，如有文本命令，插入此处。
+    if let Some(tf) = text_for {
+        for cmd in tf(id) {
+            frame.push(cmd);
+        }
     }
 }
 
@@ -173,7 +186,7 @@ mod tests {
         scene.set_props("1", &raw(&[("visible", "0")]));
 
         let mut provider = MockProvider::new();
-        let frame = build_frame(&scene, 0, &mut provider);
+        let frame = build_frame(&scene, 0, &mut provider, None);
         // 父被隐藏，父与子都不该出现。
         assert!(frame.is_empty());
     }
@@ -186,7 +199,7 @@ mod tests {
         scene.create("1.0", Some("fg".into()));
 
         let mut provider = MockProvider::new();
-        let frame = build_frame(&scene, 0, &mut provider);
+        let frame = build_frame(&scene, 0, &mut provider, None);
         assert_eq!(frame.len(), 1); // 只有 1.0 产出
         // 子图层继承了父的平移 100。
         let cmd = frame.commands[0];
@@ -202,7 +215,7 @@ mod tests {
         scene.create("1.0", Some("c".into()));
 
         let mut provider = MockProvider::new();
-        let frame = build_frame(&scene, 0, &mut provider);
+        let frame = build_frame(&scene, 0, &mut provider, None);
         let names: Vec<&str> = frame
             .commands
             .iter()
@@ -221,7 +234,7 @@ mod tests {
         scene.set_props("1.0", &raw(&[("alpha", "128")])); // ~0.5
 
         let mut provider = MockProvider::new();
-        let frame = build_frame(&scene, 0, &mut provider);
+        let frame = build_frame(&scene, 0, &mut provider, None);
         let child = frame
             .commands
             .iter()
@@ -239,7 +252,7 @@ mod tests {
         scene.set_props("1", &raw(&[("xscale", "200"), ("yscale", "200"), ("anchorx", "10"), ("anchory", "10")]));
 
         let mut provider = MockProvider::new();
-        let frame = build_frame(&scene, 0, &mut provider);
+        let frame = build_frame(&scene, 0, &mut provider, None);
         let cmd = frame.commands[0];
         let anchor = cmd.transform.transform_point2(Vec2::new(10.0, 10.0));
         assert!((anchor.x - 10.0).abs() < 1e-4);
@@ -265,10 +278,10 @@ mod tests {
 
         let mut provider = MockProvider::new();
         // 中点：alpha≈127 → opacity≈0.5
-        let frame = build_frame(&scene, 500, &mut provider);
+        let frame = build_frame(&scene, 500, &mut provider, None);
         assert!((frame.commands[0].opacity - 0.5).abs() < 0.02);
         // 末尾：alpha=255 → opacity=1.0
-        let frame = build_frame(&scene, 1000, &mut provider);
+        let frame = build_frame(&scene, 1000, &mut provider, None);
         assert!((frame.commands[0].opacity - 1.0).abs() < 1e-4);
     }
 
@@ -277,7 +290,7 @@ mod tests {
         let mut scene = Scene::new();
         scene.create("1", Some("a".into()));
         let mut provider = MockProvider::new();
-        let frame = build_frame(&scene, 0, &mut provider);
+        let frame = build_frame(&scene, 0, &mut provider, None);
         assert_eq!(frame.commands[0].size.width, TEXTURE_SIZE);
     }
 
@@ -290,7 +303,7 @@ mod tests {
         scene.set_props("1", &raw(&[("clip", "10,20,100,50")]));
 
         let mut provider = MockProvider::new();
-        let frame = build_frame(&scene, 0, &mut provider);
+        let frame = build_frame(&scene, 0, &mut provider, None);
         let cmd = &frame.commands[0];
 
         // quad_size 应该是裁剪矩形的宽高
@@ -310,7 +323,7 @@ mod tests {
         // 不设置 clip
 
         let mut provider = MockProvider::new();
-        let frame = build_frame(&scene, 0, &mut provider);
+        let frame = build_frame(&scene, 0, &mut provider, None);
         let cmd = &frame.commands[0];
 
         // 无裁剪时，quad_size 等于纹理尺寸

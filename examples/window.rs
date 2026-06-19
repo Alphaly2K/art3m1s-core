@@ -544,8 +544,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 当前 hover 的按钮图层 ID（用于 over/out 事件分发）
     let mut hovered_layer: Option<String> = None;
-    let mut frame_count: u64 = 0;
-    let mut last_wait_cleared_frame: u64 = 0;
+    let mut _frame_count: u64 = 0;
 
     event_loop.run(move |event, elwt| {
         match event {
@@ -788,7 +787,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         Some(WaitReason::KeyWait { .. }) => "KeyWait",
                                         _ => "Unknown",
                                     };
-                                    eprintln!("[diag] frame={} wait={} cleared by click={} autoclick={}", frame_count, reason_type, clicked, autoclick);
+                                    eprintln!("[diag] frame={} wait={} cleared by click={} autoclick={}", _frame_count, reason_type, clicked, autoclick);
                                 }
                                 wait_reason = None;
                                 interpreter.advance_line();

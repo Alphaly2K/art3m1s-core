@@ -313,13 +313,15 @@ pub trait TextRenderer {
     /// 文本分页（对应 `PageBreak`）。
     fn push_page_break(&mut self, backlog: Option<i32>);
 
-    /// 获取当前活动消息层的可见字形列表。
+    /// 获取所有消息层的字形绘制命令，按层 ID 分组。
     ///
-    /// `provider` 用于上传字形 atlas 纹理。返回的 `DrawCommand` 可直接追加到帧的 `DrawList` 中。
-    fn build_draw_commands(
+    /// `provider` 用于上传字形 atlas 纹理。返回的 map 以消息层 ID 为键，
+    /// 值为该层的 `DrawCommand` 列表。compositor 在 build_frame 遍历时按层
+    /// ID 注入，使文本继承对应 compositor 层的 z-order 与 visible 属性。
+    fn build_text_commands(
         &mut self,
         provider: &mut dyn TextureProvider,
-    ) -> Vec<DrawCommand>;
+    ) -> std::collections::HashMap<String, Vec<DrawCommand>>;
 
     /// 获取当前字体状态（只读）。
     fn font_state(&self) -> &FontState;

@@ -9,7 +9,7 @@
 
 use crate::compositor::anim::{Easing, Tween};
 use crate::compositor::build::build_frame;
-use crate::compositor::renderer::{DrawList, Renderer, TextureProvider};
+use crate::compositor::renderer::{DrawCommand, DrawList, Renderer, TextureProvider};
 use crate::compositor::scene::{LayerEventHandler, Scene};
 use crate::text::render::TextRenderer;
 use asb_interpreter::event::{Event, LayerEvent};
@@ -335,17 +335,12 @@ impl Compositor {
 
     /// 用当前时刻构建一帧并交给后端渲染。
     pub fn render(&self, renderer: &mut dyn Renderer, provider: &mut dyn TextureProvider) {
-        let mut frame = self.build(provider);
-        if let Some(tr) = self.text_renderer.borrow_mut().as_mut() {
-            for cmd in tr.build_draw_commands(provider) {
-                frame.push(cmd);
-            }
-        }
+        let frame = self.build(provider);
         renderer.render(&frame);
     }
 
     /// 转发文本相关事件给 TextRenderer。
-    fn forward_text_event(&self, event: &Event) {
+    fn forward_text_event(&mut self, event: &Event) {
         let mut tr_opt = self.text_renderer.borrow_mut();
         let Some(tr) = tr_opt.as_mut() else { return };
         match event {
@@ -354,7 +349,12 @@ impl Compositor {
             Event::FontInit => tr.font_init(),
             Event::FontClose => tr.font_pop(),
             Event::FontDefault(settings) => tr.font_default(settings),
-            Event::MessageLayerSwitch { id, .. } => tr.switch_message_layer(id.as_deref()),
+            Event::MessageLayerSwitch { id, .. } => {
+                // 确保 compositor 场景树里有该文本层（纯分组节点），build_frame
+                // 遍历到它时通过回调注入文本绘制命令，使其继承父层的 z-order/visible。
+                if let Some(lid) = id { self.scene.ensure(lid); }
+                tr.switch_message_layer(id.as_deref());
+            }
             Event::MessageLayerPop => tr.pop_message_layer(),
             Event::LineBreak => tr.push_line_break(),
             Event::PageBreak { backlog } => tr.push_page_break(*backlog),
@@ -521,7 +521,21 @@ impl Compositor {
 
     /// 仅构建当前帧的绘制列表（不渲染），供测试或自定义循环使用。
     pub fn build(&self, provider: &mut dyn TextureProvider) -> DrawList {
-        build_frame(&self.scene, self.clock_ms, provider)
+        // 先从 text renderer 获取所有文本层的绘制命令，再传入 build_frame。
+        // RefCell 提供内部可变性，使回调可以是 Fn（不要求 FnMut）。
+        let text_map: std::collections::HashMap<String, Vec<DrawCommand>> = {
+            let mut tr_opt = self.text_renderer.borrow_mut();
+            match tr_opt.as_mut() {
+                Some(tr) => tr.build_text_commands(provider),
+                None => std::collections::HashMap::new(),
+            }
+        };
+        let text_for: Option<&dyn Fn(&str) -> Vec<DrawCommand>> = if text_map.is_empty() {
+            None
+        } else {
+            Some(&|lid: &str| text_map.get(lid).cloned().unwrap_or_default())
+        };
+        build_frame(&self.scene, self.clock_ms, provider, text_for)
     }
 }
 
