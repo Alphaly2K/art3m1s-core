@@ -204,6 +204,8 @@ impl TextRenderer for GlyphTextRenderer<'_> {
             for (i, g) in ly.text_buffer.iter().enumerate() {
                 if g.character == "\n" { cx = 0.0; line_y += lh; ls = i + 1; continue; }
                 if cx + g.width > lw && i > ls { cx = 0.0; line_y += lh; ls = i; }
+                // 局部坐标（相对于文本所在 compositor 层的原点），
+                // compositor 注入时乘入该层的 world 变换得到舞台绝对位置。
                 let fx = ly.left + cx + g.offset_x;
                 let fy = ly.top + g.offset_y + line_y;
                 if g.atlas_w > 0.0 && g.atlas_h > 0.0 {

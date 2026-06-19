@@ -98,9 +98,11 @@ fn visit(
         visit(scene, &child, now_ms, world, opacity, provider, frame, text_for);
     }
 
-    // 文本注入：遍历完该层及其子节点后，如有文本命令，插入此处。
+    // 文本注入：文本命令为层内局部坐标，乘入世界变换与不透明度。
     if let Some(tf) = text_for {
-        for cmd in tf(id) {
+        for mut cmd in tf(id) {
+            cmd.transform = world * cmd.transform;
+            cmd.opacity *= opacity;
             frame.push(cmd);
         }
     }

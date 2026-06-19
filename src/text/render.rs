@@ -213,6 +213,8 @@ pub struct FontState {
     pub glyph_config: HashMap<String, String>,
     /// 未处理的自定义状态
     pub custom: HashMap<String, String>,
+    /// 本帧被 push 过文本的层 ID（在 build_text_commands 末尾清空）
+    pub layers_dirtied_this_frame: Vec<String>,
 }
 
 impl FontState {
@@ -227,6 +229,7 @@ impl FontState {
             alignment: TextAlignment::default(),
             glyph_config: HashMap::new(),
             custom: HashMap::new(),
+            layers_dirtied_this_frame: Vec::new(),
         }
     }
 
