@@ -14,6 +14,8 @@ mlua = { version = "0.10", features = ["lua51", "send", "serialize", "vendored"]
 glow = { version = "0.16", optional = true }
 # 素材解码（PNG 等）。只随 gl-backend 启用，且只开 png 解码以保持精简。
 image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
+# 字体光栅化（字形渲染子系统）
+ab_glyph = "0.2"
 # 窗口管理和 GL 上下文创建（示例程序需要）
 winit = { version = "0.30", optional = true }
 glutin = { version = "0.32", optional = true }

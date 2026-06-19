@@ -11,7 +11,9 @@ use crate::compositor::anim::{Easing, Tween};
 use crate::compositor::build::build_frame;
 use crate::compositor::renderer::{DrawList, Renderer, TextureProvider};
 use crate::compositor::scene::{LayerEventHandler, Scene};
+use crate::text::render::TextRenderer;
 use asb_interpreter::event::{Event, LayerEvent};
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 /// 已注册的输入事件处理器。
@@ -35,18 +37,40 @@ pub struct InputHandler {
 }
 
 /// 后端无关的合成器：场景树 + 时钟 + 事件归约。
-#[derive(Debug, Default)]
 pub struct Compositor {
     scene: Scene,
     /// 合成器时钟（毫秒），缓动与转场都基于它。
     clock_ms: u64,
     /// 舞台到物理像素的缩放因子（HiDPI）。
-    /// 纹理尺寸是物理像素，props 的 left/top 是逻辑坐标，
-    /// 命中测试需要把纹理尺寸除以这个值才能与逻辑鼠标坐标对齐。
     stage_scale: f32,
     /// 输入事件处理器注册表，按 (event_name, key) 索引。
-    /// key 来自 setonpush 标签的参数（如 "1" 表示鼠标左键）。
     input_handlers: HashMap<(String, String), InputHandler>,
+    /// 文本渲染器（RefCell 使 render(&self) 可调用其 &mut 方法）。
+    text_renderer: RefCell<Option<Box<dyn TextRenderer>>>,
+}
+
+impl std::fmt::Debug for Compositor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Compositor")
+            .field("scene", &self.scene)
+            .field("clock_ms", &self.clock_ms)
+            .field("stage_scale", &self.stage_scale)
+            .field("input_handlers", &self.input_handlers)
+            .field("text_renderer", &self.text_renderer.borrow().as_ref().map(|_| ".."))
+            .finish()
+    }
+}
+
+impl Default for Compositor {
+    fn default() -> Self {
+        Self {
+            scene: Scene::new(),
+            clock_ms: 0,
+            stage_scale: 1.0,
+            input_handlers: HashMap::new(),
+            text_renderer: RefCell::new(None),
+        }
+    }
 }
 
 impl Compositor {
@@ -64,7 +88,12 @@ impl Compositor {
 
     /// 设置舞台缩放因子（HiDPI scale）。宿主在窗口初始化/缩放变化时调用。
     pub fn set_stage_scale(&mut self, scale: f32) {
-        self.stage_scale = scale.max(1.0);
+        self.stage_scale = scale;
+    }
+
+    /// 安装文本渲染器。
+    pub fn set_text_renderer(&self, renderer: Box<dyn TextRenderer>) {
+        *self.text_renderer.borrow_mut() = Some(renderer);
     }
 
     pub fn stage_scale(&self) -> f32 {
@@ -173,8 +202,8 @@ impl Compositor {
                     self.input_handlers.retain(|(name, _), _| name != event_name);
                 }
             }
-            // 其余事件（音频、文本、存档、系统 UI…）不影响图层合成。
-            _ => {}
+            // 其余事件 — 文本相关事件转发给 TextRenderer。
+            _ => self.forward_text_event(event),
         }
     }
 
@@ -306,8 +335,32 @@ impl Compositor {
 
     /// 用当前时刻构建一帧并交给后端渲染。
     pub fn render(&self, renderer: &mut dyn Renderer, provider: &mut dyn TextureProvider) {
-        let frame = self.build(provider);
+        let mut frame = self.build(provider);
+        if let Some(tr) = self.text_renderer.borrow_mut().as_mut() {
+            for cmd in tr.build_draw_commands(provider) {
+                frame.push(cmd);
+            }
+        }
         renderer.render(&frame);
+    }
+
+    /// 转发文本相关事件给 TextRenderer。
+    fn forward_text_event(&self, event: &Event) {
+        let mut tr_opt = self.text_renderer.borrow_mut();
+        let Some(tr) = tr_opt.as_mut() else { return };
+        match event {
+            Event::ScenarioText { content, inline } => tr.push_text(content, *inline),
+            Event::FontSettings(settings) => tr.apply_font_settings(settings),
+            Event::FontInit => tr.font_init(),
+            Event::FontClose => tr.font_pop(),
+            Event::FontDefault(settings) => tr.font_default(settings),
+            Event::MessageLayerSwitch { id, .. } => tr.switch_message_layer(id.as_deref()),
+            Event::MessageLayerPop => tr.pop_message_layer(),
+            Event::LineBreak => tr.push_line_break(),
+            Event::PageBreak { backlog } => tr.push_page_break(*backlog),
+            Event::GlyphConfig(config) => tr.set_glyph_config(config),
+            _ => {}
+        }
     }
 
     /// 命中测试：返回舞台坐标 (x, y) 处最上层、可接收指针输入的图层 ID。
@@ -371,8 +424,8 @@ impl Compositor {
             }
         }
 
-        // 再检测本层：注册了任意事件处理器、且未被 clickablethreshold 判为透明。
-        if !layer.event_handlers.is_empty() && !self.is_pointer_transparent(props) {
+        // 再检测本层：注册了任意事件处理器。
+        if !layer.event_handlers.is_empty() {
             // 宽高优先级：
             // 1. props.width/height（显式设置的逻辑尺寸）
             // 2. clip 的宽高（精灵表裁剪区域，已经是逻辑坐标）
@@ -393,20 +446,39 @@ impl Compositor {
             };
 
             if mx >= abs_x && mx < abs_x + w && my >= abs_y && my < abs_y + h {
-                return Some(id.to_string());
+                // 检查 clickablethreshold：当坐标处像素 alpha 低于阈值时，指针穿透。
+                if !self.is_pointer_transparent_at(
+                    props, mx, my, abs_x, abs_y, scale, w, h, provider, &layer.file,
+                ) {
+                    return Some(id.to_string());
+                }
             }
         }
 
         None
     }
 
-    /// 按 `clickablethreshold` 判断图层是否对指针透明（不接收 hover/click）。
+    /// 按 `clickablethreshold` 判断图层在指定坐标处是否对指针透明。
     ///
-    /// Artemis 的 `clickablethreshold` 是指针命中的 alpha 阈值：被点处的有效
-    /// alpha 低于阈值时，指针穿透该图层。我们没有逐像素 alpha，但用图层级
-    /// alpha 近似——这足以放行像 `mw.zmask` 这种整层 alpha=0 的全透明拖拽遮罩
-    /// （threshold=128 而 alpha=0 → 透明）。未设阈值的图层一律可点（默认行为不变）。
-    fn is_pointer_transparent(&self, props: &crate::compositor::props::LayerProps) -> bool {
+    /// Artemis 的 `clickablethreshold` 是指针命中的 alpha 阈值：**坐标处的像素
+    /// alpha**（乘以图层 alpha 后的有效 alpha）低于阈值时，指针穿透该图层。
+    /// 例如，圆形按钮四角的透明像素 alpha=0，低于阈值 128，点击穿透；中心像素
+    /// alpha=255，高于阈值，点击被该图层接收。
+    ///
+    /// 未设 `clickablethreshold` 的图层一律可点（默认行为）。
+    fn is_pointer_transparent_at(
+        &self,
+        props: &crate::compositor::props::LayerProps,
+        mx: f32,
+        my: f32,
+        abs_x: f32,
+        abs_y: f32,
+        scale: f32,
+        _layer_w: f32,
+        _layer_h: f32,
+        provider: &mut dyn crate::compositor::renderer::TextureProvider,
+        file: &Option<String>,
+    ) -> bool {
         let Some(threshold) = props
             .custom
             .get("clickablethreshold")
@@ -414,8 +486,37 @@ impl Compositor {
         else {
             return false;
         };
-        let alpha = props.alpha.unwrap_or(255) as i32;
-        alpha < threshold
+
+        // 计算该点在纹理中的局部像素坐标。
+        // mx, my 是舞台坐标；abs_x, abs_y 是图层左上角的舞台坐标；
+        // scale 是舞台到物理像素的缩放因子。
+        let local_x = ((mx - abs_x) * scale) as u32;
+        let local_y = ((my - abs_y) * scale) as u32;
+
+        // 加上 clip 偏移（如果图层有 clip 属性）。
+        let (tex_x, tex_y) = if let Some(clip) = props.clip_rect() {
+            (local_x + clip[0] as u32, local_y + clip[1] as u32)
+        } else {
+            (local_x, local_y)
+        };
+
+        // 采样纹理像素 alpha。
+        let pixel_alpha = if let Some(file) = file {
+            provider
+                .resolve(file)
+                .and_then(|(tid, _)| provider.pixel_alpha(tid, tex_x, tex_y))
+        } else {
+            None
+        };
+
+        // 有效 alpha = 像素 alpha × 图层 alpha / 255。
+        let layer_alpha = props.alpha.unwrap_or(255) as i32;
+        let effective_alpha = match pixel_alpha {
+            Some(pa) => (pa as i32) * layer_alpha / 255,
+            None => layer_alpha, // 无法采样时只用图层 alpha
+        };
+
+        effective_alpha < threshold
     }
 
     /// 仅构建当前帧的绘制列表（不渲染），供测试或自定义循环使用。

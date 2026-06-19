@@ -6,6 +6,7 @@
 
 use art3m1s_core::backend::gl::{GlRenderer, GlTextureProvider, ShaderProfile};
 use art3m1s_core::compositor::Compositor;
+use art3m1s_core::text::GlyphTextRenderer;
 use art3m1s_core::Project;
 use asb_interpreter::event::WaitReason;
 use asb_interpreter::lua_engine::EngineCallbacks;
@@ -352,7 +353,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 创建窗口配置
     let window_attributes = Window::default_attributes()
         .with_title("Artemis Engine")
-        .with_inner_size(winit::dpi::LogicalSize::new(1280u32, 720u32));
+        .with_inner_size(winit::dpi::LogicalSize::new(1280u32, 720u32))
+        .with_active(true); // 请求焦点，确保能接收鼠标事件
 
     // 构建 GL 显示和窗口
     let template = ConfigTemplateBuilder::new();
@@ -470,6 +472,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut compositor = Compositor::new();
     compositor.set_stage_scale(scale_factor as f32);
 
+    // 字体渲染：加载项目中的 Source Han Sans 字体
+    let font_path = project_root.join("font/sourcehansans-medium.otf");
+    let mut text_renderer = GlyphTextRenderer::new();
+    if let Ok(font_bytes) = std::fs::read(&font_path) {
+        // 需要将字节的 ownership 转移到 renderer（'font lifetime）
+        // 这里用 leak 简化——字体在整个进程生命周期内有效
+        let font_bytes: &'static [u8] = Box::leak(font_bytes.into_boxed_slice());
+        let _ = text_renderer.set_font(font_bytes);
+    } else {
+        eprintln!("字体文件未找到: {}", font_path.display());
+    }
+    compositor.set_text_renderer(Box::new(text_renderer));
+
     // 设置事件收集器
     let events = Arc::new(Mutex::new(Vec::new()));
     let events_clone = Arc::clone(&events);
@@ -529,6 +544,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 当前 hover 的按钮图层 ID（用于 over/out 事件分发）
     let mut hovered_layer: Option<String> = None;
+    let mut frame_count: u64 = 0;
+    let mut last_wait_cleared_frame: u64 = 0;
 
     event_loop.run(move |event, elwt| {
         match event {
@@ -615,8 +632,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // 自动点击：扫描屏幕查找可点击区域，用引擎自身的 hit_test。
                     if autoclick && !clicked {
-                        // hit_test 依赖纹理尺寸做命中判定，需预加载。
-                        let _ = compositor.build(&mut texture_provider);
                         let step = 40;
                         let mut y = step as f32;
                         'scan: while y < stage_h as f32 {
@@ -653,9 +668,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     // 点击分发：对命中图层派发 click，再触发 push 输入事件。
-                    // 两者都只是把注册的 handler 标签塞进解释器队列，由解释器执行；
-                    // 游戏脚本内部的 btn.cursor / scr.btnfunc / setonpush_calllua 等
-                    // 状态机对引擎完全透明。
                     if clicked {
                         if let Some(id) = &new_hover_id {
                             enqueue_layer_handler(
@@ -665,15 +677,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "click",
                                 &[("click", "1")],
                             );
+                            enqueue_input_handler(
+                                &interpreter,
+                                &compositor,
+                                "push",
+                                "1",
+                                &[("key", "1"), ("type", "click")],
+                            );
                         }
-                        // push 事件（key=1 = 鼠标左键）。
-                        enqueue_input_handler(
-                            &interpreter,
-                            &compositor,
-                            "push",
-                            "1",
-                            &[("key", "1"), ("type", "click")],
-                        );
                     }
 
                     // 每帧驱动 onEnterFrame 回调（Artemis 的 vsync）。它负责清除
@@ -696,7 +707,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let q = ctx.lock().unwrap();
                         !q.tag_queue.is_empty()
                     };
-                    if has_queued_tags && matches!(wait_reason, Some(WaitReason::Stop { .. })) {
+                    let had_queued_tags = has_queued_tags;
+                    if has_queued_tags {
                         wait_reason = None;
                     }
 
@@ -759,10 +771,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                                 WaitReason::Stop { .. } => false,
-                                _ => clicked || autoclick,
+                                _ => {
+                                    // 排队标签已消费本次点击 → 不重复推进
+                                    !had_queued_tags && (clicked || autoclick)
+                                },
                             };
 
                             if should_advance {
+                                // 诊断：记录 wait_reason 类型和清除原因
+                                if std::env::var("ART3M1S_DIAG").is_ok() {
+                                    let reason_type = match wait_reason.as_ref() {
+                                        Some(WaitReason::Stop { .. }) => "Stop",
+                                        Some(WaitReason::Timed { .. }) => "Timed",
+                                        Some(WaitReason::Generic) => "Generic",
+                                        Some(WaitReason::Generic0) => "Generic0",
+                                        Some(WaitReason::KeyWait { .. }) => "KeyWait",
+                                        _ => "Unknown",
+                                    };
+                                    eprintln!("[diag] frame={} wait={} cleared by click={} autoclick={}", frame_count, reason_type, clicked, autoclick);
+                                }
                                 wait_reason = None;
                                 interpreter.advance_line();
                             }

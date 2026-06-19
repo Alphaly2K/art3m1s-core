@@ -33,6 +33,8 @@ pub struct GlTextureProvider {
     gl: Rc<glow::Context>,
     /// 资源名 → (句柄, 尺寸)。
     cache: HashMap<String, (TextureId, TextureInfo)>,
+    /// 纹理句柄 → CPU 侧 RGBA 缓存（用于 hit-test 像素采样）。
+    pixels: HashMap<TextureId, (u32, u32, Vec<u8>)>,
     /// 可选的素材字节源（资源名 → 原始字节）。无则一律用占位。
     source: Option<Box<AssetSource>>,
     /// 缺失资源回退的占位外观与尺寸。
@@ -45,6 +47,7 @@ impl GlTextureProvider {
         Self {
             gl,
             cache: HashMap::new(),
+            pixels: HashMap::new(),
             source: None,
             placeholder: PlaceholderKind::Checker,
             placeholder_size: 256,
@@ -81,6 +84,8 @@ impl GlTextureProvider {
     ) -> (TextureId, TextureInfo) {
         let entry = unsafe { self.create_texture(width, height, rgba) };
         self.cache.insert(name.to_string(), entry);
+        self.pixels
+            .insert(entry.0, (width, height, rgba.to_vec()));
         entry
     }
 
@@ -183,6 +188,7 @@ impl TextureProvider for GlTextureProvider {
         {
             let entry = unsafe { self.create_texture(w, h, &rgba) };
             self.cache.insert(name.to_string(), entry);
+            self.pixels.insert(entry.0, (w, h, rgba));
             return Some(entry);
         }
 
@@ -190,7 +196,31 @@ impl TextureProvider for GlTextureProvider {
         let (size, pixels) = self.placeholder_pixels();
         let entry = unsafe { self.create_texture(size, size, &pixels) };
         self.cache.insert(name.to_string(), entry);
+        self.pixels.insert(entry.0, (size, size, pixels));
         Some(entry)
+    }
+
+    fn upload_rgba(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) -> Option<(TextureId, TextureInfo)> {
+        let entry = unsafe { self.create_texture(width, height, data) };
+        self.cache.insert(name.to_string(), entry);
+        self.pixels
+            .insert(entry.0, (width, height, data.to_vec()));
+        Some(entry)
+    }
+
+    fn pixel_alpha(&self, texture: TextureId, x: u32, y: u32) -> Option<u8> {
+        let (w, h, rgba) = self.pixels.get(&texture)?;
+        if x >= *w || y >= *h {
+            return None;
+        }
+        let idx = ((y * *w + x) * 4 + 3) as usize; // +3 = alpha channel
+        rgba.get(idx).copied()
     }
 }
 

@@ -25,6 +25,25 @@ pub struct TextureInfo {
 /// 句柄及其尺寸。返回 `None` 表示资源缺失，合成器会跳过该图层而非崩溃。
 pub trait TextureProvider {
     fn resolve(&mut self, name: &str) -> Option<(TextureId, TextureInfo)>;
+
+    /// 上传原始 RGBA 像素数据并返回纹理句柄。
+    /// 用于字形 atlas 等动态纹理。
+    fn upload_rgba(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) -> Option<(TextureId, TextureInfo)>;
+
+    /// 采样纹理在 (x, y) 处的 alpha 通道值（0-255）。
+    ///
+    /// 用于 [`Compositor::hit_test`] 实现 `clickablethreshold`：当坐标处像素 alpha
+    /// 低于阈值时，指针穿透该图层。返回 `None` 表示无法采样（纹理不存在或坐标越界），
+    /// 调用方应视为"不透明"（保守放行点击）。
+    fn pixel_alpha(&self, _texture: TextureId, _x: u32, _y: u32) -> Option<u8> {
+        None
+    }
 }
 
 /// 混合模式。Artemis 的 `layermode` 字符串在归约阶段映射到这里。

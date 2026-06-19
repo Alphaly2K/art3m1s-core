@@ -61,6 +61,25 @@ impl TextureProvider for MockProvider {
             },
         ))
     }
+
+    fn upload_rgba(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+        _data: &[u8],
+    ) -> Option<(TextureId, TextureInfo)> {
+        let id = if let Some(id) = self.by_name.get(name) {
+            *id
+        } else {
+            let id = TextureId(self.next);
+            self.next += 1;
+            self.by_name.insert(name.to_string(), id);
+            self.by_id.insert(id.0, name.to_string());
+            id
+        };
+        Some((id, TextureInfo { width, height }))
+    }
 }
 
 /// 记录每帧绘制列表的假渲染器。
