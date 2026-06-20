@@ -468,9 +468,7 @@ impl Compositor {
             Event::PageBreak { backlog } => tr.push_page_break(*backlog),
             Event::GlyphConfig(config) => tr.set_glyph_config(config),
             Event::TextAnimation(params) => {
-                if let Some(config) = scetween_from_params(params) {
-                    tr.set_scetween(config);
-                }
+                tr.set_scetween(scetween_from_params(params));
             }
             Event::SceneIn => tr.show_text(),
             Event::SceneOut => tr.hide_text(),
@@ -682,20 +680,7 @@ fn format_param(param: &str, value: f32) -> String {
 }
 
 /// 从 `TextAnimation` 事件的参数 map 构建 [`ScetweenConfig`]。
-/// 若参数仅含 mode 不含有效配置（delay/time/param 等），返回 None 表示不覆盖现有设置。
-fn scetween_from_params(params: &HashMap<String, String>) -> Option<ScetweenConfig> {
-    let has_delay = params.contains_key("delay");
-    let has_time = params.contains_key("time");
-    let has_param = params.contains_key("param");
-    let has_ease = params.contains_key("ease");
-    let has_diff = params.contains_key("diff");
-    let has_random = params.contains_key("randomdelay");
-
-    // 仅有 mode/type 而无实际配置参数 → 不覆盖已有 scetween
-    if !has_delay && !has_time && !has_param && !has_ease && !has_diff && !has_random {
-        return None;
-    }
-
+fn scetween_from_params(params: &HashMap<String, String>) -> ScetweenConfig {
     let mode = params
         .get("type")
         .map(|s| ScetweenMode::from_str(s))
@@ -722,7 +707,7 @@ fn scetween_from_params(params: &HashMap<String, String>) -> Option<ScetweenConf
         .map(|v| v == "1")
         .unwrap_or(false);
 
-    Some(ScetweenConfig {
+    ScetweenConfig {
         mode,
         set_mode,
         param,
@@ -732,7 +717,7 @@ fn scetween_from_params(params: &HashMap<String, String>) -> Option<ScetweenConf
         time_per_char,
         random_delay,
         random_order: None,
-    })
+    }
 }
 
 #[cfg(test)]

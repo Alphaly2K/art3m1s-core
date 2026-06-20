@@ -3,9 +3,9 @@
 use crate::compositor::renderer::{
     BlendMode, ClipRect, ColorFilter, DrawCommand, TextureId, TextureInfo, TextureProvider,
 };
-use crate::text::render::{FontState, GlyphInfo, ScetweenConfig, ScetweenMode, TextRenderer};
+use crate::text::render::{FontState, GlyphInfo, ScetweenConfig, TextRenderer};
 use ab_glyph::{Font, FontRef, PxScale, PxScaleFont, ScaleFont};
-use glam::Affine2;
+use glam::{Affine2, Vec2};
 use std::collections::HashMap;
 
 const ATLAS_SZ: u32 = 1024;
@@ -64,71 +64,6 @@ fn parse(s: &str) -> [f32; 3] {
          u8::from_str_radix(&h[2..4],16).unwrap_or(255) as f32/255.0,
          u8::from_str_radix(&h[4..6],16).unwrap_or(255) as f32/255.0]
     } else { [1.0; 3] }
-}
-
-/// 计算指定字符在当前 scetween 动画中的偏移进度。
-///
-/// 返回 `(是否已完成, 缓动进度 0.0–1.0)`。
-fn scetween_char_offset(
-    scetween: &ScetweenConfig,
-    char_index: usize,
-    elapsed_ms: u64,
-) -> (bool, f32) {
-    let actual_index = if let Some(ref order) = scetween.random_order {
-        order.get(char_index).copied().unwrap_or(char_index)
-    } else {
-        char_index
-    };
-
-    let delay = scetween.delay_per_char;
-    let duration = scetween.time_per_char;
-    let char_start = actual_index as u64 * delay;
-    let char_end = char_start.saturating_add(duration);
-
-    if elapsed_ms < char_start {
-        return (false, 0.0);
-    }
-    if elapsed_ms >= char_end || duration == 0 {
-        return (true, 1.0);
-    }
-
-    let elapsed = elapsed_ms - char_start;
-    let t = elapsed as f32 / duration as f32;
-    (false, scetween.ease.apply(t))
-}
-
-/// 计算 scetween 动画中属性的起始值。
-///
-/// `normal` 为正常渲染时的属性值，`diff` 为 scetween 中设定的差值。
-fn scetween_start_value(mode: ScetweenMode, normal: f32, diff: f32) -> f32 {
-    match mode {
-        ScetweenMode::In | ScetweenMode::Show | ScetweenMode::BacklogDownIn | ScetweenMode::BacklogUpIn => {
-            normal + diff
-        }
-        ScetweenMode::Out | ScetweenMode::Hide | ScetweenMode::BacklogDownOut | ScetweenMode::BacklogUpOut => {
-            normal
-        }
-    }
-}
-
-/// 计算指定字符在 scetween 动画中的当前属性值。
-fn scetween_current_value(
-    cfg: &ScetweenConfig,
-    char_index: usize,
-    normal: f32,
-    elapsed_ms: u64,
-) -> f32 {
-    let diff = cfg.diff.unwrap_or(0.0);
-    let (_, progress) = scetween_char_offset(cfg, char_index, elapsed_ms);
-
-    match cfg.mode {
-        ScetweenMode::In | ScetweenMode::Show | ScetweenMode::BacklogDownIn | ScetweenMode::BacklogUpIn => {
-            normal + diff * (1.0 - progress)
-        }
-        ScetweenMode::Out | ScetweenMode::Hide | ScetweenMode::BacklogDownOut | ScetweenMode::BacklogUpOut => {
-            normal + diff * progress
-        }
-    }
 }
 
 impl<'font> GlyphTextRenderer<'font> {
@@ -191,6 +126,9 @@ impl TextRenderer for GlyphTextRenderer<'_> {
         let scale = PxScale::from(sz);
         let sf = scaled(&self.font, scale);
         let sf = match sf { Some(s) => s, None => return };
+        // 新文本到来时标记待揭示
+        layer.reveal_pending = true;
+        layer.reveal_clock_ms = 0;
 
         for c in content.chars() {
             let q = sf.outline_glyph(sf.glyph_id(c).with_scale(sz));
@@ -219,8 +157,6 @@ impl TextRenderer for GlyphTextRenderer<'_> {
                 });
             }
         }
-        layer.reveal_pending = true;
-        layer.reveal_clock_ms = 0;
     }
 
     fn push_line_break(&mut self) {
@@ -234,8 +170,6 @@ impl TextRenderer for GlyphTextRenderer<'_> {
             atlas_x: 0.0, atlas_y: 0.0, atlas_w: 0.0, atlas_h: 0.0,
             offset_x: 0.0, offset_y: sf.height(), width: 0.0, height: 0.0, advance_x: 0.0,
         });
-        layer.reveal_pending = true;
-        layer.reveal_clock_ms = 0;
     }
 
     fn push_page_break(&mut self, _bl: Option<i32>) {
@@ -255,6 +189,16 @@ impl TextRenderer for GlyphTextRenderer<'_> {
         for lid in &lids {
             let ly = match self.state.layers.get(lid) { Some(l) => l.clone(), None => continue };
             if ly.text_buffer.is_empty() { continue; }
+
+            // 确定本帧可见的字形范围：有 scetween 就走逐字揭示（全局配置），
+            // 无 scetween 则完整渲染。
+            let visible_count = if ly.scetween.is_some() {
+                ly.reveal_index.min(ly.text_buffer.len())
+            } else {
+                ly.text_buffer.len()
+            };
+            let scetween = &ly.scetween;
+
             let sz = ly.font.size.unwrap_or(40.0);
             let scale = PxScale::from(sz);
             let sf = scaled(&self.font, scale);
@@ -268,77 +212,90 @@ impl TextRenderer for GlyphTextRenderer<'_> {
             let has_outline = st.contains("outline");
             let has_shadow = st.contains("shadow");
 
-            let reveal_limit = if ly.scetween.is_some() {
-                ly.reveal_index
-            } else {
-                ly.text_buffer.len()
-            };
-
             let mut cx: f32 = 0.0;
             let mut line_y: f32 = 0.0;
             let mut ls: usize = 0;
             let mut v = Vec::new();
             for (i, g) in ly.text_buffer.iter().enumerate() {
-                if i >= reveal_limit {
-                    break;
+                if i >= visible_count {
+                    // 尚未揭示的字符：跳过
+                    continue;
                 }
+
                 if g.character == "\n" { cx = 0.0; line_y += lh; ls = i + 1; continue; }
                 if cx + g.width > lw && i > ls { cx = 0.0; line_y += lh; ls = i; }
-                let mut fx = ly.left + cx + g.offset_x;
-                let mut fy = ly.top + g.offset_y + line_y;
+
+                let fx = ly.left + cx + g.offset_x;
+                let fy = ly.top + g.offset_y + line_y;
+
+                // 计算每字符的 scetween 动画偏移
+                let anim_offset = scetween_char_offset(
+                    scetween.as_ref(),
+                    i,
+                    ly.reveal_clock_ms,
+                );
+
                 if g.atlas_w > 0.0 && g.atlas_h > 0.0 {
-                    let mut opacity: f32 = 1.0;
-                    let mut sx: f32 = 1.0;
-                    let mut sy: f32 = 1.0;
-                    let mut rot: f32 = 0.0;
-
-                    if let Some(ref cfg) = ly.scetween {
-                        let clock = ly.reveal_clock_ms;
-                        match cfg.param.as_deref() {
-                            Some("left") => fx = scetween_current_value(cfg, i, fx, clock),
-                            Some("top") => fy = scetween_current_value(cfg, i, fy, clock),
-                            Some("alpha") => opacity = scetween_current_value(cfg, i, 1.0, clock),
-                            Some("xscale") => sx = scetween_current_value(cfg, i, 1.0, clock),
-                            Some("yscale") => sy = scetween_current_value(cfg, i, 1.0, clock),
-                            Some("rotate") => rot = scetween_current_value(cfg, i, 0.0, clock),
-                            _ => {}
-                        }
-                    }
-
                     let clip = ClipRect {
                         uv_offset: [g.atlas_x / ATLAS_SZ as f32, g.atlas_y / ATLAS_SZ as f32],
                         uv_scale: [g.atlas_w / ATLAS_SZ as f32, g.atlas_h / ATLAS_SZ as f32],
                         quad_size: [g.atlas_w, g.atlas_h],
                     };
 
-                    let mut xform = Affine2::from_translation(glam::Vec2::new(fx, fy));
-                    if sx != 1.0 || sy != 1.0 {
-                        xform = xform * Affine2::from_scale(glam::Vec2::new(sx, sy));
-                    }
-                    if rot != 0.0 {
-                        xform = xform * Affine2::from_angle(rot.to_radians());
+                    // 带 scetween 动画偏移的位置
+                    let pos_x = fx + anim_offset.0;
+                    let pos_y = fy + anim_offset.1;
+                    // 每字符缩放
+                    let char_scale_x = anim_offset.2;
+                    let char_scale_y = anim_offset.3;
+                    let char_rotate = anim_offset.4;
+                    let char_alpha = anim_offset.5;
+
+                    let mut base_transform = Affine2::from_translation(Vec2::new(pos_x, pos_y));
+
+                    // 如果每字符有缩放或旋转，围绕字形中心变换
+                    if (char_scale_x - 1.0).abs() > 1e-6
+                        || (char_scale_y - 1.0).abs() > 1e-6
+                        || char_rotate.abs() > 1e-6
+                    {
+                        let cx_center = g.width * 0.5;
+                        let cy_center = g.height * 0.5;
+                        let to_center = Affine2::from_translation(Vec2::new(cx_center, cy_center));
+                        let from_center = Affine2::from_translation(Vec2::new(-cx_center, -cy_center));
+                        let rot = Affine2::from_angle(char_rotate.to_radians());
+                        let scl = Affine2::from_scale(Vec2::new(char_scale_x, char_scale_y));
+                        base_transform = Affine2::from_translation(Vec2::new(pos_x, pos_y))
+                            * to_center
+                            * rot
+                            * scl
+                            * from_center;
                     }
 
                     let base = DrawCommand {
                         texture: tex,
                         size: TextureInfo { width: ATLAS_SZ, height: ATLAS_SZ },
-                        transform: xform,
-                        opacity,
+                        transform: base_transform,
+                        opacity: char_alpha,
                         blend: BlendMode::Alpha,
                         color: ColorFilter { multiply: color, grayscale: false, negative: false },
                         clip: clip.clone(),
                     };
                     if has_shadow {
                         let mut sc = base;
+                        let sd = ly.font.shadow_size.unwrap_or(2.0);
                         sc.color.multiply = oc;
-                        sc.transform = Affine2::from_translation(glam::Vec2::new(fx + 2.0, fy + 2.0));
+                        sc.transform = Affine2::from_translation(Vec2::new(pos_x + sd, pos_y + sd));
                         v.push(sc);
                     }
                     if has_outline {
+                        let os = ly.font.outline_size.unwrap_or(1.0);
                         for &(ox, oy) in &OUTLINE_OFFSETS {
                             let mut ocp = base;
                             ocp.color.multiply = oc;
-                            ocp.transform = Affine2::from_translation(glam::Vec2::new(fx + ox, fy + oy));
+                            ocp.transform = Affine2::from_translation(Vec2::new(
+                                pos_x + ox * os,
+                                pos_y + oy * os,
+                            ));
                             v.push(ocp);
                         }
                     }
@@ -353,32 +310,11 @@ impl TextRenderer for GlyphTextRenderer<'_> {
         out
     }
 
-    fn font_state(&self) -> &FontState { &self.state }
-    fn font_state_mut(&mut self) -> &mut FontState { &mut self.state }
-
-    // ── 逐字显示（Scetween）接口 ──
+    // ── 逐字显示（Scetween） ──
 
     fn set_scetween(&mut self, config: ScetweenConfig) {
-        // 更新所有已配置 scetween 的层，未配置的层不受影响
-        let lids: Vec<String> = self.state.layers.keys().cloned().collect();
-        let has_any = lids.iter().any(|lid| {
-            self.state.layers.get(lid)
-                .map(|l| l.scetween.is_some())
-                .unwrap_or(false)
-        });
-        if has_any {
-            for lid in &lids {
-                if let Some(layer) = self.state.layers.get_mut(lid) {
-                    if layer.scetween.is_some() {
-                        layer.scetween = Some(config.clone());
-                    }
-                }
-            }
-        } else {
-            // 尚无任何层有 scetween，设到当前活动层（首次设置）
-            let layer = self.state.active_layer_mut();
-            layer.scetween = Some(config);
-        }
+        let layer = self.state.active_layer_mut();
+        layer.scetween = Some(config);
     }
 
     fn reset_reveal(&mut self) {
@@ -428,12 +364,13 @@ impl TextRenderer for GlyphTextRenderer<'_> {
                         (layer.reveal_clock_ms / cfg.delay_per_char) as usize + 1;
                     layer.reveal_index = chars_revealed.min(char_count);
                     if layer.reveal_index >= char_count {
+                        // 全部字符已揭示，但最后一个字符的出场动画可能还在播放
                         let last_char_start =
                             (char_count.saturating_sub(1) as u64) * cfg.delay_per_char;
                         if cfg.time_per_char > 0
                             && layer.reveal_clock_ms < last_char_start + cfg.time_per_char
                         {
-                            // 最后一个字符仍在动画中
+                            // 继续标记为 pending 以播放动画
                         } else {
                             layer.reveal_pending = false;
                         }
@@ -470,5 +407,95 @@ impl TextRenderer for GlyphTextRenderer<'_> {
             }
         }
         true
+    }
+
+    fn font_state(&self) -> &FontState { &self.state }
+    fn font_state_mut(&mut self) -> &mut FontState { &mut self.state }
+}
+
+/// 计算单个字符的 scetween 动画偏移量。
+///
+/// 返回 `(offset_x, offset_y, scale_x, scale_y, rotate_degrees, alpha)`，
+/// 其中位置偏移为像素值，缩放为倍数（1.0=无缩放），alpha 为 0.0-1.0。
+fn scetween_char_offset(
+    cfg: Option<&ScetweenConfig>,
+    char_index: usize,
+    reveal_clock_ms: u64,
+) -> (f32, f32, f32, f32, f32, f32) {
+    let cfg = match cfg {
+        Some(c) => c,
+        None => return (0.0, 0.0, 1.0, 1.0, 0.0, 1.0),
+    };
+
+    let char_start_ms = char_index as u64 * cfg.delay_per_char;
+    if reveal_clock_ms < char_start_ms {
+        // 尚未到达该字符的动画开始时间
+        return match cfg.mode {
+            crate::text::render::ScetweenMode::In
+            | crate::text::render::ScetweenMode::Show
+            | crate::text::render::ScetweenMode::BacklogDownIn
+            | crate::text::render::ScetweenMode::BacklogUpIn => {
+                // 入场动画：字符从动画起点开始
+                scetween_start_value(cfg)
+            }
+            _ => (0.0, 0.0, 1.0, 1.0, 0.0, 1.0),
+        };
+    }
+
+    let elapsed = reveal_clock_ms - char_start_ms;
+    let time = if cfg.time_per_char > 0 {
+        cfg.time_per_char
+    } else {
+        return (0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    };
+
+    if elapsed >= time {
+        return (0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    }
+
+    let t = elapsed as f32 / time as f32;
+    let progress = cfg.ease.apply(t);
+
+    // 从起始值到正常值的插值
+    let (start_x, start_y, start_sx, start_sy, start_r, start_a) =
+        scetween_start_value(cfg);
+
+    let end_x: f32 = 0.0;
+    let end_y: f32 = 0.0;
+    let end_sx: f32 = 1.0;
+    let end_sy: f32 = 1.0;
+    let end_r: f32 = 0.0;
+    let end_a: f32 = 1.0;
+
+    (
+        start_x + (end_x - start_x) * progress,
+        start_y + (end_y - start_y) * progress,
+        start_sx + (end_sx - start_sx) * progress,
+        start_sy + (end_sy - start_sy) * progress,
+        start_r + (end_r - start_r) * progress,
+        start_a + (end_a - start_a) * progress,
+    )
+}
+
+/// 根据 scetween 配置计算动画的起始值。
+fn scetween_start_value(cfg: &ScetweenConfig) -> (f32, f32, f32, f32, f32, f32) {
+    let diff = cfg.diff.unwrap_or(0.0);
+    match cfg.param.as_deref() {
+        Some("left") => (diff, 0.0, 1.0, 1.0, 0.0, 1.0),
+        Some("top") => (0.0, diff, 1.0, 1.0, 0.0, 1.0),
+        Some("alpha") => {
+            let start_a = if cfg.mode.is_entrance() { 0.0 } else { 1.0 };
+            (0.0, 0.0, 1.0, 1.0, 0.0, start_a)
+        }
+        Some("xscale") => {
+            let start_s = 1.0 + diff / 100.0;
+            (0.0, 0.0, start_s, 1.0, 0.0, 1.0)
+        }
+        Some("yscale") => {
+            let start_s = 1.0 + diff / 100.0;
+            (0.0, 0.0, 1.0, start_s, 0.0, 1.0)
+        }
+        Some("rotate") => (0.0, 0.0, 1.0, 1.0, diff, 1.0),
+        _ => (0.0, 0.0, 1.0, 1.0, 0.0, 1.0),
     }
 }

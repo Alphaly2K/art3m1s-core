@@ -241,7 +241,7 @@ pub struct MessageLayer {
     pub reveal_index: usize,
     /// 逐字显示：本层的新文本是否正在等待揭示
     pub reveal_pending: bool,
-    /// 逐字显示配置（仅此层的 scetween）
+    /// 逐字显示配置（仅本层生效）
     pub scetween: Option<ScetweenConfig>,
     /// 逐字显示内部时钟（毫秒），追踪自 reveal 开始以来的时间
     pub reveal_clock_ms: u64,

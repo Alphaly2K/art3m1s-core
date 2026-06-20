@@ -102,24 +102,8 @@ impl TextRenderer for StubTextRenderer {
     // ── 逐字显示 ──
 
     fn set_scetween(&mut self, config: ScetweenConfig) {
-        let lids: Vec<String> = self.state.layers.keys().cloned().collect();
-        let has_any = lids.iter().any(|lid| {
-            self.state.layers.get(lid)
-                .map(|l| l.scetween.is_some())
-                .unwrap_or(false)
-        });
-        if has_any {
-            for lid in &lids {
-                if let Some(layer) = self.state.layers.get_mut(lid) {
-                    if layer.scetween.is_some() {
-                        layer.scetween = Some(config.clone());
-                    }
-                }
-            }
-        } else {
-            let layer = self.state.active_layer_mut();
-            layer.scetween = Some(config);
-        }
+        let layer = self.state.active_layer_mut();
+        layer.scetween = Some(config);
     }
 
     fn reset_reveal(&mut self) {

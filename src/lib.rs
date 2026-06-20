@@ -13,6 +13,8 @@ use std::path::{Component, Path, PathBuf};
 pub mod audio;
 pub mod backend;
 pub mod compositor;
+pub mod ffi;
+pub mod ffi_callbacks;
 pub mod save;
 pub mod text;
 
@@ -196,6 +198,15 @@ pub struct Project {
 }
 
 impl Project {
+    /// Open a project from an in-memory `system.ini` string (no disk
+    /// access needed).  The `root` path is stored for virtual-path
+    /// resolution but not read from.
+    pub fn open_from_data(root: impl Into<PathBuf>, ini_content: &str, platform: &str) -> Result<Self> {
+        let root = root.into();
+        let config = ProjectConfig::from_system_ini(ini_content, platform)?;
+        Ok(Self { root, config })
+    }
+
     /// Open an unpacked project directory and parse its `system.ini`.
     pub fn open(root: impl Into<PathBuf>, platform: &str) -> Result<Self> {
         let root = root.into();
@@ -229,14 +240,32 @@ impl Project {
 
     /// Create an interpreter configured for this project and install a file
     /// loader that can resolve `.iet`, `.ast`, and `.asb` paths from scripts.
+    ///
+    /// If the FFI file reader has been registered (Flutter frontend in
+    /// control), all script loading is routed through the callback.
+    /// Otherwise, files are read directly from disk (standalone mode).
     pub fn create_interpreter(&self) -> Interpreter {
         let root = self.root.clone();
-        let mut interpreter = Interpreter::new(self.config.to_interpreter_config(Some(&self.root)));
+        let mut interpreter =
+            Interpreter::new(self.config.to_interpreter_config(Some(&self.root)));
 
-        interpreter.set_file_loader(Box::new(move |name| {
-            let path = resolve_project_path(&root, name).map_err(to_interpreter_error)?;
-            std::fs::read(&path).map_err(asb_interpreter::Error::from)
-        }));
+        if crate::ffi::file_reader_registered() {
+            interpreter.set_file_loader(Box::new(move |name| {
+                let bytes = crate::ffi::request_file(name).map_err(|m| {
+                    asb_interpreter::Error::IoError(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        m,
+                    ))
+                })?;
+                Ok(bytes)
+            }));
+        } else {
+            interpreter.set_file_loader(Box::new(move |name| {
+                let path =
+                    resolve_project_path(&root, name).map_err(to_interpreter_error)?;
+                std::fs::read(&path).map_err(asb_interpreter::Error::from)
+            }));
+        }
 
         interpreter
     }
@@ -262,6 +291,17 @@ impl Project {
         Ok(())
     }
 }
+
+/// Load a font file through the FFI bridge and return a `&'static` slice
+/// suitable for [`crate::text::GlyphTextRenderer::set_font`].
+pub fn load_font_ffi(path: &str) -> std::result::Result<&'static [u8], String> {
+    let bytes = crate::ffi::request_file(path)?;
+    Ok(Box::leak(bytes.into_boxed_slice()))
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 私有辅助
+// ═══════════════════════════════════════════════════════════════════
 
 fn parse_ini(contents: &str) -> HashMap<String, HashMap<String, String>> {
     let mut sections = HashMap::new();

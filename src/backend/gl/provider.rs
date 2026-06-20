@@ -66,6 +66,14 @@ impl GlTextureProvider {
         self
     }
 
+    /// Use the FFI-registered file reader as the texture byte source.
+    /// All texture loads are routed through the Flutter frontend.
+    pub fn with_ffi_source(self) -> Self {
+        self.with_source(|name: &str| -> Option<Vec<u8>> {
+            crate::ffi::request_asset(name)
+        })
+    }
+
     /// 设置缺失资源的占位外观。
     pub fn with_placeholder(mut self, kind: PlaceholderKind, size: u32) -> Self {
         self.placeholder = kind;
