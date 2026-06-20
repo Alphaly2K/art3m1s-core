@@ -435,11 +435,7 @@ pub trait AudioBackend {
 ///
 /// 如果 `time_ms` > 0，为该通道创建一个 fade-out 过渡（目标增益=0，完成后自动停止）。
 /// 如果 `time_ms` == 0，立即停止通道。
-pub(crate) fn apply_channel_fade_out(
-    channel: &mut SoundChannel,
-    time_ms: u64,
-    clock_ms: u64,
-) {
+pub(crate) fn apply_channel_fade_out(channel: &mut SoundChannel, time_ms: u64, clock_ms: u64) {
     if time_ms == 0 {
         channel.playing = false;
         channel.current_gain = 1.0;

@@ -4,9 +4,9 @@
 //! 通过 `audio-backend` feature 启用。
 
 use crate::audio::engine::{
-    advance_channel_fade, apply_channel_fade_out, apply_channel_gain_fade,
-    apply_channel_pan_fade, AudioBackend, AudioState, BgmConfig, FadeState, SeConfig,
-    SoundCategory, SoundChannel, SoundFinishEvent, SoundFinishHandler,
+    AudioBackend, AudioState, BgmConfig, FadeState, SeConfig, SoundCategory, SoundChannel,
+    SoundFinishEvent, SoundFinishHandler, advance_channel_fade, apply_channel_fade_out,
+    apply_channel_gain_fade, apply_channel_pan_fade,
 };
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
 use std::collections::HashMap;
@@ -70,10 +70,9 @@ impl RodioBackend {
         data: &[u8],
         loop_play: bool,
     ) -> Result<Sink, String> {
-        let source = Decoder::new(Cursor::new(data.to_vec()))
-            .map_err(|e| format!("解码音频失败: {e}"))?;
-        let sink =
-            Sink::try_new(handle).map_err(|e| format!("创建音频通道失败: {e}"))?;
+        let source =
+            Decoder::new(Cursor::new(data.to_vec())).map_err(|e| format!("解码音频失败: {e}"))?;
+        let sink = Sink::try_new(handle).map_err(|e| format!("创建音频通道失败: {e}"))?;
         if loop_play {
             sink.append(source.repeat_infinite());
         } else {

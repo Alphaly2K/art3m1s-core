@@ -310,7 +310,10 @@ impl ScetweenMode {
 
     /// 是否为"出现"类动画（reveal 递增而非递减）。
     pub fn is_entrance(&self) -> bool {
-        matches!(self, Self::In | Self::Show | Self::BacklogDownIn | Self::BacklogUpIn)
+        matches!(
+            self,
+            Self::In | Self::Show | Self::BacklogDownIn | Self::BacklogUpIn
+        )
     }
 }
 

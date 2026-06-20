@@ -9,14 +9,14 @@
 
 #![cfg(all(target_os = "macos", feature = "gl-backend"))]
 
-use art3m1s_core::backend::gl::{GlRenderer, GlTextureProvider, PlaceholderKind, ShaderProfile};
-use art3m1s_core::compositor::renderer::Renderer;
-use art3m1s_core::compositor::Compositor;
 use art3m1s_core::Project;
+use art3m1s_core::backend::gl::{GlRenderer, GlTextureProvider, PlaceholderKind, ShaderProfile};
+use art3m1s_core::compositor::Compositor;
+use art3m1s_core::compositor::renderer::Renderer;
 use asb_interpreter::event::{Event, LayerEvent};
 use glow::HasContext;
 use std::collections::HashMap;
-use std::ffi::{c_void, CString};
+use std::ffi::{CString, c_void};
 use std::os::raw::{c_int, c_uint};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -194,7 +194,11 @@ fn renders_solid_layer_to_framebuffer() {
     let buf = unsafe { read_pixels(&gl, W, H) };
     // 中心应为红色（占位纯红）。
     let center = pixel_at(&buf, W, W / 2, H / 2);
-    assert_eq!(center, [255, 0, 0, 255], "中心像素应为红色, 实际 {center:?}");
+    assert_eq!(
+        center,
+        [255, 0, 0, 255],
+        "中心像素应为红色, 实际 {center:?}"
+    );
 }
 
 #[test]
@@ -432,5 +436,9 @@ fn missing_asset_falls_back_to_placeholder() {
     }
     let buf = unsafe { read_pixels(&gl, W, H) };
     let center = pixel_at(&buf, W, W / 2, H / 2);
-    assert_eq!(center, [0, 255, 0, 255], "缺失资源中心应为绿色占位, 实际 {center:?}");
+    assert_eq!(
+        center,
+        [0, 255, 0, 255],
+        "缺失资源中心应为绿色占位, 实际 {center:?}"
+    );
 }

@@ -23,6 +23,13 @@ impl StubTextRenderer {
 impl TextRenderer for StubTextRenderer {
     fn apply_font_settings(&mut self, settings: &HashMap<String, String>) {
         let layer = self.state.active_layer_mut();
+        let stacked = settings
+            .get("stack")
+            .map(|v| matches!(v.as_str(), "1" | "true"))
+            .unwrap_or(true);
+        if stacked {
+            layer.font_stack.push(layer.font.clone());
+        }
         layer.font.merge_raw(settings);
     }
 
@@ -125,7 +132,9 @@ impl TextRenderer for StubTextRenderer {
             }
             layer.reveal_clock_ms = layer.reveal_clock_ms.saturating_add(delta_ms);
 
-            let is_entrance = layer.scetween.as_ref()
+            let is_entrance = layer
+                .scetween
+                .as_ref()
                 .map(|cfg| cfg.mode.is_entrance())
                 .unwrap_or(true);
 
@@ -149,8 +158,7 @@ impl TextRenderer for StubTextRenderer {
                         layer.reveal_pending = false;
                     }
                 } else {
-                    let chars_revealed =
-                        (layer.reveal_clock_ms / cfg.delay_per_char) as usize + 1;
+                    let chars_revealed = (layer.reveal_clock_ms / cfg.delay_per_char) as usize + 1;
                     layer.reveal_index = chars_revealed.min(char_count);
                     if layer.reveal_index >= char_count {
                         let last_char_start =
@@ -189,8 +197,7 @@ impl TextRenderer for StubTextRenderer {
     fn is_reveal_complete(&self) -> bool {
         if let Some(ref active) = self.state.active_layer {
             if let Some(layer) = self.state.layers.get(active) {
-                return !layer.reveal_pending
-                    && layer.reveal_index >= layer.text_buffer.len();
+                return !layer.reveal_pending && layer.reveal_index >= layer.text_buffer.len();
             }
         }
         true

@@ -1,6 +1,6 @@
 use art3m1s_core::Project;
-use asb_interpreter::{CallbackResult, Event};
 use asb_interpreter::event::LayerEvent;
+use asb_interpreter::{CallbackResult, Event};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -19,7 +19,10 @@ fn probe_boot_full() {
         // 跟踪脚本跳转
         match &e {
             Event::ScriptCall { file, label } => {
-                jumps_clone.lock().unwrap().push(format!("Call -> {}:{}", file, label));
+                jumps_clone
+                    .lock()
+                    .unwrap()
+                    .push(format!("Call -> {}:{}", file, label));
             }
             Event::Layer(LayerEvent::Create { id, file }) => {
                 events_clone.lock().unwrap().push(e.clone());
@@ -44,7 +47,13 @@ fn probe_boot_full() {
     loop {
         iterations += 1;
         let r = it.run();
-        println!("iter={} script={:?} line={} result={:?}", iterations, it.current_script(), it.current_line(), r);
+        println!(
+            "iter={} script={:?} line={} result={:?}",
+            iterations,
+            it.current_script(),
+            it.current_line(),
+            r
+        );
         match r {
             Ok(asb_interpreter::ExecutionResult::Wait(_)) => {
                 // run 返回 Wait 时停在 Wait 指令，下一次 run 还会撞同一行；手动越过。
@@ -62,7 +71,10 @@ fn probe_boot_full() {
         }
     }
 
-    println!("\n=== 脚本跳转历史 (共 {}) ===", jumps.lock().unwrap().len());
+    println!(
+        "\n=== 脚本跳转历史 (共 {}) ===",
+        jumps.lock().unwrap().len()
+    );
     for (i, j) in jumps.lock().unwrap().iter().enumerate() {
         println!("#{i} {j}");
     }

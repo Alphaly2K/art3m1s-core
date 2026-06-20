@@ -44,6 +44,10 @@ pub trait TextureProvider {
     fn pixel_alpha(&self, _texture: TextureId, _x: u32, _y: u32) -> Option<u8> {
         None
     }
+
+    /// 保留 `names` 中的纹理，释放所有不在其中的纹理资源。
+    /// 默认不操作。实现方可按需覆写以控制内存占用。
+    fn retain(&mut self, _names: &std::collections::HashSet<String>) {}
 }
 
 /// 混合模式。Artemis 的 `layermode` 字符串在归约阶段映射到这里。

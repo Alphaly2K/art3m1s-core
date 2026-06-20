@@ -23,9 +23,9 @@ use crate::compositor::renderer::{BlendMode, DrawCommand, DrawList, Renderer};
 use glow::HasContext;
 use std::rc::Rc;
 
+pub mod platform;
 mod provider;
 mod shader;
-pub mod platform;
 
 pub use provider::{AssetSource, GlTextureProvider, PlaceholderKind};
 pub use shader::ShaderProfile;
@@ -158,9 +158,15 @@ impl GlRenderer {
         let h = self.stage_height;
         // 列主序填充（glUniformMatrix3fv transpose=false 期望列主序）。
         [
-            2.0 / w, 0.0, 0.0, // col 0
-            0.0, -2.0 / h, 0.0, // col 1
-            -1.0, 1.0, 1.0, // col 2
+            2.0 / w,
+            0.0,
+            0.0, // col 0
+            0.0,
+            -2.0 / h,
+            0.0, // col 1
+            -1.0,
+            1.0,
+            1.0, // col 2
         ]
     }
 
@@ -202,10 +208,22 @@ impl GlRenderer {
             ];
             gl.uniform_matrix_3_f32_slice(self.u_transform.as_ref(), false, &transform3);
             // 用裁剪后的 quad 尺寸（而不是整张纹理尺寸）展开单位方块。
-            gl.uniform_2_f32(self.u_size.as_ref(), cmd.clip.quad_size[0], cmd.clip.quad_size[1]);
+            gl.uniform_2_f32(
+                self.u_size.as_ref(),
+                cmd.clip.quad_size[0],
+                cmd.clip.quad_size[1],
+            );
             // UV 重映射：把 0..1 的顶点 UV 映射到裁剪子区域。
-            gl.uniform_2_f32(self.u_uv_offset.as_ref(), cmd.clip.uv_offset[0], cmd.clip.uv_offset[1]);
-            gl.uniform_2_f32(self.u_uv_scale.as_ref(), cmd.clip.uv_scale[0], cmd.clip.uv_scale[1]);
+            gl.uniform_2_f32(
+                self.u_uv_offset.as_ref(),
+                cmd.clip.uv_offset[0],
+                cmd.clip.uv_offset[1],
+            );
+            gl.uniform_2_f32(
+                self.u_uv_scale.as_ref(),
+                cmd.clip.uv_scale[0],
+                cmd.clip.uv_scale[1],
+            );
             gl.uniform_1_f32(self.u_opacity.as_ref(), cmd.opacity);
             let c = cmd.color;
             gl.uniform_3_f32(
@@ -218,9 +236,12 @@ impl GlRenderer {
             gl.uniform_1_i32(self.u_negative.as_ref(), c.negative as i32);
 
             gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(glow::NativeTexture(
-                std::num::NonZeroU32::new(cmd.texture.0 as u32).expect("texture id 非零"),
-            )));
+            gl.bind_texture(
+                glow::TEXTURE_2D,
+                Some(glow::NativeTexture(
+                    std::num::NonZeroU32::new(cmd.texture.0 as u32).expect("texture id 非零"),
+                )),
+            );
             gl.uniform_1_i32(self.u_sampler.as_ref(), 0);
 
             gl.draw_arrays(glow::TRIANGLES, 0, 6);
@@ -264,7 +285,5 @@ impl Drop for GlRenderer {
 
 /// 把 `&[f32]` 当作字节切片传给 GL，避免引入 bytemuck 依赖。
 fn bytemuck_cast(data: &[f32]) -> &[u8] {
-    unsafe {
-        std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
-    }
+    unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data)) }
 }

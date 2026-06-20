@@ -90,9 +90,9 @@ fn compare_id_part(a: &str, b: &str) -> Ordering {
 
     match (a_num, b_num) {
         (Some(na), Some(nb)) => na.cmp(&nb),
-        (Some(_), None) => Ordering::Less,      // 数字优先
-        (None, Some(_)) => Ordering::Greater,   // 字符串在后
-        (None, None) => a.cmp(b),               // 都是字符串，按字典序
+        (Some(_), None) => Ordering::Less,    // 数字优先
+        (None, Some(_)) => Ordering::Greater, // 字符串在后
+        (None, None) => a.cmp(b),             // 都是字符串，按字典序
     }
 }
 
@@ -156,6 +156,11 @@ impl Scene {
         self.nodes.values()
     }
 
+    /// 收集当前场景中所有图层引用的纹理文件名称。
+    pub fn collect_files(&self) -> std::collections::HashSet<String> {
+        self.nodes.values().filter_map(|l| l.file.clone()).collect()
+    }
+
     /// 确保某 ID 的节点存在（含祖先链接），不改动已有属性。
     pub fn ensure(&mut self, id: &str) {
         self.ensure_path(id);
@@ -180,7 +185,8 @@ impl Scene {
         match parent_id(id) {
             Some(parent) => {
                 self.ensure_path(parent);
-                self.nodes.insert(id.to_string(), Layer::new(id.to_string()));
+                self.nodes
+                    .insert(id.to_string(), Layer::new(id.to_string()));
                 let parent_node = self
                     .nodes
                     .get_mut(parent)
@@ -190,7 +196,8 @@ impl Scene {
                 }
             }
             None => {
-                self.nodes.insert(id.to_string(), Layer::new(id.to_string()));
+                self.nodes
+                    .insert(id.to_string(), Layer::new(id.to_string()));
                 if !self.roots.iter().any(|r| r == id) {
                     self.roots.push(id.to_string());
                 }
@@ -395,7 +402,13 @@ mod tests {
         assert!(scene.get("1.0.0").is_none());
         assert_eq!(scene.get("1.9").unwrap().file.as_deref(), Some("a"));
         assert_eq!(scene.get("1.9.0").unwrap().file.as_deref(), Some("b"));
-        assert!(scene.get("1").unwrap().children.contains(&"1.9".to_string()));
+        assert!(
+            scene
+                .get("1")
+                .unwrap()
+                .children
+                .contains(&"1.9".to_string())
+        );
     }
 
     #[test]

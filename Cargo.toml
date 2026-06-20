@@ -23,6 +23,8 @@ image = { version = "0.25", optional = true, default-features = false, features 
 ab_glyph = "0.2"
 # 音频播放后端（基于 rodio/cpal）
 rodio = { version = "0.20", features = ["mp3", "vorbis", "wav", "flac"], optional = true }
+# 视频解码后端（基于 FFmpeg）
+ffmpeg-next = { version = "8.1", optional = true }
 # 窗口管理和 GL 上下文创建（示例程序需要）
 winit = { version = "0.30", optional = true }
 glutin = { version = "0.32", optional = true }
@@ -33,7 +35,8 @@ raw-window-handle = { version = "0.6", optional = true }
 default = ["gl-backend", "audio-backend"]
 gl-backend = ["dep:glow", "dep:image"]
 audio-backend = ["dep:rodio"]
-window = ["gl-backend", "dep:winit", "dep:glutin", "dep:glutin-winit", "dep:raw-window-handle", "dep:mlua"]
+video-backend = ["dep:ffmpeg-next"]
+window = ["gl-backend", "audio-backend", "video-backend", "dep:winit", "dep:glutin", "dep:glutin-winit", "dep:raw-window-handle", "dep:mlua"]
 
 [dev-dependencies]
 # 离屏像素回读测试需要在 macOS 上创建一个 CGL headless 上下文。

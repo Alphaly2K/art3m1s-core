@@ -3,8 +3,8 @@
 //! 负责将解释器的完整运行状态序列化到文件，以及从文件恢复。
 //! 使用 serde_json 作为序列化格式。
 
-use asb_interpreter::variable::VariableStore;
 use asb_interpreter::CallFrame;
+use asb_interpreter::variable::VariableStore;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -30,13 +30,19 @@ pub struct CallFrameSnapshot {
 
 impl From<&CallFrame> for CallFrameSnapshot {
     fn from(f: &CallFrame) -> Self {
-        Self { script: f.script.clone(), return_line: f.return_line }
+        Self {
+            script: f.script.clone(),
+            return_line: f.return_line,
+        }
     }
 }
 
 impl From<CallFrameSnapshot> for CallFrame {
     fn from(s: CallFrameSnapshot) -> Self {
-        Self { script: s.script, return_line: s.return_line }
+        Self {
+            script: s.script,
+            return_line: s.return_line,
+        }
     }
 }
 
@@ -75,7 +81,12 @@ impl SaveManager {
     pub fn list(&self) -> std::io::Result<Vec<PathBuf>> {
         let mut entries: Vec<_> = std::fs::read_dir(&self.save_dir)?
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map(|ext| ext == "dat").unwrap_or(false))
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "dat")
+                    .unwrap_or(false)
+            })
             .map(|e| e.path())
             .collect();
         entries.sort();
@@ -122,9 +133,17 @@ impl SaveData {
     }
 
     /// 将存档数据恢复到解释器。
-    pub fn restore(&self, interpreter: &mut asb_interpreter::Interpreter) -> asb_interpreter::Result<()> {
+    pub fn restore(
+        &self,
+        interpreter: &mut asb_interpreter::Interpreter,
+    ) -> asb_interpreter::Result<()> {
         interpreter.restore_variables(self.variables.clone());
-        let stack: Vec<CallFrame> = self.call_stack.iter().cloned().map(CallFrame::from).collect();
+        let stack: Vec<CallFrame> = self
+            .call_stack
+            .iter()
+            .cloned()
+            .map(CallFrame::from)
+            .collect();
         interpreter.restore_position(&self.current_script, self.current_line, stack)
     }
 }

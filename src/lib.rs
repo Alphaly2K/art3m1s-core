@@ -18,6 +18,7 @@ pub mod ffi_callbacks;
 pub mod runtime;
 pub mod save;
 pub mod text;
+pub mod video;
 
 pub use asb_interpreter as script;
 pub use pfs_upk as archive;
@@ -202,7 +203,11 @@ impl Project {
     /// Open a project from an in-memory `system.ini` string (no disk
     /// access needed).  The `root` path is stored for virtual-path
     /// resolution but not read from.
-    pub fn open_from_data(root: impl Into<PathBuf>, ini_content: &str, platform: &str) -> Result<Self> {
+    pub fn open_from_data(
+        root: impl Into<PathBuf>,
+        ini_content: &str,
+        platform: &str,
+    ) -> Result<Self> {
         let root = root.into();
         let config = ProjectConfig::from_system_ini(ini_content, platform)?;
         Ok(Self { root, config })
@@ -247,8 +252,7 @@ impl Project {
     /// Otherwise, files are read directly from disk (standalone mode).
     pub fn create_interpreter(&self) -> Interpreter {
         let root = self.root.clone();
-        let mut interpreter =
-            Interpreter::new(self.config.to_interpreter_config(Some(&self.root)));
+        let mut interpreter = Interpreter::new(self.config.to_interpreter_config(Some(&self.root)));
 
         if crate::ffi::file_reader_registered() {
             interpreter.set_file_loader(Box::new(move |name| {
@@ -262,8 +266,7 @@ impl Project {
             }));
         } else {
             interpreter.set_file_loader(Box::new(move |name| {
-                let path =
-                    resolve_project_path(&root, name).map_err(to_interpreter_error)?;
+                let path = resolve_project_path(&root, name).map_err(to_interpreter_error)?;
                 std::fs::read(&path).map_err(asb_interpreter::Error::from)
             }));
         }

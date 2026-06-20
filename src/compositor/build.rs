@@ -28,7 +28,16 @@ pub fn build_frame(
 ) -> DrawList {
     let mut frame = DrawList::new();
     for root in scene.roots() {
-        visit(scene, &root, now_ms, Affine2::IDENTITY, 1.0, provider, &mut frame, text_for);
+        visit(
+            scene,
+            &root,
+            now_ms,
+            Affine2::IDENTITY,
+            1.0,
+            provider,
+            &mut frame,
+            text_for,
+        );
     }
     frame
 }
@@ -95,7 +104,9 @@ fn visit(
 
     // 按 Artemis 图层顺序遍历子图层（数字优先，数字按值，字符串按字典序）。
     for child in scene.children(id) {
-        visit(scene, &child, now_ms, world, opacity, provider, frame, text_for);
+        visit(
+            scene, &child, now_ms, world, opacity, provider, frame, text_for,
+        );
     }
 
     // 文本注入：文本命令为层内局部坐标，乘入世界变换与不透明度。
@@ -122,8 +133,8 @@ fn resolved_props(layer: &crate::compositor::scene::Layer, now_ms: u64) -> Layer
 /// alpha/visible 等整数属性按整数格式化，避免 "128.0" 落入浮点回退路径。
 fn format_value(param: &str, value: f32) -> String {
     match param {
-        "alpha" | "visible" | "reversex" | "reversey" | "grayscale" | "negative"
-        | "delete" | "stack" | "vertical" | "hung" | "anchorcenter" | "overflow" => {
+        "alpha" | "visible" | "reversex" | "reversey" | "grayscale" | "negative" | "delete"
+        | "stack" | "vertical" | "hung" | "anchorcenter" | "overflow" => {
             (value.round() as i64).to_string()
         }
         _ => value.to_string(),
@@ -251,7 +262,15 @@ mod tests {
         let mut scene = Scene::new();
         scene.create("1", Some("a".into()));
         // 锚点在 (10,10)，放大 2 倍：锚点本身不动。
-        scene.set_props("1", &raw(&[("xscale", "200"), ("yscale", "200"), ("anchorx", "10"), ("anchory", "10")]));
+        scene.set_props(
+            "1",
+            &raw(&[
+                ("xscale", "200"),
+                ("yscale", "200"),
+                ("anchorx", "10"),
+                ("anchory", "10"),
+            ]),
+        );
 
         let mut provider = MockProvider::new();
         let frame = build_frame(&scene, 0, &mut provider, None);
@@ -336,7 +355,10 @@ mod tests {
         let cmd = &frame.commands[0];
 
         // 无裁剪时，quad_size 等于纹理尺寸
-        assert_eq!(cmd.clip.quad_size, [TEXTURE_SIZE as f32, TEXTURE_SIZE as f32]);
+        assert_eq!(
+            cmd.clip.quad_size,
+            [TEXTURE_SIZE as f32, TEXTURE_SIZE as f32]
+        );
         // UV offset 为 0
         assert_eq!(cmd.clip.uv_offset, [0.0, 0.0]);
         // UV scale 为 1

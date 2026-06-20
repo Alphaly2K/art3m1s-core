@@ -4,9 +4,9 @@
 //! 在真实音频后端就绪前用于编译与测试。
 
 use crate::audio::engine::{
-    advance_channel_fade, apply_channel_fade_out, apply_channel_gain_fade,
-    apply_channel_pan_fade, AudioBackend, AudioState, BgmConfig, FadeState, SeConfig,
-    SoundCategory, SoundChannel, SoundFinishEvent, SoundFinishHandler,
+    AudioBackend, AudioState, BgmConfig, FadeState, SeConfig, SoundCategory, SoundChannel,
+    SoundFinishEvent, SoundFinishHandler, advance_channel_fade, apply_channel_fade_out,
+    apply_channel_gain_fade, apply_channel_pan_fade,
 };
 
 /// 不输出任何音频的存根后端。
@@ -35,11 +35,7 @@ impl StubAudioBackend {
     fn notify_channel_finish(&mut self, channel: &SoundChannel) {
         let handler = match channel.category {
             SoundCategory::Bgm => self.state.bgm_finish_handler.clone(),
-            SoundCategory::Se => self
-                .state
-                .se_finish_handlers
-                .get(&channel.id)
-                .cloned(),
+            SoundCategory::Se => self.state.se_finish_handlers.get(&channel.id).cloned(),
             SoundCategory::Voice => {
                 // Voice 目前不触发独立完成处理器
                 None
@@ -282,9 +278,7 @@ impl AudioBackend for StubAudioBackend {
             });
         }
 
-        self.state
-            .voice_channels
-            .insert(id.to_string(), channel);
+        self.state.voice_channels.insert(id.to_string(), channel);
     }
 
     // -------------------------------------------------------------------
@@ -489,11 +483,7 @@ mod tests {
         a.play_se("se01", "click.wav", &SeConfig::default());
         a.play_se("se01", "boom.wav", &SeConfig::default());
         assert_eq!(
-            a.audio_state()
-                .se_channels
-                .get("se01")
-                .unwrap()
-                .file,
+            a.audio_state().se_channels.get("se01").unwrap().file,
             "boom.wav"
         );
     }
@@ -548,7 +538,7 @@ mod tests {
 
         // 旧 BGM 在淡出，新 BGM 在淡入（从 0 开始）
         // 注意：BGM 是单通道，新 BGM 替换了旧的 bgm_channel 字段
-        // 旧 BGM 的 fade 状态在 apply_channel_fade_out 中设置... 
+        // 旧 BGM 的 fade 状态在 apply_channel_fade_out 中设置...
         // 但由于 bgm_channel 被替换了，旧 channel 丢失了
         // 这是一个已知的设计限制：BGM 单通道下 crossfade 需要两个独立缓冲区
         // 真正的后端（rodio）会用两个 Sink 实现真正的重叠

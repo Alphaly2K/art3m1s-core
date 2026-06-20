@@ -197,8 +197,7 @@ impl Easing {
                 if t < 0.5 {
                     -(2.0_f32).powf(20.0 * t - 10.0) * ((20.0 * t - 11.125) * C5).sin() / 2.0
                 } else {
-                    (2.0_f32).powf(-20.0 * t + 10.0) * ((20.0 * t - 11.125) * C5).sin() / 2.0
-                        + 1.0
+                    (2.0_f32).powf(-20.0 * t + 10.0) * ((20.0 * t - 11.125) * C5).sin() / 2.0 + 1.0
                 }
             }
             // Bounce ────────────────────────────────────────
@@ -531,19 +530,42 @@ mod tests {
     #[test]
     fn easing_endpoints_return_bounds() {
         let all = [
-            Easing::EaseInQuad, Easing::EaseOutQuad, Easing::EaseInOutQuad,
-            Easing::EaseInCubic, Easing::EaseOutCubic, Easing::EaseInOutCubic,
-            Easing::EaseInQuart, Easing::EaseOutQuart, Easing::EaseInOutQuart,
-            Easing::EaseInQuint, Easing::EaseOutQuint, Easing::EaseInOutQuint,
-            Easing::EaseInExpo, Easing::EaseOutExpo, Easing::EaseInOutExpo,
-            Easing::EaseInCirc, Easing::EaseOutCirc, Easing::EaseInOutCirc,
-            Easing::EaseInSine, Easing::EaseOutSine, Easing::EaseInOutSine,
-            Easing::EaseInBack, Easing::EaseOutBack, Easing::EaseInOutBack,
-            Easing::EaseInElastic, Easing::EaseOutElastic, Easing::EaseInOutElastic,
-            Easing::EaseInBounce, Easing::EaseOutBounce, Easing::EaseInOutBounce,
+            Easing::EaseInQuad,
+            Easing::EaseOutQuad,
+            Easing::EaseInOutQuad,
+            Easing::EaseInCubic,
+            Easing::EaseOutCubic,
+            Easing::EaseInOutCubic,
+            Easing::EaseInQuart,
+            Easing::EaseOutQuart,
+            Easing::EaseInOutQuart,
+            Easing::EaseInQuint,
+            Easing::EaseOutQuint,
+            Easing::EaseInOutQuint,
+            Easing::EaseInExpo,
+            Easing::EaseOutExpo,
+            Easing::EaseInOutExpo,
+            Easing::EaseInCirc,
+            Easing::EaseOutCirc,
+            Easing::EaseInOutCirc,
+            Easing::EaseInSine,
+            Easing::EaseOutSine,
+            Easing::EaseInOutSine,
+            Easing::EaseInBack,
+            Easing::EaseOutBack,
+            Easing::EaseInOutBack,
+            Easing::EaseInElastic,
+            Easing::EaseOutElastic,
+            Easing::EaseInOutElastic,
+            Easing::EaseInBounce,
+            Easing::EaseOutBounce,
+            Easing::EaseInOutBounce,
         ];
         for e in all {
-            let eps = if matches!(e, Easing::EaseInElastic | Easing::EaseOutElastic | Easing::EaseInOutElastic) {
+            let eps = if matches!(
+                e,
+                Easing::EaseInElastic | Easing::EaseOutElastic | Easing::EaseInOutElastic
+            ) {
                 0.01 // elastic oscillates near 0 and 1
             } else {
                 1e-4

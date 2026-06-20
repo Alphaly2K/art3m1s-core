@@ -12,6 +12,7 @@
 use crate::compositor::renderer::{TextureId, TextureInfo, TextureProvider};
 use glow::HasContext;
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::rc::Rc;
 
 /// 资源名 → 原始字节的来源。返回 `None` 表示该资源不存在（将回退占位）。
@@ -69,9 +70,7 @@ impl GlTextureProvider {
     /// Use the FFI-registered file reader as the texture byte source.
     /// All texture loads are routed through the Flutter frontend.
     pub fn with_ffi_source(self) -> Self {
-        self.with_source(|name: &str| -> Option<Vec<u8>> {
-            crate::ffi::request_asset(name)
-        })
+        self.with_source(|name: &str| -> Option<Vec<u8>> { crate::ffi::request_asset(name) })
     }
 
     /// 设置缺失资源的占位外观。
@@ -90,11 +89,22 @@ impl GlTextureProvider {
         height: u32,
         rgba: &[u8],
     ) -> (TextureId, TextureInfo) {
+        self.remove_if_cached(name);
         let entry = unsafe { self.create_texture(width, height, rgba) };
         self.cache.insert(name.to_string(), entry);
-        self.pixels
-            .insert(entry.0, (width, height, rgba.to_vec()));
+        self.pixels.insert(entry.0, (width, height, rgba.to_vec()));
         entry
+    }
+
+    fn remove_if_cached(&mut self, name: &str) {
+        if let Some((id, _)) = self.cache.remove(name) {
+            self.pixels.remove(&id);
+            if let Some(nz) = NonZeroU32::new(id.0 as u32) {
+                unsafe {
+                    self.gl.delete_texture(glow::NativeTexture(nz));
+                }
+            }
+        }
     }
 
     /// 在 GL 上创建一张 RGBA8 纹理并上传像素。
@@ -146,10 +156,7 @@ impl GlTextureProvider {
 
             // glow 的 NativeTexture 内部是 NonZeroU32；取出原始 id 存进句柄。
             let raw = tex.0.get();
-            (
-                TextureId(raw as u64),
-                TextureInfo { width, height },
-            )
+            (TextureId(raw as u64), TextureInfo { width, height })
         }
     }
 
@@ -215,10 +222,10 @@ impl TextureProvider for GlTextureProvider {
         height: u32,
         data: &[u8],
     ) -> Option<(TextureId, TextureInfo)> {
+        self.remove_if_cached(name);
         let entry = unsafe { self.create_texture(width, height, data) };
         self.cache.insert(name.to_string(), entry);
-        self.pixels
-            .insert(entry.0, (width, height, data.to_vec()));
+        self.pixels.insert(entry.0, (width, height, data.to_vec()));
         Some(entry)
     }
 
@@ -229,6 +236,25 @@ impl TextureProvider for GlTextureProvider {
         }
         let idx = ((y * *w + x) * 4 + 3) as usize; // +3 = alpha channel
         rgba.get(idx).copied()
+    }
+
+    fn retain(&mut self, names: &std::collections::HashSet<String>) {
+        let stale: Vec<String> = self
+            .cache
+            .keys()
+            .filter(|k| !names.contains(*k))
+            .cloned()
+            .collect();
+        for name in &stale {
+            if let Some((id, _)) = self.cache.remove(name) {
+                self.pixels.remove(&id);
+                if let Some(nz) = NonZeroU32::new(id.0 as u32) {
+                    unsafe {
+                        self.gl.delete_texture(glow::NativeTexture(nz));
+                    }
+                }
+            }
+        }
     }
 }
 

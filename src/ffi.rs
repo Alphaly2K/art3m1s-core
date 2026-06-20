@@ -4,7 +4,7 @@
 //! filesystem operation inside the core is routed through those callbacks,
 //! keeping the core entirely free of direct I/O.
 
-use std::ffi::{c_char, c_int, c_longlong, CString};
+use std::ffi::{CString, c_char, c_int, c_longlong};
 use std::sync::OnceLock;
 
 // ── Global debug flag ──────────────────────────────────────────
@@ -34,7 +34,9 @@ pub unsafe extern "C" fn art3m1s_register_log_callback(cb: LogCallback) {
 pub fn log(level: &str, msg: &str) {
     if let Some(cb) = LOG_CB.get() {
         if let (Ok(l), Ok(m)) = (CString::new(level), CString::new(msg)) {
-            unsafe { cb(l.as_ptr(), m.as_ptr()); }
+            unsafe {
+                cb(l.as_ptr(), m.as_ptr());
+            }
         }
     }
 }
@@ -142,7 +144,9 @@ const MAX_SINGLE: u64 = 16 * 1024 * 1024;
 
 pub fn request_file(path: &str) -> Result<Vec<u8>, String> {
     let total = query_size(path).ok_or_else(|| format!("not found: {path}"))?;
-    if total == 0 { return Ok(Vec::new()); }
+    if total == 0 {
+        return Ok(Vec::new());
+    }
     if total <= MAX_SINGLE {
         let mut buf = vec![0u8; total as usize];
         let n = read_chunk(path, 0, &mut buf).unwrap_or(0);
@@ -155,7 +159,9 @@ pub fn request_file(path: &str) -> Result<Vec<u8>, String> {
         let take = ((total - off) as usize).min(CHUNK);
         let mut chunk = vec![0u8; take];
         let n = read_chunk(path, off, &mut chunk).unwrap_or(0);
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         buf.extend_from_slice(&chunk[..n]);
         off += n as u64;
     }
@@ -169,29 +175,40 @@ pub fn request_file_range(path: &str, offset: u64, len: usize) -> Option<Vec<u8>
     Some(buf)
 }
 
-pub fn request_asset(path: &str) -> Option<Vec<u8>> { request_file(path).ok() }
+pub fn request_asset(path: &str) -> Option<Vec<u8>> {
+    request_file(path).ok()
+}
 pub fn request_asset_range(path: &str, offset: u64, len: usize) -> Option<Vec<u8>> {
     request_file_range(path, offset, len)
 }
-pub fn query_asset_size(path: &str) -> Option<u64> { query_size(path) }
+pub fn query_asset_size(path: &str) -> Option<u64> {
+    query_size(path)
+}
 
 // ── File operations ──────────────────────────────────────────────
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_file_exists(path: *const c_char) -> c_int {
-    if path.is_null() { return 0; }
-    let Ok(s) = (unsafe { std::ffi::CStr::from_ptr(path).to_str() }) else { return 0 };
+    if path.is_null() {
+        return 0;
+    }
+    let Ok(s) = (unsafe { std::ffi::CStr::from_ptr(path).to_str() }) else {
+        return 0;
+    };
     if query_size(s).is_some() { 1 } else { 0 }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn art3m1s_copy_file(
-    src: *const c_char,
-    dst: *const c_char,
-) -> c_int {
-    if src.is_null() || dst.is_null() { return -1; }
-    let Ok(s) = (unsafe { std::ffi::CStr::from_ptr(src).to_str() }) else { return -1 };
-    let Ok(_d) = (unsafe { std::ffi::CStr::from_ptr(dst).to_str() }) else { return -1 };
+pub unsafe extern "C" fn art3m1s_copy_file(src: *const c_char, dst: *const c_char) -> c_int {
+    if src.is_null() || dst.is_null() {
+        return -1;
+    }
+    let Ok(s) = (unsafe { std::ffi::CStr::from_ptr(src).to_str() }) else {
+        return -1;
+    };
+    let Ok(_d) = (unsafe { std::ffi::CStr::from_ptr(dst).to_str() }) else {
+        return -1;
+    };
     let _data = match request_file(s) {
         Ok(v) => v,
         Err(_) => return -1,
@@ -201,7 +218,9 @@ pub unsafe extern "C" fn art3m1s_copy_file(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_delete_file(path: *const c_char) -> c_int {
-    if path.is_null() { return -1; }
+    if path.is_null() {
+        return -1;
+    }
     0
 }
 
@@ -210,11 +229,7 @@ pub unsafe extern "C" fn art3m1s_delete_file(path: *const c_char) -> c_int {
 use crate::runtime::CoreRuntime;
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn art3m1s_runtime_create(
-    w: u32,
-    h: u32,
-    backend: i32,
-) -> *mut CoreRuntime {
+pub unsafe extern "C" fn art3m1s_runtime_create(w: u32, h: u32, backend: i32) -> *mut CoreRuntime {
     let b = crate::backend::gl::platform::GfxBackend::from_int(backend);
     match CoreRuntime::create(w, h, b) {
         Ok(rt) => Box::into_raw(Box::new(rt)),
@@ -231,10 +246,16 @@ pub unsafe extern "C" fn art3m1s_runtime_load_project(
     ini_content: *const c_char,
     platform: *const c_char,
 ) -> i32 {
-    if rt.is_null() || ini_content.is_null() || platform.is_null() { return -1; }
+    if rt.is_null() || ini_content.is_null() || platform.is_null() {
+        return -1;
+    }
     let rt = unsafe { &mut *rt };
-    let Ok(ini) = (unsafe { std::ffi::CStr::from_ptr(ini_content).to_str() }) else { return -1 };
-    let Ok(plat) = (unsafe { std::ffi::CStr::from_ptr(platform).to_str() }) else { return -1 };
+    let Ok(ini) = (unsafe { std::ffi::CStr::from_ptr(ini_content).to_str() }) else {
+        return -1;
+    };
+    let Ok(plat) = (unsafe { std::ffi::CStr::from_ptr(platform).to_str() }) else {
+        return -1;
+    };
     match rt.load_project(ini, plat) {
         Ok(()) => 0,
         Err(e) => {
@@ -245,30 +266,28 @@ pub unsafe extern "C" fn art3m1s_runtime_load_project(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn art3m1s_runtime_feed_mouse(
-    rt: *mut CoreRuntime,
-    x: i32,
-    y: i32,
-) {
-    if rt.is_null() { return; }
+pub unsafe extern "C" fn art3m1s_runtime_feed_mouse(rt: *mut CoreRuntime, x: i32, y: i32) {
+    if rt.is_null() {
+        return;
+    }
     let rt = unsafe { &*rt };
     rt.feed_mouse(x, y);
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_feed_click(rt: *mut CoreRuntime) {
-    if rt.is_null() { return; }
+    if rt.is_null() {
+        return;
+    }
     let rt = unsafe { &*rt };
     rt.feed_click();
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn art3m1s_runtime_feed_key(
-    rt: *mut CoreRuntime,
-    vk: u32,
-    pressed: i32,
-) {
-    if rt.is_null() { return; }
+pub unsafe extern "C" fn art3m1s_runtime_feed_key(rt: *mut CoreRuntime, vk: u32, pressed: i32) {
+    if rt.is_null() {
+        return;
+    }
     let rt = unsafe { &*rt };
     if pressed != 0 {
         rt.feed_key_down(vk);
@@ -291,11 +310,15 @@ pub unsafe extern "C" fn art3m1s_runtime_advance_and_render(
     out_pixels: *mut u8,
     out_capacity: u32,
 ) -> u32 {
-    if rt.is_null() || out_pixels.is_null() { return 0; }
+    if rt.is_null() || out_pixels.is_null() {
+        return 0;
+    }
     let rt = unsafe { &mut *rt };
     let pixels = rt.advance_and_render(delta_ms as u64);
     let to_copy = pixels.len().min(out_capacity as usize);
-    unsafe { std::ptr::copy_nonoverlapping(pixels.as_ptr(), out_pixels, to_copy); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(pixels.as_ptr(), out_pixels, to_copy);
+    }
     to_copy as u32
 }
 
@@ -305,15 +328,21 @@ pub unsafe extern "C" fn art3m1s_runtime_set_volume(
     volume_type: *const c_char,
     value: f32,
 ) {
-    if rt.is_null() || volume_type.is_null() { return; }
+    if rt.is_null() || volume_type.is_null() {
+        return;
+    }
     let rt = unsafe { &*rt };
-    let Ok(ty) = (unsafe { std::ffi::CStr::from_ptr(volume_type).to_str() }) else { return };
+    let Ok(ty) = (unsafe { std::ffi::CStr::from_ptr(volume_type).to_str() }) else {
+        return;
+    };
     rt.set_volume(ty, value);
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_is_exit_requested(rt: *const CoreRuntime) -> i32 {
-    if rt.is_null() { return 0; }
+    if rt.is_null() {
+        return 0;
+    }
     let rt = unsafe { &*rt };
     if rt.is_exit_requested() { 1 } else { 0 }
 }

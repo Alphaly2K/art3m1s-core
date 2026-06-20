@@ -15,6 +15,7 @@ use crate::compositor::build::build_frame;
 use crate::compositor::renderer::{DrawCommand, DrawList, Renderer, TextureProvider};
 use crate::compositor::scene::{LayerEventHandler, Scene};
 use crate::text::render::{ScetweenConfig, ScetweenMode, ScetweenSetMode, TextRenderer};
+use crate::video::engine::{VideoBackend, VideoConfig, VideoFinishEvent, VideoFinishHandler};
 use asb_interpreter::event::{Event, LayerEvent};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -52,6 +53,8 @@ pub struct Compositor {
     text_renderer: RefCell<Option<Box<dyn TextRenderer>>>,
     /// 音频后端（RefCell 使 apply_event(&mut self) 外亦可内部分发）。
     audio_backend: RefCell<Option<Box<dyn AudioBackend>>>,
+    /// 视频后端（RefCell 使 apply_event(&mut self) 外亦可内部分发）。
+    video_backend: RefCell<Option<Box<dyn VideoBackend>>>,
     /// 自上次 `poll_tween_events` 以来产生待处理的缓动完成事件。
     pending_tween_events: Vec<TweenHandler>,
 }
@@ -63,8 +66,18 @@ impl std::fmt::Debug for Compositor {
             .field("clock_ms", &self.clock_ms)
             .field("stage_scale", &self.stage_scale)
             .field("input_handlers", &self.input_handlers)
-            .field("text_renderer", &self.text_renderer.borrow().as_ref().map(|_| ".."))
-            .field("audio_backend", &self.audio_backend.borrow().as_ref().map(|_| ".."))
+            .field(
+                "text_renderer",
+                &self.text_renderer.borrow().as_ref().map(|_| ".."),
+            )
+            .field(
+                "audio_backend",
+                &self.audio_backend.borrow().as_ref().map(|_| ".."),
+            )
+            .field(
+                "video_backend",
+                &self.video_backend.borrow().as_ref().map(|_| ".."),
+            )
             .field("pending_tween_events", &self.pending_tween_events)
             .finish()
     }
@@ -84,6 +97,18 @@ impl Default for Compositor {
                 None
             }
         };
+        let video_backend = {
+            #[cfg(feature = "video-backend")]
+            {
+                crate::core_info!("[Video] 使用 FFmpeg 视频后端");
+                Some(Box::new(crate::video::FfmpegBackend::new()) as Box<dyn VideoBackend>)
+            }
+            #[cfg(not(feature = "video-backend"))]
+            {
+                crate::core_info!("[Video] 使用存根视频后端（video-backend feature 未启用）");
+                Some(Box::new(crate::video::StubVideoBackend::new()) as Box<dyn VideoBackend>)
+            }
+        };
         Self {
             scene: Scene::new(),
             clock_ms: 0,
@@ -91,6 +116,7 @@ impl Default for Compositor {
             input_handlers: HashMap::new(),
             text_renderer: RefCell::new(None),
             audio_backend: RefCell::new(audio_backend),
+            video_backend: RefCell::new(video_backend),
             pending_tween_events: Vec::new(),
         }
     }
@@ -124,8 +150,17 @@ impl Compositor {
         *self.audio_backend.borrow_mut() = Some(backend);
     }
 
-    pub fn audio_mut(&self) -> std::cell::RefMut<Option<Box<dyn AudioBackend>>> {
+    /// 安装视频后端。
+    pub fn set_video_backend(&self, backend: Box<dyn VideoBackend>) {
+        *self.video_backend.borrow_mut() = Some(backend);
+    }
+
+    pub fn audio_mut(&self) -> std::cell::RefMut<'_, Option<Box<dyn AudioBackend>>> {
         self.audio_backend.borrow_mut()
+    }
+
+    pub fn video_mut(&self) -> std::cell::RefMut<'_, Option<Box<dyn VideoBackend>>> {
+        self.video_backend.borrow_mut()
     }
 
     pub fn stage_scale(&self) -> f32 {
@@ -134,7 +169,8 @@ impl Compositor {
 
     /// 查询指定事件/键组合的已注册处理器。宿主在检测到输入后调用。
     pub fn get_input_handler(&self, event_name: &str, key: &str) -> Option<&InputHandler> {
-        self.input_handlers.get(&(event_name.to_string(), key.to_string()))
+        self.input_handlers
+            .get(&(event_name.to_string(), key.to_string()))
     }
 
     /// 推进合成器时钟。宿主每帧用累计的真实时间调用一次。
@@ -147,6 +183,9 @@ impl Compositor {
         if let Some(audio) = self.audio_backend.borrow_mut().as_mut() {
             audio.advance(delta_ms);
         }
+        if let Some(video) = self.video_backend.borrow_mut().as_mut() {
+            video.advance(delta_ms);
+        }
     }
 
     /// 查询并清空自上次调用以来产生的声音完成事件。
@@ -155,6 +194,15 @@ impl Compositor {
             .borrow_mut()
             .as_mut()
             .map(|a| a.poll_finish_events())
+            .unwrap_or_default()
+    }
+
+    /// 查询并清空自上次调用以来产生的视频完成事件。
+    pub fn poll_video_finish_events(&mut self) -> Vec<VideoFinishEvent> {
+        self.video_backend
+            .borrow_mut()
+            .as_mut()
+            .map(|v| v.poll_finish_events())
             .unwrap_or_default()
     }
     ///
@@ -272,9 +320,11 @@ impl Compositor {
             }
             Event::DelEventHandler { event_name, key } => {
                 if let Some(key) = key {
-                    self.input_handlers.remove(&(event_name.clone(), key.clone()));
+                    self.input_handlers
+                        .remove(&(event_name.clone(), key.clone()));
                 } else {
-                    self.input_handlers.retain(|(name, _), _| name != event_name);
+                    self.input_handlers
+                        .retain(|(name, _), _| name != event_name);
                 }
             }
             // ── 音频事件转发 ──
@@ -385,8 +435,11 @@ impl Compositor {
             yoyo_reverse: false,
             loop_delay_ms: loop_delay.unwrap_or(0),
             delete_on_finish: delete,
-            handler: if sync || handler_file.is_some() || handler_label.is_some()
-                || handler_handler.is_some() || delete
+            handler: if sync
+                || handler_file.is_some()
+                || handler_label.is_some()
+                || handler_handler.is_some()
+                || delete
             {
                 Some(TweenHandler {
                     file: handler_file.map(|s| s.to_string()),
@@ -454,11 +507,7 @@ impl Compositor {
                 for t in &layer.tweens {
                     if t.is_finished(now) {
                         settle.push((id.clone(), t.param.clone(), t.to));
-                        completed.push((
-                            id.clone(),
-                            t.handler.clone(),
-                            t.delete_on_finish,
-                        ));
+                        completed.push((id.clone(), t.handler.clone(), t.delete_on_finish));
                     }
                 }
             }
@@ -481,14 +530,70 @@ impl Compositor {
 
     /// 用当前时刻构建一帧并交给后端渲染。
     pub fn render(&self, renderer: &mut dyn Renderer, provider: &mut dyn TextureProvider) {
+        // 更新视频纹理（如果有视频正在播放）
+        self.update_video_textures(provider);
+
         let frame = self.build(provider);
         renderer.render(&frame);
     }
 
-    /// 转发音频事件到 AudioBackend，其余事件转到 TextRenderer。
+    /// 更新视频纹理（将解码后的帧上传到 GPU）。
+    fn update_video_textures(&self, provider: &mut dyn TextureProvider) {
+        let mut video_opt = self.video_backend.borrow_mut();
+        let Some(video) = video_opt.as_mut() else { return };
+
+        // 更新全屏视频纹理
+        let fullscreen_info = {
+            let state = video.video_state();
+            state.fullscreen_video.as_ref().map(|v| (v.width, v.height, v.playing))
+        };
+        if let Some((width, height, playing)) = fullscreen_info {
+            if playing {
+                if let Some(frame_data) = video.get_fullscreen_frame() {
+                    crate::core_info!("[Video] 上传全屏视频纹理: {}x{}, {} bytes", width, height, frame_data.len());
+                    provider.upload_rgba(
+                        "__video_fullscreen__",
+                        width,
+                        height,
+                        frame_data,
+                    );
+                } else {
+                    crate::core_debug!("[Video] 全屏视频没有新帧");
+                }
+            }
+        }
+
+        // 更新视频图层纹理
+        let layer_infos: Vec<(String, u32, u32, bool)> = {
+            let state = video.video_state();
+            state.video_layers.iter()
+                .map(|(id, layer)| (id.clone(), layer.width, layer.height, layer.playing))
+                .collect()
+        };
+        for (layer_id, width, height, playing) in layer_infos {
+            if playing {
+                if let Some(frame_data) = video.get_frame(&layer_id) {
+                    crate::core_info!("[Video] 上传视频图层纹理: id={}, {}x{}, {} bytes", layer_id, width, height, frame_data.len());
+                    let texture_name = format!("__video_layer_{}__", layer_id);
+                    provider.upload_rgba(
+                        &texture_name,
+                        width,
+                        height,
+                        frame_data,
+                    );
+                }
+            }
+        }
+    }
+
+    /// 转发音频事件到 AudioBackend，视频事件到 VideoBackend，其余事件转到 TextRenderer。
     fn forward_audio_or_text_event(&mut self, event: &Event) {
         // 先尝试音频事件
         if self.forward_audio_event(event) {
+            return;
+        }
+        // 再尝试视频事件
+        if self.forward_video_event(event) {
             return;
         }
         // 其余→文本
@@ -498,7 +603,9 @@ impl Compositor {
     /// 转发音频事件给 AudioBackend。返回 true 表示已处理。
     fn forward_audio_event(&mut self, event: &Event) -> bool {
         let mut audio_opt = self.audio_backend.borrow_mut();
-        let Some(audio) = audio_opt.as_mut() else { return false };
+        let Some(audio) = audio_opt.as_mut() else {
+            return false;
+        };
         match event {
             Event::BgmPlay {
                 file,
@@ -617,7 +724,11 @@ impl Compositor {
                 handler,
             } => {
                 audio.set_sound_finish_handler(
-                    if id.is_empty() { None } else { Some(id.as_str()) },
+                    if id.is_empty() {
+                        None
+                    } else {
+                        Some(id.as_str())
+                    },
                     SoundFinishHandler {
                         file: file.clone(),
                         label: label.clone(),
@@ -628,7 +739,69 @@ impl Compositor {
                 true
             }
             Event::SoundFinishHandlerDel { id } => {
-                audio.remove_sound_finish_handler(if id.is_empty() { None } else { Some(id.as_str()) });
+                audio.remove_sound_finish_handler(if id.is_empty() {
+                    None
+                } else {
+                    Some(id.as_str())
+                });
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// 转发视频事件给 VideoBackend。返回 true 表示已处理。
+    fn forward_video_event(&mut self, event: &Event) -> bool {
+        let mut video_opt = self.video_backend.borrow_mut();
+        let Some(video) = video_opt.as_mut() else {
+            crate::core_warn!("[Video] 视频后端未初始化，忽略视频事件");
+            return false;
+        };
+        match event {
+            Event::VideoPlay {
+                id,
+                file,
+                skip,
+                loop_play,
+            } => {
+                crate::core_info!("[Video] 收到 VideoPlay 事件: file={}, id={:?}, skip={}, loop={}", file, id, skip, loop_play);
+                let config = VideoConfig {
+                    file: file.clone(),
+                    skippable: *skip,
+                    loop_play: *loop_play,
+                    delay_margin_ms: None,
+                };
+                match id {
+                    Some(layer_id) => {
+                        crate::core_info!("[Video] 播放视频图层: id={}", layer_id);
+                        video.play_layer(layer_id, &config);
+                    }
+                    None => {
+                        crate::core_info!("[Video] 播放全屏视频");
+                        video.play_fullscreen(&config);
+                    }
+                }
+                crate::core_info!("[Video] 视频播放请求已发送");
+                true
+            }
+            Event::VideoFinishHandler {
+                file,
+                label,
+                call,
+                handler,
+            } => {
+                crate::core_info!("[Video] 设置视频完成处理器: file={:?}, label={:?}, call={}", file, label, call);
+                video.set_finish_handler(VideoFinishHandler {
+                    file: file.clone(),
+                    label: label.clone(),
+                    call: *call,
+                    handler: handler.clone(),
+                });
+                true
+            }
+            Event::VideoFinishHandlerDel => {
+                crate::core_info!("[Video] 删除视频完成处理器");
+                video.remove_finish_handler();
                 true
             }
             _ => false,
@@ -646,7 +819,9 @@ impl Compositor {
             Event::FontClose => tr.font_pop(),
             Event::FontDefault(settings) => tr.font_default(settings),
             Event::MessageLayerSwitch { id, .. } => {
-                if let Some(lid) = id { self.scene.ensure(lid); }
+                if let Some(lid) = id {
+                    self.scene.ensure(lid);
+                }
                 tr.switch_message_layer(id.as_deref());
             }
             Event::MessageLayerPop => tr.pop_message_layer(),
@@ -675,12 +850,7 @@ impl Compositor {
     /// 程序化拖拽，不应拦截落到其下工具栏按钮的 hover/click——靠这个阈值放行。
     ///
     /// 命中用图层 left/top/width/height 做 AABB 判定。没有可推断宽高的纯分组节点跳过。
-    pub fn hit_test(
-        &self,
-        x: f32,
-        y: f32,
-        provider: &mut dyn TextureProvider,
-    ) -> Option<String> {
+    pub fn hit_test(&self, x: f32, y: f32, provider: &mut dyn TextureProvider) -> Option<String> {
         let roots = self.scene.roots();
         let scale = self.stage_scale;
         for root in roots.iter().rev() {
@@ -717,7 +887,8 @@ impl Compositor {
         // 否则命中的 z-order 与画面不符。
         let children = self.scene.children(id);
         for child_id in children.iter().rev() {
-            if let Some(hit) = self.hit_test_subtree(child_id, abs_x, abs_y, mx, my, scale, provider)
+            if let Some(hit) =
+                self.hit_test_subtree(child_id, abs_x, abs_y, mx, my, scale, provider)
             {
                 return Some(hit);
             }
@@ -747,7 +918,16 @@ impl Compositor {
             if mx >= abs_x && mx < abs_x + w && my >= abs_y && my < abs_y + h {
                 // 检查 clickablethreshold：当坐标处像素 alpha 低于阈值时，指针穿透。
                 if !self.is_pointer_transparent_at(
-                    props, mx, my, abs_x, abs_y, scale, w, h, provider, &layer.file,
+                    props,
+                    mx,
+                    my,
+                    abs_x,
+                    abs_y,
+                    scale,
+                    w,
+                    h,
+                    provider,
+                    &layer.file,
                 ) {
                     return Some(id.to_string());
                 }
@@ -857,10 +1037,8 @@ fn default_param_value(param: &str) -> f32 {
 /// 把缓动终值格式化回属性字符串（整数属性按整数）。
 fn format_param(param: &str, value: f32) -> String {
     match param {
-        "alpha" | "visible" | "reversex" | "reversey" | "grayscale" | "negative"
-        | "delete" | "vertical" | "hung" | "anchorcenter" | "overflow" => {
-            (value.round() as i64).to_string()
-        }
+        "alpha" | "visible" | "reversex" | "reversey" | "grayscale" | "negative" | "delete"
+        | "vertical" | "hung" | "anchorcenter" | "overflow" => (value.round() as i64).to_string(),
         _ => value.to_string(),
     }
 }
@@ -884,14 +1062,8 @@ fn scetween_from_params(params: &HashMap<String, String>) -> ScetweenConfig {
         .get("delay")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    let time_per_char = params
-        .get("time")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    let random_delay = params
-        .get("randomdelay")
-        .map(|v| v == "1")
-        .unwrap_or(false);
+    let time_per_char = params.get("time").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let random_delay = params.get("randomdelay").map(|v| v == "1").unwrap_or(false);
 
     ScetweenConfig {
         mode,

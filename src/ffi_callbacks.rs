@@ -36,7 +36,10 @@ impl InputSnapshot {
         self.keys_up_edge.clear();
     }
     fn key_down(&self, vk: u32) -> bool {
-        self.key_overrides.get(&vk).copied().unwrap_or_else(|| self.keys_down.contains(&vk))
+        self.key_overrides
+            .get(&vk)
+            .copied()
+            .unwrap_or_else(|| self.keys_down.contains(&vk))
     }
 }
 
@@ -49,10 +52,15 @@ impl EngineCallbacks for FfiCallbacks {
     fn set_event_handler(&self, _handlers: HashMap<String, String>) {}
 
     fn set_magic_path(&self, name: &str, path: &str) {
-        self.magic_paths.lock().unwrap().insert(name.to_string(), path.to_string());
+        self.magic_paths
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), path.to_string());
     }
 
-    fn get_script_status(&self) -> u8 { 0 }
+    fn get_script_status(&self) -> u8 {
+        0
+    }
 
     fn is_key_down(&self, key_id: u32) -> bool {
         self.input.lock().unwrap().key_down(key_id)
@@ -65,15 +73,25 @@ impl EngineCallbacks for FfiCallbacks {
     }
     fn override_key(&self, from: u32, to: u32) {
         let mut s = self.input.lock().unwrap();
-        if to == 0 { s.key_overrides.remove(&from); } else { s.key_overrides.insert(from, true); }
+        if to == 0 {
+            s.key_overrides.remove(&from);
+        } else {
+            s.key_overrides.insert(from, true);
+        }
     }
-    fn is_decide(&self) -> bool { self.input.lock().unwrap().clicked }
+    fn is_decide(&self) -> bool {
+        self.input.lock().unwrap().clicked
+    }
     fn get_mouse_point(&self) -> (i32, i32) {
         let s = self.input.lock().unwrap();
         (s.mouse_x, s.mouse_y)
     }
-    fn get_touch_count(&self) -> u32 { 0 }
-    fn get_touch_point(&self, _index: u32) -> (i32, i32) { (0, 0) }
+    fn get_touch_count(&self) -> u32 {
+        0
+    }
+    fn get_touch_point(&self, _index: u32) -> (i32, i32) {
+        (0, 0)
+    }
 
     fn is_file_exists(&self, path: &str) -> bool {
         let resolved = resolve_magic(&self.magic_paths, path);
@@ -84,7 +102,11 @@ impl EngineCallbacks for FfiCallbacks {
         let resolved = resolve_magic(&self.magic_paths, path);
         let bytes = ffi::request_asset(&resolved)?;
         let comments = parse_png_text_chunks(&bytes);
-        if comments.is_empty() { None } else { Some(comments) }
+        if comments.is_empty() {
+            None
+        } else {
+            Some(comments)
+        }
     }
 
     fn file_operation(&self, command: &str, params: HashMap<String, String>) {
@@ -92,23 +114,41 @@ impl EngineCallbacks for FfiCallbacks {
     }
 
     fn set_master_volume(&self, volume: f32) {
-        self.volumes.lock().unwrap().insert("master".to_string(), volume);
+        self.volumes
+            .lock()
+            .unwrap()
+            .insert("master".to_string(), volume);
     }
     fn set_bgm_volume(&self, volume: f32) {
-        self.volumes.lock().unwrap().insert("bgm".to_string(), volume);
+        self.volumes
+            .lock()
+            .unwrap()
+            .insert("bgm".to_string(), volume);
     }
     fn set_se_volume(&self, volume: f32) {
-        self.volumes.lock().unwrap().insert("se".to_string(), volume);
+        self.volumes
+            .lock()
+            .unwrap()
+            .insert("se".to_string(), volume);
     }
     fn set_voice_volume(&self, volume: f32) {
-        self.volumes.lock().unwrap().insert("voice".to_string(), volume);
+        self.volumes
+            .lock()
+            .unwrap()
+            .insert("voice".to_string(), volume);
     }
 
     fn include(&self, _path: &str) {}
     fn set_flick_sensitivity(&self, _sensitivity: f64) {}
-    fn get_script_block(&self) -> HashMap<String, String> { HashMap::new() }
-    fn get_script_stack(&self) -> Vec<HashMap<String, String>> { vec![] }
-    fn get_script_wait_reason(&self) -> u8 { 0 }
+    fn get_script_block(&self) -> HashMap<String, String> {
+        HashMap::new()
+    }
+    fn get_script_stack(&self) -> Vec<HashMap<String, String>> {
+        vec![]
+    }
+    fn get_script_wait_reason(&self) -> u8 {
+        0
+    }
 }
 
 /// Resolve `:name/rest` magic paths through the magic-path table,
@@ -130,14 +170,18 @@ fn resolve_magic(table: &std::sync::Arc<MagicPathTable>, name: &str) -> String {
 fn parse_png_text_chunks(bytes: &[u8]) -> HashMap<String, String> {
     let mut out = HashMap::new();
     const SIG: usize = 8;
-    if bytes.len() < SIG || &bytes[..SIG] != b"\x89PNG\r\n\x1a\n" { return out; }
+    if bytes.len() < SIG || &bytes[..SIG] != b"\x89PNG\r\n\x1a\n" {
+        return out;
+    }
     let mut i = SIG;
     while i + 8 <= bytes.len() {
-        let len = u32::from_be_bytes([bytes[i], bytes[i+1], bytes[i+2], bytes[i+3]]) as usize;
+        let len = u32::from_be_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]) as usize;
         let typ = &bytes[i + 4..i + 8];
         let data_start = i + 8;
         let data_end = data_start + len;
-        if data_end > bytes.len() { break; }
+        if data_end > bytes.len() {
+            break;
+        }
         if typ == b"tEXt" {
             let data = &bytes[data_start..data_end];
             if let Some(nul) = data.iter().position(|&b| b == 0) {
@@ -146,7 +190,9 @@ fn parse_png_text_chunks(bytes: &[u8]) -> HashMap<String, String> {
                 out.insert(keyword, text);
             }
         }
-        if typ == b"IEND" { break; }
+        if typ == b"IEND" {
+            break;
+        }
         i = data_end + 4;
     }
     out

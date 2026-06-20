@@ -44,15 +44,13 @@ pub fn create_offscreen_context(
 ) -> Result<(Rc<glow::Context>, Box<dyn GLPlatformContext>, GfxBackend), String> {
     match backend {
         GfxBackend::Cgl => create_cgl().map(|(g, c)| (g, c, GfxBackend::Cgl)),
-        GfxBackend::Angle(sub) => {
-            match create_egl(sub, stage_w, stage_h) {
-                Ok((g, c)) => Ok((g, c, GfxBackend::Angle(sub))),
-                Err(e) => {
-                    crate::core_warn!("ANGLE failed ({e}), falling back to CGL");
-                    create_cgl().map(|(g, c)| (g, c, GfxBackend::Cgl))
-                }
+        GfxBackend::Angle(sub) => match create_egl(sub, stage_w, stage_h) {
+            Ok((g, c)) => Ok((g, c, GfxBackend::Angle(sub))),
+            Err(e) => {
+                crate::core_warn!("ANGLE failed ({e}), falling back to CGL");
+                create_cgl().map(|(g, c)| (g, c, GfxBackend::Cgl))
             }
-        }
+        },
     }
 }
 
@@ -62,7 +60,7 @@ pub fn create_offscreen_context(
 fn create_cgl() -> Result<(Rc<glow::Context>, Box<dyn GLPlatformContext>), String> {
     mod imp {
         use super::GLPlatformContext;
-        use std::ffi::{c_int, c_uint, c_void, CString};
+        use std::ffi::{CString, c_int, c_uint, c_void};
         use std::rc::Rc;
 
         type CGLError = c_int;
@@ -71,8 +69,16 @@ fn create_cgl() -> Result<(Rc<glow::Context>, Box<dyn GLPlatformContext>), Strin
 
         #[link(name = "OpenGL", kind = "framework")]
         unsafe extern "C" {
-            fn CGLChoosePixelFormat(a: *const c_uint, p: *mut CGLPixelFormatObj, n: *mut c_int) -> CGLError;
-            fn CGLCreateContext(p: CGLPixelFormatObj, s: CGLContextObj, c: *mut CGLContextObj) -> CGLError;
+            fn CGLChoosePixelFormat(
+                a: *const c_uint,
+                p: *mut CGLPixelFormatObj,
+                n: *mut c_int,
+            ) -> CGLError;
+            fn CGLCreateContext(
+                p: CGLPixelFormatObj,
+                s: CGLContextObj,
+                c: *mut CGLContextObj,
+            ) -> CGLError;
             fn CGLSetCurrentContext(c: CGLContextObj) -> CGLError;
             fn CGLReleaseContext(c: CGLContextObj) -> CGLError;
             fn CGLReleasePixelFormat(p: CGLPixelFormatObj) -> CGLError;
@@ -83,18 +89,29 @@ fn create_cgl() -> Result<(Rc<glow::Context>, Box<dyn GLPlatformContext>), Strin
             fn dlsym(h: *mut c_void, sym: *const i8) -> *const c_void;
         }
 
-        pub struct Ctx { h: CGLContextObj }
+        pub struct Ctx {
+            h: CGLContextObj,
+        }
         unsafe impl Send for Ctx {}
 
         impl GLPlatformContext for Ctx {
-            fn make_current(&self) -> bool { unsafe { CGLSetCurrentContext(self.h) == 0 } }
+            fn make_current(&self) -> bool {
+                unsafe { CGLSetCurrentContext(self.h) == 0 }
+            }
         }
         impl Drop for Ctx {
-            fn drop(&mut self) { unsafe { CGLReleaseContext(self.h); } }
+            fn drop(&mut self) {
+                unsafe {
+                    CGLReleaseContext(self.h);
+                }
+            }
         }
 
         pub fn make() -> Result<(Rc<glow::Context>, Ctx), String> {
-            const A: c_uint = 73; const PROFILE: c_uint = 99; const CORE: c_uint = 0x3200; const COLOR: c_uint = 8;
+            const A: c_uint = 73;
+            const PROFILE: c_uint = 99;
+            const CORE: c_uint = 0x3200;
+            const COLOR: c_uint = 8;
             unsafe {
                 let attrs: [c_uint; 6] = [A, PROFILE, CORE, COLOR, 24, 0];
                 let mut pix = std::ptr::null_mut();
@@ -108,9 +125,16 @@ fn create_cgl() -> Result<(Rc<glow::Context>, Box<dyn GLPlatformContext>), Strin
                     return Err("CGLCreateContext failed".into());
                 }
                 CGLReleasePixelFormat(pix);
-                if CGLSetCurrentContext(h) != 0 { return Err("CGLSetCurrentContext failed".into()); }
-                let fw = dlopen(c"/System/Library/Frameworks/OpenGL.framework/OpenGL".as_ptr(), 2);
-                if fw.is_null() { return Err("dlopen OpenGL.framework failed".into()); }
+                if CGLSetCurrentContext(h) != 0 {
+                    return Err("CGLSetCurrentContext failed".into());
+                }
+                let fw = dlopen(
+                    c"/System/Library/Frameworks/OpenGL.framework/OpenGL".as_ptr(),
+                    2,
+                );
+                if fw.is_null() {
+                    return Err("dlopen OpenGL.framework failed".into());
+                }
                 let gl = glow::Context::from_loader_function(|s| {
                     let cs = CString::new(s).unwrap();
                     dlsym(fw, cs.as_ptr())
@@ -130,10 +154,14 @@ fn create_cgl() -> Result<(Rc<glow::Context>, Box<dyn GLPlatformContext>), Strin
 
 // ── EGL / ANGLE ─────────────────────────────────────────────────
 
-fn create_egl(backend: AngleBackend, stage_w: u32, stage_h: u32) -> Result<(Rc<glow::Context>, Box<dyn GLPlatformContext>), String> {
+fn create_egl(
+    backend: AngleBackend,
+    stage_w: u32,
+    stage_h: u32,
+) -> Result<(Rc<glow::Context>, Box<dyn GLPlatformContext>), String> {
     mod egl {
         use super::GLPlatformContext;
-        use std::ffi::{c_int, c_uint, c_void, CString};
+        use std::ffi::{CString, c_int, c_uint, c_void};
         use std::rc::Rc;
 
         type EGLBoolean = c_uint;
@@ -170,7 +198,9 @@ fn create_egl(backend: AngleBackend, stage_w: u32, stage_h: u32) -> Result<(Rc<g
             ($lib:expr, $name:expr) => {{
                 let cs = CString::new($name).unwrap();
                 let ptr = dlsym($lib, cs.as_ptr());
-                if ptr.is_null() { return Err(format!("dlsym {} failed", $name)); }
+                if ptr.is_null() {
+                    return Err(format!("dlsym {} failed", $name));
+                }
                 std::mem::transmute::<*const c_void, _>(ptr)
             }};
         }
@@ -182,14 +212,17 @@ fn create_egl(backend: AngleBackend, stage_w: u32, stage_h: u32) -> Result<(Rc<g
             destroy: unsafe extern "C" fn(EGLDisplay, EGLContext) -> EGLBoolean,
             destroy_surface: unsafe extern "C" fn(EGLDisplay, EGLSurface) -> EGLBoolean,
             terminate: unsafe extern "C" fn(EGLDisplay) -> EGLBoolean,
-            make_current: unsafe extern "C" fn(EGLDisplay, EGLSurface, EGLSurface, EGLContext) -> EGLBoolean,
+            make_current:
+                unsafe extern "C" fn(EGLDisplay, EGLSurface, EGLSurface, EGLContext) -> EGLBoolean,
         }
 
         unsafe impl Send for EglCtx {}
 
         impl GLPlatformContext for EglCtx {
             fn make_current(&self) -> bool {
-                unsafe { (self.make_current)(self._display, self._surface, self._surface, self.ctx) != 0 }
+                unsafe {
+                    (self.make_current)(self._display, self._surface, self._surface, self.ctx) != 0
+                }
             }
         }
 
@@ -212,7 +245,11 @@ fn create_egl(backend: AngleBackend, stage_w: u32, stage_h: u32) -> Result<(Rc<g
         const EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE: EGLAttrib = 0x34A2;
         const EGL_PLATFORM_ANGLE_TYPE_D3D11_ANGLE: EGLAttrib = 0x3421;
 
-        pub fn make(backend: super::AngleBackend, stage_w: u32, stage_h: u32) -> Result<(Rc<glow::Context>, EglCtx), String> {
+        pub fn make(
+            backend: super::AngleBackend,
+            stage_w: u32,
+            stage_h: u32,
+        ) -> Result<(Rc<glow::Context>, EglCtx), String> {
             unsafe {
                 // Load libEGL
                 let egl_name = if cfg!(target_os = "macos") {
@@ -230,8 +267,13 @@ fn create_egl(backend: AngleBackend, stage_w: u32, stage_h: u32) -> Result<(Rc<g
                     return Err("ANGLE libEGL not found — install or bundle ANGLE libraries".into());
                 }
 
-                let egl_get_display: unsafe extern "C" fn(EGLint) -> EGLDisplay = load!(egl_lib, "eglGetDisplay");
-                let egl_initialize: unsafe extern "C" fn(EGLDisplay, *mut EGLint, *mut EGLint) -> EGLBoolean = load!(egl_lib, "eglInitialize");
+                let egl_get_display: unsafe extern "C" fn(EGLint) -> EGLDisplay =
+                    load!(egl_lib, "eglGetDisplay");
+                let egl_initialize: unsafe extern "C" fn(
+                    EGLDisplay,
+                    *mut EGLint,
+                    *mut EGLint,
+                ) -> EGLBoolean = load!(egl_lib, "eglInitialize");
 
                 // Try ANGLE platform display: eglGetPlatformDisplay (EGL 1.5) first,
                 // fall back to eglGetPlatformDisplayEXT (ANGLE extension alias).
@@ -242,55 +284,121 @@ fn create_egl(backend: AngleBackend, stage_w: u32, stage_h: u32) -> Result<(Rc<g
                     super::AngleBackend::OpenGL => EGL_PLATFORM_ANGLE_TYPE_OPENGL_ANGLE,
                 };
                 let attribs: [EGLAttrib; 3] = [
-                    EGL_PLATFORM_ANGLE_TYPE_ANGLE as EGLAttrib, angle_type,
+                    EGL_PLATFORM_ANGLE_TYPE_ANGLE as EGLAttrib,
+                    angle_type,
                     EGL_NONE as EGLAttrib,
                 ];
 
-                type PfPlatformDisplay = unsafe extern "C" fn(EGLint, *mut c_void, *const EGLAttrib) -> EGLDisplay;
-                let display = ["eglGetPlatformDisplay", "eglGetPlatformDisplayEXT"].iter().find_map(|name| {
-                    let cs = CString::new(*name).unwrap();
-                    let ptr = dlsym(egl_lib, cs.as_ptr());
-                    if ptr.is_null() { return None; }
-                    let f: PfPlatformDisplay = std::mem::transmute(ptr);
-                    let d = f(EGL_PLATFORM_ANGLE_ANGLE, EGL_DEFAULT_DISPLAY as *mut c_void, attribs.as_ptr());
-                    if d.is_null() { None } else { Some(d) }
-                }).unwrap_or_else(|| {
-                    egl_get_display(EGL_DEFAULT_DISPLAY)
-                });
-                let egl_choose_config: unsafe extern "C" fn(EGLDisplay, *const EGLint, *mut EGLConfig, EGLint, *mut EGLint) -> EGLBoolean = load!(egl_lib, "eglChooseConfig");
-                let egl_create_pbuffer_surface: unsafe extern "C" fn(EGLDisplay, EGLConfig, *const EGLint) -> EGLSurface = load!(egl_lib, "eglCreatePbufferSurface");
-                let egl_create_context: unsafe extern "C" fn(EGLDisplay, EGLConfig, EGLContext, *const EGLint) -> EGLContext = load!(egl_lib, "eglCreateContext");
-                let egl_make_current: unsafe extern "C" fn(EGLDisplay, EGLSurface, EGLSurface, EGLContext) -> EGLBoolean = load!(egl_lib, "eglMakeCurrent");
-                let egl_destroy_context: unsafe extern "C" fn(EGLDisplay, EGLContext) -> EGLBoolean = load!(egl_lib, "eglDestroyContext");
-                let egl_destroy_surface: unsafe extern "C" fn(EGLDisplay, EGLSurface) -> EGLBoolean = load!(egl_lib, "eglDestroySurface");
-                let egl_terminate: unsafe extern "C" fn(EGLDisplay) -> EGLBoolean = load!(egl_lib, "eglTerminate");
+                type PfPlatformDisplay =
+                    unsafe extern "C" fn(EGLint, *mut c_void, *const EGLAttrib) -> EGLDisplay;
+                let display = ["eglGetPlatformDisplay", "eglGetPlatformDisplayEXT"]
+                    .iter()
+                    .find_map(|name| {
+                        let cs = CString::new(*name).unwrap();
+                        let ptr = dlsym(egl_lib, cs.as_ptr());
+                        if ptr.is_null() {
+                            return None;
+                        }
+                        let f: PfPlatformDisplay = std::mem::transmute(ptr);
+                        let d = f(
+                            EGL_PLATFORM_ANGLE_ANGLE,
+                            EGL_DEFAULT_DISPLAY as *mut c_void,
+                            attribs.as_ptr(),
+                        );
+                        if d.is_null() { None } else { Some(d) }
+                    })
+                    .unwrap_or_else(|| egl_get_display(EGL_DEFAULT_DISPLAY));
+                let egl_choose_config: unsafe extern "C" fn(
+                    EGLDisplay,
+                    *const EGLint,
+                    *mut EGLConfig,
+                    EGLint,
+                    *mut EGLint,
+                ) -> EGLBoolean = load!(egl_lib, "eglChooseConfig");
+                let egl_create_pbuffer_surface: unsafe extern "C" fn(
+                    EGLDisplay,
+                    EGLConfig,
+                    *const EGLint,
+                )
+                    -> EGLSurface = load!(egl_lib, "eglCreatePbufferSurface");
+                let egl_create_context: unsafe extern "C" fn(
+                    EGLDisplay,
+                    EGLConfig,
+                    EGLContext,
+                    *const EGLint,
+                ) -> EGLContext = load!(egl_lib, "eglCreateContext");
+                let egl_make_current: unsafe extern "C" fn(
+                    EGLDisplay,
+                    EGLSurface,
+                    EGLSurface,
+                    EGLContext,
+                ) -> EGLBoolean = load!(egl_lib, "eglMakeCurrent");
+                let egl_destroy_context: unsafe extern "C" fn(
+                    EGLDisplay,
+                    EGLContext,
+                ) -> EGLBoolean = load!(egl_lib, "eglDestroyContext");
+                let egl_destroy_surface: unsafe extern "C" fn(
+                    EGLDisplay,
+                    EGLSurface,
+                ) -> EGLBoolean = load!(egl_lib, "eglDestroySurface");
+                let egl_terminate: unsafe extern "C" fn(EGLDisplay) -> EGLBoolean =
+                    load!(egl_lib, "eglTerminate");
 
-                if display.is_null() { return Err("eglGetDisplay failed".into()); }
+                if display.is_null() {
+                    return Err("eglGetDisplay failed".into());
+                }
                 if egl_initialize(display, std::ptr::null_mut(), std::ptr::null_mut()) == 0 {
                     return Err("eglInitialize failed".into());
                 }
 
                 let config_attrs = [
-                    EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
-                    EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
-                    EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8,
-                    EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+                    EGL_RENDERABLE_TYPE,
+                    EGL_OPENGL_ES2_BIT,
+                    EGL_SURFACE_TYPE,
+                    EGL_PBUFFER_BIT,
+                    EGL_RED_SIZE,
+                    8,
+                    EGL_GREEN_SIZE,
+                    8,
+                    EGL_BLUE_SIZE,
+                    8,
+                    EGL_ALPHA_SIZE,
+                    8,
                     EGL_NONE,
                 ];
                 let mut config: EGLConfig = std::ptr::null_mut();
                 let mut num_configs: EGLint = 0;
-                if egl_choose_config(display, config_attrs.as_ptr(), &mut config, 1, &mut num_configs) == 0 || num_configs == 0 {
+                if egl_choose_config(
+                    display,
+                    config_attrs.as_ptr(),
+                    &mut config,
+                    1,
+                    &mut num_configs,
+                ) == 0
+                    || num_configs == 0
+                {
                     return Err("eglChooseConfig failed".into());
                 }
 
-                let pbuffer_attrs = [EGL_WIDTH, stage_w as EGLint, EGL_HEIGHT, stage_h as EGLint, EGL_NONE];
+                let pbuffer_attrs = [
+                    EGL_WIDTH,
+                    stage_w as EGLint,
+                    EGL_HEIGHT,
+                    stage_h as EGLint,
+                    EGL_NONE,
+                ];
                 let surface = egl_create_pbuffer_surface(display, config, pbuffer_attrs.as_ptr());
-                if surface.is_null() { return Err("eglCreatePbufferSurface failed".into()); }
+                if surface.is_null() {
+                    return Err("eglCreatePbufferSurface failed".into());
+                }
 
                 // Request ES 2.0 context (ANGLE Metal works best with this)
                 let ctx_attrs = [0x3098 /* EGL_CONTEXT_CLIENT_VERSION */, 2, EGL_NONE];
-                let ctx = egl_create_context(display, config, std::ptr::null_mut(), ctx_attrs.as_ptr());
-                if ctx.is_null() { return Err("eglCreateContext failed".into()); }
+                let ctx =
+                    egl_create_context(display, config, std::ptr::null_mut(), ctx_attrs.as_ptr());
+                if ctx.is_null() {
+                    return Err("eglCreateContext failed".into());
+                }
 
                 if egl_make_current(display, surface, surface, ctx) == 0 {
                     return Err("eglMakeCurrent failed".into());
@@ -308,20 +416,27 @@ fn create_egl(backend: AngleBackend, stage_w: u32, stage_h: u32) -> Result<(Rc<g
                     CString::new(gles_name.as_str()).unwrap().as_ptr() as *const i8,
                     2,
                 );
-                if gles_lib.is_null() { return Err("ANGLE libGLESv2 not found".into()); }
+                if gles_lib.is_null() {
+                    return Err("ANGLE libGLESv2 not found".into());
+                }
 
                 let gl = glow::Context::from_loader_function(|s| {
                     let cs = CString::new(s).unwrap();
                     dlsym(gles_lib, cs.as_ptr())
                 });
 
-                Ok((Rc::new(gl), EglCtx {
-                    _display: display, _surface: surface, ctx,
-                    destroy: egl_destroy_context,
-                    destroy_surface: egl_destroy_surface,
-                    terminate: egl_terminate,
-                    make_current: egl_make_current,
-                }))
+                Ok((
+                    Rc::new(gl),
+                    EglCtx {
+                        _display: display,
+                        _surface: surface,
+                        ctx,
+                        destroy: egl_destroy_context,
+                        destroy_surface: egl_destroy_surface,
+                        terminate: egl_terminate,
+                        make_current: egl_make_current,
+                    },
+                ))
             }
         }
     }
@@ -330,36 +445,72 @@ fn create_egl(backend: AngleBackend, stage_w: u32, stage_h: u32) -> Result<(Rc<g
 }
 
 pub unsafe fn create_fbo_target(
-    gl: &glow::Context, width: i32, height: i32,
+    gl: &glow::Context,
+    width: i32,
+    height: i32,
 ) -> Result<(glow::Framebuffer, glow::Texture), String> {
     unsafe {
-        let tex = gl.create_texture().map_err(|e| format!("create_texture: {e}"))?;
+        let tex = gl
+            .create_texture()
+            .map_err(|e| format!("create_texture: {e}"))?;
         gl.bind_texture(glow::TEXTURE_2D, Some(tex));
         // Use GL_RGBA for both internalformat and format — required by
         // GLES 2.0 and ANGLE Metal/GL backends (sized formats like RGBA8
         // are GLES 3.0+ only).
-        gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA as i32,
-            width, height, 0, glow::RGBA, glow::UNSIGNED_BYTE,
-            glow::PixelUnpackData::Slice(None));
-        let fbo = gl.create_framebuffer().map_err(|e| format!("create_framebuffer: {e}"))?;
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA as i32,
+            width,
+            height,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(None),
+        );
+        let fbo = gl
+            .create_framebuffer()
+            .map_err(|e| format!("create_framebuffer: {e}"))?;
         gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-        gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0,
-            glow::TEXTURE_2D, Some(tex), 0);
+        gl.framebuffer_texture_2d(
+            glow::FRAMEBUFFER,
+            glow::COLOR_ATTACHMENT0,
+            glow::TEXTURE_2D,
+            Some(tex),
+            0,
+        );
         let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
         if status != glow::FRAMEBUFFER_COMPLETE {
             // Some ANGLE backends (Metal/GL) reject RGBA8 as FBO color attachment.
             // Try RGBA4 as fallback.
             gl.delete_texture(tex);
             gl.delete_framebuffer(fbo);
-            let tex2 = gl.create_texture().map_err(|e| format!("create_texture(retry): {e}"))?;
+            let tex2 = gl
+                .create_texture()
+                .map_err(|e| format!("create_texture(retry): {e}"))?;
             gl.bind_texture(glow::TEXTURE_2D, Some(tex2));
-            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA4 as i32,
-                width, height, 0, glow::RGBA, glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(None));
-            let fbo2 = gl.create_framebuffer().map_err(|e| format!("create_framebuffer(retry): {e}"))?;
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA4 as i32,
+                width,
+                height,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(None),
+            );
+            let fbo2 = gl
+                .create_framebuffer()
+                .map_err(|e| format!("create_framebuffer(retry): {e}"))?;
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo2));
-            gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0,
-                glow::TEXTURE_2D, Some(tex2), 0);
+            gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(tex2),
+                0,
+            );
             let status2 = gl.check_framebuffer_status(glow::FRAMEBUFFER);
             if status2 != glow::FRAMEBUFFER_COMPLETE {
                 return Err(format!("FBO incomplete: {status:#x} / retry={status2:#x}"));
@@ -375,8 +526,15 @@ pub unsafe fn read_pixels(gl: &glow::Context, width: i32, height: i32) -> Vec<u8
     let total = row_bytes * height as usize;
     let mut buf = vec![0u8; total];
     unsafe {
-        gl.read_pixels(0, 0, width, height, glow::RGBA, glow::UNSIGNED_BYTE,
-            glow::PixelPackData::Slice(Some(&mut buf)));
+        gl.read_pixels(
+            0,
+            0,
+            width,
+            height,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelPackData::Slice(Some(&mut buf)),
+        );
     }
     let mut tmp = vec![0u8; row_bytes];
     for y in 0..(height / 2) as usize {
