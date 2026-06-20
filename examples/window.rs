@@ -6,6 +6,7 @@
 
 use art3m1s_core::backend::gl::{GlRenderer, GlTextureProvider, ShaderProfile};
 use art3m1s_core::compositor::Compositor;
+use art3m1s_core::save::{SaveData, SaveManager};
 use art3m1s_core::text::GlyphTextRenderer;
 use art3m1s_core::Project;
 use asb_interpreter::event::WaitReason;
@@ -248,7 +249,23 @@ impl EngineCallbacks for WinitCallbacks {
         let comments = parse_png_text_chunks(&bytes);
         if comments.is_empty() { None } else { Some(comments) }
     }
-    fn file_operation(&self, _command: &str, _params: HashMap<String, String>) {}
+    fn file_operation(&self, command: &str, params: HashMap<String, String>) {
+        let src = params.get("src").map(|s| {
+            self.project_root.join(s)
+        });
+        let dst = params.get("dst").map(|s| {
+            self.project_root.join(s)
+        });
+        match command {
+            "copy" if src.is_some() && dst.is_some() => {
+                let _ = std::fs::copy(src.unwrap(), dst.unwrap());
+            }
+            "delete" | "remove" if src.is_some() => {
+                let _ = std::fs::remove_file(src.unwrap());
+            }
+            _ => {}
+        }
+    }
     fn include(&self, _path: &str) {}
     fn set_flick_sensitivity(&self, _sensitivity: f64) {}
     fn get_script_block(&self) -> HashMap<String, String> { HashMap::new() }
@@ -524,6 +541,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 启动 boot 流程
     project.start_boot(&mut interpreter)?;
+
+    // ── 存档管理 ────────────────────────────────────────────────────
+    let save_dir = project_root.join("save");
+    let save_manager = SaveManager::new(save_dir).unwrap_or_else(|e| {
+        eprintln!("存档目录创建失败: {e}");
+        SaveManager::new(std::env::temp_dir().join("art3m1s_save")).unwrap()
+    });
 
     // 等待状态：None = 正在运行，Some(reason) = 等待中
     let mut wait_reason: Option<WaitReason> = None;
@@ -806,7 +830,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     for event in &collected_events {
-                        compositor.apply_event(event);
+                        match event {
+                            Event::SaveGame { file } => {
+                                if file.is_empty() {
+                                    // 系统初始化时的空存档，跳过
+                                    continue;
+                                }
+                                eprintln!("[save] 正在保存存档: {file}");
+                                let data = SaveData::from_interpreter(&interpreter);
+                                if let Err(e) = save_manager.save(file, &data) {
+                                    eprintln!("存档失败 [{file}]: {e}");
+                                } else {
+                                    eprintln!("[save] 存档完成: {file}");
+                                }
+                            }
+                            Event::LoadGame { file, .. } => {
+                                if file.is_empty() { continue; }
+                                eprintln!("[load] 正在读取存档: {file}");
+                                match save_manager.load(file) {
+                                    Ok(data) => {
+                                        if let Err(e) = data.restore(&mut interpreter) {
+                                            eprintln!("读档恢复失败 [{file}]: {e}");
+                                        } else {
+                                            eprintln!("[load] 读档完成: {file}");
+                                        }
+                                        wait_reason = None;
+                                    }
+                                    Err(e) => eprintln!("读档失败 [{file}]: {e}"),
+                                }
+                            }
+                            _ => compositor.apply_event(event),
+                        }
                     }
 
                     // 推进动画时钟

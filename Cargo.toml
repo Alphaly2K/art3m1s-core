@@ -8,6 +8,8 @@ pfs-upk-rust = { path = "../pfs-upk-rust" }
 asb-interpreter = { path = "../asb-interpreter" }
 encoding_rs = "0.8"
 glam = "0.30"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 mlua = { version = "0.10", features = ["lua51", "send", "serialize", "vendored"], optional = true }
 # GL 渲染后端：实现合成器的 Renderer / TextureProvider trait。
 # 关闭 gl-backend feature 时核心合成器保持零 GPU 依赖。
@@ -16,6 +18,8 @@ glow = { version = "0.16", optional = true }
 image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
 # 字体光栅化（字形渲染子系统）
 ab_glyph = "0.2"
+# 音频播放后端（基于 rodio/cpal，计划中）
+rodio = { version = "0.20", optional = true }
 # 窗口管理和 GL 上下文创建（示例程序需要）
 winit = { version = "0.30", optional = true }
 glutin = { version = "0.32", optional = true }
@@ -25,6 +29,7 @@ raw-window-handle = { version = "0.6", optional = true }
 [features]
 default = ["gl-backend"]
 gl-backend = ["dep:glow", "dep:image"]
+audio-backend = ["dep:rodio"]
 window = ["gl-backend", "dep:winit", "dep:glutin", "dep:glutin-winit", "dep:raw-window-handle", "dep:mlua"]
 
 [dev-dependencies]

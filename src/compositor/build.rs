@@ -113,7 +113,6 @@ fn resolved_props(layer: &crate::compositor::scene::Layer, now_ms: u64) -> Layer
     let mut props = layer.props.clone();
     for tween in &layer.tweens {
         let value = tween.value_at(now_ms);
-        // 缓动的 param 名沿用原始属性名，复用同一套解析逻辑写回。
         props.set_raw(&tween.param, &format_value(&tween.param, value));
     }
     props
@@ -123,7 +122,8 @@ fn resolved_props(layer: &crate::compositor::scene::Layer, now_ms: u64) -> Layer
 /// alpha/visible 等整数属性按整数格式化，避免 "128.0" 落入浮点回退路径。
 fn format_value(param: &str, value: f32) -> String {
     match param {
-        "alpha" | "visible" | "reversex" | "reversey" | "grayscale" | "negative" => {
+        "alpha" | "visible" | "reversex" | "reversey" | "grayscale" | "negative"
+        | "delete" | "stack" | "vertical" | "hung" | "anchorcenter" | "overflow" => {
             (value.round() as i64).to_string()
         }
         _ => value.to_string(),
@@ -276,6 +276,13 @@ mod tests {
             easing: Easing::Linear,
             start_ms: 0,
             duration_ms: 1000,
+            infinite_loop: false,
+            loop_count: None,
+            yoyo: false,
+            yoyo_reverse: false,
+            loop_delay_ms: 0,
+            delete_on_finish: false,
+            handler: None,
         });
 
         let mut provider = MockProvider::new();

@@ -26,6 +26,7 @@ pub mod stub;
 pub use glyph::GlyphTextRenderer;
 pub use inject::TextInject;
 pub use render::{
-    FontDesc, FontMetrics, FontState, GlyphInfo, MessageLayer, TextAlignment, TextRenderer,
+    FontDesc, FontMetrics, FontState, GlyphInfo, MessageLayer, ScetweenConfig, ScetweenMode,
+    ScetweenSetMode, TextAlignment, TextRenderer,
 };
 pub use stub::StubTextRenderer;

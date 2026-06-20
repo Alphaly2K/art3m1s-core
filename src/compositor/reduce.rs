@@ -7,11 +7,11 @@
 //! 时间推进与渲染分离：解释器只管"发生了什么"，由宿主每帧调用 [`Compositor::render`]
 //! 把当前时刻的场景画出来。
 
-use crate::compositor::anim::{Easing, Tween};
+use crate::compositor::anim::{Easing, Tween, TweenHandler};
 use crate::compositor::build::build_frame;
 use crate::compositor::renderer::{DrawCommand, DrawList, Renderer, TextureProvider};
 use crate::compositor::scene::{LayerEventHandler, Scene};
-use crate::text::render::TextRenderer;
+use crate::text::render::{ScetweenConfig, ScetweenMode, ScetweenSetMode, TextRenderer};
 use asb_interpreter::event::{Event, LayerEvent};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -47,6 +47,8 @@ pub struct Compositor {
     input_handlers: HashMap<(String, String), InputHandler>,
     /// 文本渲染器（RefCell 使 render(&self) 可调用其 &mut 方法）。
     text_renderer: RefCell<Option<Box<dyn TextRenderer>>>,
+    /// 自上次 `poll_tween_events` 以来产生待处理的缓动完成事件。
+    pending_tween_events: Vec<TweenHandler>,
 }
 
 impl std::fmt::Debug for Compositor {
@@ -57,6 +59,7 @@ impl std::fmt::Debug for Compositor {
             .field("stage_scale", &self.stage_scale)
             .field("input_handlers", &self.input_handlers)
             .field("text_renderer", &self.text_renderer.borrow().as_ref().map(|_| ".."))
+            .field("pending_tween_events", &self.pending_tween_events)
             .finish()
     }
 }
@@ -69,6 +72,7 @@ impl Default for Compositor {
             stage_scale: 1.0,
             input_handlers: HashMap::new(),
             text_renderer: RefCell::new(None),
+            pending_tween_events: Vec::new(),
         }
     }
 }
@@ -109,6 +113,17 @@ impl Compositor {
     pub fn advance(&mut self, delta_ms: u64) {
         self.clock_ms = self.clock_ms.saturating_add(delta_ms);
         self.gc_finished_tweens();
+        if let Some(tr) = self.text_renderer.borrow_mut().as_mut() {
+            tr.advance_reveal(delta_ms);
+        }
+    }
+
+    /// 查询并清空自上次调用以来产生的缓动完成事件。
+    ///
+    /// 宿主在每帧 `advance` 之后调用，将返回到的 [`TweenHandler`] 交回解释器
+    /// 执行（对于 `sync` 缓动则构造 Wait 事件暂停脚本）。
+    pub fn poll_tween_events(&mut self) -> Vec<TweenHandler> {
+        std::mem::take(&mut self.pending_tween_events)
     }
 
     /// 把一个解释器事件应用到场景上。与画面无关的事件返回而不改动状态。
@@ -125,8 +140,32 @@ impl Compositor {
                 to,
                 ease,
                 time,
-                ..
-            } => self.apply_tween(id, param, from.as_deref(), to.as_deref(), ease.as_deref(), *time),
+                delay,
+                loop_count,
+                yoyo,
+                loop_delay,
+                sync,
+                delete,
+                handler_file,
+                handler_label,
+                handler_handler,
+            } => self.apply_tween(
+                id,
+                param,
+                from.as_deref(),
+                to.as_deref(),
+                ease.as_deref(),
+                *time,
+                *delay,
+                *loop_count,
+                *yoyo,
+                *loop_delay,
+                *sync,
+                *delete,
+                handler_file.as_deref(),
+                handler_label.as_deref(),
+                handler_handler.as_deref(),
+            ),
             Event::LayerTweenDelete { id } => {
                 // 强制完成：把该图层所有缓动直接落到终值并清空。
                 self.finish_tweens(id);
@@ -241,6 +280,7 @@ impl Compositor {
     /// 把一个 `[lytween]` 落成图层上的 [`Tween`]。
     ///
     /// `from` 省略时取属性当前值；`to` 解析失败则忽略本次缓动（没有目标无意义）。
+    #[allow(clippy::too_many_arguments)]
     fn apply_tween(
         &mut self,
         id: &str,
@@ -249,29 +289,81 @@ impl Compositor {
         to: Option<&str>,
         ease: Option<&str>,
         time: Option<u64>,
+        delay: Option<u64>,
+        loop_count: Option<i32>,
+        yoyo: Option<i32>,
+        loop_delay: Option<u64>,
+        sync: bool,
+        delete: bool,
+        handler_file: Option<&str>,
+        handler_label: Option<&str>,
+        handler_handler: Option<&str>,
     ) {
-        // 没有可解析的目标值，缓动无意义，直接忽略。
         let Some(to_value) = to.and_then(parse_num) else {
             return;
         };
 
-        // 确保图层存在，再读出起始值（from 省略时取属性当前值）。
         self.scene.ensure(id);
         let from_value = from
             .and_then(parse_num)
             .unwrap_or_else(|| self.current_param_value(id, param));
+
+        let start_ms = self.clock_ms + delay.unwrap_or(0);
+
+        // 解析循环：-1 → 无限，0 → 不循环，N → 循环 N 次
+        let infinite_loop = loop_count == Some(-1);
+        let loops: Option<u32> = if infinite_loop || loop_count.unwrap_or(0) <= 0 {
+            None
+        } else {
+            Some(loop_count.unwrap() as u32)
+        };
+
+        // 解析 yoyo：-1 → 无限乒乓，0 → 不乒乓，N → 乒乓 N 次
+        let yoyo_enabled = yoyo == Some(-1) || yoyo.unwrap_or(0) > 0;
+        let yoyo_loops: Option<u32> = if yoyo_enabled {
+            if yoyo == Some(-1) {
+                None // 无限
+            } else if yoyo.unwrap_or(0) > 0 {
+                Some(yoyo.unwrap() as u32)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // 使用 yoyo 的循环次数（如果有的话），否则用 loop_count
+        let effective_loops = yoyo_loops.or(loops);
+        let infinite = infinite_loop || yoyo == Some(-1);
 
         let tween = Tween {
             param: param.to_string(),
             from: from_value,
             to: to_value,
             easing: ease.map(Easing::parse).unwrap_or_default(),
-            start_ms: self.clock_ms,
+            start_ms,
             duration_ms: time.unwrap_or(0),
+            infinite_loop: infinite,
+            loop_count: effective_loops,
+            yoyo: yoyo_enabled,
+            yoyo_reverse: false,
+            loop_delay_ms: loop_delay.unwrap_or(0),
+            delete_on_finish: delete,
+            handler: if sync || handler_file.is_some() || handler_label.is_some()
+                || handler_handler.is_some() || delete
+            {
+                Some(TweenHandler {
+                    file: handler_file.map(|s| s.to_string()),
+                    label: handler_label.map(|s| s.to_string()),
+                    call: false,
+                    handler: handler_handler.map(|s| s.to_string()),
+                })
+            } else {
+                None
+            },
         };
 
         if let Some(layer) = self.scene.get_mut(id) {
-            // 同一属性的旧缓动被新的取代，避免叠加冲突。
             layer.tweens.retain(|t| t.param != param);
             layer.tweens.push(tween);
         }
@@ -286,10 +378,15 @@ impl Compositor {
         match param {
             "left" | "x" => p.left.unwrap_or(0.0),
             "top" | "y" => p.top.unwrap_or(0.0),
-            "xscale" => p.x_scale.unwrap_or(100.0),
-            "yscale" => p.y_scale.unwrap_or(100.0),
+            "xscale" | "scale_x" => p.x_scale.unwrap_or(100.0),
+            "yscale" | "scale_y" => p.y_scale.unwrap_or(100.0),
             "rotate" => p.rotate.unwrap_or(0.0),
             "alpha" => p.alpha.unwrap_or(255) as f32,
+            "anchorx" | "anchor_x" => p.anchor_x.unwrap_or(0.0),
+            "anchory" | "anchor_y" => p.anchor_y.unwrap_or(0.0),
+            "width" => p.width.unwrap_or(0.0),
+            "height" => p.height.unwrap_or(0.0),
+            "zoom" => p.x_scale.unwrap_or(100.0),
             _ => default_param_value(param),
         }
     }
@@ -310,17 +407,22 @@ impl Compositor {
         }
     }
 
-    /// 回收已结束的缓动，把终值固化到属性里。每帧 `advance` 调用。
+    /// 回收已结束的缓动，把终值固化到属性里，并收集完成回调。每帧 `advance` 调用。
     fn gc_finished_tweens(&mut self) {
         let now = self.clock_ms;
-        // 先收集需要固化的 (id, param, value)，避免借用冲突。
         let mut settle: Vec<(String, String, f32)> = Vec::new();
+        let mut completed: Vec<(String, Option<TweenHandler>, bool)> = Vec::new();
         let ids: Vec<String> = self.scene.iter_ids();
         for id in &ids {
             if let Some(layer) = self.scene.get(id) {
                 for t in &layer.tweens {
                     if t.is_finished(now) {
                         settle.push((id.clone(), t.param.clone(), t.to));
+                        completed.push((
+                            id.clone(),
+                            t.handler.clone(),
+                            t.delete_on_finish,
+                        ));
                     }
                 }
             }
@@ -329,6 +431,14 @@ impl Compositor {
             if let Some(layer) = self.scene.get_mut(&id) {
                 layer.props.set_raw(&param, &format_param(&param, value));
                 layer.tweens.retain(|t| !t.is_finished(now));
+            }
+        }
+        for (id, handler, delete) in completed {
+            if let Some(handler) = handler {
+                self.pending_tween_events.push(handler);
+            }
+            if delete {
+                self.scene.delete(&id);
             }
         }
     }
@@ -350,8 +460,6 @@ impl Compositor {
             Event::FontClose => tr.font_pop(),
             Event::FontDefault(settings) => tr.font_default(settings),
             Event::MessageLayerSwitch { id, .. } => {
-                // 确保 compositor 场景树里有该文本层（纯分组节点），build_frame
-                // 遍历到它时通过回调注入文本绘制命令，使其继承父层的 z-order/visible。
                 if let Some(lid) = id { self.scene.ensure(lid); }
                 tr.switch_message_layer(id.as_deref());
             }
@@ -359,6 +467,13 @@ impl Compositor {
             Event::LineBreak => tr.push_line_break(),
             Event::PageBreak { backlog } => tr.push_page_break(*backlog),
             Event::GlyphConfig(config) => tr.set_glyph_config(config),
+            Event::TextAnimation(params) => {
+                if let Some(config) = scetween_from_params(params) {
+                    tr.set_scetween(config);
+                }
+            }
+            Event::SceneIn => tr.show_text(),
+            Event::SceneOut => tr.hide_text(),
             _ => {}
         }
     }
@@ -521,12 +636,16 @@ impl Compositor {
 
     /// 仅构建当前帧的绘制列表（不渲染），供测试或自定义循环使用。
     pub fn build(&self, provider: &mut dyn TextureProvider) -> DrawList {
-        // 先从 text renderer 获取所有文本层的绘制命令，再传入 build_frame。
-        // RefCell 提供内部可变性，使回调可以是 Fn（不要求 FnMut）。
         let text_map: std::collections::HashMap<String, Vec<DrawCommand>> = {
             let mut tr_opt = self.text_renderer.borrow_mut();
             match tr_opt.as_mut() {
-                Some(tr) => tr.build_text_commands(provider),
+                Some(tr) => {
+                    // 兜底揭示：本帧可能先 advance 再推文本，此时 advance_reveal
+                    // 已执行但新文本尚未到达，故在渲染前再推进一次（delta=0 只会
+                    // 把刚推入的首个字符设为可见，不会重复计算已逝时间）。
+                    tr.advance_reveal(0);
+                    tr.build_text_commands(provider)
+                }
                 None => std::collections::HashMap::new(),
             }
         };
@@ -545,7 +664,7 @@ fn parse_num(value: &str) -> Option<f32> {
 
 fn default_param_value(param: &str) -> f32 {
     match param {
-        "xscale" | "yscale" => 100.0,
+        "xscale" | "yscale" | "zoom" => 100.0,
         "alpha" => 255.0,
         _ => 0.0,
     }
@@ -554,9 +673,66 @@ fn default_param_value(param: &str) -> f32 {
 /// 把缓动终值格式化回属性字符串（整数属性按整数）。
 fn format_param(param: &str, value: f32) -> String {
     match param {
-        "alpha" | "visible" => (value.round() as i64).to_string(),
+        "alpha" | "visible" | "reversex" | "reversey" | "grayscale" | "negative"
+        | "delete" | "vertical" | "hung" | "anchorcenter" | "overflow" => {
+            (value.round() as i64).to_string()
+        }
         _ => value.to_string(),
     }
+}
+
+/// 从 `TextAnimation` 事件的参数 map 构建 [`ScetweenConfig`]。
+/// 若参数仅含 mode 不含有效配置（delay/time/param 等），返回 None 表示不覆盖现有设置。
+fn scetween_from_params(params: &HashMap<String, String>) -> Option<ScetweenConfig> {
+    let has_delay = params.contains_key("delay");
+    let has_time = params.contains_key("time");
+    let has_param = params.contains_key("param");
+    let has_ease = params.contains_key("ease");
+    let has_diff = params.contains_key("diff");
+    let has_random = params.contains_key("randomdelay");
+
+    // 仅有 mode/type 而无实际配置参数 → 不覆盖已有 scetween
+    if !has_delay && !has_time && !has_param && !has_ease && !has_diff && !has_random {
+        return None;
+    }
+
+    let mode = params
+        .get("type")
+        .map(|s| ScetweenMode::from_str(s))
+        .unwrap_or(ScetweenMode::In);
+
+    let set_mode = match params.get("mode").map(|s| s.as_str()) {
+        Some("add") => ScetweenSetMode::Add,
+        _ => ScetweenSetMode::Init,
+    };
+
+    let param = params.get("param").cloned();
+    let ease = Easing::parse(params.get("ease").map(|s| s.as_str()).unwrap_or(""));
+    let diff = params.get("diff").and_then(|v| v.parse().ok());
+    let delay_per_char = params
+        .get("delay")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let time_per_char = params
+        .get("time")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let random_delay = params
+        .get("randomdelay")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+
+    Some(ScetweenConfig {
+        mode,
+        set_mode,
+        param,
+        ease,
+        diff,
+        delay_per_char,
+        time_per_char,
+        random_delay,
+        random_order: None,
+    })
 }
 
 #[cfg(test)]

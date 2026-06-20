@@ -10,8 +10,10 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::path::{Component, Path, PathBuf};
 
+pub mod audio;
 pub mod backend;
 pub mod compositor;
+pub mod save;
 pub mod text;
 
 pub use asb_interpreter as script;

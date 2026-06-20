@@ -22,7 +22,7 @@ pub mod reduce;
 pub mod renderer;
 pub mod scene;
 
-pub use anim::{Easing, Tween};
+pub use anim::{Easing, Tween, TweenHandler};
 pub use props::LayerProps;
 pub use reduce::Compositor;
 pub use renderer::{
