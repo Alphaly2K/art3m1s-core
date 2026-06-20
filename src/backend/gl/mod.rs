@@ -25,6 +25,7 @@ use std::rc::Rc;
 
 mod provider;
 mod shader;
+pub mod platform;
 
 pub use provider::{AssetSource, GlTextureProvider, PlaceholderKind};
 pub use shader::ShaderProfile;

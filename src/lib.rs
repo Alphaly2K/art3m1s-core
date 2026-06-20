@@ -15,6 +15,7 @@ pub mod backend;
 pub mod compositor;
 pub mod ffi;
 pub mod ffi_callbacks;
+pub mod runtime;
 pub mod save;
 pub mod text;
 

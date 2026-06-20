@@ -14,6 +14,7 @@ pub type MagicPathTable = Mutex<HashMap<String, String>>;
 pub struct FfiCallbacks {
     pub input: std::sync::Arc<std::sync::Mutex<InputSnapshot>>,
     pub magic_paths: std::sync::Arc<MagicPathTable>,
+    pub volumes: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, f32>>>,
 }
 
 /// Minimal input state snapshot (mirrors the winit version but without
@@ -41,7 +42,7 @@ impl InputSnapshot {
 
 impl EngineCallbacks for FfiCallbacks {
     fn debug(&self, _level: i32, data: &str, _raw: bool) {
-        eprintln!("[art3m1s] {data}");
+        crate::core_info!("{data}");
     }
 
     fn enqueue_tag(&self, _tag: String, _params: HashMap<String, String>) {}
@@ -88,6 +89,19 @@ impl EngineCallbacks for FfiCallbacks {
 
     fn file_operation(&self, command: &str, params: HashMap<String, String>) {
         let _ = (command, params); // delegate to frontend via FFI
+    }
+
+    fn set_master_volume(&self, volume: f32) {
+        self.volumes.lock().unwrap().insert("master".to_string(), volume);
+    }
+    fn set_bgm_volume(&self, volume: f32) {
+        self.volumes.lock().unwrap().insert("bgm".to_string(), volume);
+    }
+    fn set_se_volume(&self, volume: f32) {
+        self.volumes.lock().unwrap().insert("se".to_string(), volume);
+    }
+    fn set_voice_volume(&self, volume: f32) {
+        self.volumes.lock().unwrap().insert("voice".to_string(), volume);
     }
 
     fn include(&self, _path: &str) {}

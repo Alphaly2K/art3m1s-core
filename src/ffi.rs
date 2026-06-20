@@ -7,6 +7,78 @@
 use std::ffi::{c_char, c_int, c_longlong, CString};
 use std::sync::OnceLock;
 
+// ── Global debug flag ──────────────────────────────────────────
+
+static DEBUG: OnceLock<bool> = OnceLock::new();
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_set_debug(enabled: c_int) {
+    let _ = DEBUG.set(enabled != 0);
+}
+
+pub fn debug_enabled() -> bool {
+    DEBUG.get().copied().unwrap_or(false)
+}
+
+// ── Log callback ───────────────────────────────────────────────
+
+type LogCallback = unsafe extern "C" fn(level: *const c_char, msg: *const c_char);
+
+static LOG_CB: OnceLock<LogCallback> = OnceLock::new();
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_register_log_callback(cb: LogCallback) {
+    let _ = LOG_CB.set(cb);
+}
+
+pub fn log(level: &str, msg: &str) {
+    if let Some(cb) = LOG_CB.get() {
+        if let (Ok(l), Ok(m)) = (CString::new(level), CString::new(msg)) {
+            unsafe { cb(l.as_ptr(), m.as_ptr()); }
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! core_info {
+    ($($arg:tt)*) => { $crate::ffi::log("I", &format!($($arg)*)); };
+}
+#[macro_export]
+macro_rules! core_warn {
+    ($($arg:tt)*) => { $crate::ffi::log("W", &format!($($arg)*)); };
+}
+#[macro_export]
+macro_rules! core_debug {
+    ($($arg:tt)*) => {
+        if $crate::ffi::debug_enabled() {
+            $crate::ffi::log("D", &format!($($arg)*));
+        }
+    };
+}
+#[macro_export]
+macro_rules! core_error {
+    ($($arg:tt)*) => { $crate::ffi::log("E", &format!($($arg)*)); };
+}
+
+// ── ANGLE library search path ──────────────────────────────────
+
+static ANGLE_PATH: OnceLock<String> = OnceLock::new();
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_set_angle_path(path: *const c_char) {
+    if let Ok(s) = unsafe { std::ffi::CStr::from_ptr(path).to_str() } {
+        let _ = ANGLE_PATH.set(s.to_string());
+    }
+}
+
+pub fn angle_lib_path(name: &str) -> String {
+    if let Some(prefix) = ANGLE_PATH.get() {
+        format!("{prefix}/{name}")
+    } else {
+        name.to_string()
+    }
+}
+
 // ── File reader callback ────────────────────────────────────────
 
 type FileReaderCallback = unsafe extern "C" fn(
@@ -131,4 +203,117 @@ pub unsafe extern "C" fn art3m1s_copy_file(
 pub unsafe extern "C" fn art3m1s_delete_file(path: *const c_char) -> c_int {
     if path.is_null() { return -1; }
     0
+}
+
+// ── Runtime control FFI ─────────────────────────────────────────
+
+use crate::runtime::CoreRuntime;
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_create(
+    w: u32,
+    h: u32,
+    backend: i32,
+) -> *mut CoreRuntime {
+    let b = crate::backend::gl::platform::GfxBackend::from_int(backend);
+    match CoreRuntime::create(w, h, b) {
+        Ok(rt) => Box::into_raw(Box::new(rt)),
+        Err(e) => {
+            core_error!("art3m1s_runtime_create: {e}");
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_load_project(
+    rt: *mut CoreRuntime,
+    ini_content: *const c_char,
+    platform: *const c_char,
+) -> i32 {
+    if rt.is_null() || ini_content.is_null() || platform.is_null() { return -1; }
+    let rt = unsafe { &mut *rt };
+    let Ok(ini) = (unsafe { std::ffi::CStr::from_ptr(ini_content).to_str() }) else { return -1 };
+    let Ok(plat) = (unsafe { std::ffi::CStr::from_ptr(platform).to_str() }) else { return -1 };
+    match rt.load_project(ini, plat) {
+        Ok(()) => 0,
+        Err(e) => {
+            core_error!("art3m1s_runtime_load_project: {e}");
+            -1
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_feed_mouse(
+    rt: *mut CoreRuntime,
+    x: i32,
+    y: i32,
+) {
+    if rt.is_null() { return; }
+    let rt = unsafe { &*rt };
+    rt.feed_mouse(x, y);
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_feed_click(rt: *mut CoreRuntime) {
+    if rt.is_null() { return; }
+    let rt = unsafe { &*rt };
+    rt.feed_click();
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_feed_key(
+    rt: *mut CoreRuntime,
+    vk: u32,
+    pressed: i32,
+) {
+    if rt.is_null() { return; }
+    let rt = unsafe { &*rt };
+    if pressed != 0 {
+        rt.feed_key_down(vk);
+    } else {
+        rt.feed_key_up(vk);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_destroy(rt: *mut CoreRuntime) {
+    if !rt.is_null() {
+        drop(unsafe { Box::from_raw(rt) });
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_advance_and_render(
+    rt: *mut CoreRuntime,
+    delta_ms: u32,
+    out_pixels: *mut u8,
+    out_capacity: u32,
+) -> u32 {
+    if rt.is_null() || out_pixels.is_null() { return 0; }
+    let rt = unsafe { &mut *rt };
+    let pixels = rt.advance_and_render(delta_ms as u64);
+    let to_copy = pixels.len().min(out_capacity as usize);
+    unsafe { std::ptr::copy_nonoverlapping(pixels.as_ptr(), out_pixels, to_copy); }
+    to_copy as u32
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_set_volume(
+    rt: *mut CoreRuntime,
+    volume_type: *const c_char,
+    value: f32,
+) {
+    if rt.is_null() || volume_type.is_null() { return; }
+    let rt = unsafe { &*rt };
+    let Ok(ty) = (unsafe { std::ffi::CStr::from_ptr(volume_type).to_str() }) else { return };
+    rt.set_volume(ty, value);
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_is_exit_requested(rt: *const CoreRuntime) -> i32 {
+    if rt.is_null() { return 0; }
+    let rt = unsafe { &*rt };
+    if rt.is_exit_requested() { 1 } else { 0 }
 }

@@ -7,6 +7,9 @@
 //! 时间推进与渲染分离：解释器只管"发生了什么"，由宿主每帧调用 [`Compositor::render`]
 //! 把当前时刻的场景画出来。
 
+use crate::audio::engine::{
+    AudioBackend, BgmConfig, SeConfig, SoundFinishEvent, SoundFinishHandler,
+};
 use crate::compositor::anim::{Easing, Tween, TweenHandler};
 use crate::compositor::build::build_frame;
 use crate::compositor::renderer::{DrawCommand, DrawList, Renderer, TextureProvider};
@@ -47,6 +50,8 @@ pub struct Compositor {
     input_handlers: HashMap<(String, String), InputHandler>,
     /// 文本渲染器（RefCell 使 render(&self) 可调用其 &mut 方法）。
     text_renderer: RefCell<Option<Box<dyn TextRenderer>>>,
+    /// 音频后端（RefCell 使 apply_event(&mut self) 外亦可内部分发）。
+    audio_backend: RefCell<Option<Box<dyn AudioBackend>>>,
     /// 自上次 `poll_tween_events` 以来产生待处理的缓动完成事件。
     pending_tween_events: Vec<TweenHandler>,
 }
@@ -59,6 +64,7 @@ impl std::fmt::Debug for Compositor {
             .field("stage_scale", &self.stage_scale)
             .field("input_handlers", &self.input_handlers)
             .field("text_renderer", &self.text_renderer.borrow().as_ref().map(|_| ".."))
+            .field("audio_backend", &self.audio_backend.borrow().as_ref().map(|_| ".."))
             .field("pending_tween_events", &self.pending_tween_events)
             .finish()
     }
@@ -66,12 +72,25 @@ impl std::fmt::Debug for Compositor {
 
 impl Default for Compositor {
     fn default() -> Self {
+        let audio_backend = {
+            #[cfg(feature = "audio-backend")]
+            {
+                crate::audio::RodioBackend::new()
+                    .ok()
+                    .map(|a| Box::new(a) as Box<dyn AudioBackend>)
+            }
+            #[cfg(not(feature = "audio-backend"))]
+            {
+                None
+            }
+        };
         Self {
             scene: Scene::new(),
             clock_ms: 0,
             stage_scale: 1.0,
             input_handlers: HashMap::new(),
             text_renderer: RefCell::new(None),
+            audio_backend: RefCell::new(audio_backend),
             pending_tween_events: Vec::new(),
         }
     }
@@ -100,6 +119,15 @@ impl Compositor {
         *self.text_renderer.borrow_mut() = Some(renderer);
     }
 
+    /// 安装音频后端。
+    pub fn set_audio_backend(&self, backend: Box<dyn AudioBackend>) {
+        *self.audio_backend.borrow_mut() = Some(backend);
+    }
+
+    pub fn audio_mut(&self) -> std::cell::RefMut<Option<Box<dyn AudioBackend>>> {
+        self.audio_backend.borrow_mut()
+    }
+
     pub fn stage_scale(&self) -> f32 {
         self.stage_scale
     }
@@ -116,9 +144,19 @@ impl Compositor {
         if let Some(tr) = self.text_renderer.borrow_mut().as_mut() {
             tr.advance_reveal(delta_ms);
         }
+        if let Some(audio) = self.audio_backend.borrow_mut().as_mut() {
+            audio.advance(delta_ms);
+        }
     }
 
-    /// 查询并清空自上次调用以来产生的缓动完成事件。
+    /// 查询并清空自上次调用以来产生的声音完成事件。
+    pub fn poll_sound_finish_events(&mut self) -> Vec<SoundFinishEvent> {
+        self.audio_backend
+            .borrow_mut()
+            .as_mut()
+            .map(|a| a.poll_finish_events())
+            .unwrap_or_default()
+    }
     ///
     /// 宿主在每帧 `advance` 之后调用，将返回到的 [`TweenHandler`] 交回解释器
     /// 执行（对于 `sync` 缓动则构造 Wait 事件暂停脚本）。
@@ -234,15 +272,13 @@ impl Compositor {
             }
             Event::DelEventHandler { event_name, key } => {
                 if let Some(key) = key {
-                    // 只移除指定 key 的处理器
                     self.input_handlers.remove(&(event_name.clone(), key.clone()));
                 } else {
-                    // 移除该事件类型的所有处理器
                     self.input_handlers.retain(|(name, _), _| name != event_name);
                 }
             }
-            // 其余事件 — 文本相关事件转发给 TextRenderer。
-            _ => self.forward_text_event(event),
+            // ── 音频事件转发 ──
+            _ => self.forward_audio_or_text_event(event),
         }
     }
 
@@ -447,6 +483,156 @@ impl Compositor {
     pub fn render(&self, renderer: &mut dyn Renderer, provider: &mut dyn TextureProvider) {
         let frame = self.build(provider);
         renderer.render(&frame);
+    }
+
+    /// 转发音频事件到 AudioBackend，其余事件转到 TextRenderer。
+    fn forward_audio_or_text_event(&mut self, event: &Event) {
+        // 先尝试音频事件
+        if self.forward_audio_event(event) {
+            return;
+        }
+        // 其余→文本
+        self.forward_text_event(event);
+    }
+
+    /// 转发音频事件给 AudioBackend。返回 true 表示已处理。
+    fn forward_audio_event(&mut self, event: &Event) -> bool {
+        let mut audio_opt = self.audio_backend.borrow_mut();
+        let Some(audio) = audio_opt.as_mut() else { return false };
+        match event {
+            Event::BgmPlay {
+                file,
+                loop_play,
+                gain,
+                pan,
+                fade_time,
+            } => {
+                audio.play_bgm(
+                    file,
+                    &BgmConfig {
+                        loop_play: *loop_play,
+                        gain: *gain,
+                        pan: *pan,
+                        fade_in_ms: fade_time.unwrap_or(0),
+                        buffer_size: None,
+                    },
+                );
+                true
+            }
+            Event::BgmStop { fade_time } => {
+                audio.stop_bgm(fade_time.unwrap_or(0));
+                true
+            }
+            Event::BgmFade { gain, time } => {
+                audio.fade_bgm_gain(*gain, *time);
+                true
+            }
+            Event::BgmPan { pan } => {
+                audio.pan_bgm(*pan, 0);
+                true
+            }
+            Event::BgmCrossFade {
+                file,
+                loop_play,
+                gain,
+                pan,
+                time,
+            } => {
+                audio.crossfade_bgm(
+                    file,
+                    &BgmConfig {
+                        loop_play: *loop_play,
+                        gain: *gain,
+                        pan: *pan,
+                        fade_in_ms: *time,
+                        buffer_size: None,
+                    },
+                );
+                true
+            }
+            Event::SePlay {
+                id,
+                file,
+                loop_play,
+                gain,
+                pan,
+                fade_time,
+                skippable,
+            } => {
+                audio.play_se(
+                    id,
+                    file,
+                    &SeConfig {
+                        loop_play: *loop_play,
+                        gain: *gain,
+                        pan: *pan,
+                        fade_in_ms: fade_time.unwrap_or(0),
+                        buffer_size: None,
+                        skippable: *skippable,
+                    },
+                );
+                true
+            }
+            Event::SeStop { id, fade_time } => {
+                audio.stop_se(id, fade_time.unwrap_or(0));
+                true
+            }
+            Event::SeFade { id, gain, time } => {
+                audio.fade_se_gain(id, *gain, *time);
+                true
+            }
+            Event::SePan { id, pan } => {
+                audio.pan_se(id, *pan, 0);
+                true
+            }
+            Event::VoicePlay {
+                file,
+                gain,
+                pan,
+                fade_time,
+            } => {
+                audio.play_voice(
+                    "",
+                    file,
+                    &SeConfig {
+                        loop_play: false,
+                        gain: *gain,
+                        pan: *pan,
+                        fade_in_ms: fade_time.unwrap_or(0),
+                        buffer_size: None,
+                        skippable: false,
+                    },
+                );
+                true
+            }
+            Event::StopAllSounds { .. } => {
+                audio.stop_all_sounds();
+                true
+            }
+            Event::SoundFinishHandler {
+                id,
+                file,
+                label,
+                call,
+                handler,
+            } => {
+                audio.set_sound_finish_handler(
+                    if id.is_empty() { None } else { Some(id.as_str()) },
+                    SoundFinishHandler {
+                        file: file.clone(),
+                        label: label.clone(),
+                        call: *call,
+                        handler: handler.clone(),
+                    },
+                );
+                true
+            }
+            Event::SoundFinishHandlerDel { id } => {
+                audio.remove_sound_finish_handler(if id.is_empty() { None } else { Some(id.as_str()) });
+                true
+            }
+            _ => false,
+        }
     }
 
     /// 转发文本相关事件给 TextRenderer。
