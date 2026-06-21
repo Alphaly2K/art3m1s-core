@@ -40,7 +40,6 @@ window = ["gl-backend", "audio-backend", "video-backend", "dep:winit", "dep:glut
 
 [dev-dependencies]
 # 离屏像素回读测试需要在 macOS 上创建一个 CGL headless 上下文。
-libc = "0.2"
 # 测试里用来在内存中编码一张 PNG 喂给解码路径。
 image = { version = "0.25", default-features = false, features = ["png"] }
 
