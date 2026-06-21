@@ -173,19 +173,20 @@ impl CoreRuntime {
 
         // Wire events
         let events_cb = Arc::clone(&self.events);
-        let video_finished_cb = Arc::clone(&self.video_finished);
         let exit_requested_cb = Arc::clone(&self.exit_requested);
         self.interpreter.set_callback(move |e| {
             if matches!(e, Event::Exit) {
                 crate::core_info!("[CoreRuntime] Event::Exit received, setting exit flag");
                 exit_requested_cb.store(true, std::sync::atomic::Ordering::SeqCst);
             }
-            if matches!(e, Event::VideoPlay { .. }) {
-                video_finished_cb.store(true, std::sync::atomic::Ordering::SeqCst);
-            }
+            // Pause script execution on VideoPlay, video completion is signalled via
+            // video_finished atomic → WaitReason::Stop handler resumes.
             let pause = matches!(
                 e,
-                Event::Wait { .. } | Event::YesNo { .. } | Event::ShowDialog { .. }
+                Event::Wait { .. }
+                    | Event::YesNo { .. }
+                    | Event::ShowDialog { .. }
+                    | Event::VideoPlay { .. }
             );
             events_cb.lock().unwrap().push(e);
             if pause {
@@ -321,6 +322,12 @@ impl CoreRuntime {
                         self.wait_reason = Some(reason);
                         break;
                     }
+                    Ok(ExecutionResult::Wait(Event::VideoPlay { .. })) => {
+                        self.wait_reason = Some(WaitReason::Stop {
+                            reason: Some("video".into()),
+                        });
+                        break;
+                    }
                     Ok(ExecutionResult::Wait(_)) => {
                         self.wait_reason = Some(WaitReason::Generic);
                         break;
@@ -370,8 +377,8 @@ impl CoreRuntime {
         // 输出视频相关事件日志（始终输出）
         for event in &collected {
             match event {
-                Event::VideoPlay { id, file, skip, loop_play } => {
-                    crate::core_info!("[runtime] VideoPlay: file={}, id={:?}, skip={}, loop={}", file, id, skip, loop_play);
+                Event::VideoPlay { id, file, .. } => {
+                    crate::core_debug!("[runtime] VideoPlay: file={}, id={:?}", file, id);
                 }
                 Event::VideoFinishHandler { file, label, call, handler } => {
                     crate::core_info!("[runtime] VideoFinishHandler: file={:?}, label={:?}, call={}, handler={:?}",
@@ -403,7 +410,7 @@ impl CoreRuntime {
             }
 
             self.compositor.apply_event(event);
-            crate::core_debug!("[runtime] 事件: {event:?}");
+            crate::core_debug!("[event] {}", event_name(event));
         }
 
         // Apply volume from Artemis system variables (s.bgmvol / s.sevol, range 0-1000)
@@ -438,19 +445,13 @@ impl CoreRuntime {
 
         // Poll video finish events and handle them
         let video_finish_events = self.compositor.poll_video_finish_events();
-        if !video_finish_events.is_empty() {
-            crate::core_info!("[runtime] 收到 {} 个视频完成事件", video_finish_events.len());
-        }
         for event in video_finish_events {
-            crate::core_info!("[runtime] 视频完成: id={:?}", event.id);
             // Set video_finished flag for backward compatibility
             self.video_finished
                 .store(true, std::sync::atomic::Ordering::SeqCst);
 
             // Enqueue handler tags if registered
             if let Some(handler) = event.handler {
-                crate::core_info!("[runtime] 触发视频完成处理器: handler={:?}, file={:?}, label={:?}",
-                    handler.handler, handler.file, handler.label);
                 enqueue_handler_tags(
                     &self.interpreter,
                     handler.handler.as_deref(),
@@ -467,6 +468,7 @@ impl CoreRuntime {
             .render(&mut self.renderer, &mut self.texture_provider);
         let mut used_files = self.compositor.scene().collect_files();
         used_files.insert(":text/atlas".to_string());
+        used_files.insert("__video_fullscreen__".to_string());
         self.texture_provider.retain(&used_files);
         unsafe {
             self.gl.finish();
@@ -598,4 +600,75 @@ fn resolve_texture_path(table: &MagicPathTable, name: &str) -> String {
         return format!("image/{rest}");
     }
     name.to_string()
+}
+
+fn event_name(e: &Event) -> &str {
+    match e {
+        Event::Layer(layer_event) => match layer_event {
+            asb_interpreter::event::LayerEvent::Create { .. } => "LayerCreate",
+            asb_interpreter::event::LayerEvent::Delete { .. } => "LayerDelete",
+            asb_interpreter::event::LayerEvent::SetProperty { .. } => "LayerSetProp",
+            asb_interpreter::event::LayerEvent::SetProperties { .. } => "LayerSetProps",
+            _ => "Layer",
+        },
+        Event::LayerTween { .. } => "LayerTween",
+        Event::LayerTweenDelete { .. } => "LayerTweenDel",
+        Event::LayerRename { .. } => "LayerRename",
+        Event::LayerEventHandler { .. } => "LayerEvtHandler",
+        Event::UiTransition(_) => "UiTrans",
+        Event::Trans { .. } => "Trans",
+        Event::Flip => "Flip",
+        Event::BgmPlay { .. } => "BgmPlay",
+        Event::BgmStop { .. } => "BgmStop",
+        Event::BgmFade { .. } => "BgmFade",
+        Event::BgmCrossFade { .. } => "BgmCrossFade",
+        Event::SePlay { .. } => "SePlay",
+        Event::SeStop { .. } => "SeStop",
+        Event::SeFade { .. } => "SeFade",
+        Event::VoicePlay { .. } => "VoicePlay",
+        Event::StopAllSounds { .. } => "StopAllSounds",
+        Event::SoundFinishHandler { .. } => "SoundFinishHandler",
+        Event::SoundFinishHandlerDel { .. } => "SoundFinishHandlerDel",
+        Event::VideoPlay { .. } => "VideoPlay",
+        Event::VideoFinishHandler { .. } => "VideoFinishHandler",
+        Event::VideoFinishHandlerDel => "VideoFinishHandlerDel",
+        Event::Text { .. } => "Text",
+        Event::ScenarioText { .. } => "ScenarioText",
+        Event::LineBreak => "LineBreak",
+        Event::PageBreak { .. } => "PageBreak",
+        Event::FontSettings(_) => "FontSettings",
+        Event::FontClose => "FontClose",
+        Event::FontDefault(_) => "FontDefault",
+        Event::FontInit => "FontInit",
+        Event::MessageLayerSwitch { .. } => "MsgLayerSwitch",
+        Event::MessageLayerPop => "MsgLayerPop",
+        Event::Wait { reason } => match reason {
+            WaitReason::Generic => "Wait(Generic)",
+            WaitReason::Stop { reason } => match reason.as_deref() {
+                Some(r) => return &*format!("Wait(Stop:{r})").leak(),
+                None => "Wait(Stop)",
+            },
+            WaitReason::Timed { .. } => "Wait(Timed)",
+            WaitReason::KeyWait { .. } => "Wait(KeyWait)",
+            _ => "Wait",
+        },
+        Event::SaveGame { .. } => "Save",
+        Event::LoadGame { .. } => "Load",
+        Event::Exit => "Exit",
+        Event::GoTitle => "GoTitle",
+        Event::ShowDialog { .. } => "ShowDialog",
+        Event::YesNo { .. } => "YesNo",
+        Event::SceneIn => "SceneIn",
+        Event::SceneOut => "SceneOut",
+        _ => "...",
+    }
+}
+
+trait LeakExt {
+    fn leak(self) -> &'static str;
+}
+impl LeakExt for String {
+    fn leak(self) -> &'static str {
+        Box::leak(self.into_boxed_str())
+    }
 }

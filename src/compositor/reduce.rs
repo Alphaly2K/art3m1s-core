@@ -100,7 +100,7 @@ impl Default for Compositor {
         let video_backend = {
             #[cfg(feature = "video-backend")]
             {
-                crate::core_info!("[Video] 使用 FFmpeg 视频后端");
+                crate::core_debug!("[Video] 使用 FFmpeg 视频后端");
                 Some(Box::new(crate::video::FfmpegBackend::new()) as Box<dyn VideoBackend>)
             }
             #[cfg(not(feature = "video-backend"))]
@@ -533,8 +533,33 @@ impl Compositor {
         // 更新视频纹理（如果有视频正在播放）
         self.update_video_textures(provider);
 
-        let frame = self.build(provider);
+        let mut frame = self.build(provider);
+
+        // 全屏视频：在帧的最底层插入一个覆盖整个舞台的四边形
+        self.inject_fullscreen_video(&mut frame, provider);
+
         renderer.render(&frame);
+    }
+
+    /// 如果有全屏视频正在播放，解析其纹理并替换整个帧（独占画面）。
+    fn inject_fullscreen_video(&self, frame: &mut DrawList, provider: &mut dyn TextureProvider) {
+        let video_opt = self.video_backend.borrow();
+        let Some(video) = video_opt.as_ref() else { return };
+        let state = video.video_state();
+        let Some(ref v) = state.fullscreen_video else { return };
+        if !v.playing { return; }
+
+        let Some((tex, info)) = provider.resolve("__video_fullscreen__") else { return };
+        frame.commands.clear();
+        frame.commands.push(DrawCommand {
+            texture: tex,
+            size: info,
+            transform: glam::Affine2::IDENTITY,
+            opacity: 1.0,
+            blend: crate::compositor::renderer::BlendMode::Alpha,
+            color: crate::compositor::renderer::ColorFilter::default(),
+            clip: crate::compositor::renderer::ClipRect::full(info),
+        });
     }
 
     /// 更新视频纹理（将解码后的帧上传到 GPU）。
@@ -550,7 +575,6 @@ impl Compositor {
         if let Some((width, height, playing)) = fullscreen_info {
             if playing {
                 if let Some(frame_data) = video.get_fullscreen_frame() {
-                    crate::core_info!("[Video] 上传全屏视频纹理: {}x{}, {} bytes", width, height, frame_data.len());
                     provider.upload_rgba(
                         "__video_fullscreen__",
                         width,
@@ -573,7 +597,6 @@ impl Compositor {
         for (layer_id, width, height, playing) in layer_infos {
             if playing {
                 if let Some(frame_data) = video.get_frame(&layer_id) {
-                    crate::core_info!("[Video] 上传视频图层纹理: id={}, {}x{}, {} bytes", layer_id, width, height, frame_data.len());
                     let texture_name = format!("__video_layer_{}__", layer_id);
                     provider.upload_rgba(
                         &texture_name,
@@ -764,7 +787,7 @@ impl Compositor {
                 skip,
                 loop_play,
             } => {
-                crate::core_info!("[Video] 收到 VideoPlay 事件: file={}, id={:?}, skip={}, loop={}", file, id, skip, loop_play);
+                crate::core_debug!("[Video] VideoPlay: file={}, id={:?}", file, id);
                 let config = VideoConfig {
                     file: file.clone(),
                     skippable: *skip,
@@ -773,15 +796,12 @@ impl Compositor {
                 };
                 match id {
                     Some(layer_id) => {
-                        crate::core_info!("[Video] 播放视频图层: id={}", layer_id);
                         video.play_layer(layer_id, &config);
                     }
                     None => {
-                        crate::core_info!("[Video] 播放全屏视频");
                         video.play_fullscreen(&config);
                     }
                 }
-                crate::core_info!("[Video] 视频播放请求已发送");
                 true
             }
             Event::VideoFinishHandler {
@@ -790,7 +810,6 @@ impl Compositor {
                 call,
                 handler,
             } => {
-                crate::core_info!("[Video] 设置视频完成处理器: file={:?}, label={:?}, call={}", file, label, call);
                 video.set_finish_handler(VideoFinishHandler {
                     file: file.clone(),
                     label: label.clone(),
@@ -800,7 +819,6 @@ impl Compositor {
                 true
             }
             Event::VideoFinishHandlerDel => {
-                crate::core_info!("[Video] 删除视频完成处理器");
                 video.remove_finish_handler();
                 true
             }

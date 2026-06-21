@@ -32,7 +32,7 @@ glutin-winit = { version = "0.5", optional = true }
 raw-window-handle = { version = "0.6", optional = true }
 
 [features]
-default = ["gl-backend", "audio-backend"]
+default = ["gl-backend", "audio-backend", "video-backend"]
 gl-backend = ["dep:glow", "dep:image"]
 audio-backend = ["dep:rodio"]
 video-backend = ["dep:ffmpeg-next"]

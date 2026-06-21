@@ -286,9 +286,6 @@ impl FfmpegBackend {
 
             if stream.index() == decoder_state.stream_index {
                 packets_read += 1;
-                if packets_read <= 3 {
-                    crate::core_info!("[FFmpeg] 处理视频包 #{}: pts={:?}, size={}", packets_read, packet.pts(), packet.size());
-                }
 
                 // 发送包到解码器
                 if let Err(e) = decoder_state.decoder.send_packet(&packet) {
@@ -300,7 +297,6 @@ impl FfmpegBackend {
                 let mut frame = ffmpeg::util::frame::Video::empty();
                 match decoder_state.decoder.receive_frame(&mut frame) {
                     Ok(()) => {
-                        crate::core_info!("[FFmpeg] 成功解码一帧: {}x{}, format={:?}", frame.width(), frame.height(), frame.format());
                         // 将帧转换为 RGBA
                         if let Some(ref mut scaler) = decoder_state.scaler {
                             let mut rgba_frame = ffmpeg::util::frame::Video::new(
@@ -369,11 +365,7 @@ impl FfmpegBackend {
             }
         }
 
-        crate::core_info!("[FFmpeg] decode_next_frame 完成: 读取了 {} 个包, 找到帧={}", packets_read, found_frame);
-
-        if !found_frame && packets_read == 0 {
-            // 没有读取到任何包，标记为完成
-            crate::core_info!("[FFmpeg] 没有更多帧，标记为完成");
+            if !found_frame && packets_read == 0 {
             decoder_state.finished = true;
         }
     }
