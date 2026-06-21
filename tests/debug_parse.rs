@@ -3,7 +3,7 @@ use std::path::Path;
 
 #[test]
 fn debug_parse() {
-    let root = Path::new("/Users/alphaly/lfpm/hamidashi");
+    let root = Path::new("");
     let project = Project::open(root, "WINDOWS").unwrap();
     let mut it = project.create_interpreter();
 
