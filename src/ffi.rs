@@ -175,11 +175,7 @@ fn query_size(path: &str) -> Option<u64> {
     let cb = FILE_READER.lock().unwrap().clone()?;
     let c_path = CString::new(path).ok()?;
     let size = unsafe { cb(c_path.as_ptr(), std::ptr::null_mut(), 0, -1) };
-    if size >= 0 {
-        Some(size as u64)
-    } else {
-        None
-    }
+    if size >= 0 { Some(size as u64) } else { None }
 }
 
 fn read_chunk(path: &str, offset: u64, buf: &mut [u8]) -> Option<usize> {
@@ -193,11 +189,7 @@ fn read_chunk(path: &str, offset: u64, buf: &mut [u8]) -> Option<usize> {
             offset as c_longlong,
         )
     };
-    if n >= 0 {
-        Some(n as usize)
-    } else {
-        None
-    }
+    if n >= 0 { Some(n as usize) } else { None }
 }
 
 const CHUNK: usize = 65536;

@@ -12,6 +12,7 @@ use crate::{Project, core_debug};
 use asb_interpreter::event::WaitReason;
 use asb_interpreter::{CallbackResult, Event, ExecutionResult};
 use glow::HasContext;
+use image::ImageEncoder;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
@@ -21,6 +22,13 @@ use std::sync::{Arc, Mutex};
 const SAVEG_FILE: &str = "saveg.dat";
 /// `syssave()` 落盘的系统域文件名。
 const SYSTEM_FILE: &str = "system.dat";
+
+#[derive(Clone)]
+struct ScreenshotBuffer {
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+}
 
 pub struct CoreRuntime {
     gl: Rc<glow::Context>,
@@ -48,6 +56,8 @@ pub struct CoreRuntime {
     project_savepath: Option<String>,
     /// 规范化后的存档逻辑相对前缀（如 `save`/`savedata`），种入 `s.savepath`。
     savepath: String,
+    /// `[takess]` 缓存的游戏画面。`[savess]` 后续从这里缩放/编码，不能重新截保存 UI。
+    save_screenshot: Option<ScreenshotBuffer>,
 }
 
 impl CoreRuntime {
@@ -105,6 +115,7 @@ impl CoreRuntime {
             exit_requested: Arc::new(AtomicBool::new(false)),
             project_savepath: None,
             savepath: "save".to_string(),
+            save_screenshot: None,
         })
     }
 
@@ -116,6 +127,7 @@ impl CoreRuntime {
         self.stage_w = project.config().stage_width;
         self.stage_h = project.config().stage_height;
         self.project_savepath = project.config().savepath.clone();
+        self.save_screenshot = None;
         self.interpreter = project.create_interpreter();
 
         // Wire callbacks
@@ -487,6 +499,24 @@ impl CoreRuntime {
                         }
                     }
                 }
+                Event::TakeScreenshot => {
+                    self.capture_save_screenshot();
+                }
+                Event::SaveScreenshot {
+                    file,
+                    width,
+                    height,
+                } => {
+                    crate::core_info!(
+                        "[runtime] Event::SaveScreenshot file={:?} width={:?} height={:?}",
+                        file,
+                        width,
+                        height
+                    );
+                    if let Err(e) = self.handle_save_screenshot(file, *width, *height) {
+                        crate::core_error!("[runtime] 保存缩略图失败 {}: {}", file, e);
+                    }
+                }
                 _ => {}
             }
 
@@ -729,6 +759,73 @@ impl CoreRuntime {
         crate::core_info!("[runtime] 已读取存档: {}", path);
         Ok(())
     }
+
+    fn capture_save_screenshot(&mut self) {
+        unsafe {
+            self.gl.finish();
+        }
+        let rgba =
+            unsafe { platform::read_pixels(&self.gl, self.stage_w as i32, self.stage_h as i32) };
+        self.save_screenshot = Some(ScreenshotBuffer {
+            width: self.stage_w,
+            height: self.stage_h,
+            rgba,
+        });
+        crate::core_info!(
+            "[runtime] takess 已缓存游戏画面 {}x{}",
+            self.stage_w,
+            self.stage_h
+        );
+    }
+
+    fn handle_save_screenshot(
+        &mut self,
+        file: &str,
+        width: Option<u32>,
+        height: Option<u32>,
+    ) -> Result<(), String> {
+        let screenshot = self
+            .save_screenshot
+            .clone()
+            .ok_or_else(|| "savess 前没有 takess 缓存，跳过以避免截到保存界面".to_string())?;
+        let target_width = width.unwrap_or(screenshot.width).max(1);
+        let target_height = height.unwrap_or(screenshot.height).max(1);
+        let rgba = resize_screenshot_rgba(&screenshot, target_width, target_height)?;
+        let png = encode_png_rgba(&rgba, target_width, target_height)?;
+        let (resource_name, path) = self.screenshot_paths_for(file)?;
+
+        crate::ffi::request_write(&path, &png)?;
+        self.texture_provider
+            .upload_rgba(&resource_name, target_width, target_height, &rgba);
+        crate::core_info!(
+            "[runtime] 已保存缩略图: {} (resource={}, {}x{})",
+            path,
+            resource_name,
+            target_width,
+            target_height
+        );
+        Ok(())
+    }
+
+    fn screenshot_paths_for(&self, file: &str) -> Result<(String, String), String> {
+        let name =
+            normalize_relative_path(file).ok_or_else(|| format!("非法缩略图路径: {file}"))?;
+        let lower = name.to_ascii_lowercase();
+        let resource_name = if lower.ends_with(".png") {
+            name[..name.len() - 4].to_string()
+        } else {
+            name.clone()
+        };
+        let png_name = if lower.ends_with(".png") {
+            name
+        } else {
+            format!("{name}.png")
+        };
+        Ok((
+            self.save_path_for(&resource_name)?,
+            self.save_path_for(&png_name)?,
+        ))
+    }
 }
 
 // ── Event dispatch helpers ──────────────────────────────────────
@@ -864,6 +961,52 @@ fn qualify_save_path(file: &str, savepath: &str) -> Result<String, String> {
     }
 }
 
+fn resize_screenshot_rgba(
+    screenshot: &ScreenshotBuffer,
+    target_width: u32,
+    target_height: u32,
+) -> Result<Vec<u8>, String> {
+    if screenshot.width == target_width && screenshot.height == target_height {
+        return Ok(screenshot.rgba.clone());
+    }
+    let image =
+        image::RgbaImage::from_raw(screenshot.width, screenshot.height, screenshot.rgba.clone())
+            .ok_or_else(|| {
+                format!(
+                    "截图 RGBA 长度不匹配: {}x{} len={}",
+                    screenshot.width,
+                    screenshot.height,
+                    screenshot.rgba.len()
+                )
+            })?;
+    let resized = image::imageops::resize(
+        &image,
+        target_width,
+        target_height,
+        image::imageops::FilterType::Triangle,
+    );
+    Ok(resized.into_raw())
+}
+
+fn encode_png_rgba(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let expected_len = width as usize * height as usize * 4;
+    if rgba.len() != expected_len {
+        return Err(format!(
+            "PNG RGBA 长度不匹配: {}x{} expected={} actual={}",
+            width,
+            height,
+            expected_len,
+            rgba.len()
+        ));
+    }
+    let mut png = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(&mut png);
+    encoder
+        .write_image(rgba, width, height, image::ColorType::Rgba8.into())
+        .map_err(|e| e.to_string())?;
+    Ok(png)
+}
+
 /// Resolve a texture name that may contain Artemis `:prefix/rest` magic
 /// path notation into a plain relative path suitable for the FFI file
 /// reader callback.
@@ -888,7 +1031,10 @@ fn resolve_texture_path(table: &MagicPathTable, name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{qualify_save_path, sanitize_savepath};
+    use super::{
+        ScreenshotBuffer, encode_png_rgba, qualify_save_path, resize_screenshot_rgba,
+        sanitize_savepath,
+    };
 
     #[test]
     fn save_paths_are_qualified_with_savepath_once() {
@@ -914,9 +1060,29 @@ mod tests {
 
     #[test]
     fn savepath_from_ini_is_sanitized() {
-        assert_eq!(sanitize_savepath(Some(r"Citrus\\hokeloli")), "Citrus/hokeloli");
+        assert_eq!(
+            sanitize_savepath(Some(r"Citrus\\hokeloli")),
+            "Citrus/hokeloli"
+        );
         assert_eq!(sanitize_savepath(Some("../bad/save")), "bad/save");
         assert_eq!(sanitize_savepath(None), "save");
+    }
+
+    #[test]
+    fn screenshot_resize_and_png_encode_work() {
+        let screenshot = ScreenshotBuffer {
+            width: 2,
+            height: 2,
+            rgba: vec![
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+            ],
+        };
+        let resized = resize_screenshot_rgba(&screenshot, 1, 1).unwrap();
+        assert_eq!(resized.len(), 4);
+
+        let png = encode_png_rgba(&resized, 1, 1).unwrap();
+        let decoded = image::load_from_memory(&png).unwrap().to_rgba8();
+        assert_eq!(decoded.dimensions(), (1, 1));
     }
 }
 
@@ -1015,6 +1181,13 @@ fn event_name(e: &Event) -> String {
             target,
         } => {
             format!("FileOp {command} src={src:?} dst={dst:?} target={target:?}")
+        }
+        Event::SaveScreenshot {
+            file,
+            width,
+            height,
+        } => {
+            format!("SaveScreenshot file={file:?} {width:?}x{height:?}")
         }
         Event::Exit => "Exit".to_string(),
         Event::GoTitle => "GoTitle".to_string(),
