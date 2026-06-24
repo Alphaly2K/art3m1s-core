@@ -5,7 +5,7 @@
 //! keeping the core entirely free of direct I/O.
 
 use std::ffi::{CString, c_char, c_int, c_longlong};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 // ── Global debug flag ──────────────────────────────────────────
 
@@ -90,15 +90,68 @@ type FileReaderCallback = unsafe extern "C" fn(
     offset: c_longlong,
 ) -> c_int;
 
-static FILE_READER: OnceLock<FileReaderCallback> = OnceLock::new();
+static FILE_READER: Mutex<Option<FileReaderCallback>> = Mutex::new(None);
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_register_file_reader(cb: FileReaderCallback) {
-    let _ = FILE_READER.set(cb);
+    *FILE_READER.lock().unwrap() = Some(cb);
 }
 
 pub fn file_reader_registered() -> bool {
-    FILE_READER.get().is_some()
+    FILE_READER.lock().unwrap().is_some()
+}
+
+// ── File writer / delete callbacks ──────────────────────────────
+//
+// 方案 B：通过宿主（Flutter）注册的回调落盘到应用沙箱目录。
+// core 只传脚本相对路径；物理路径由宿主决定，core 不直接读写文件系统。
+
+/// 写文件回调：`path` 相对路径，`buf`/`len` 为待写字节。返回写入字节数，<0 表失败。
+type FileWriterCallback =
+    unsafe extern "C" fn(path: *const c_char, buf: *const u8, len: c_int) -> c_int;
+
+/// 删除文件回调：`path` 相对路径。返回 0 成功，<0 失败。
+type FileDeleteCallback = unsafe extern "C" fn(path: *const c_char) -> c_int;
+
+static FILE_WRITER: Mutex<Option<FileWriterCallback>> = Mutex::new(None);
+static FILE_DELETE: Mutex<Option<FileDeleteCallback>> = Mutex::new(None);
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_register_file_writer(cb: FileWriterCallback) {
+    *FILE_WRITER.lock().unwrap() = Some(cb);
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_register_file_delete(cb: FileDeleteCallback) {
+    *FILE_DELETE.lock().unwrap() = Some(cb);
+}
+
+/// 通过宿主回调写入文件。`path` 为相对路径。
+pub fn request_write(path: &str, data: &[u8]) -> Result<(), String> {
+    let cb = FILE_WRITER
+        .lock()
+        .unwrap()
+        .ok_or_else(|| "file writer not registered".to_string())?;
+    let c_path = CString::new(path).map_err(|e| e.to_string())?;
+    let n = unsafe { cb(c_path.as_ptr(), data.as_ptr(), data.len() as c_int) };
+    if n < 0 {
+        return Err(format!("write failed: {path}"));
+    }
+    Ok(())
+}
+
+/// 通过宿主回调删除文件。`path` 为相对路径。
+pub fn request_delete(path: &str) -> Result<(), String> {
+    let cb = FILE_DELETE
+        .lock()
+        .unwrap()
+        .ok_or_else(|| "file delete not registered".to_string())?;
+    let c_path = CString::new(path).map_err(|e| e.to_string())?;
+    let r = unsafe { cb(c_path.as_ptr()) };
+    if r < 0 {
+        return Err(format!("delete failed: {path}"));
+    }
+    Ok(())
 }
 
 // ── Save directory ───────────────────────────────────────────────
@@ -119,14 +172,18 @@ pub fn save_dir() -> Option<&'static str> {
 // ── Query helpers ────────────────────────────────────────────────
 
 fn query_size(path: &str) -> Option<u64> {
-    let cb = FILE_READER.get()?;
+    let cb = FILE_READER.lock().unwrap().clone()?;
     let c_path = CString::new(path).ok()?;
     let size = unsafe { cb(c_path.as_ptr(), std::ptr::null_mut(), 0, -1) };
-    if size < 0 { None } else { Some(size as u64) }
+    if size >= 0 {
+        Some(size as u64)
+    } else {
+        None
+    }
 }
 
 fn read_chunk(path: &str, offset: u64, buf: &mut [u8]) -> Option<usize> {
-    let cb = FILE_READER.get()?;
+    let cb = FILE_READER.lock().unwrap().clone()?;
     let c_path = CString::new(path).ok()?;
     let n = unsafe {
         cb(
@@ -136,7 +193,11 @@ fn read_chunk(path: &str, offset: u64, buf: &mut [u8]) -> Option<usize> {
             offset as c_longlong,
         )
     };
-    if n < 0 { None } else { Some(n as usize) }
+    if n >= 0 {
+        Some(n as usize)
+    } else {
+        None
+    }
 }
 
 const CHUNK: usize = 65536;
@@ -221,7 +282,16 @@ pub unsafe extern "C" fn art3m1s_delete_file(path: *const c_char) -> c_int {
     if path.is_null() {
         return -1;
     }
-    0
+    let Ok(s) = (unsafe { std::ffi::CStr::from_ptr(path).to_str() }) else {
+        return -1;
+    };
+    match request_delete(s) {
+        Ok(()) => 0,
+        Err(e) => {
+            core_warn!("art3m1s_delete_file: {e}");
+            -1
+        }
+    }
 }
 
 // ── Runtime control FFI ─────────────────────────────────────────

@@ -2,13 +2,13 @@
 //! text rendering and input handling into a single frame-oriented API
 //! that the Flutter frontend calls from its game loop.
 
-use crate::Project;
 use crate::backend::gl::platform::{self, GfxBackend};
 use crate::backend::gl::{GlRenderer, GlTextureProvider, ShaderProfile};
 use crate::compositor::Compositor;
 use crate::compositor::renderer::TextureProvider;
 use crate::ffi_callbacks::{FfiCallbacks, InputSnapshot, MagicPathTable};
 use crate::text::GlyphTextRenderer;
+use crate::{Project, core_debug};
 use asb_interpreter::event::WaitReason;
 use asb_interpreter::{CallbackResult, Event, ExecutionResult};
 use glow::HasContext;
@@ -16,6 +16,11 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
+
+/// `syssave()`（无 file 的 `[save]`）落盘的全局域文件名。
+const SAVEG_FILE: &str = "saveg.dat";
+/// `syssave()` 落盘的系统域文件名。
+const SYSTEM_FILE: &str = "system.dat";
 
 pub struct CoreRuntime {
     gl: Rc<glow::Context>,
@@ -39,6 +44,10 @@ pub struct CoreRuntime {
     hovered_layer: Option<String>,
     volumes: Arc<Mutex<HashMap<String, f32>>>,
     exit_requested: Arc<AtomicBool>,
+    /// system.ini 的 SAVEPATH 原值（可能含反斜杠/CSIDL），由 load_project 捕获。
+    project_savepath: Option<String>,
+    /// 规范化后的存档逻辑相对前缀（如 `save`/`savedata`），种入 `s.savepath`。
+    savepath: String,
 }
 
 impl CoreRuntime {
@@ -94,6 +103,8 @@ impl CoreRuntime {
             hovered_layer: None,
             volumes: Arc::new(Mutex::new(HashMap::new())),
             exit_requested: Arc::new(AtomicBool::new(false)),
+            project_savepath: None,
+            savepath: "save".to_string(),
         })
     }
 
@@ -104,6 +115,7 @@ impl CoreRuntime {
 
         self.stage_w = project.config().stage_width;
         self.stage_h = project.config().stage_height;
+        self.project_savepath = project.config().savepath.clone();
         self.interpreter = project.create_interpreter();
 
         // Wire callbacks
@@ -214,6 +226,27 @@ impl CoreRuntime {
         self.texture_provider
             .upload_rgba(":bg/white", 2, 2, &[255, 255, 255, 255].repeat(4));
 
+        // Seed `s.savepath` —— 真实 Artemis 由引擎按 system.ini 的 SAVEPATH 种入此系统
+        // 变量；脚本到处用 `e:var("s.savepath").."/"..file` 拼存档/缩略图路径，且 boot
+        // 期间（boot.lua）就会读取它来检测既有存档，故必须在 start_boot 之前种好。
+        //
+        // 我们把它当作沙箱内的逻辑相对子目录前缀：所有存档路径形如
+        // `<savepath>/save0001.dat`，由宿主统一解析到 appSupport 基准下（方案 A1 +
+        // save-files-in-app-sandbox）。原始 SAVEPATH 可能含反斜杠/CSIDL（如
+        // hamidashi 的 `まどそふと\ハミダシクリエイティブ`），这里规范化为正斜杠
+        // 相对路径，缺省退回 `save`。
+        let savepath = sanitize_savepath(self.project_savepath.as_deref());
+        self.interpreter.set_variable(
+            "s.savepath",
+            asb_interpreter::Value::String(savepath.clone()),
+        );
+        self.savepath = savepath;
+
+        // 读回上次 syssave() 落下的全局/系统域（saveg.dat / system.dat），使
+        // boot.lua 期间 system_dataloading() 能拿到既有的 sys/gscr/conf。
+        // 必须在 start_boot 之前，且在 s.savepath 种好之后（save_path_for 依赖它）。
+        self.sysload();
+
         // Boot
         project
             .start_boot(&mut self.interpreter)
@@ -304,7 +337,11 @@ impl CoreRuntime {
             !ctx.lock().unwrap().tag_queue.is_empty()
         };
         if has_tags {
-            self.wait_reason = None;
+            if let Some(reason @ WaitReason::Stop { .. }) = self.wait_reason.clone() {
+                self.drain_queued_tags_while_stopped(reason);
+            } else {
+                self.wait_reason = None;
+            }
         }
 
         // Run interpreter
@@ -380,9 +417,19 @@ impl CoreRuntime {
                 Event::VideoPlay { id, file, .. } => {
                     crate::core_debug!("[runtime] VideoPlay: file={}, id={:?}", file, id);
                 }
-                Event::VideoFinishHandler { file, label, call, handler } => {
-                    crate::core_info!("[runtime] VideoFinishHandler: file={:?}, label={:?}, call={}, handler={:?}",
-                        file, label, call, handler);
+                Event::VideoFinishHandler {
+                    file,
+                    label,
+                    call,
+                    handler,
+                } => {
+                    crate::core_info!(
+                        "[runtime] VideoFinishHandler: file={:?}, label={:?}, call={}, handler={:?}",
+                        file,
+                        label,
+                        call,
+                        handler
+                    );
                 }
                 Event::VideoFinishHandlerDel => {
                     crate::core_info!("[runtime] VideoFinishHandlerDel");
@@ -398,13 +445,47 @@ impl CoreRuntime {
                     .store(true, std::sync::atomic::Ordering::SeqCst);
             }
 
-            // 存档/读档事件日志
+            // 存档 / 读档 / 文件删除——通过宿主回调真正落盘（方案 B + A1）
             match event {
-                Event::SaveGame { file } if !file.is_empty() => {
-                    crate::core_info!("[runtime] 保存存档: {}", file);
+                Event::SaveGame { file } => {
+                    crate::core_info!("[runtime] Event::SaveGame file={:?}", file);
+                    if file.is_empty() {
+                        // 不带 file 的 [save] 即 syssave()：持久化全局/系统域到
+                        // saveg.dat / system.dat（fileio.lua eqtag{"save"}）。
+                        if let Err(e) = self.syssave() {
+                            crate::core_error!("[runtime] syssave 失败: {}", e);
+                        }
+                    } else if let Err(e) = self.handle_save_game(file) {
+                        crate::core_error!("[runtime] 保存存档失败 {}: {}", file, e);
+                    }
                 }
-                Event::LoadGame { file, .. } if !file.is_empty() => {
-                    crate::core_info!("[runtime] 读取存档: {}", file);
+                Event::LoadGame { file, .. } => {
+                    crate::core_info!("[runtime] Event::LoadGame file={:?}", file);
+                    if file.is_empty() {
+                        crate::core_warn!("[runtime] LoadGame 的 file 为空，跳过");
+                    } else if let Err(e) = self.handle_load_game(file) {
+                        crate::core_error!("[runtime] 读取存档失败 {}: {}", file, e);
+                    }
+                }
+                Event::FileOperation {
+                    command, target, ..
+                } if command == "delete" => {
+                    crate::core_info!("[runtime] Event::FileOperation delete target={:?}", target);
+                    if let Some(t) = target {
+                        match self.save_path_for(t) {
+                            Ok(path) => match crate::ffi::request_delete(&path) {
+                                Ok(()) => {
+                                    crate::core_info!("[runtime] 已删除 {}", path);
+                                }
+                                Err(e) => {
+                                    crate::core_warn!("[runtime] 删除文件失败 {}: {}", path, e);
+                                }
+                            },
+                            Err(e) => {
+                                crate::core_warn!("[runtime] 删除文件路径非法 {}: {}", t, e);
+                            }
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -499,6 +580,155 @@ impl CoreRuntime {
         self.exit_requested
             .load(std::sync::atomic::Ordering::SeqCst)
     }
+
+    fn drain_queued_tags_while_stopped(&mut self, stop_reason: WaitReason) {
+        let mut should_resume = false;
+        for _ in 0..64 {
+            let drain = match self.interpreter.drain_queued_tags_only() {
+                Ok(drain) => drain,
+                Err(e) => {
+                    crate::core_error!("解释器错误: {e:?}");
+                    self.wait_reason = Some(stop_reason);
+                    return;
+                }
+            };
+            should_resume |= drain.saw_return || drain.changed_position;
+            if drain.wait.is_some() {
+                self.interpreter.advance_line();
+                continue;
+            }
+            break;
+        }
+
+        if should_resume {
+            self.wait_reason = None;
+        } else {
+            self.wait_reason = Some(stop_reason);
+        }
+    }
+
+    /// 把脚本存档路径归一成宿主 saveDir 内的相对路径。
+    ///
+    /// 真实 Artemis 的 `[save file="save0001.dat"]` / `[load file=...]`
+    /// 默认落在 `SAVEPATH` 下；脚本里 `isSaveFile()` 又会检查
+    /// `s.savepath.."/"..file`。所以宿主回调必须看到同一种脚本相对路径：
+    /// `savedata/save0001.dat`。若脚本已经传了 `savedata/...`，保持原样。
+    fn save_path_for(&self, file: &str) -> Result<String, String> {
+        qualify_save_path(file, &self.savepath)
+    }
+
+    /// 处理 [save]：触发 onSave 序列化 `sys` 等 Lua 表 → 抽干 [var] 队列 →
+    /// 快照解释器状态 → JSON → 经宿主写回调落盘。
+    fn handle_save_game(&mut self, file: &str) -> Result<(), String> {
+        // onSave（store）把 sys/gscr/conf 经 pluto 序列化进 Artemis 变量，
+        // 这些 [var] 标签排入队列后必须抽干，快照才能包含它们。
+        self.interpreter
+            .fire_save_handler()
+            .map_err(|e| format!("onSave 处理器失败: {e:?}"))?;
+        self.interpreter
+            .flush_pending_tags()
+            .map_err(|e| format!("抽干存档标签失败: {e:?}"))?;
+
+        let data = crate::save::SaveData::from_interpreter(&self.interpreter);
+        let json = serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?;
+        let path = self.save_path_for(file)?;
+        crate::ffi::request_write(&path, json.as_bytes())?;
+        crate::core_info!("[runtime] 已保存存档: {}", path);
+
+        // `store()`/`saveconv(true)` 已把最新 `sys.saveslot` 写入 `g.system`。
+        // 编号存档文件本身只负责读档恢复；存档/读档列表重启后的槽位索引来自
+        // saveg.dat。若这里只写 `save0001.dat`，本次会话内能读，但重启后列表为空。
+        self.syssave()
+            .map_err(|e| format!("同步系统存档失败: {e}"))?;
+        Ok(())
+    }
+
+    /// 处理 `syssave()`——即不带 `file` 的 `[save]`（fileio.lua `eqtag{"save"}`）。
+    ///
+    /// 与编号存档不同，它只持久化**全局/系统**两个变量域（脚本先经
+    /// `fsave_pluto` 把 sys/gscr/conf 序列化进 `g.*` 变量，再触发本保存）。落两份
+    /// 固定文件：`saveg.dat`（全局域 `g.`）与 `system.dat`（系统域 `s.`），下次启动
+    /// 由 [`Self::sysload`] 读回。
+    fn syssave(&mut self) -> Result<(), String> {
+        // fileio.lua 的 syssave() 已在排入 `[save]` 前同步执行 saveconv()，
+        // 将 sys/gscr/conf 写入 g.*。这里不能再触发 onSave/flush_tag_queue：
+        // 运行到 YES 对话框时，file="" 的 syssave 事件会早于 UI 关闭队列完成到达；
+        // 若此处抽干全局 tag_queue，会把 dialog_return 的 return+jump 提前消费，
+        // 破坏后续恢复到 popfunc02 第二个 fn.pop 的控制流。
+        let store = self.interpreter.variables();
+        let global: HashMap<String, asb_interpreter::Value> = store
+            .iter_global()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let system: HashMap<String, asb_interpreter::Value> = store
+            .iter_system()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        for (file, map) in [(SAVEG_FILE, &global), (SYSTEM_FILE, &system)] {
+            let json = serde_json::to_string_pretty(map).map_err(|e| e.to_string())?;
+            let path = self.save_path_for(file)?;
+            crate::ffi::request_write(&path, json.as_bytes())?;
+            crate::core_info!("[runtime] syssave 已保存 {} ({} 项)", path, map.len());
+        }
+        Ok(())
+    }
+
+    /// 启动时读回 `syssave()` 落下的全局/系统域。缺文件（首次启动）静默跳过。
+    fn sysload(&mut self) {
+        for (file, is_global) in [(SAVEG_FILE, true), (SYSTEM_FILE, false)] {
+            let Ok(path) = self.save_path_for(file) else {
+                continue;
+            };
+            let bytes = match crate::ffi::request_file(&path) {
+                Ok(b) => b,
+                Err(e) => {
+                    // 首次启动尚无文件属正常；记 debug 便于排查"读路径不对"的情况。
+                    crate::core_debug!("[runtime] sysload 跳过 {} ({})", path, e);
+                    continue;
+                }
+            };
+            let map: HashMap<String, asb_interpreter::Value> = match serde_json::from_slice(&bytes)
+            {
+                Ok(m) => m,
+                Err(e) => {
+                    crate::core_warn!("[runtime] sysload 解析 {} 失败: {}", path, e);
+                    continue;
+                }
+            };
+            let prefix = if is_global { "g." } else { "s." };
+            let n = map.len();
+            for (k, v) in map {
+                self.interpreter.set_variable(&format!("{prefix}{k}"), v);
+            }
+            crate::core_info!("[runtime] sysload 已读回 {} ({} 项)", path, n);
+        }
+    }
+
+    /// 处理 [load]：经宿主读回调读取 JSON → 恢复变量与执行位置 → 触发 onLoad
+    /// 把变量反序列化回 `sys` 等 Lua 表 → 抽干队列 → 清等待状态让脚本续跑。
+    fn handle_load_game(&mut self, file: &str) -> Result<(), String> {
+        let path = self.save_path_for(file)?;
+        let bytes = crate::ffi::request_file(&path)?;
+        let data: crate::save::SaveData =
+            serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        data.restore(&mut self.interpreter)
+            .map_err(|e| format!("恢复存档状态失败: {e:?}"))?;
+
+        // onLoad（restore）把恢复的变量经 pluto 反序列化回 sys/gscr/scr/log 等表，
+        // 否则承载游戏态与存档槽位的 Lua 表仍是旧的。
+        self.interpreter
+            .fire_load_handler()
+            .map_err(|e| format!("onLoad 处理器失败: {e:?}"))?;
+        self.interpreter
+            .flush_pending_tags()
+            .map_err(|e| format!("抽干读档标签失败: {e:?}"))?;
+
+        // 清除等待状态，使下一帧 run() 从恢复后的位置继续执行。
+        self.wait_reason = None;
+        crate::core_info!("[runtime] 已读取存档: {}", path);
+        Ok(())
+    }
 }
 
 // ── Event dispatch helpers ──────────────────────────────────────
@@ -580,6 +810,60 @@ fn enqueue_input_handler(
     );
 }
 
+/// 规范化 system.ini 的 SAVEPATH 为沙箱内的逻辑相对子目录前缀。
+///
+/// 原值可能是 Windows 风格（含反斜杠、盘符、CSIDL 特殊文件夹名），桌面/移动端都
+/// 不能直接当文件系统路径用。这里：反斜杠转正斜杠、去掉首尾分隔符、剔除
+/// `..`/盘符等危险段，得到一个干净的相对前缀；为空则退回 `save`。物理落盘基准由
+/// 宿主（Flutter）解析到应用沙箱目录。
+fn sanitize_savepath(raw: Option<&str>) -> String {
+    let raw = raw.map(|s| s.trim()).unwrap_or("");
+    if raw.is_empty() {
+        return "save".to_string();
+    }
+    let normalized = raw.replace('\\', "/");
+    let cleaned: Vec<&str> = normalized
+        .split('/')
+        .map(|seg| seg.trim())
+        .filter(|seg| !seg.is_empty() && *seg != "." && *seg != ".." && !seg.ends_with(':'))
+        .collect();
+    if cleaned.is_empty() {
+        "save".to_string()
+    } else {
+        cleaned.join("/")
+    }
+}
+
+fn normalize_relative_path(path: &str) -> Option<String> {
+    let normalized = path.trim().trim_start_matches('/').replace('\\', "/");
+    let mut parts = Vec::new();
+    for part in normalized.split('/') {
+        let part = part.trim();
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." || part.contains(':') {
+            return None;
+        }
+        parts.push(part);
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("/"))
+    }
+}
+
+fn qualify_save_path(file: &str, savepath: &str) -> Result<String, String> {
+    let f = normalize_relative_path(file).ok_or_else(|| format!("非法存档路径: {file}"))?;
+    let prefix = savepath.trim_matches('/');
+    if prefix.is_empty() || f == prefix || f.starts_with(&format!("{prefix}/")) {
+        Ok(f)
+    } else {
+        Ok(format!("{prefix}/{f}"))
+    }
+}
+
 /// Resolve a texture name that may contain Artemis `:prefix/rest` magic
 /// path notation into a plain relative path suitable for the FFI file
 /// reader callback.
@@ -602,73 +886,145 @@ fn resolve_texture_path(table: &MagicPathTable, name: &str) -> String {
     name.to_string()
 }
 
-fn event_name(e: &Event) -> &str {
-    match e {
-        Event::Layer(layer_event) => match layer_event {
-            asb_interpreter::event::LayerEvent::Create { .. } => "LayerCreate",
-            asb_interpreter::event::LayerEvent::Delete { .. } => "LayerDelete",
-            asb_interpreter::event::LayerEvent::SetProperty { .. } => "LayerSetProp",
-            asb_interpreter::event::LayerEvent::SetProperties { .. } => "LayerSetProps",
-            _ => "Layer",
-        },
-        Event::LayerTween { .. } => "LayerTween",
-        Event::LayerTweenDelete { .. } => "LayerTweenDel",
-        Event::LayerRename { .. } => "LayerRename",
-        Event::LayerEventHandler { .. } => "LayerEvtHandler",
-        Event::UiTransition(_) => "UiTrans",
-        Event::Trans { .. } => "Trans",
-        Event::Flip => "Flip",
-        Event::BgmPlay { .. } => "BgmPlay",
-        Event::BgmStop { .. } => "BgmStop",
-        Event::BgmFade { .. } => "BgmFade",
-        Event::BgmCrossFade { .. } => "BgmCrossFade",
-        Event::SePlay { .. } => "SePlay",
-        Event::SeStop { .. } => "SeStop",
-        Event::SeFade { .. } => "SeFade",
-        Event::VoicePlay { .. } => "VoicePlay",
-        Event::StopAllSounds { .. } => "StopAllSounds",
-        Event::SoundFinishHandler { .. } => "SoundFinishHandler",
-        Event::SoundFinishHandlerDel { .. } => "SoundFinishHandlerDel",
-        Event::VideoPlay { .. } => "VideoPlay",
-        Event::VideoFinishHandler { .. } => "VideoFinishHandler",
-        Event::VideoFinishHandlerDel => "VideoFinishHandlerDel",
-        Event::Text { .. } => "Text",
-        Event::ScenarioText { .. } => "ScenarioText",
-        Event::LineBreak => "LineBreak",
-        Event::PageBreak { .. } => "PageBreak",
-        Event::FontSettings(_) => "FontSettings",
-        Event::FontClose => "FontClose",
-        Event::FontDefault(_) => "FontDefault",
-        Event::FontInit => "FontInit",
-        Event::MessageLayerSwitch { .. } => "MsgLayerSwitch",
-        Event::MessageLayerPop => "MsgLayerPop",
-        Event::Wait { reason } => match reason {
-            WaitReason::Generic => "Wait(Generic)",
-            WaitReason::Stop { reason } => match reason.as_deref() {
-                Some(r) => return &*format!("Wait(Stop:{r})").leak(),
-                None => "Wait(Stop)",
-            },
-            WaitReason::Timed { .. } => "Wait(Timed)",
-            WaitReason::KeyWait { .. } => "Wait(KeyWait)",
-            _ => "Wait",
-        },
-        Event::SaveGame { .. } => "Save",
-        Event::LoadGame { .. } => "Load",
-        Event::Exit => "Exit",
-        Event::GoTitle => "GoTitle",
-        Event::ShowDialog { .. } => "ShowDialog",
-        Event::YesNo { .. } => "YesNo",
-        Event::SceneIn => "SceneIn",
-        Event::SceneOut => "SceneOut",
-        _ => "...",
+#[cfg(test)]
+mod tests {
+    use super::{qualify_save_path, sanitize_savepath};
+
+    #[test]
+    fn save_paths_are_qualified_with_savepath_once() {
+        assert_eq!(
+            qualify_save_path("save0001.dat", "savedata").unwrap(),
+            "savedata/save0001.dat"
+        );
+        assert_eq!(
+            qualify_save_path("savedata/save0001.dat", "savedata").unwrap(),
+            "savedata/save0001.dat"
+        );
+        assert_eq!(
+            qualify_save_path(r"savedata\\saveg.dat", "savedata").unwrap(),
+            "savedata/saveg.dat"
+        );
+    }
+
+    #[test]
+    fn save_paths_reject_parent_traversal() {
+        assert!(qualify_save_path("../save0001.dat", "savedata").is_err());
+        assert!(qualify_save_path("C:/save0001.dat", "savedata").is_err());
+    }
+
+    #[test]
+    fn savepath_from_ini_is_sanitized() {
+        assert_eq!(sanitize_savepath(Some(r"Citrus\\hokeloli")), "Citrus/hokeloli");
+        assert_eq!(sanitize_savepath(Some("../bad/save")), "bad/save");
+        assert_eq!(sanitize_savepath(None), "save");
     }
 }
 
-trait LeakExt {
-    fn leak(self) -> &'static str;
-}
-impl LeakExt for String {
-    fn leak(self) -> &'static str {
-        Box::leak(self.into_boxed_str())
+/// 事件摘要：名称 + 关键参数，供 `[event]` 调试日志使用。
+///
+/// 返回拥有所有权的 `String`（不再用 `Box::leak`——旧实现对每个 `Wait(Stop)`
+/// 事件泄漏一段堆内存）。仅展开常用事件的关键字段，其余只给变体名。
+fn event_name(e: &Event) -> String {
+    use asb_interpreter::event::LayerEvent;
+    match e {
+        Event::Layer(layer_event) => match layer_event {
+            LayerEvent::Create { id, file } => format!("LayerCreate id={id} file={file}"),
+            LayerEvent::Create2 { id, file, alpha } => {
+                format!("LayerCreate2 id={id} file={file} alpha={alpha:?}")
+            }
+            LayerEvent::Delete { id } => format!("LayerDelete id={id}"),
+            LayerEvent::SetProperty {
+                id,
+                property,
+                value,
+            } => {
+                format!("LayerSetProp id={id} {property}={value}")
+            }
+            LayerEvent::SetProperties { id, properties } => {
+                format!(
+                    "LayerSetProps id={id} keys={:?}",
+                    properties.keys().collect::<Vec<_>>()
+                )
+            }
+        },
+        Event::LayerTween { id, param, .. } => format!("LayerTween id={id} param={param}"),
+        Event::LayerTweenDelete { .. } => "LayerTweenDel".to_string(),
+        Event::LayerRename { id, to } => format!("LayerRename id={id} -> {to}"),
+        Event::LayerEventHandler { .. } => "LayerEvtHandler".to_string(),
+        Event::UiTransition(_) => "UiTrans".to_string(),
+        Event::Trans {
+            trans_type,
+            time,
+            rule,
+            ..
+        } => {
+            format!("Trans type={trans_type} time={time:?} rule={rule:?}")
+        }
+        Event::Flip => "Flip".to_string(),
+        Event::BgmPlay {
+            file,
+            loop_play,
+            gain,
+            ..
+        } => {
+            format!("BgmPlay file={file} loop={loop_play} gain={gain:?}")
+        }
+        Event::BgmStop { .. } => "BgmStop".to_string(),
+        Event::BgmFade { .. } => "BgmFade".to_string(),
+        Event::BgmCrossFade { .. } => "BgmCrossFade".to_string(),
+        Event::SePlay { id, file, .. } => format!("SePlay id={id} file={file}"),
+        Event::SeStop { .. } => "SeStop".to_string(),
+        Event::SeFade { .. } => "SeFade".to_string(),
+        Event::VoicePlay { file, .. } => format!("VoicePlay file={file}"),
+        Event::StopAllSounds { .. } => "StopAllSounds".to_string(),
+        Event::SoundFinishHandler { .. } => "SoundFinishHandler".to_string(),
+        Event::SoundFinishHandlerDel { .. } => "SoundFinishHandlerDel".to_string(),
+        Event::VideoPlay { id, file, .. } => format!("VideoPlay id={id:?} file={file}"),
+        Event::VideoFinishHandler { .. } => "VideoFinishHandler".to_string(),
+        Event::VideoFinishHandlerDel => "VideoFinishHandlerDel".to_string(),
+        Event::Text { content } => format!("Text {content:?}"),
+        Event::ScenarioText { content, inline } => {
+            format!("ScenarioText inline={inline} {content:?}")
+        }
+        Event::LineBreak => "LineBreak".to_string(),
+        Event::PageBreak { .. } => "PageBreak".to_string(),
+        Event::FontSettings(_) => "FontSettings".to_string(),
+        Event::FontClose => "FontClose".to_string(),
+        Event::FontDefault(_) => "FontDefault".to_string(),
+        Event::FontInit => "FontInit".to_string(),
+        Event::MessageLayerSwitch { .. } => "MsgLayerSwitch".to_string(),
+        Event::MessageLayerPop => "MsgLayerPop".to_string(),
+        Event::Wait { reason } => match reason {
+            WaitReason::Generic => "Wait(Generic)".to_string(),
+            WaitReason::Stop { reason } => match reason.as_deref() {
+                Some(r) => format!("Wait(Stop:{r})"),
+                None => "Wait(Stop)".to_string(),
+            },
+            WaitReason::Timed { .. } => "Wait(Timed)".to_string(),
+            WaitReason::KeyWait { .. } => "Wait(KeyWait)".to_string(),
+            _ => "Wait".to_string(),
+        },
+        Event::SaveGame { file } => format!("Save file={file:?}"),
+        Event::LoadGame { file, trans_type } => {
+            format!("Load file={file:?} type={trans_type:?}")
+        }
+        Event::FileOperation {
+            command,
+            src,
+            dst,
+            target,
+        } => {
+            format!("FileOp {command} src={src:?} dst={dst:?} target={target:?}")
+        }
+        Event::Exit => "Exit".to_string(),
+        Event::GoTitle => "GoTitle".to_string(),
+        Event::ShowDialog { .. } => "ShowDialog".to_string(),
+        Event::YesNo { .. } => "YesNo".to_string(),
+        Event::SceneIn => "SceneIn".to_string(),
+        Event::SceneOut => "SceneOut".to_string(),
+        e => {
+            core_debug!("[event] {:?}", e);
+            "Not implemented event".to_string()
+        }
     }
 }
