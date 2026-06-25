@@ -33,7 +33,7 @@ struct ScreenshotBuffer {
 
 pub struct CoreRuntime {
     gl: Rc<glow::Context>,
-    _gl_ctx: Box<dyn platform::GLPlatformContext>,
+    gl_ctx: Box<dyn platform::GLPlatformContext>,
     _fbo: glow::Framebuffer,
     _fbo_tex: glow::Texture,
 
@@ -96,7 +96,7 @@ impl CoreRuntime {
 
         Ok(Self {
             gl,
-            _gl_ctx: gl_ctx,
+            gl_ctx: gl_ctx,
             _fbo: fbo,
             _fbo_tex: fbo_tex,
             renderer,
@@ -298,6 +298,11 @@ impl CoreRuntime {
     /// Advance logic and render one frame. Returns the RGBA pixel buffer.
     /// The caller owns the returned `Vec<u8>`.
     pub fn advance_and_render(&mut self, delta_ms: u64) -> Vec<u8> {
+        // 抢占当前线程的 GL 上下文前，先保存宿主（Flutter）的上下文；
+        // 渲染完后必须 restore，否则宿主后续的 GL 调用全打到我们的离屏 FBO，
+        // 宿主窗口就黑了。
+        let saved_ctx = self.gl_ctx.bind_save();
+
         // Read & clear per-frame click state
         let (clicked, mouse_x, mouse_y) = {
             let mut s = self.input.lock().unwrap();
@@ -579,6 +584,9 @@ impl CoreRuntime {
             unsafe { platform::read_pixels(&self.gl, self.stage_w as i32, self.stage_h as i32) };
 
         self.input.lock().unwrap().clear_edges();
+
+        // 渲染完毕，把 GL 上下文还给宿主。
+        self.gl_ctx.restore(saved_ctx);
 
         pixels
     }

@@ -7,6 +7,40 @@ use glow::HasContext;
 
 pub trait GLPlatformContext: Send {
     fn make_current(&self) -> bool;
+
+    /// 保存当前线程的 GL 上下文并把我们的上下文设为 current，返回保存的句柄。
+    /// 调用方稍后必须把句柄传给 [`GLPlatformContext::restore`] 以恢复原上下文。
+    fn bind_save(&self) -> SavedGlContext;
+
+    /// 恢复之前由 [`GLPlatformContext::bind_save`] 保存的 GL 上下文。
+    fn restore(&self, saved: SavedGlContext);
+}
+
+/// 之前线程当前的 GL 上下文快照（不透明句柄）。
+///
+/// 用于 [`GLPlatformContext::bind_save`] / [`GLPlatformContext::restore`] 之间保存
+/// 宿主（如 Flutter）的 EGL/CGL 上下文，避免我们的离屏上下文长期抢占线程的
+/// current context 导致宿主渲染全黑。
+pub struct SavedGlContext {
+    /// EGL: (display, draw_surface, read_surface, context)。CGL: unused。
+    pub(crate) display: *mut std::ffi::c_void,
+    pub(crate) draw: *mut std::ffi::c_void,
+    pub(crate) read: *mut std::ffi::c_void,
+    pub(crate) context: *mut std::ffi::c_void,
+}
+
+impl SavedGlContext {
+    /// 空快照（没有上下文需要恢复）。
+    pub const NONE: Self = Self {
+        display: std::ptr::null_mut(),
+        draw: std::ptr::null_mut(),
+        read: std::ptr::null_mut(),
+        context: std::ptr::null_mut(),
+    };
+
+    pub fn is_none(&self) -> bool {
+        self.context.is_null()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +114,7 @@ fn create_cgl() -> Result<(Rc<glow::Context>, Box<dyn GLPlatformContext>), Strin
                 c: *mut CGLContextObj,
             ) -> CGLError;
             fn CGLSetCurrentContext(c: CGLContextObj) -> CGLError;
+            fn CGLGetCurrentContext() -> CGLContextObj;
             fn CGLReleaseContext(c: CGLContextObj) -> CGLError;
             fn CGLReleasePixelFormat(p: CGLPixelFormatObj) -> CGLError;
         }
@@ -97,6 +132,20 @@ fn create_cgl() -> Result<(Rc<glow::Context>, Box<dyn GLPlatformContext>), Strin
         impl GLPlatformContext for Ctx {
             fn make_current(&self) -> bool {
                 unsafe { CGLSetCurrentContext(self.h) == 0 }
+            }
+            fn bind_save(&self) -> super::SavedGlContext {
+                let prev = unsafe { CGLGetCurrentContext() };
+                let _ = self.make_current();
+                super::SavedGlContext {
+                    display: std::ptr::null_mut(),
+                    draw: std::ptr::null_mut(),
+                    read: std::ptr::null_mut(),
+                    context: prev,
+                }
+            }
+            fn restore(&self, saved: super::SavedGlContext) {
+                // CGL 用 null 表示"解除当前上下文"，非 null 则恢复。
+                unsafe { CGLSetCurrentContext(saved.context) };
             }
         }
         impl Drop for Ctx {
@@ -222,6 +271,10 @@ fn create_egl(
             terminate: unsafe extern "C" fn(EGLDisplay) -> EGLBoolean,
             make_current:
                 unsafe extern "C" fn(EGLDisplay, EGLSurface, EGLSurface, EGLContext) -> EGLBoolean,
+            // 用于 bind_save/restore：查询/恢复当前线程的 EGL 上下文。
+            get_current_display: unsafe extern "C" fn() -> EGLDisplay,
+            get_current_surface: unsafe extern "C" fn(EGLint) -> EGLSurface,
+            get_current_context: unsafe extern "C" fn() -> EGLContext,
         }
 
         unsafe impl Send for EglCtx {}
@@ -230,6 +283,47 @@ fn create_egl(
             fn make_current(&self) -> bool {
                 unsafe {
                     (self.make_current)(self._display, self._surface, self._surface, self.ctx) != 0
+                }
+            }
+            fn bind_save(&self) -> super::SavedGlContext {
+                // 先记录当前线程的 EGL 上下文（宿主如 Flutter 的），然后切到我们的。
+                let saved = unsafe {
+                    super::SavedGlContext {
+                        display: (self.get_current_display)().cast(),
+                        draw: (self.get_current_surface)(0x305A /* EGL_DRAW */).cast(),
+                        read: (self.get_current_surface)(0x305B /* EGL_READ */).cast(),
+                        context: (self.get_current_context)().cast(),
+                    }
+                };
+                let _ = self.make_current();
+                saved
+            }
+            fn restore(&self, saved: super::SavedGlContext) {
+                // 恢复宿主的 EGL 上下文；如果宿主没有上下文（context==null），
+                // 传 EGL_NO_* 解除当前绑定，避免我们的上下文继续占用线程。
+                if saved.context.is_null() {
+                    // eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT)
+                    let _ = unsafe {
+                        (self.make_current)(
+                            if saved.display.is_null() {
+                                self._display
+                            } else {
+                                saved.display.cast()
+                            },
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                        )
+                    };
+                } else {
+                    let _ = unsafe {
+                        (self.make_current)(
+                            saved.display.cast(),
+                            saved.draw.cast(),
+                            saved.read.cast(),
+                            saved.context.cast(),
+                        )
+                    };
                 }
             }
         }
@@ -392,6 +486,13 @@ fn create_egl(
                 ) -> EGLBoolean = load!(egl_lib, "eglDestroySurface");
                 let egl_terminate: unsafe extern "C" fn(EGLDisplay) -> EGLBoolean =
                     load!(egl_lib, "eglTerminate");
+                // 查询当前线程的 EGL 上下文（bind_save/restore 用来保存/恢复宿主上下文）。
+                let egl_get_current_display: unsafe extern "C" fn() -> EGLDisplay =
+                    load!(egl_lib, "eglGetCurrentDisplay");
+                let egl_get_current_surface: unsafe extern "C" fn(EGLint) -> EGLSurface =
+                    load!(egl_lib, "eglGetCurrentSurface");
+                let egl_get_current_context: unsafe extern "C" fn() -> EGLContext =
+                    load!(egl_lib, "eglGetCurrentContext");
 
                 if display.is_null() {
                     return Err("eglGetDisplay failed".into());
@@ -529,6 +630,9 @@ fn create_egl(
                         destroy_surface: egl_destroy_surface,
                         terminate: egl_terminate,
                         make_current: egl_make_current,
+                        get_current_display: egl_get_current_display,
+                        get_current_surface: egl_get_current_surface,
+                        get_current_context: egl_get_current_context,
                     },
                 ))
             }
