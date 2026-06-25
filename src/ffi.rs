@@ -79,11 +79,9 @@ macro_rules! core_error {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_init_android(java_vm: *mut std::ffi::c_void, context: *mut std::ffi::c_void) {
     if java_vm.is_null() || context.is_null() {
-        core_error!("art3m1s_init_android: null pointer (vm={java_vm:p}, ctx={context:p})");
         return;
     }
     unsafe { ndk_context::initialize_android_context(java_vm, context) };
-    core_info!("art3m1s_init_android: ndk-context initialized");
 }
 
 
