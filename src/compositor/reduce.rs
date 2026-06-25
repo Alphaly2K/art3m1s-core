@@ -14,6 +14,7 @@ use crate::compositor::anim::{Easing, Tween, TweenHandler};
 use crate::compositor::build::build_frame;
 use crate::compositor::renderer::{DrawCommand, DrawList, Renderer, TextureProvider};
 use crate::compositor::scene::{LayerEventHandler, Scene};
+use crate::save::{AudioChannelSnapshot, AudioSnapshot};
 use crate::text::render::{ScetweenConfig, ScetweenMode, ScetweenSetMode, TextRenderer};
 use crate::video::engine::{VideoBackend, VideoConfig, VideoFinishEvent, VideoFinishHandler};
 use asb_interpreter::event::{Event, LayerEvent};
@@ -129,6 +130,104 @@ impl Compositor {
 
     pub fn scene(&self) -> &Scene {
         &self.scene
+    }
+
+    pub fn scene_snapshot(&self) -> Scene {
+        self.scene.clone()
+    }
+
+    pub fn audio_snapshot(&self) -> AudioSnapshot {
+        let audio_opt = self.audio_backend.borrow();
+        let Some(audio) = audio_opt.as_ref() else {
+            return AudioSnapshot::default();
+        };
+        let state = audio.audio_state();
+        let bgm = state
+            .bgm_channel
+            .as_ref()
+            .filter(|channel| channel.playing)
+            .map(AudioChannelSnapshot::from);
+        let mut se: Vec<_> = state
+            .se_channels
+            .values()
+            .filter(|channel| channel.playing)
+            .map(AudioChannelSnapshot::from)
+            .collect();
+        let mut voice: Vec<_> = state
+            .voice_channels
+            .values()
+            .filter(|channel| channel.playing)
+            .map(AudioChannelSnapshot::from)
+            .collect();
+        se.sort_by(|a, b| a.id.cmp(&b.id));
+        voice.sort_by(|a, b| a.id.cmp(&b.id));
+        AudioSnapshot { bgm, se, voice }
+    }
+
+    pub fn restore_scene(&mut self, scene: Scene) {
+        self.scene.replace_with(scene);
+        self.pending_tween_events.clear();
+    }
+
+    pub fn restore_audio(&self, snapshot: &AudioSnapshot) {
+        let mut audio_opt = self.audio_backend.borrow_mut();
+        let Some(audio) = audio_opt.as_mut() else {
+            return;
+        };
+        if let Some(bgm) = &snapshot.bgm {
+            audio.play_bgm(
+                &bgm.file,
+                &BgmConfig {
+                    loop_play: bgm.loop_play,
+                    gain: Some(bgm.gain),
+                    pan: Some(bgm.pan),
+                    fade_in_ms: 0,
+                    buffer_size: None,
+                },
+            );
+        }
+        for se in &snapshot.se {
+            audio.play_se(
+                &se.id,
+                &se.file,
+                &SeConfig {
+                    loop_play: se.loop_play,
+                    gain: Some(se.gain),
+                    pan: Some(se.pan),
+                    fade_in_ms: 0,
+                    buffer_size: None,
+                    skippable: se.skippable,
+                },
+            );
+        }
+        for voice in &snapshot.voice {
+            audio.play_voice(
+                &voice.id,
+                &voice.file,
+                &SeConfig {
+                    loop_play: voice.loop_play,
+                    gain: Some(voice.gain),
+                    pan: Some(voice.pan),
+                    fade_in_ms: 0,
+                    buffer_size: None,
+                    skippable: voice.skippable,
+                },
+            );
+        }
+    }
+
+    /// 读档是全局状态切换边界：旧画面、旧 UI 输入处理器和正在播放的音视频都
+    /// 不能穿透到新存档。随后若存档携带 scene，调用方再用 `restore_scene` 覆盖。
+    pub fn reset_for_load(&mut self) {
+        self.scene.replace_with(Scene::new());
+        self.input_handlers.clear();
+        self.pending_tween_events.clear();
+        if let Some(audio) = self.audio_backend.borrow_mut().as_mut() {
+            audio.stop_all_sounds();
+        }
+        if let Some(video) = self.video_backend.borrow_mut().as_mut() {
+            video.stop_all_videos();
+        }
     }
 
     pub fn clock_ms(&self) -> u64 {
@@ -544,12 +643,20 @@ impl Compositor {
     /// 如果有全屏视频正在播放，解析其纹理并替换整个帧（独占画面）。
     fn inject_fullscreen_video(&self, frame: &mut DrawList, provider: &mut dyn TextureProvider) {
         let video_opt = self.video_backend.borrow();
-        let Some(video) = video_opt.as_ref() else { return };
+        let Some(video) = video_opt.as_ref() else {
+            return;
+        };
         let state = video.video_state();
-        let Some(ref v) = state.fullscreen_video else { return };
-        if !v.playing { return; }
+        let Some(ref v) = state.fullscreen_video else {
+            return;
+        };
+        if !v.playing {
+            return;
+        }
 
-        let Some((tex, info)) = provider.resolve("__video_fullscreen__") else { return };
+        let Some((tex, info)) = provider.resolve("__video_fullscreen__") else {
+            return;
+        };
         frame.commands.clear();
         frame.commands.push(DrawCommand {
             texture: tex,
@@ -565,22 +672,22 @@ impl Compositor {
     /// 更新视频纹理（将解码后的帧上传到 GPU）。
     fn update_video_textures(&self, provider: &mut dyn TextureProvider) {
         let mut video_opt = self.video_backend.borrow_mut();
-        let Some(video) = video_opt.as_mut() else { return };
+        let Some(video) = video_opt.as_mut() else {
+            return;
+        };
 
         // 更新全屏视频纹理
         let fullscreen_info = {
             let state = video.video_state();
-            state.fullscreen_video.as_ref().map(|v| (v.width, v.height, v.playing))
+            state
+                .fullscreen_video
+                .as_ref()
+                .map(|v| (v.width, v.height, v.playing))
         };
         if let Some((width, height, playing)) = fullscreen_info {
             if playing {
                 if let Some(frame_data) = video.get_fullscreen_frame() {
-                    provider.upload_rgba(
-                        "__video_fullscreen__",
-                        width,
-                        height,
-                        frame_data,
-                    );
+                    provider.upload_rgba("__video_fullscreen__", width, height, frame_data);
                 } else {
                     crate::core_debug!("[Video] 全屏视频没有新帧");
                 }
@@ -590,7 +697,9 @@ impl Compositor {
         // 更新视频图层纹理
         let layer_infos: Vec<(String, u32, u32, bool)> = {
             let state = video.video_state();
-            state.video_layers.iter()
+            state
+                .video_layers
+                .iter()
                 .map(|(id, layer)| (id.clone(), layer.width, layer.height, layer.playing))
                 .collect()
         };
@@ -598,12 +707,7 @@ impl Compositor {
             if playing {
                 if let Some(frame_data) = video.get_frame(&layer_id) {
                     let texture_name = format!("__video_layer_{}__", layer_id);
-                    provider.upload_rgba(
-                        &texture_name,
-                        width,
-                        height,
-                        frame_data,
-                    );
+                    provider.upload_rgba(&texture_name, width, height, frame_data);
                 }
             }
         }
@@ -1203,6 +1307,80 @@ mod tests {
         });
         c.apply_event(&Event::StopAllSounds { duration: 0 });
         assert_eq!(c.scene().len(), 1);
+    }
+
+    #[test]
+    fn reset_for_load_clears_scene_input_and_audio() {
+        let mut c = Compositor::new();
+        c.set_audio_backend(Box::new(crate::audio::StubAudioBackend::new()));
+        c.apply_event(&create("title", "title_bg"));
+        c.apply_event(&Event::SetEventHandler {
+            event_name: "push".into(),
+            file: None,
+            label: None,
+            call: false,
+            handler: Some("calllua".into()),
+            extra_params: HashMap::from([("key".into(), "1".into())]),
+        });
+        c.apply_event(&Event::BgmPlay {
+            file: "title.ogg".into(),
+            loop_play: true,
+            gain: None,
+            pan: None,
+            fade_time: None,
+        });
+
+        c.reset_for_load();
+
+        assert!(c.scene().is_empty());
+        assert!(c.get_input_handler("push", "1").is_none());
+        let audio = c.audio_mut();
+        let state = audio.as_ref().unwrap().audio_state();
+        assert!(state.bgm_channel.is_none());
+    }
+
+    #[test]
+    fn audio_snapshot_replays_active_channels_from_start() {
+        let mut c = Compositor::new();
+        c.set_audio_backend(Box::new(crate::audio::StubAudioBackend::new()));
+        c.apply_event(&Event::BgmPlay {
+            file: "bgm/scene.ogg".into(),
+            loop_play: true,
+            gain: Some(700),
+            pan: Some(-100),
+            fade_time: Some(1000),
+        });
+        c.apply_event(&Event::SePlay {
+            id: "amb".into(),
+            file: "se/wind.ogg".into(),
+            loop_play: true,
+            gain: Some(400),
+            pan: Some(100),
+            fade_time: Some(500),
+            skippable: true,
+        });
+        c.advance(250);
+
+        let snapshot = c.audio_snapshot();
+        assert_eq!(snapshot.bgm.as_ref().unwrap().file, "bgm/scene.ogg");
+        assert_eq!(snapshot.bgm.as_ref().unwrap().gain, 700);
+        assert_eq!(snapshot.se[0].file, "se/wind.ogg");
+        assert!(snapshot.se[0].skippable);
+
+        c.reset_for_load();
+        c.restore_audio(&snapshot);
+
+        let audio = c.audio_mut();
+        let state = audio.as_ref().unwrap().audio_state();
+        let bgm = state.bgm_channel.as_ref().unwrap();
+        assert_eq!(bgm.file, "bgm/scene.ogg");
+        assert_eq!(bgm.current_gain, crate::audio::SoundChannel::gain_to_linear(700));
+        assert!(bgm.fade.is_none());
+        let se = state.se_channels.get("amb").unwrap();
+        assert_eq!(se.file, "se/wind.ogg");
+        assert_eq!(se.current_gain, crate::audio::SoundChannel::gain_to_linear(400));
+        assert!(se.skippable);
+        assert!(se.fade.is_none());
     }
 
     #[test]

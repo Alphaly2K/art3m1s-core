@@ -130,6 +130,24 @@ impl RodioBackend {
         let effective = channel.current_gain * category_vol * self.state.master_volume;
         sink.set_volume(effective);
     }
+
+    fn sync_all_sink_volumes(&self) {
+        if let Some(ref sink) = self.bgm_sink {
+            if let Some(ref channel) = self.state.bgm_channel {
+                self.sync_sink_volume(sink, channel);
+            }
+        }
+        for (id, sink) in self.se_sinks.iter() {
+            if let Some(channel) = self.state.se_channels.get(id) {
+                self.sync_sink_volume(sink, channel);
+            }
+        }
+        for (id, sink) in self.voice_sinks.iter() {
+            if let Some(channel) = self.state.voice_channels.get(id) {
+                self.sync_sink_volume(sink, channel);
+            }
+        }
+    }
 }
 
 impl AudioBackend for RodioBackend {
@@ -239,6 +257,7 @@ impl AudioBackend for RodioBackend {
                 let mut channel = SoundChannel::new(id, file, SoundCategory::Se);
                 channel.playing = true;
                 channel.loop_play = config.loop_play;
+                channel.skippable = config.skippable;
                 Self::set_channel_gain(&mut channel, config.gain, config.pan);
                 Self::start_fade_in(&mut channel, config.fade_in_ms, self.state.clock_ms);
                 self.sync_sink_volume(&sink, &channel);
@@ -298,6 +317,7 @@ impl AudioBackend for RodioBackend {
                 let mut channel = SoundChannel::new(id, file, SoundCategory::Voice);
                 channel.playing = true;
                 channel.loop_play = config.loop_play;
+                channel.skippable = config.skippable;
                 Self::set_channel_gain(&mut channel, config.gain, config.pan);
                 Self::start_fade_in(&mut channel, config.fade_in_ms, self.state.clock_ms);
                 self.sync_sink_volume(&sink, &channel);
@@ -325,18 +345,22 @@ impl AudioBackend for RodioBackend {
 
     fn set_master_volume(&mut self, volume: f32) {
         self.state.master_volume = volume.clamp(0.0, 1.0);
+        self.sync_all_sink_volumes();
     }
 
     fn set_bgm_volume(&mut self, volume: f32) {
         self.state.bgm_volume = volume.clamp(0.0, 1.0);
+        self.sync_all_sink_volumes();
     }
 
     fn set_se_volume(&mut self, volume: f32) {
         self.state.se_volume = volume.clamp(0.0, 1.0);
+        self.sync_all_sink_volumes();
     }
 
     fn set_voice_volume(&mut self, volume: f32) {
         self.state.voice_volume = volume.clamp(0.0, 1.0);
+        self.sync_all_sink_volumes();
     }
 
     fn set_skipping(&mut self, skipping: bool) {
@@ -452,22 +476,7 @@ impl AudioBackend for RodioBackend {
             }
         }
 
-        // Sync volumes
-        if let Some(ref sink) = self.bgm_sink {
-            if let Some(ref channel) = self.state.bgm_channel {
-                self.sync_sink_volume(sink, channel);
-            }
-        }
-        for (id, sink) in self.se_sinks.iter() {
-            if let Some(channel) = self.state.se_channels.get(id) {
-                self.sync_sink_volume(sink, channel);
-            }
-        }
-        for (id, sink) in self.voice_sinks.iter() {
-            if let Some(channel) = self.state.voice_channels.get(id) {
-                self.sync_sink_volume(sink, channel);
-            }
-        }
+        self.sync_all_sink_volumes();
     }
 
     fn poll_finish_events(&mut self) -> Vec<SoundFinishEvent> {

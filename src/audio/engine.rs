@@ -204,6 +204,8 @@ pub struct SoundChannel {
     pub current_pan: f32,
     /// 进行中的淡入淡出（如果有）
     pub fade: Option<FadeState>,
+    /// skippable=1 时，在快进/跳过期间不播放该 SE。
+    pub skippable: bool,
 }
 
 impl SoundChannel {
@@ -219,6 +221,7 @@ impl SoundChannel {
             current_gain: 1.0,
             current_pan: 0.0,
             fade: None,
+            skippable: false,
         }
     }
 

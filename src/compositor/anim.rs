@@ -4,11 +4,13 @@
 //! 解析成转场事件。这些都是基于时间的：合成器记录起止值与时长，在每帧 `build`
 //! 时按当前时间求出插值，写回图层属性。本模块只做"按时间求值"，不持有图层引用。
 
+use serde::{Deserialize, Serialize};
+
 /// 缓动函数。Artemis 的 `ease` 字符串在归约阶段映射到这里。
 ///
 /// 支持全部 30 种 Artemis 标准缓动函数，按数学家族分为 10 组，每组含
 /// in / out / inout 三种方向。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Easing {
     #[default]
     Linear,
@@ -275,7 +277,7 @@ impl Easing {
 ///
 /// 与 [`crate::compositor::scene::LayerEventHandler`] 同构，当缓动自然完成
 /// （非被删除/替换导致的中断）时触发。
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct TweenHandler {
     pub file: Option<String>,
     pub label: Option<String>,
@@ -287,7 +289,7 @@ pub struct TweenHandler {
 ///
 /// 时间用毫秒，与解释器事件一致。`param` 是被缓动的属性名（如 `"alpha"`、
 /// `"left"`），由归约阶段从事件填入，build 阶段据此把求值结果写回 `LayerProps`。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Tween {
     pub param: String,
     pub from: f32,

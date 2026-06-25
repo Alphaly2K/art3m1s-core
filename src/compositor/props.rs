@@ -6,6 +6,7 @@
 //! `colormultiply` / `layermode` …），所以合成器自己解析成 typed 字段，并把无法
 //! 识别的长尾属性原样保留在 `custom` 里，留给后续后端按需消费。
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// 图层的可视属性。
@@ -17,7 +18,7 @@ use std::collections::HashMap;
 /// - `alpha`：0-255。
 /// - `anchorx` / `anchory`：变换锚点（缩放/旋转的中心），像素。
 /// - `rotate`：角度，单位度。
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LayerProps {
     pub left: Option<f32>,
     pub top: Option<f32>,

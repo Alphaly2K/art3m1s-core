@@ -28,6 +28,7 @@ struct ScreenshotBuffer {
     width: u32,
     height: u32,
     rgba: Vec<u8>,
+    scene: crate::compositor::Scene,
 }
 
 pub struct CoreRuntime {
@@ -524,19 +525,8 @@ impl CoreRuntime {
             crate::core_debug!("[event] {}", event_name(event));
         }
 
-        // Apply volume from Artemis system variables (s.bgmvol / s.sevol, range 0-1000)
-        // and from Lua e:set*Volume() callbacks
+        self.apply_system_audio_volume();
         if let Some(ref mut audio) = *self.compositor.audio_mut() {
-            let vars = self.interpreter.variables_handle();
-            let vars = vars.lock().unwrap();
-            if let Some(asb_interpreter::Value::Int(bgm)) = vars.get("s.bgmvol") {
-                audio.set_bgm_volume((*bgm as f32 / 1000.0).clamp(0.0, 1.0));
-            }
-            if let Some(asb_interpreter::Value::Int(se)) = vars.get("s.sevol") {
-                audio.set_se_volume((*se as f32 / 1000.0).clamp(0.0, 1.0));
-            }
-            drop(vars);
-
             let mut pending = self.volumes.lock().unwrap();
             if let Some(v) = pending.remove("master") {
                 audio.set_master_volume(v);
@@ -606,6 +596,29 @@ impl CoreRuntime {
         }
     }
 
+    fn apply_system_audio_volume(&self) {
+        let vars = self.interpreter.variables_handle();
+        let vars = vars.lock().unwrap();
+        let bgm_volume = vars.get("s.bgmvol").and_then(|value| match value {
+            asb_interpreter::Value::Int(v) => Some((*v as f32 / 1000.0).clamp(0.0, 1.0)),
+            _ => None,
+        });
+        let se_volume = vars.get("s.sevol").and_then(|value| match value {
+            asb_interpreter::Value::Int(v) => Some((*v as f32 / 1000.0).clamp(0.0, 1.0)),
+            _ => None,
+        });
+        drop(vars);
+
+        if let Some(ref mut audio) = *self.compositor.audio_mut() {
+            if let Some(v) = bgm_volume {
+                audio.set_bgm_volume(v);
+            }
+            if let Some(v) = se_volume {
+                audio.set_se_volume(v);
+            }
+        }
+    }
+
     pub fn is_exit_requested(&self) -> bool {
         self.exit_requested
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -659,7 +672,13 @@ impl CoreRuntime {
             .flush_pending_tags()
             .map_err(|e| format!("抽干存档标签失败: {e:?}"))?;
 
-        let data = crate::save::SaveData::from_interpreter(&self.interpreter);
+        let mut data = crate::save::SaveData::from_interpreter(&self.interpreter);
+        if let Some(snapshot) = &self.save_screenshot {
+            data = data.with_scene(snapshot.scene.clone());
+        } else {
+            data = data.with_scene(self.compositor.scene_snapshot());
+        }
+        data = data.with_audio(self.compositor.audio_snapshot());
         let json = serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?;
         let path = self.save_path_for(file)?;
         crate::ffi::request_write(&path, json.as_bytes())?;
@@ -742,6 +761,11 @@ impl CoreRuntime {
         let bytes = crate::ffi::request_file(&path)?;
         let data: crate::save::SaveData =
             serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        self.compositor.reset_for_load();
+        self.hovered_layer = None;
+        if let Some(scene) = data.scene.clone() {
+            self.compositor.restore_scene(scene);
+        }
         data.restore(&mut self.interpreter)
             .map_err(|e| format!("恢复存档状态失败: {e:?}"))?;
 
@@ -753,6 +777,10 @@ impl CoreRuntime {
         self.interpreter
             .flush_pending_tags()
             .map_err(|e| format!("抽干读档标签失败: {e:?}"))?;
+        self.apply_system_audio_volume();
+        if let Some(audio) = &data.audio {
+            self.compositor.restore_audio(audio);
+        }
 
         // 清除等待状态，使下一帧 run() 从恢复后的位置继续执行。
         self.wait_reason = None;
@@ -770,6 +798,7 @@ impl CoreRuntime {
             width: self.stage_w,
             height: self.stage_h,
             rgba,
+            scene: self.compositor.scene_snapshot(),
         });
         crate::core_info!(
             "[runtime] takess 已缓存游戏画面 {}x{}",
@@ -1076,6 +1105,7 @@ mod tests {
             rgba: vec![
                 255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
             ],
+            scene: crate::compositor::Scene::new(),
         };
         let resized = resize_screenshot_rgba(&screenshot, 1, 1).unwrap();
         assert_eq!(resized.len(), 4);

@@ -8,6 +8,42 @@ use asb_interpreter::variable::VariableStore;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// 存档中的音频重放快照。只记录当前应播放的音频，不记录播放进度；
+/// 读档时所有音频都从头重放。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AudioSnapshot {
+    #[serde(default)]
+    pub bgm: Option<AudioChannelSnapshot>,
+    #[serde(default)]
+    pub se: Vec<AudioChannelSnapshot>,
+    #[serde(default)]
+    pub voice: Vec<AudioChannelSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AudioChannelSnapshot {
+    pub id: String,
+    pub file: String,
+    pub loop_play: bool,
+    pub gain: i32,
+    pub pan: i32,
+    #[serde(default)]
+    pub skippable: bool,
+}
+
+impl From<&crate::audio::SoundChannel> for AudioChannelSnapshot {
+    fn from(channel: &crate::audio::SoundChannel) -> Self {
+        Self {
+            id: channel.id.clone(),
+            file: channel.file.clone(),
+            loop_play: channel.loop_play,
+            gain: channel.raw_gain,
+            pan: channel.raw_pan,
+            skippable: channel.skippable,
+        }
+    }
+}
+
 /// 一个完整的存档。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SaveData {
@@ -19,6 +55,12 @@ pub struct SaveData {
     pub current_line: usize,
     /// 调用栈
     pub call_stack: Vec<CallFrameSnapshot>,
+    /// 引擎侧保留模式画面层树。旧存档没有该字段，读档时仅恢复脚本/Lua 状态。
+    #[serde(default)]
+    pub scene: Option<crate::compositor::Scene>,
+    /// 引擎侧音频播放状态。旧存档没有该字段时读档保持静音，等待脚本后续事件。
+    #[serde(default)]
+    pub audio: Option<AudioSnapshot>,
 }
 
 /// 调用栈帧快照（不依赖 asb-interpreter 的 CallFrame）。
@@ -129,7 +171,19 @@ impl SaveData {
                 .iter()
                 .map(CallFrameSnapshot::from)
                 .collect(),
+            scene: None,
+            audio: None,
         }
+    }
+
+    pub fn with_scene(mut self, scene: crate::compositor::Scene) -> Self {
+        self.scene = Some(scene);
+        self
+    }
+
+    pub fn with_audio(mut self, audio: AudioSnapshot) -> Self {
+        self.audio = Some(audio);
+        self
     }
 
     /// 将存档数据恢复到解释器。
@@ -145,5 +199,63 @@ impl SaveData {
             .map(CallFrame::from)
             .collect();
         interpreter.restore_position(&self.current_script, self.current_line, stack)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asb_interpreter::VariableStore;
+
+    #[test]
+    fn save_data_serializes_optional_scene_snapshot() {
+        let mut scene = crate::compositor::Scene::new();
+        scene.create("1.0", Some("bg/room".to_string()));
+        scene.set_props(
+            "1.0",
+            &std::collections::HashMap::from([("alpha".to_string(), "255".to_string())]),
+        );
+
+        let data = SaveData {
+            variables: VariableStore::new(),
+            current_script: "system/script.asb".to_string(),
+            current_line: 38,
+            call_stack: Vec::new(),
+            scene: Some(scene),
+            audio: Some(AudioSnapshot {
+                bgm: Some(AudioChannelSnapshot {
+                    id: "bgm".to_string(),
+                    file: "bgm01.ogg".to_string(),
+                    loop_play: true,
+                    gain: 800,
+                    pan: 0,
+                    skippable: false,
+                }),
+                se: Vec::new(),
+                voice: Vec::new(),
+            }),
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        let restored: SaveData = serde_json::from_str(&json).unwrap();
+        let scene = restored.scene.unwrap();
+        assert_eq!(scene.get("1.0").unwrap().file.as_deref(), Some("bg/room"));
+        assert_eq!(scene.get("1.0").unwrap().props.alpha, Some(255));
+        assert_eq!(
+            restored.audio.unwrap().bgm.unwrap().file,
+            "bgm01.ogg".to_string()
+        );
+    }
+
+    #[test]
+    fn save_data_accepts_legacy_files_without_scene() {
+        let json = r#"{
+            "variables": {"local": {}, "global": {}, "system": {}},
+            "current_script": "system/script.asb",
+            "current_line": 38,
+            "call_stack": []
+        }"#;
+        let restored: SaveData = serde_json::from_str(json).unwrap();
+        assert!(restored.scene.is_none());
+        assert!(restored.audio.is_none());
     }
 }

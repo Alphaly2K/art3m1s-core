@@ -182,6 +182,7 @@ impl AudioBackend for StubAudioBackend {
         let mut channel = SoundChannel::new(id, file, SoundCategory::Se);
         channel.playing = true;
         channel.loop_play = config.loop_play;
+        channel.skippable = config.skippable;
 
         if let Some(gain) = config.gain {
             channel.raw_gain = gain;
@@ -254,6 +255,7 @@ impl AudioBackend for StubAudioBackend {
         let mut channel = SoundChannel::new(id, file, SoundCategory::Voice);
         channel.playing = true;
         channel.loop_play = config.loop_play;
+        channel.skippable = config.skippable;
 
         if let Some(gain) = config.gain {
             channel.raw_gain = gain;

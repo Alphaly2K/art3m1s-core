@@ -7,6 +7,7 @@
 
 use crate::compositor::anim::Tween;
 use crate::compositor::props::LayerProps;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
@@ -14,7 +15,7 @@ use std::collections::HashMap;
 ///
 /// 节点既可能绑定了纹理资源（`file`），也可能只是一个用于分组/变换的空容器
 /// （只设了属性、没有 `file`）。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Layer {
     /// 完整点分 ID，如 `"1.0.-1"`。
     pub id: String,
@@ -35,7 +36,7 @@ pub struct Layer {
 /// 完全对应 Artemis `lyevent` 标签语义：命中后引擎执行 `handler` 标签（若有），
 /// 并跳转/调用到 `(file, label)`（若有），其余参数原样透传。引擎不认识其中任何
 /// 游戏函数名或参数含义。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LayerEventHandler {
     /// 命中时先就地执行的标签名（如 `"calllua"`）；`None` 表示不执行内联标签。
     pub handler: Option<String>,
@@ -100,7 +101,7 @@ fn compare_id_part(a: &str, b: &str) -> Ordering {
 ///
 /// 节点存在扁平的 `HashMap` 里（键为完整 ID），父子关系通过 ID 推导，子节点顺序
 /// 单独记录。根节点集合是没有父级的顶层 ID，按插入顺序排列。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Scene {
     nodes: HashMap<String, Layer>,
     /// 顶层节点 ID，按插入顺序——决定根层之间的绘制先后。
@@ -110,6 +111,10 @@ pub struct Scene {
 impl Scene {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn replace_with(&mut self, other: Scene) {
+        *self = other;
     }
 
     pub fn get(&self, id: &str) -> Option<&Layer> {
