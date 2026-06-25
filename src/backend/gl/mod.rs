@@ -149,6 +149,24 @@ impl GlRenderer {
         self.viewport_height = height as i32;
     }
 
+    /// 获取当前视口宽度。
+    pub fn viewport_width(&self) -> u32 {
+        self.viewport_width as u32
+    }
+
+    /// 获取当前视口高度。
+    pub fn viewport_height(&self) -> u32 {
+        self.viewport_height as u32
+    }
+
+    /// 设置舞台设计分辨率（用于投影矩阵）。
+    ///
+    /// 当加载不同分辨率的项目时调用，更新投影矩阵以匹配新的舞台尺寸。
+    pub fn set_stage_size(&mut self, width: u32, height: u32) {
+        self.stage_width = width as f32;
+        self.stage_height = height as f32;
+    }
+
     /// 把舞台像素坐标映射到 NDC 的正交投影（行主序 3x3，列向量约定）。
     ///
     /// 舞台：x∈[0,W] 映射到 [-1,1]，y∈[0,H] 映射到 [1,-1]（Y 翻转，原点左上）。

@@ -86,6 +86,16 @@ impl std::fmt::Debug for Compositor {
 
 impl Default for Compositor {
     fn default() -> Self {
+        Self::new_with_stage_size(1280, 720)
+    }
+}
+
+impl Compositor {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn new_with_stage_size(stage_width: u32, stage_height: u32) -> Self {
         let audio_backend = {
             #[cfg(feature = "audio-backend")]
             {
@@ -102,7 +112,7 @@ impl Default for Compositor {
             #[cfg(feature = "video-backend")]
             {
                 crate::core_debug!("[Video] 使用 FFmpeg 视频后端");
-                Some(Box::new(crate::video::FfmpegBackend::new()) as Box<dyn VideoBackend>)
+                Some(Box::new(crate::video::FfmpegBackend::new(stage_width, stage_height)) as Box<dyn VideoBackend>)
             }
             #[cfg(not(feature = "video-backend"))]
             {
@@ -124,10 +134,6 @@ impl Default for Compositor {
 }
 
 impl Compositor {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn scene(&self) -> &Scene {
         &self.scene
     }

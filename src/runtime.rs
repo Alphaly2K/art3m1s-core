@@ -34,8 +34,8 @@ struct ScreenshotBuffer {
 pub struct CoreRuntime {
     gl: Rc<glow::Context>,
     gl_ctx: Box<dyn platform::GLPlatformContext>,
-    _fbo: glow::Framebuffer,
-    _fbo_tex: glow::Texture,
+    fbo: glow::Framebuffer,
+    fbo_tex: glow::Texture,
 
     renderer: GlRenderer,
     texture_provider: GlTextureProvider,
@@ -85,7 +85,7 @@ impl CoreRuntime {
 
         let texture_provider = GlTextureProvider::new(gl.clone()).with_ffi_source();
 
-        let compositor = Compositor::new();
+        let compositor = Compositor::new_with_stage_size(stage_width, stage_height);
         let interpreter =
             asb_interpreter::Interpreter::new(asb_interpreter::InterpreterConfig::default());
 
@@ -97,8 +97,8 @@ impl CoreRuntime {
         Ok(Self {
             gl,
             gl_ctx: gl_ctx,
-            _fbo: fbo,
-            _fbo_tex: fbo_tex,
+            fbo,
+            fbo_tex,
             renderer,
             texture_provider,
             compositor,
@@ -120,13 +120,46 @@ impl CoreRuntime {
         })
     }
 
+    /// 重新创建 FBO 并更新渲染器的 viewport/projection。
+    /// 当舞台尺寸改变时调用（例如加载不同分辨率的项目）。
+    fn resize_stage(&mut self, new_width: u32, new_height: u32) -> Result<(), String> {
+        // 删除旧的 FBO 和纹理
+        unsafe {
+            self.gl.delete_framebuffer(self.fbo);
+            self.gl.delete_texture(self.fbo_tex);
+        }
+
+        // 创建新的 FBO
+        let (new_fbo, new_fbo_tex) = unsafe {
+            platform::create_fbo_target(&self.gl, new_width as i32, new_height as i32)
+                .map_err(|e| format!("重新创建 FBO 失败: {e}"))?
+        };
+
+        self.fbo = new_fbo;
+        self.fbo_tex = new_fbo_tex;
+        self.stage_w = new_width;
+        self.stage_h = new_height;
+
+        // 更新渲染器的 viewport 和 projection
+        self.renderer.set_viewport_size(new_width, new_height);
+        self.renderer.set_stage_size(new_width, new_height);
+
+        Ok(())
+    }
+
     /// Load a project from an in-memory system.ini string.
     pub fn load_project(&mut self, ini_content: &str, platform: &str) -> Result<(), String> {
         let project =
             Project::open_from_data("", ini_content, platform).map_err(|e| e.to_string())?;
 
-        self.stage_w = project.config().stage_width;
-        self.stage_h = project.config().stage_height;
+        let new_width = project.config().stage_width;
+        let new_height = project.config().stage_height;
+
+        // 如果分辨率改变，重新创建 FBO 和更新渲染器
+        if new_width != self.stage_w || new_height != self.stage_h {
+            self.resize_stage(new_width, new_height)?;
+        }
+
         self.project_savepath = project.config().savepath.clone();
         self.save_screenshot = None;
         self.interpreter = project.create_interpreter();
@@ -266,6 +299,19 @@ impl CoreRuntime {
             .map_err(|e| e.to_string())?;
 
         Ok(())
+    }
+
+    pub fn stage_width(&self) -> u32 {
+        self.stage_w
+    }
+
+    pub fn stage_height(&self) -> u32 {
+        self.stage_h
+    }
+
+    /// 返回一帧像素数据的字节数（width * height * 4）。
+    pub fn pixel_buffer_size(&self) -> usize {
+        (self.stage_w * self.stage_h * 4) as usize
     }
 
     pub fn feed_mouse(&self, x: i32, y: i32) {
@@ -570,6 +616,11 @@ impl CoreRuntime {
             }
         }
 
+        // 绑定 FBO，渲染到纹理而不是默认帧缓冲
+        unsafe {
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
+        }
+
         self.compositor
             .render(&mut self.renderer, &mut self.texture_provider);
         let mut used_files = self.compositor.scene().collect_files();
@@ -580,8 +631,15 @@ impl CoreRuntime {
             self.gl.finish();
         }
 
-        let pixels =
-            unsafe { platform::read_pixels(&self.gl, self.stage_w as i32, self.stage_h as i32) };
+        // 从 FBO 读取像素（使用 glReadPixels，对所有后端都可靠）
+        let pixels = unsafe {
+            platform::read_pixels(&self.gl, self.stage_w as i32, self.stage_h as i32)
+        };
+
+        // 解绑 FBO
+        unsafe {
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        }
 
         self.input.lock().unwrap().clear_edges();
 
@@ -797,11 +855,18 @@ impl CoreRuntime {
     }
 
     fn capture_save_screenshot(&mut self) {
+        // 确保 FBO 已绑定并渲染完成
         unsafe {
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
             self.gl.finish();
         }
-        let rgba =
-            unsafe { platform::read_pixels(&self.gl, self.stage_w as i32, self.stage_h as i32) };
+        // 从 FBO 读取像素（使用 glReadPixels，对所有后端都可靠）
+        let rgba = unsafe {
+            platform::read_pixels(&self.gl, self.stage_w as i32, self.stage_h as i32)
+        };
+        unsafe {
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        }
         self.save_screenshot = Some(ScreenshotBuffer {
             width: self.stage_w,
             height: self.stage_h,

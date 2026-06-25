@@ -15,6 +15,10 @@ pub struct FfmpegBackend {
     decoder: Option<VideoDecoder>,
     /// 视频完成事件队列
     finish_queue: VecDeque<VideoFinishEvent>,
+    /// 舞台宽度（用于模拟解码器）
+    stage_width: u32,
+    /// 舞台高度（用于模拟解码器）
+    stage_height: u32,
 }
 
 /// 视频解码器状态
@@ -62,12 +66,14 @@ struct VideoDecoder {
 }
 
 impl FfmpegBackend {
-    pub fn new() -> Self {
+    pub fn new(stage_width: u32, stage_height: u32) -> Self {
         ffmpeg::init().unwrap_or(());
         Self {
             state: VideoState::default(),
             decoder: None,
             finish_queue: VecDeque::new(),
+            stage_width,
+            stage_height,
         }
     }
 
@@ -211,8 +217,8 @@ impl FfmpegBackend {
 
     /// 创建模拟解码器（用于加载失败的情况）
     fn create_mock_decoder(&mut self, id: &str, file: &str, loop_play: bool) -> bool {
-        let width = 1280;
-        let height = 720;
+        let width = self.stage_width;
+        let height = self.stage_height;
         let duration_ms = 5000;
 
         crate::core_info!(

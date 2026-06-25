@@ -652,9 +652,9 @@ pub unsafe fn create_fbo_target(
             .create_texture()
             .map_err(|e| format!("create_texture: {e}"))?;
         gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-        // Use GL_RGBA for both internalformat and format — required by
-        // GLES 2.0 and ANGLE Metal/GL backends (sized formats like RGBA8
-        // are GLES 3.0+ only).
+        // Use GL_RGBA for both internalformat and format. This is the GLES 2.0
+        // compatible path and avoids ANGLE/Metal treating sized desktop formats
+        // differently from the ES context we create below.
         gl.tex_image_2d(
             glow::TEXTURE_2D,
             0,
@@ -723,7 +723,10 @@ pub unsafe fn read_pixels(gl: &glow::Context, width: i32, height: i32) -> Vec<u8
     let row_bytes = (width * 4) as usize;
     let total = row_bytes * height as usize;
     let mut buf = vec![0u8; total];
+
     unsafe {
+        gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
+
         gl.read_pixels(
             0,
             0,
@@ -734,6 +737,8 @@ pub unsafe fn read_pixels(gl: &glow::Context, width: i32, height: i32) -> Vec<u8
             glow::PixelPackData::Slice(Some(&mut buf)),
         );
     }
+
+    // 垂直翻转（OpenGL 原点在左下，我们需要左上）
     let mut tmp = vec![0u8; row_bytes];
     for y in 0..(height / 2) as usize {
         let top = y * row_bytes;
@@ -744,4 +749,11 @@ pub unsafe fn read_pixels(gl: &glow::Context, width: i32, height: i32) -> Vec<u8
         right[..row_bytes].copy_from_slice(&tmp);
     }
     buf
+}
+
+/// 从当前绑定的 FBO 读取像素（原点在左上，Y 向下）。
+///
+/// 与 [`read_pixels`] 相同，但语义上明确表示从 FBO 读取。
+pub unsafe fn read_pixels_from_fbo(gl: &glow::Context, width: i32, height: i32) -> Vec<u8> {
+    unsafe { read_pixels(gl, width, height) }
 }

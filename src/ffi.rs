@@ -365,6 +365,30 @@ pub unsafe extern "C" fn art3m1s_runtime_destroy(rt: *mut CoreRuntime) {
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_stage_width(rt: *const CoreRuntime) -> u32 {
+    if rt.is_null() {
+        return 0;
+    }
+    unsafe { &*rt }.stage_width()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_stage_height(rt: *const CoreRuntime) -> u32 {
+    if rt.is_null() {
+        return 0;
+    }
+    unsafe { &*rt }.stage_height()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_pixel_buffer_size(rt: *const CoreRuntime) -> u32 {
+    if rt.is_null() {
+        return 0;
+    }
+    unsafe { &*rt }.pixel_buffer_size() as u32
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_advance_and_render(
     rt: *mut CoreRuntime,
     delta_ms: u32,
