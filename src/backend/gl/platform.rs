@@ -94,7 +94,7 @@ pub fn create_offscreen_context(
 fn create_cgl() -> Result<(Rc<glow::Context>, Box<dyn GLPlatformContext>), String> {
     mod imp {
         use super::GLPlatformContext;
-        use std::ffi::{CString, c_int, c_uint, c_void};
+        use std::ffi::{CString, c_char, c_int, c_uint, c_void};
         use std::rc::Rc;
 
         type CGLError = c_int;
@@ -120,8 +120,8 @@ fn create_cgl() -> Result<(Rc<glow::Context>, Box<dyn GLPlatformContext>), Strin
         }
 
         unsafe extern "C" {
-            fn dlopen(path: *const i8, mode: c_int) -> *mut c_void;
-            fn dlsym(h: *mut c_void, sym: *const i8) -> *const c_void;
+            fn dlopen(path: *const c_char, mode: c_int) -> *mut c_void;
+            fn dlsym(h: *mut c_void, sym: *const c_char) -> *const c_void;
         }
 
         pub struct Ctx {
@@ -210,7 +210,7 @@ fn create_egl(
 ) -> Result<(Rc<glow::Context>, Box<dyn GLPlatformContext>), String> {
     mod egl {
         use super::GLPlatformContext;
-        use std::ffi::{CString, c_int, c_uint, c_void};
+        use std::ffi::{CString, c_char, c_int, c_uint, c_void};
         use std::rc::Rc;
 
         type EGLBoolean = c_uint;
@@ -239,8 +239,8 @@ fn create_egl(
         const EGL_OPENGL_ES_API: EGLint = 0x30A0;
 
         unsafe extern "C" {
-            fn dlopen(path: *const i8, mode: c_int) -> *mut c_void;
-            fn dlsym(h: *mut c_void, sym: *const i8) -> *const c_void;
+            fn dlopen(path: *const c_char, mode: c_int) -> *mut c_void;
+            fn dlsym(h: *mut c_void, sym: *const c_char) -> *const c_void;
         }
 
         // dlopen 标志位：RTLD_LAZY=1 / RTLD_NOW=2 是 POSIX；RTLD_GLOBAL 在
@@ -361,7 +361,7 @@ fn create_egl(
                 #[cfg(target_os = "linux")]
                 {
                     let gl_lib = dlopen(
-                        c"libGL.so.1".as_ptr() as *const i8,
+                        c"libGL.so.1".as_ptr(),
                         RTLD_NOW | RTLD_GLOBAL,
                     );
                     if gl_lib.is_null() {
@@ -375,11 +375,14 @@ fn create_egl(
                 // RTLD_GLOBAL 让 EGL/GL 跨库共享符号。
                 let egl_name = if cfg!(target_os = "macos") {
                     crate::ffi::angle_lib_path("libEGL.dylib")
+                } else if cfg!(target_os = "android") {
+                    // Android 系统自带 libEGL.so，无需 ANGLE。
+                    "libEGL.so".to_string()
                 } else if cfg!(target_os = "linux") {
                     // 优先加载带版本号的 .so.1（mesa 标准）；fallback 到 libEGL.so。
                     let versioned = "libEGL.so.1";
                     let probe = CString::new(versioned).unwrap();
-                    let h = dlopen(probe.as_ptr() as *const i8, RTLD_LAZY);
+                    let h = dlopen(probe.as_ptr(), RTLD_LAZY);
                     if !h.is_null() {
                         versioned.to_string()
                     } else {
@@ -388,13 +391,13 @@ fn create_egl(
                 } else {
                     crate::ffi::angle_lib_path("libEGL.dll")
                 };
-                let egl_mode = if cfg!(target_os = "linux") {
+                let egl_mode = if cfg!(target_os = "linux") || cfg!(target_os = "android") {
                     RTLD_NOW | RTLD_GLOBAL
                 } else {
                     RTLD_LAZY
                 };
                 let egl_lib = dlopen(
-                    CString::new(egl_name.as_str()).unwrap().as_ptr() as *const i8,
+                    CString::new(egl_name.as_str()).unwrap().as_ptr(),
                     egl_mode,
                 );
                 if egl_lib.is_null() {
@@ -412,11 +415,11 @@ fn create_egl(
                 // ── Display 创建 ──────────────────────────────────────
                 // macOS/Windows ANGLE：优先 eglGetPlatformDisplay (EGL 1.5)，再试
                 //   eglGetPlatformDisplayEXT（ANGLE 扩展别名）；都失败则退回 eglGetDisplay。
-                // Linux mesa：mesa libEGL 不支持 ANGLE 的 EGL_PLATFORM_ANGLE_* 属性，
+                // Linux/Android mesa：mesa libEGL 不支持 ANGLE 的 EGL_PLATFORM_ANGLE_* 属性，
                 //   走 eglGetPlatformDisplay 反而会返回 NULL 并在 ld.so 留下
                 //   "eglGetPlatformDisplayEXT undefined symbol (fatal)" 噪音。
                 //   直接用 eglGetDisplay(EGL_DEFAULT_DISPLAY) 即可。
-                let display = if cfg!(target_os = "linux") {
+                let display = if cfg!(target_os = "linux") || cfg!(target_os = "android") {
                     egl_get_display(EGL_DEFAULT_DISPLAY)
                 } else {
                     let angle_type = match backend {
@@ -566,11 +569,14 @@ fn create_egl(
                 // dispatch 层找到已预加载的 libGL 桌面符号。
                 let gles_name = if cfg!(target_os = "macos") {
                     crate::ffi::angle_lib_path("libGLESv2.dylib")
+                } else if cfg!(target_os = "android") {
+                    // Android 系统自带 libGLESv2.so。
+                    "libGLESv2.so".to_string()
                 } else if cfg!(target_os = "linux") {
                     // 先尝试带版本号的 .so.2（mesa 标准命名）。
                     let versioned = "libGLESv2.so.2";
                     let probe = CString::new(versioned).unwrap();
-                    let h = dlopen(probe.as_ptr() as *const i8, RTLD_LAZY);
+                    let h = dlopen(probe.as_ptr(), RTLD_LAZY);
                     if !h.is_null() {
                         versioned.to_string()
                     } else {
@@ -579,13 +585,13 @@ fn create_egl(
                 } else {
                     crate::ffi::angle_lib_path("libGLESv2.dll")
                 };
-                let gles_mode = if cfg!(target_os = "linux") {
+                let gles_mode = if cfg!(target_os = "linux") || cfg!(target_os = "android") {
                     RTLD_NOW | RTLD_GLOBAL
                 } else {
                     RTLD_LAZY
                 };
                 let gles_lib = dlopen(
-                    CString::new(gles_name.as_str()).unwrap().as_ptr() as *const i8,
+                    CString::new(gles_name.as_str()).unwrap().as_ptr(),
                     gles_mode,
                 );
                 if gles_lib.is_null() {
@@ -596,7 +602,7 @@ fn create_egl(
                 // EGL 标准提供 eglGetProcAddress 取 GLES 函数；对桌面 GL 扩展符号
                 // mesa 可能返回 NULL，此时退回 dlsym(gles_lib)。
                 // macOS/ANGLE 上 dlsym 已经够用，保留原路径。
-                type EglGetProcAddress = unsafe extern "C" fn(*const i8) -> *const c_void;
+                type EglGetProcAddress = unsafe extern "C" fn(*const c_char) -> *const c_void;
                 let egl_get_proc_addr: Option<EglGetProcAddress> = {
                     let cs = CString::new("eglGetProcAddress").unwrap();
                     let ptr = dlsym(egl_lib, cs.as_ptr());

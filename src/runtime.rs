@@ -10,6 +10,7 @@ use crate::ffi_callbacks::{FfiCallbacks, InputSnapshot, MagicPathTable};
 use crate::text::GlyphTextRenderer;
 use crate::{Project, core_debug};
 use asb_interpreter::event::WaitReason;
+use asb_interpreter::tags::{ExecutionContext, TagHandler, TagResult};
 use asb_interpreter::{CallbackResult, Event, ExecutionResult};
 use glow::HasContext;
 use image::ImageEncoder;
@@ -22,6 +23,18 @@ use std::sync::{Arc, Mutex};
 const SAVEG_FILE: &str = "saveg.dat";
 /// `syssave()` 落盘的系统域文件名。
 const SYSTEM_FILE: &str = "system.dat";
+
+struct RuntimeResetHandler;
+
+impl TagHandler for RuntimeResetHandler {
+    fn execute(
+        &self,
+        ctx: &mut ExecutionContext<'_>,
+    ) -> asb_interpreter::Result<TagResult> {
+        ctx.variables.reset();
+        Ok(TagResult::Emit(Event::GoTitle))
+    }
+}
 
 #[derive(Clone)]
 struct ScreenshotBuffer {
@@ -163,6 +176,8 @@ impl CoreRuntime {
         self.project_savepath = project.config().savepath.clone();
         self.save_screenshot = None;
         self.interpreter = project.create_interpreter();
+        self.interpreter
+            .register_tag("reset", RuntimeResetHandler);
 
         // Wire callbacks
         let input_cb = Arc::clone(&self.input);
@@ -531,6 +546,12 @@ impl CoreRuntime {
                         crate::core_error!("[runtime] 读取存档失败 {}: {}", file, e);
                     }
                 }
+                Event::GoTitle => {
+                    crate::core_info!("[runtime] Event::GoTitle");
+                    if let Err(e) = self.handle_go_title() {
+                        crate::core_error!("[runtime] 返回标题失败: {}", e);
+                    }
+                }
                 Event::FileOperation {
                     command, target, ..
                 } if command == "delete" => {
@@ -854,6 +875,18 @@ impl CoreRuntime {
         Ok(())
     }
 
+    fn handle_go_title(&mut self) -> Result<(), String> {
+        self.compositor.reset_for_load();
+        self.hovered_layer = None;
+        self.save_screenshot = None;
+        self.timed_remaining_ms = 0;
+        self.wait_reason = None;
+        self.interpreter
+            .start("system/first.iet", "title")
+            .map_err(|e| format!("{e:?}"))?;
+        Ok(())
+    }
+
     fn capture_save_screenshot(&mut self) {
         // 确保 FBO 已绑定并渲染完成
         unsafe {
@@ -1137,6 +1170,11 @@ mod tests {
         ScreenshotBuffer, encode_png_rgba, qualify_save_path, resize_screenshot_rgba,
         sanitize_savepath,
     };
+    use asb_interpreter::{CallbackResult, Event, ExecutionResult, Interpreter};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
 
     #[test]
     fn save_paths_are_qualified_with_savepath_once() {
@@ -1186,6 +1224,33 @@ mod tests {
         let png = encode_png_rgba(&resized, 1, 1).unwrap();
         let decoded = image::load_from_memory(&png).unwrap().to_rgba8();
         assert_eq!(decoded.dimensions(), (1, 1));
+    }
+
+    #[test]
+    fn go_title_reset_triggers_event() {
+        let mut interpreter = Interpreter::new(asb_interpreter::InterpreterConfig::default());
+        interpreter.register_tag("reset", super::RuntimeResetHandler);
+        interpreter
+            .load_script(
+                "test",
+                r#"
+*main
+[reset]
+"#,
+            )
+            .unwrap();
+        interpreter.start("test", "main").unwrap();
+        let saw_go_title = Arc::new(AtomicBool::new(false));
+        let saw_go_title_c = Arc::clone(&saw_go_title);
+        interpreter.set_callback(move |event| {
+            if matches!(event, Event::GoTitle) {
+                saw_go_title_c.store(true, Ordering::SeqCst);
+            }
+            CallbackResult::Continue
+        });
+        let result = interpreter.run().unwrap();
+        assert!(matches!(result, ExecutionResult::Completed | ExecutionResult::Wait(_)));
+        assert!(saw_go_title.load(Ordering::SeqCst));
     }
 }
 

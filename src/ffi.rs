@@ -10,10 +10,22 @@ use std::sync::{Mutex, OnceLock};
 
 static DEBUG: OnceLock<bool> = OnceLock::new();
 
+/// 从 catch_unwind 的 payload 提取 panic message。
+fn panic_msg(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_set_debug(enabled: c_int) {
     let _ = DEBUG.set(enabled != 0);
 }
+
 
 pub fn debug_enabled() -> bool {
     DEBUG.get().copied().unwrap_or(false)
@@ -60,6 +72,20 @@ macro_rules! core_debug {
 macro_rules! core_error {
     ($($arg:tt)*) => { $crate::ffi::log("E", &format!($($arg)*)); };
 }
+
+/// Android 专用：初始化 ndk-context，让 cpal/oboe 等音频库能拿到 JavaVM 和 Activity。
+/// 必须在任何音频操作之前调用。`java_vm` 和 `context` 由 Flutter 端通过 JNI 获取后传入。
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_init_android(java_vm: *mut std::ffi::c_void, context: *mut std::ffi::c_void) {
+    if java_vm.is_null() || context.is_null() {
+        core_error!("art3m1s_init_android: null pointer (vm={java_vm:p}, ctx={context:p})");
+        return;
+    }
+    unsafe { ndk_context::initialize_android_context(java_vm, context) };
+    core_info!("art3m1s_init_android: ndk-context initialized");
+}
+
 
 // ── ANGLE library search path ──────────────────────────────────
 
@@ -291,11 +317,20 @@ use crate::runtime::CoreRuntime;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_create(w: u32, h: u32, backend: i32) -> *mut CoreRuntime {
+    // catch_unwind 防止 panic 跨越 extern "C" 边界导致 abort，
+    // 同时把 panic message 打印到日志方便定位。
     let b = crate::backend::gl::platform::GfxBackend::from_int(backend);
-    match CoreRuntime::create(w, h, b) {
-        Ok(rt) => Box::into_raw(Box::new(rt)),
-        Err(e) => {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        CoreRuntime::create(w, h, b)
+    }));
+    match result {
+        Ok(Ok(rt)) => Box::into_raw(Box::new(rt)),
+        Ok(Err(e)) => {
             core_error!("art3m1s_runtime_create: {e}");
+            std::ptr::null_mut()
+        }
+        Err(panic_info) => {
+            core_error!("art3m1s_runtime_create panicked: {}", panic_msg(&panic_info));
             std::ptr::null_mut()
         }
     }
@@ -317,10 +352,18 @@ pub unsafe extern "C" fn art3m1s_runtime_load_project(
     let Ok(plat) = (unsafe { std::ffi::CStr::from_ptr(platform).to_str() }) else {
         return -1;
     };
-    match rt.load_project(ini, plat) {
-        Ok(()) => 0,
-        Err(e) => {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rt.load_project(ini, plat)
+    }));
+    match result {
+        Ok(Ok(())) => 0,
+        Ok(Err(e)) => {
             core_error!("art3m1s_runtime_load_project: {e}");
+            -1
+        }
+        Err(panic_info) => {
+            let msg = panic_msg(&panic_info);
+            core_error!("art3m1s_runtime_load_project panicked: {msg}");
             -1
         }
     }
@@ -360,7 +403,9 @@ pub unsafe extern "C" fn art3m1s_runtime_feed_key(rt: *mut CoreRuntime, vk: u32,
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_destroy(rt: *mut CoreRuntime) {
     if !rt.is_null() {
-        drop(unsafe { Box::from_raw(rt) });
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(unsafe { Box::from_raw(rt) });
+        }));
     }
 }
 
@@ -399,12 +444,22 @@ pub unsafe extern "C" fn art3m1s_runtime_advance_and_render(
         return 0;
     }
     let rt = unsafe { &mut *rt };
-    let pixels = rt.advance_and_render(delta_ms as u64);
-    let to_copy = pixels.len().min(out_capacity as usize);
-    unsafe {
-        std::ptr::copy_nonoverlapping(pixels.as_ptr(), out_pixels, to_copy);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rt.advance_and_render(delta_ms as u64)
+    }));
+    match result {
+        Ok(pixels) => {
+            let to_copy = pixels.len().min(out_capacity as usize);
+            unsafe {
+                std::ptr::copy_nonoverlapping(pixels.as_ptr(), out_pixels, to_copy);
+            }
+            to_copy as u32
+        }
+        Err(panic_info) => {
+            core_error!("art3m1s_runtime_advance_and_render panicked: {}", panic_msg(&panic_info));
+            0
+        }
     }
-    to_copy as u32
 }
 
 #[unsafe(no_mangle)]

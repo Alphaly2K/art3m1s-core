@@ -119,6 +119,7 @@ dependencies = [
  "glutin-winit",
  "image",
  "mlua",
+ "ndk-context",
  "pfs-upk-rust",
  "raw-window-handle",
  "rodio",

@@ -6,7 +6,6 @@
 use crate::video::engine::*;
 use ffmpeg_next as ffmpeg;
 use std::collections::VecDeque;
-use std::io::Write;
 
 /// FFmpeg 视频后端。
 pub struct FfmpegBackend {
