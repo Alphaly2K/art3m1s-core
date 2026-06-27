@@ -4,9 +4,7 @@
 //! 尺寸，便于在不接 GPU 的情况下断言"哪张纹理被画了、按什么顺序、什么变换"。
 //! [`MockRenderer`] 把每帧收到的 [`DrawList`] 记录下来供断言。
 
-use crate::render_pipeline::draw::{
-    DrawList, Renderer, TextureId, TextureInfo, TextureProvider,
-};
+use crate::render_pipeline::draw::{DrawList, Renderer, TextureId, TextureInfo, TextureProvider};
 use std::collections::HashMap;
 
 /// mock 纹理统一使用的边长（像素）。

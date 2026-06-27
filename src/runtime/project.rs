@@ -1,7 +1,8 @@
 use super::CoreRuntime;
+use super::callbacks::FfiCallbacks;
+use super::magic_path;
 use crate::Project;
 use crate::backend::gl::GlTextureProvider;
-use crate::ffi_callbacks::{FfiCallbacks, MagicPathTable};
 use crate::runtime::save_io;
 use crate::text::GlyphTextRenderer;
 use asb_interpreter::tags::{ExecutionContext, TagHandler, TagResult};
@@ -68,7 +69,7 @@ impl CoreRuntime {
         let magic_paths_loader = Arc::clone(&self.magic_paths);
         self.interpreter
             .set_file_loader(Box::new(move |name: &str| {
-                let resolved = resolve_texture_path(&magic_paths_loader, name);
+                let resolved = magic_path::resolve_path(&magic_paths_loader, name);
                 crate::ffi::request_file(&resolved).map_err(|m| {
                     asb_interpreter::Error::IoError(std::io::Error::new(
                         std::io::ErrorKind::NotFound,
@@ -89,7 +90,7 @@ impl CoreRuntime {
         let magic_paths_tex = Arc::clone(&self.magic_paths);
         self.texture_provider =
             GlTextureProvider::new(gl_for_tex).with_source(move |name: &str| -> Option<Vec<u8>> {
-                let resolved = resolve_texture_path(&magic_paths_tex, name);
+                let resolved = magic_path::resolve_path(&magic_paths_tex, name);
                 for try_path in [format!("{resolved}.png"), resolved.clone()] {
                     match crate::ffi::request_asset(&try_path) {
                         Some(bytes) => {
@@ -179,28 +180,6 @@ impl CoreRuntime {
         // 必须在 start_boot 之前，且在 s.savepath 种好之后（save_path_for 依赖它）。
         self.sysload();
     }
-}
-
-/// Resolve a texture name that may contain Artemis `:prefix/rest` magic
-/// path notation into a plain relative path suitable for the FFI file
-/// reader callback.
-///
-/// - `:bg/room` → lookup "bg" in the magic-path table → `image/bg/room`
-/// - `:fa/char` → lookup "fa" → `image/fg/char`
-/// - `image/thumb/xxx` → passed through as-is
-///
-/// The table is populated by the script engine during boot (via
-/// `e:setMagicPath`).  Names without a `:` prefix are returned unchanged.
-fn resolve_texture_path(table: &MagicPathTable, name: &str) -> String {
-    if let Some(rest) = name.strip_prefix(':') {
-        let (ns, tail) = rest.split_once('/').unwrap_or((rest, ""));
-        let map = table.lock().unwrap();
-        if let Some(prefix) = map.get(ns) {
-            return format!("{prefix}/{tail}");
-        }
-        return format!("image/{rest}");
-    }
-    name.to_string()
 }
 
 #[cfg(test)]

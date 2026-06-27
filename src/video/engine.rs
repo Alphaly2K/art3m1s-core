@@ -214,5 +214,4 @@ pub trait VideoBackend {
 
     /// 获取当前视频状态（可变）。
     fn video_state_mut(&mut self) -> &mut VideoState;
-
 }

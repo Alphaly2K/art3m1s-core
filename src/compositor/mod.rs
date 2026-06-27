@@ -22,12 +22,12 @@ pub mod props;
 pub mod reduce;
 pub mod scene;
 
-pub use anim::{Easing, Tween, TweenHandler};
-pub use events::{CompositorEvent, IntoCompositorEvent};
-pub use props::LayerProps;
-pub use reduce::Compositor;
 pub use crate::render_pipeline::draw::{
     BlendMode, ColorFilter, DrawCommand, DrawList, Renderer, TextureId, TextureInfo,
     TextureProvider,
 };
+pub use anim::{Easing, Tween, TweenHandler};
+pub use events::{CompositorEvent, IntoCompositorEvent};
+pub use props::LayerProps;
+pub use reduce::Compositor;
 pub use scene::{Layer, Scene};

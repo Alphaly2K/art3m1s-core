@@ -274,7 +274,7 @@ impl SaveData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::{AudioBackend, BgmConfig, SeConfig, AudioStateBackend};
+    use crate::audio::{AudioBackend, AudioStateBackend, BgmConfig, SeConfig};
     use asb_interpreter::VariableStore;
 
     #[test]

@@ -1,7 +1,7 @@
 use super::CoreRuntime;
 use crate::backend::gl::platform;
-use crate::render_pipeline::draw::{Renderer, TextureProvider};
 use crate::render_pipeline::RenderPipeline;
+use crate::render_pipeline::draw::{Renderer, TextureProvider};
 use glow::HasContext;
 
 impl CoreRuntime {

@@ -34,15 +34,7 @@ impl CoreRuntime {
     }
 
     fn resolve_magic_media_path(&self, name: &str) -> String {
-        if let Some(rest) = name.strip_prefix(':') {
-            let (ns, tail) = rest.split_once('/').unwrap_or((rest, ""));
-            let map = self.magic_paths.lock().unwrap();
-            if let Some(prefix) = map.get(ns) {
-                return format!("{prefix}/{tail}");
-            }
-            return format!("image/{rest}");
-        }
-        name.to_string()
+        super::magic_path::resolve_path(&self.magic_paths, name)
     }
 
     pub(super) fn stop_all_media(&mut self) {

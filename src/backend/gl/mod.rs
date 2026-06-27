@@ -27,8 +27,8 @@ pub mod platform;
 mod provider;
 mod shader;
 
-pub use provider::{AssetSource, GlTextureProvider, PlaceholderKind};
 pub use crate::render_pipeline::ShaderProfile;
+pub use provider::{AssetSource, GlTextureProvider, PlaceholderKind};
 
 /// GLES 渲染器：持有 GL 程序、四边形几何与舞台尺寸。
 ///

@@ -125,7 +125,6 @@ impl VideoBackend for VideoStateBackend {
     fn video_state_mut(&mut self) -> &mut VideoState {
         &mut self.state
     }
-
 }
 
 #[cfg(test)]

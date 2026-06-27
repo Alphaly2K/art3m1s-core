@@ -1,26 +1,24 @@
-//! Standard [`EngineCallbacks`] implementation that routes everything
-//! through the FFI bridge — zero direct filesystem access.
+//! Runtime [`EngineCallbacks`] implementation backed by the FFI bridge.
+//!
+//! This module is runtime plumbing: it adapts script-engine callbacks to host
+//! FFI services for input, file access, magic paths, and volume changes.
 
 use asb_interpreter::lua_engine::EngineCallbacks;
 use std::collections::HashMap;
-use std::sync::Mutex;
 
+use super::magic_path;
 use crate::ffi;
 
-/// Magic path table shared between callbacks and texture source.
-pub type MagicPathTable = Mutex<HashMap<String, String>>;
-
 /// Engine callbacks that use the FFI bridge for all file access.
-pub struct FfiCallbacks {
+pub(super) struct FfiCallbacks {
     pub input: std::sync::Arc<std::sync::Mutex<InputSnapshot>>,
-    pub magic_paths: std::sync::Arc<MagicPathTable>,
+    pub magic_paths: std::sync::Arc<magic_path::MagicPathTable>,
     pub volumes: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, f32>>>,
 }
 
-/// Minimal input state snapshot (mirrors the winit version but without
-/// winit dependency).
+/// Minimal input state snapshot mirrored from the host event loop.
 #[derive(Default)]
-pub struct InputSnapshot {
+pub(super) struct InputSnapshot {
     pub mouse_x: i32,
     pub mouse_y: i32,
     pub clicked: bool,
@@ -35,6 +33,7 @@ impl InputSnapshot {
         self.keys_down_edge.clear();
         self.keys_up_edge.clear();
     }
+
     fn key_down(&self, vk: u32) -> bool {
         self.key_overrides
             .get(&vk)
@@ -65,12 +64,15 @@ impl EngineCallbacks for FfiCallbacks {
     fn is_key_down(&self, key_id: u32) -> bool {
         self.input.lock().unwrap().key_down(key_id)
     }
+
     fn is_key_down_edge(&self, key_id: u32) -> bool {
         self.input.lock().unwrap().keys_down_edge.contains(&key_id)
     }
+
     fn is_key_up_edge(&self, key_id: u32) -> bool {
         self.input.lock().unwrap().keys_up_edge.contains(&key_id)
     }
+
     fn override_key(&self, from: u32, to: u32) {
         let mut s = self.input.lock().unwrap();
         if to == 0 {
@@ -79,27 +81,31 @@ impl EngineCallbacks for FfiCallbacks {
             s.key_overrides.insert(from, true);
         }
     }
+
     fn is_decide(&self) -> bool {
         self.input.lock().unwrap().clicked
     }
+
     fn get_mouse_point(&self) -> (i32, i32) {
         let s = self.input.lock().unwrap();
         (s.mouse_x, s.mouse_y)
     }
+
     fn get_touch_count(&self) -> u32 {
         0
     }
+
     fn get_touch_point(&self, _index: u32) -> (i32, i32) {
         (0, 0)
     }
 
     fn is_file_exists(&self, path: &str) -> bool {
-        let resolved = resolve_magic(&self.magic_paths, path);
+        let resolved = magic_path::resolve_path(&self.magic_paths, path);
         ffi::query_asset_size(&resolved).is_some()
     }
 
     fn load_png_comments(&self, path: &str) -> Option<HashMap<String, String>> {
-        let resolved = resolve_magic(&self.magic_paths, path);
+        let resolved = magic_path::resolve_path(&self.magic_paths, path);
         let bytes = ffi::request_asset(&resolved)?;
         let comments = parse_png_text_chunks(&bytes);
         if comments.is_empty() {
@@ -110,7 +116,7 @@ impl EngineCallbacks for FfiCallbacks {
     }
 
     fn file_operation(&self, command: &str, params: HashMap<String, String>) {
-        let _ = (command, params); // delegate to frontend via FFI
+        let _ = (command, params);
     }
 
     fn set_master_volume(&self, volume: f32) {
@@ -119,18 +125,21 @@ impl EngineCallbacks for FfiCallbacks {
             .unwrap()
             .insert("master".to_string(), volume);
     }
+
     fn set_bgm_volume(&self, volume: f32) {
         self.volumes
             .lock()
             .unwrap()
             .insert("bgm".to_string(), volume);
     }
+
     fn set_se_volume(&self, volume: f32) {
         self.volumes
             .lock()
             .unwrap()
             .insert("se".to_string(), volume);
     }
+
     fn set_voice_volume(&self, volume: f32) {
         self.volumes
             .lock()
@@ -151,22 +160,7 @@ impl EngineCallbacks for FfiCallbacks {
     }
 }
 
-/// Resolve `:name/rest` magic paths through the magic-path table,
-/// falling back to `image/rest` when the prefix is not registered.
-fn resolve_magic(table: &std::sync::Arc<MagicPathTable>, name: &str) -> String {
-    if let Some(rest) = name.strip_prefix(':') {
-        let (ns, tail) = rest.split_once('/').unwrap_or((rest, ""));
-        let map = table.lock().unwrap();
-        if let Some(prefix) = map.get(ns) {
-            return format!("{prefix}/{tail}");
-        }
-        return format!("image/{rest}");
-    }
-    name.to_string()
-}
-
-/// Parse PNG tEXt chunks into `keyword → text` map.
-/// Used by `load_png_comments` to extract positioning metadata.
+/// Parse PNG tEXt chunks into `keyword -> text` map.
 fn parse_png_text_chunks(bytes: &[u8]) -> HashMap<String, String> {
     let mut out = HashMap::new();
     const SIG: usize = 8;

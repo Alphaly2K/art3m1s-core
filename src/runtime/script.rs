@@ -83,8 +83,7 @@ impl CoreRuntime {
             WaitReason::Stop {
                 reason: Some(r)
             } if r == "trans"
-        ) && !RenderPipeline::new(&self.compositor)
-            .is_transition_in_progress();
+        ) && !RenderPipeline::new(&self.compositor).is_transition_in_progress();
         if video_resume || trans_resume {
             self.wait_reason = None;
             return;

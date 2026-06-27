@@ -6,7 +6,6 @@ use crate::audio::AudioBackend;
 use crate::backend::gl::platform::{self, GfxBackend};
 use crate::backend::gl::{GlRenderer, GlTextureProvider, ShaderProfile};
 use crate::compositor::Compositor;
-use crate::ffi_callbacks::{InputSnapshot, MagicPathTable};
 use crate::text::TextRenderer;
 use crate::video::VideoBackend;
 use asb_interpreter::Event;
@@ -16,8 +15,10 @@ use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
+mod callbacks;
 mod events;
 mod input;
+mod magic_path;
 mod media;
 mod project;
 mod render;
@@ -38,10 +39,10 @@ pub struct CoreRuntime {
     audio: Box<dyn AudioBackend>,
     video: Box<dyn VideoBackend>,
     interpreter: asb_interpreter::Interpreter,
-    input: Arc<Mutex<InputSnapshot>>,
+    input: Arc<Mutex<callbacks::InputSnapshot>>,
     events: Arc<Mutex<Vec<Event>>>,
     video_finished: Arc<AtomicBool>,
-    magic_paths: Arc<MagicPathTable>,
+    magic_paths: Arc<magic_path::MagicPathTable>,
 
     stage_w: u32,
     stage_h: u32,
@@ -88,10 +89,10 @@ impl CoreRuntime {
         let interpreter =
             asb_interpreter::Interpreter::new(asb_interpreter::InterpreterConfig::default());
 
-        let input = Arc::new(Mutex::new(InputSnapshot::default()));
+        let input = Arc::new(Mutex::new(callbacks::InputSnapshot::default()));
         let events = Arc::new(Mutex::new(Vec::new()));
         let video_finished = Arc::new(AtomicBool::new(false));
-        let magic_paths: Arc<MagicPathTable> = Arc::new(Mutex::new(HashMap::new()));
+        let magic_paths: Arc<magic_path::MagicPathTable> = Arc::new(Mutex::new(HashMap::new()));
 
         Ok(Self {
             gl,

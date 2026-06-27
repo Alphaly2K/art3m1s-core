@@ -6,10 +6,10 @@
 //! 顺序）排列——也就是从底到顶的绘制次序。
 
 use crate::compositor::props::LayerProps;
+use crate::compositor::scene::Scene;
 use crate::render_pipeline::draw::{
     BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, TextureProvider,
 };
-use crate::compositor::scene::Scene;
 use glam::{Affine2, Vec2};
 
 /// 在时刻 `now_ms` 把 `scene` 构建成一帧绘制列表。
