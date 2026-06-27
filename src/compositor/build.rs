@@ -6,7 +6,7 @@
 //! 顺序）排列——也就是从底到顶的绘制次序。
 
 use crate::compositor::props::LayerProps;
-use crate::compositor::renderer::{
+use crate::render_pipeline::draw::{
     BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, TextureProvider,
 };
 use crate::compositor::scene::Scene;

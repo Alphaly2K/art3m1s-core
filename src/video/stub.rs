@@ -126,15 +126,6 @@ impl VideoBackend for StubVideoBackend {
         &mut self.state
     }
 
-    fn get_frame(&mut self, _id: &str) -> Option<&[u8]> {
-        // 存根模式：没有实际帧数据
-        None
-    }
-
-    fn get_fullscreen_frame(&mut self) -> Option<&[u8]> {
-        // 存根模式：没有实际帧数据
-        None
-    }
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 //!
 //! 在真实字体后端就绪前用于编译/测试，不产生任何绘制输出。
 
-use crate::compositor::renderer::{DrawCommand, TextureId};
+use crate::render_pipeline::draw::{DrawCommand, TextureId};
 use crate::text::render::{FontState, GlyphInfo, ScetweenConfig, TextRenderer};
 use std::collections::HashMap;
 
@@ -101,7 +101,7 @@ impl TextRenderer for StubTextRenderer {
 
     fn build_text_commands(
         &mut self,
-        _provider: &mut dyn crate::compositor::renderer::TextureProvider,
+        _provider: &mut dyn crate::render_pipeline::draw::TextureProvider,
     ) -> HashMap<String, Vec<DrawCommand>> {
         HashMap::new()
     }

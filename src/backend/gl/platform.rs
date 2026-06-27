@@ -220,10 +220,8 @@ fn create_egl(
         type EGLSurface = *mut c_void;
         type EGLint = i32;
 
-        const EGL_SUCCESS: EGLint = 0x3000;
         const EGL_NONE: EGLint = 0x3038;
         const EGL_RENDERABLE_TYPE: EGLint = 0x3040;
-        const EGL_OPENGL_ES3_BIT: EGLint = 0x0040;
         const EGL_OPENGL_ES2_BIT: EGLint = 0x0004;
         const EGL_SURFACE_TYPE: EGLint = 0x3033;
         const EGL_PBUFFER_BIT: EGLint = 0x0001;
@@ -231,8 +229,6 @@ fn create_egl(
         const EGL_GREEN_SIZE: EGLint = 0x3023;
         const EGL_RED_SIZE: EGLint = 0x3024;
         const EGL_ALPHA_SIZE: EGLint = 0x3021;
-        const EGL_DEPTH_SIZE: EGLint = 0x3025;
-        const EGL_STENCIL_SIZE: EGLint = 0x3026;
         const EGL_WIDTH: EGLint = 0x3057;
         const EGL_HEIGHT: EGLint = 0x3056;
         const EGL_DEFAULT_DISPLAY: EGLint = 0;
@@ -360,13 +356,10 @@ fn create_egl(
                 // 并标为 fatal，导致后续 GL 调用 SIGSEGV。
                 #[cfg(target_os = "linux")]
                 {
-                    let gl_lib = dlopen(
-                        c"libGL.so.1".as_ptr(),
-                        RTLD_NOW | RTLD_GLOBAL,
-                    );
+                    let gl_lib = dlopen(c"libGL.so.1".as_ptr(), RTLD_NOW | RTLD_GLOBAL);
                     if gl_lib.is_null() {
                         return Err(
-                            "libGL.so.1 not found — install mesa/libGL (e.g. libglvnd)".into(),
+                            "libGL.so.1 not found — install mesa/libGL (e.g. libglvnd)".into()
                         );
                     }
                 }
@@ -396,10 +389,7 @@ fn create_egl(
                 } else {
                     RTLD_LAZY
                 };
-                let egl_lib = dlopen(
-                    CString::new(egl_name.as_str()).unwrap().as_ptr(),
-                    egl_mode,
-                );
+                let egl_lib = dlopen(CString::new(egl_name.as_str()).unwrap().as_ptr(), egl_mode);
                 if egl_lib.is_null() {
                     return Err("libEGL not found — install mesa EGL or bundle ANGLE".into());
                 }
@@ -609,7 +599,7 @@ fn create_egl(
                     if ptr.is_null() {
                         None
                     } else {
-                        Some(unsafe { std::mem::transmute(ptr) })
+                        Some(std::mem::transmute(ptr))
                     }
                 };
 
@@ -617,13 +607,13 @@ fn create_egl(
                     let cs = CString::new(s).unwrap();
                     // 1) 优先 eglGetProcAddress（EGL 标准；mesa/ANGLE 都支持）。
                     if let Some(f) = egl_get_proc_addr {
-                        let p = unsafe { f(cs.as_ptr()) };
+                        let p = f(cs.as_ptr());
                         if !p.is_null() {
                             return p;
                         }
                     }
                     // 2) 退回 dlsym（扩展名或 macOS 路径）。
-                    unsafe { dlsym(gles_lib, cs.as_ptr()) }
+                    dlsym(gles_lib, cs.as_ptr())
                 });
 
                 Ok((

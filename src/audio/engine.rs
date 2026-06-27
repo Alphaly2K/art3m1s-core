@@ -1,10 +1,9 @@
-//! 音频后端抽象。
+//! 音频逻辑状态与宿主音频协议。
 //!
-//! [`AudioBackend`] trait 定义了音频子系统的全部操作接口。后端实现方负责：
-//! 1. 加载并解码音频文件（WAV / Ogg Vorbis / MP3 等）
-//! 2. 管理 BGM / SE / Voice 三个独立通道组
-//! 3. 执行音量、声像的平滑过渡（淡入淡出）
-//! 4. 在声音播放完成时触发完成事件处理器
+//! Core only produces audio state changes and completion synchronization.  It
+//! does not stream PCM through Dart.  A production host should implement the
+//! actual audio sink on the native/host side (ring buffer or native pull
+//! callback), while Dart controls lifecycle and routes commands.
 //!
 //! ## 参数约定
 //! - gain: Artemis 原始增益值 0-1000，映射为线性增益 0.0-1.0+
@@ -12,10 +11,9 @@
 //! - time: 过渡时间，单位毫秒；0 表示即时生效
 //!
 //! ## 与合成器的关系
-//! 音频子系统与 [`crate::compositor::Compositor`] 平级，不直接依赖图形后端。
-//! 宿主在帧循环中把解释器的音频事件转发给 [`AudioBackend`] 实例，并每帧调用
-//! [`AudioBackend::advance`] 推进淡入淡出时钟，然后通过
-//! [`AudioBackend::poll_finish_events`] 获取待处理的声音完成事件。
+//! 音频子系统与 [`crate::compositor::Compositor`] 平级，不直接依赖图形或音频设备
+//! 后端。宿主在帧循环中推进 core 的逻辑时钟，并通过 host media command 执行真实
+//! 播放。
 
 use std::collections::HashMap;
 
@@ -292,16 +290,16 @@ impl Default for AudioState {
 // AudioBackend trait
 // ---------------------------------------------------------------------------
 
-/// 音频渲染后端。
+/// 音频逻辑状态后端。
 ///
-/// 实现方负责将逻辑音频状态映射到实际的音频输出设备。host 在帧循环中：
+/// 实现方维护 core 侧通道状态、淡入淡出和完成事件。真实输出设备由 host/native
+/// audio sink 负责。host 在帧循环中：
 /// 1. 把解释器的音频事件转发给 [`AudioBackend`] 的对应方法
 /// 2. 每帧调用 [`AudioBackend::advance`] 推进淡入淡出
 /// 3. 通过 [`AudioBackend::poll_finish_events`] 获取声音完成事件
 ///
 /// ## 计划实现
-/// - [`crate::audio::StubAudioBackend`]：无操作的存根实现，用于测试
-/// - 基于 `rodio` crate 的完整实现（计划中，通过 `audio-backend` feature 启用）
+/// - [`crate::audio::StubAudioBackend`]：无操作的逻辑状态实现，用于测试和 runtime
 pub trait AudioBackend {
     // -----------------------------------------------------------------------
     // BGM 操作

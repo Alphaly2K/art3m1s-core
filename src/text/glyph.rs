@@ -1,6 +1,6 @@
 //! 基于 ab_glyph 的字形光栅化文本渲染器。
 
-use crate::compositor::renderer::{
+use crate::render_pipeline::draw::{
     BlendMode, ClipRect, ColorFilter, DrawCommand, TextureId, TextureInfo, TextureProvider,
 };
 use crate::text::render::{FontState, GlyphInfo, ScetweenConfig, TextRenderer};

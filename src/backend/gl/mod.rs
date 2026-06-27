@@ -1,6 +1,6 @@
 //! 基于 glow 的 GLES 渲染后端。
 //!
-//! 这是合成器 [`crate::compositor::renderer`] 抽象的具体实现。它把每帧的
+//! 这是渲染管线 draw-list 抽象的具体实现。它把每帧的
 //! [`DrawList`](crate::compositor::DrawList) 翻译成 GLES 绘制调用：每条
 //! [`DrawCommand`](crate::compositor::DrawCommand) 用一个带纹理的四边形画出，
 //! 应用世界变换、不透明度、混合模式与颜色滤镜。
@@ -19,7 +19,7 @@
 //! 舞台坐标映射到 NDC，因此 [`DrawCommand::transform`] 可以直接当作像素空间的
 //! 仿射变换使用。
 
-use crate::compositor::renderer::{BlendMode, DrawCommand, DrawList, Renderer};
+use crate::render_pipeline::draw::{BlendMode, DrawCommand, DrawList, Renderer};
 use glow::HasContext;
 use std::rc::Rc;
 
@@ -28,7 +28,7 @@ mod provider;
 mod shader;
 
 pub use provider::{AssetSource, GlTextureProvider, PlaceholderKind};
-pub use shader::ShaderProfile;
+pub use crate::render_pipeline::ShaderProfile;
 
 /// GLES 渲染器：持有 GL 程序、四边形几何与舞台尺寸。
 ///

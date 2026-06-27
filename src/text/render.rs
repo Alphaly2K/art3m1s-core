@@ -3,7 +3,7 @@
 //! 后端实现 [`TextRenderer`] trait 来把解释器的文本事件翻译成绘制命令。
 
 use crate::compositor::anim::Easing;
-use crate::compositor::renderer::{DrawCommand, TextureProvider};
+use crate::render_pipeline::draw::{DrawCommand, TextureProvider};
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -188,7 +188,7 @@ pub struct GlyphInfo {
     /// UTF-8 字符序列
     pub character: String,
     /// 字形在 atlas 中的纹理 ID
-    pub texture_id: crate::compositor::renderer::TextureId,
+    pub texture_id: crate::render_pipeline::draw::TextureId,
     /// 字形在 atlas 中的像素位置与尺寸
     pub atlas_x: f32,
     pub atlas_y: f32,
@@ -353,6 +353,36 @@ impl Default for ScetweenConfig {
             delay_per_char: 0,
             time_per_char: 0,
             random_delay: false,
+            random_order: None,
+        }
+    }
+}
+
+impl ScetweenConfig {
+    /// 从 `TextAnimation` 事件参数构建逐字动画配置。
+    pub fn from_params(params: &HashMap<String, String>) -> Self {
+        let mode = params
+            .get("type")
+            .map(|s| ScetweenMode::from_str(s))
+            .unwrap_or(ScetweenMode::In);
+
+        let set_mode = match params.get("mode").map(|s| s.as_str()) {
+            Some("add") => ScetweenSetMode::Add,
+            _ => ScetweenSetMode::Init,
+        };
+
+        Self {
+            mode,
+            set_mode,
+            param: params.get("param").cloned(),
+            ease: Easing::parse(params.get("ease").map(|s| s.as_str()).unwrap_or("")),
+            diff: params.get("diff").and_then(|v| v.parse().ok()),
+            delay_per_char: params
+                .get("delay")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            time_per_char: params.get("time").and_then(|v| v.parse().ok()).unwrap_or(0),
+            random_delay: params.get("randomdelay").map(|v| v == "1").unwrap_or(false),
             random_order: None,
         }
     }

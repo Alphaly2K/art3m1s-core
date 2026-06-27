@@ -6,6 +6,7 @@
 
 use art3m1s_core::backend::gl::{GlRenderer, GlTextureProvider, ShaderProfile};
 use art3m1s_core::compositor::Compositor;
+use art3m1s_core::pipeline::CompositorPipeline;
 use art3m1s_core::save::{SaveData, SaveManager};
 use art3m1s_core::text::GlyphTextRenderer;
 use art3m1s_core::Project;
@@ -500,7 +501,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         eprintln!("字体文件未找到: {}", font_path.display());
     }
-    compositor.set_text_renderer(Box::new(text_renderer));
+    // Text rendering is owned by the runtime/frontend layer, not the compositor.
 
     // 设置事件收集器
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -881,42 +882,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // 推进动画时钟
                     compositor.advance(delta_ms);
 
-                    // 处理视频完成事件
-                    let video_finish_events = compositor.poll_video_finish_events();
-                    if !video_finish_events.is_empty() {
-                        eprintln!("[video] 收到 {} 个视频完成事件", video_finish_events.len());
-                    }
-                    for vf_event in video_finish_events {
-                        eprintln!("[video] 视频完成: id={:?}", vf_event.id);
-                        // 设置 video_finished 标志（向后兼容）
-                        video_finished.store(true, std::sync::atomic::Ordering::SeqCst);
-
-                        // 如果有注册的 handler，将其加入标签队列
-                        if let Some(handler) = vf_event.handler {
-                            eprintln!("[video] 触发视频完成处理器: handler={:?}, file={:?}, label={:?}",
-                                handler.handler, handler.file, handler.label);
-                            let ctx = interpreter.engine_context();
-                            let mut queue = ctx.lock().unwrap();
-                            if let Some(tag) = handler.handler {
-                                let mut params = std::collections::HashMap::new();
-                                if let Some(f) = handler.file { params.insert("file".to_string(), f); }
-                                if let Some(l) = handler.label { params.insert("label".to_string(), l); }
-                                queue.tag_queue.push((tag, params));
-                            }
-                            if handler.file.is_some() || handler.label.is_some() {
-                                let mut params = std::collections::HashMap::new();
-                                if let Some(f) = handler.file { params.insert("file".to_string(), f); }
-                                if let Some(l) = handler.label { params.insert("label".to_string(), l); }
-                                queue.tag_queue.push((
-                                    if handler.call { "call" } else { "jump" }.to_string(),
-                                    params,
-                                ));
-                            }
-                        }
-                    }
-
                     // 渲染
-                    compositor.render(&mut renderer, &mut texture_provider);
+                    CompositorPipeline::new(&compositor)
+                        .render(&mut renderer, &mut texture_provider);
                     surface.swap_buffers(&gl_context).unwrap();
 
                     // 帧末清除按键边沿：down/up edge 只在发生的那一帧对脚本可见，

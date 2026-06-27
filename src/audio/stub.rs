@@ -543,7 +543,7 @@ mod tests {
         // 旧 BGM 的 fade 状态在 apply_channel_fade_out 中设置...
         // 但由于 bgm_channel 被替换了，旧 channel 丢失了
         // 这是一个已知的设计限制：BGM 单通道下 crossfade 需要两个独立缓冲区
-        // 真正的后端（rodio）会用两个 Sink 实现真正的重叠
+        // 前端真实音频后端可用两个播放通道实现真正的重叠。
         let state = a.audio_state();
         assert!(state.bgm_channel.is_some());
         assert_eq!(state.bgm_channel.as_ref().unwrap().file, "new.ogg");

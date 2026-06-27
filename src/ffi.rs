@@ -26,7 +26,6 @@ pub unsafe extern "C" fn art3m1s_set_debug(enabled: c_int) {
     let _ = DEBUG.set(enabled != 0);
 }
 
-
 pub fn debug_enabled() -> bool {
     DEBUG.get().copied().unwrap_or(false)
 }
@@ -52,6 +51,36 @@ pub fn log(level: &str, msg: &str) {
     }
 }
 
+// ── Media command callback ─────────────────────────────────────
+
+type MediaCommandCallback = unsafe extern "C" fn(kind: *const c_char, payload_json: *const c_char);
+
+static MEDIA_COMMAND_CB: Mutex<Option<MediaCommandCallback>> = Mutex::new(None);
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_register_media_command_callback(cb: MediaCommandCallback) {
+    *MEDIA_COMMAND_CB.lock().unwrap() = Some(cb);
+}
+
+pub fn media_command_callback_registered() -> bool {
+    MEDIA_COMMAND_CB.lock().unwrap().is_some()
+}
+
+pub fn emit_media_command(kind: &str, payload: serde_json::Value) {
+    let Some(cb) = *MEDIA_COMMAND_CB.lock().unwrap() else {
+        return;
+    };
+    let Ok(kind) = CString::new(kind) else {
+        return;
+    };
+    let Ok(payload) = CString::new(payload.to_string()) else {
+        return;
+    };
+    unsafe {
+        cb(kind.as_ptr(), payload.as_ptr());
+    }
+}
+
 #[macro_export]
 macro_rules! core_info {
     ($($arg:tt)*) => { $crate::ffi::log("I", &format!($($arg)*)); };
@@ -72,18 +101,6 @@ macro_rules! core_debug {
 macro_rules! core_error {
     ($($arg:tt)*) => { $crate::ffi::log("E", &format!($($arg)*)); };
 }
-
-/// Android 专用：初始化 ndk-context，让 cpal/oboe 等音频库能拿到 JavaVM 和 Activity。
-/// 必须在任何音频操作之前调用。`java_vm` 和 `context` 由 Flutter 端通过 JNI 获取后传入。
-#[cfg(target_os = "android")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn art3m1s_init_android(java_vm: *mut std::ffi::c_void, context: *mut std::ffi::c_void) {
-    if java_vm.is_null() || context.is_null() {
-        return;
-    }
-    unsafe { ndk_context::initialize_android_context(java_vm, context) };
-}
-
 
 // ── ANGLE library search path ──────────────────────────────────
 
@@ -311,8 +328,10 @@ pub unsafe extern "C" fn art3m1s_delete_file(path: *const c_char) -> c_int {
 
 // ── Runtime control FFI ─────────────────────────────────────────
 
+#[cfg(feature = "gl-backend")]
 use crate::runtime::CoreRuntime;
 
+#[cfg(feature = "gl-backend")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_create(w: u32, h: u32, backend: i32) -> *mut CoreRuntime {
     // catch_unwind 防止 panic 跨越 extern "C" 边界导致 abort，
@@ -328,12 +347,16 @@ pub unsafe extern "C" fn art3m1s_runtime_create(w: u32, h: u32, backend: i32) ->
             std::ptr::null_mut()
         }
         Err(panic_info) => {
-            core_error!("art3m1s_runtime_create panicked: {}", panic_msg(&panic_info));
+            core_error!(
+                "art3m1s_runtime_create panicked: {}",
+                panic_msg(&panic_info)
+            );
             std::ptr::null_mut()
         }
     }
 }
 
+#[cfg(feature = "gl-backend")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_load_project(
     rt: *mut CoreRuntime,
@@ -350,9 +373,8 @@ pub unsafe extern "C" fn art3m1s_runtime_load_project(
     let Ok(plat) = (unsafe { std::ffi::CStr::from_ptr(platform).to_str() }) else {
         return -1;
     };
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        rt.load_project(ini, plat)
-    }));
+    let result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rt.load_project(ini, plat)));
     match result {
         Ok(Ok(())) => 0,
         Ok(Err(e)) => {
@@ -367,6 +389,7 @@ pub unsafe extern "C" fn art3m1s_runtime_load_project(
     }
 }
 
+#[cfg(feature = "gl-backend")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_feed_mouse(rt: *mut CoreRuntime, x: i32, y: i32) {
     if rt.is_null() {
@@ -376,6 +399,7 @@ pub unsafe extern "C" fn art3m1s_runtime_feed_mouse(rt: *mut CoreRuntime, x: i32
     rt.feed_mouse(x, y);
 }
 
+#[cfg(feature = "gl-backend")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_feed_click(rt: *mut CoreRuntime) {
     if rt.is_null() {
@@ -385,6 +409,7 @@ pub unsafe extern "C" fn art3m1s_runtime_feed_click(rt: *mut CoreRuntime) {
     rt.feed_click();
 }
 
+#[cfg(feature = "gl-backend")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_feed_key(rt: *mut CoreRuntime, vk: u32, pressed: i32) {
     if rt.is_null() {
@@ -398,6 +423,7 @@ pub unsafe extern "C" fn art3m1s_runtime_feed_key(rt: *mut CoreRuntime, vk: u32,
     }
 }
 
+#[cfg(feature = "gl-backend")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_destroy(rt: *mut CoreRuntime) {
     if !rt.is_null() {
@@ -407,6 +433,7 @@ pub unsafe extern "C" fn art3m1s_runtime_destroy(rt: *mut CoreRuntime) {
     }
 }
 
+#[cfg(feature = "gl-backend")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_stage_width(rt: *const CoreRuntime) -> u32 {
     if rt.is_null() {
@@ -415,6 +442,7 @@ pub unsafe extern "C" fn art3m1s_runtime_stage_width(rt: *const CoreRuntime) -> 
     unsafe { &*rt }.stage_width()
 }
 
+#[cfg(feature = "gl-backend")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_stage_height(rt: *const CoreRuntime) -> u32 {
     if rt.is_null() {
@@ -423,6 +451,7 @@ pub unsafe extern "C" fn art3m1s_runtime_stage_height(rt: *const CoreRuntime) ->
     unsafe { &*rt }.stage_height()
 }
 
+#[cfg(feature = "gl-backend")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_pixel_buffer_size(rt: *const CoreRuntime) -> u32 {
     if rt.is_null() {
@@ -431,6 +460,7 @@ pub unsafe extern "C" fn art3m1s_runtime_pixel_buffer_size(rt: *const CoreRuntim
     unsafe { &*rt }.pixel_buffer_size() as u32
 }
 
+#[cfg(feature = "gl-backend")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_advance_and_render(
     rt: *mut CoreRuntime,
@@ -454,12 +484,16 @@ pub unsafe extern "C" fn art3m1s_runtime_advance_and_render(
             to_copy as u32
         }
         Err(panic_info) => {
-            core_error!("art3m1s_runtime_advance_and_render panicked: {}", panic_msg(&panic_info));
+            core_error!(
+                "art3m1s_runtime_advance_and_render panicked: {}",
+                panic_msg(&panic_info)
+            );
             0
         }
     }
 }
 
+#[cfg(feature = "gl-backend")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_set_volume(
     rt: *mut CoreRuntime,
@@ -469,13 +503,50 @@ pub unsafe extern "C" fn art3m1s_runtime_set_volume(
     if rt.is_null() || volume_type.is_null() {
         return;
     }
-    let rt = unsafe { &*rt };
+    let rt = unsafe { &mut *rt };
     let Ok(ty) = (unsafe { std::ffi::CStr::from_ptr(volume_type).to_str() }) else {
         return;
     };
     rt.set_volume(ty, value);
 }
 
+#[cfg(feature = "gl-backend")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_notify_video_finished(
+    rt: *mut CoreRuntime,
+    id: *const c_char,
+) {
+    if rt.is_null() {
+        return;
+    }
+    let rt = unsafe { &mut *rt };
+    let id = if id.is_null() {
+        None
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(id).to_str().ok() }
+    };
+    rt.notify_video_finished(id);
+}
+
+#[cfg(feature = "gl-backend")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_notify_sound_finished(
+    rt: *mut CoreRuntime,
+    id: *const c_char,
+) {
+    if rt.is_null() {
+        return;
+    }
+    let rt = unsafe { &mut *rt };
+    let id = if id.is_null() {
+        None
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(id).to_str().ok() }
+    };
+    rt.notify_sound_finished(id);
+}
+
+#[cfg(feature = "gl-backend")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_is_exit_requested(rt: *const CoreRuntime) -> i32 {
     if rt.is_null() {

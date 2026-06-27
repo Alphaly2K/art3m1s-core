@@ -9,7 +9,7 @@
 //! 将来也可以接内存读 `.pfs` 的实现，provider 这边无需改动。样例项目暂无打包图片，
 //! 因此默认无字节源、一律回退占位，让整条绘制管线无需素材即可端到端验证。
 
-use crate::compositor::renderer::{TextureId, TextureInfo, TextureProvider};
+use crate::render_pipeline::draw::{TextureId, TextureInfo, TextureProvider};
 use glow::HasContext;
 use std::collections::HashMap;
 use std::num::NonZeroU32;

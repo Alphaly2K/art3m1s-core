@@ -1,14 +1,13 @@
-//! 视频后端抽象。
+//! 视频状态与宿主视频协议。
 //!
-//! [`VideoBackend`] trait 定义了视频子系统的全部操作接口。后端实现方负责：
-//! 1. 加载并解码视频文件（Ogg Theora / Motion-JPEG with Alpha 等）
-//! 2. 管理全屏视频和视频图层
-//! 3. 在视频播放完成时触发完成事件处理器
+//! Core does not own an FFmpeg/Theora backend and does not keep decoded video
+//! frames.  It keeps script-visible video state and synchronization points, then
+//! emits host media commands.  The frontend/host decides whether to use a
+//! platform decoder, native fallback, or a texture-producing decoder.
 //!
 //! ## 与合成器的关系
-//! 视频子系统与 [`crate::compositor::Compositor`] 平级，但视频图层需要与合成器
-//! 的图层树集成。宿主在帧循环中把解释器的视频事件转发给 [`VideoBackend`] 实例，
-//! 并每帧调用 [`VideoBackend::advance`] 推进视频解码。
+//! 视频子系统与 [`crate::compositor::Compositor`] 平级。合成器只看到普通图层状态；
+//! 宿主侧视频输出不进入 core 的 render pipeline。
 
 use std::collections::HashMap;
 
@@ -93,18 +92,6 @@ pub struct VideoChannel {
     pub skippable: bool,
     /// 当前播放位置（毫秒）
     pub position_ms: u64,
-    /// 视频总时长（毫秒），0 表示未知
-    pub duration_ms: u64,
-    /// 视频宽度
-    pub width: u32,
-    /// 视频高度
-    pub height: u32,
-    /// 是否有 Alpha 通道
-    pub has_alpha: bool,
-    /// 当前帧数据（RGBA）
-    pub current_frame: Option<Vec<u8>>,
-    /// 是否有新帧需要渲染
-    pub frame_dirty: bool,
 }
 
 impl VideoChannel {
@@ -116,12 +103,6 @@ impl VideoChannel {
             loop_play: false,
             skippable: true,
             position_ms: 0,
-            duration_ms: 0,
-            width: 0,
-            height: 0,
-            has_alpha: false,
-            current_frame: None,
-            frame_dirty: false,
         }
     }
 }
@@ -149,16 +130,12 @@ pub struct VideoState {
 // VideoBackend trait
 // ---------------------------------------------------------------------------
 
-/// 视频渲染后端。
+/// 视频逻辑状态后端。
 ///
-/// 实现方负责将逻辑视频状态映射到实际的视频输出。host 在帧循环中：
+/// 实现方只维护 core 侧状态和完成事件。真实解码/显示在宿主侧完成。host 在帧循环中：
 /// 1. 把解释器的视频事件转发给 [`VideoBackend`] 的对应方法
-/// 2. 每帧调用 [`VideoBackend::advance`] 推进视频解码
+/// 2. 每帧调用 [`VideoBackend::advance`] 推进同步时钟
 /// 3. 通过 [`VideoBackend::poll_finish_events`] 获取视频完成事件
-///
-/// ## 计划实现
-/// - [`crate::video::StubVideoBackend`]：无操作的存根实现，用于测试
-/// - 基于 `theora` crate 的 Ogg Theora 解码实现（计划中）
 pub trait VideoBackend {
     // -----------------------------------------------------------------------
     // 全屏视频操作
@@ -217,7 +194,7 @@ pub trait VideoBackend {
     // 帧循环
     // -----------------------------------------------------------------------
 
-    /// 推进视频内部时钟，处理视频解码进度。
+    /// 推进视频内部时钟。
     ///
     /// host 每帧用累计的真实时间增量调用一次。
     fn advance(&mut self, delta_ms: u64);
@@ -238,13 +215,4 @@ pub trait VideoBackend {
     /// 获取当前视频状态（可变）。
     fn video_state_mut(&mut self) -> &mut VideoState;
 
-    /// 获取指定视频图层的当前帧数据（RGBA）。
-    ///
-    /// 返回 `None` 表示该图层不存在或没有新帧。
-    fn get_frame(&mut self, id: &str) -> Option<&[u8]>;
-
-    /// 获取全屏视频的当前帧数据（RGBA）。
-    ///
-    /// 返回 `None` 表示没有全屏视频或没有新帧。
-    fn get_fullscreen_frame(&mut self) -> Option<&[u8]>;
 }

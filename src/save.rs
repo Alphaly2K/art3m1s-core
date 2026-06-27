@@ -44,6 +44,75 @@ impl From<&crate::audio::SoundChannel> for AudioChannelSnapshot {
     }
 }
 
+impl AudioSnapshot {
+    pub fn from_audio(audio: &dyn crate::audio::AudioBackend) -> Self {
+        let state = audio.audio_state();
+        let bgm = state
+            .bgm_channel
+            .as_ref()
+            .filter(|channel| channel.playing)
+            .map(AudioChannelSnapshot::from);
+        let mut se: Vec<_> = state
+            .se_channels
+            .values()
+            .filter(|channel| channel.playing)
+            .map(AudioChannelSnapshot::from)
+            .collect();
+        let mut voice: Vec<_> = state
+            .voice_channels
+            .values()
+            .filter(|channel| channel.playing)
+            .map(AudioChannelSnapshot::from)
+            .collect();
+        se.sort_by(|a, b| a.id.cmp(&b.id));
+        voice.sort_by(|a, b| a.id.cmp(&b.id));
+        Self { bgm, se, voice }
+    }
+
+    pub fn restore_into(&self, audio: &mut dyn crate::audio::AudioBackend) {
+        if let Some(bgm) = &self.bgm {
+            audio.play_bgm(
+                &bgm.file,
+                &crate::audio::BgmConfig {
+                    loop_play: bgm.loop_play,
+                    gain: Some(bgm.gain),
+                    pan: Some(bgm.pan),
+                    fade_in_ms: 0,
+                    buffer_size: None,
+                },
+            );
+        }
+        for se in &self.se {
+            audio.play_se(
+                &se.id,
+                &se.file,
+                &crate::audio::SeConfig {
+                    loop_play: se.loop_play,
+                    gain: Some(se.gain),
+                    pan: Some(se.pan),
+                    fade_in_ms: 0,
+                    buffer_size: None,
+                    skippable: se.skippable,
+                },
+            );
+        }
+        for voice in &self.voice {
+            audio.play_voice(
+                &voice.id,
+                &voice.file,
+                &crate::audio::SeConfig {
+                    loop_play: voice.loop_play,
+                    gain: Some(voice.gain),
+                    pan: Some(voice.pan),
+                    fade_in_ms: 0,
+                    buffer_size: None,
+                    skippable: voice.skippable,
+                },
+            );
+        }
+    }
+}
+
 /// 一个完整的存档。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SaveData {
@@ -205,6 +274,7 @@ impl SaveData {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::{AudioBackend, BgmConfig, SeConfig, StubAudioBackend};
     use asb_interpreter::VariableStore;
 
     #[test]
@@ -257,5 +327,59 @@ mod tests {
         let restored: SaveData = serde_json::from_str(json).unwrap();
         assert!(restored.scene.is_none());
         assert!(restored.audio.is_none());
+    }
+
+    #[test]
+    fn audio_snapshot_replays_active_channels_from_start() {
+        let mut audio = StubAudioBackend::new();
+        audio.play_bgm(
+            "bgm/scene.ogg",
+            &BgmConfig {
+                loop_play: true,
+                gain: Some(700),
+                pan: Some(-100),
+                fade_in_ms: 1000,
+                buffer_size: None,
+            },
+        );
+        audio.play_se(
+            "amb",
+            "se/wind.ogg",
+            &SeConfig {
+                loop_play: true,
+                gain: Some(400),
+                pan: Some(100),
+                fade_in_ms: 500,
+                buffer_size: None,
+                skippable: true,
+            },
+        );
+        audio.advance(250);
+
+        let snapshot = AudioSnapshot::from_audio(&audio);
+        assert_eq!(snapshot.bgm.as_ref().unwrap().file, "bgm/scene.ogg");
+        assert_eq!(snapshot.bgm.as_ref().unwrap().gain, 700);
+        assert_eq!(snapshot.se[0].file, "se/wind.ogg");
+        assert!(snapshot.se[0].skippable);
+
+        let mut restored = StubAudioBackend::new();
+        snapshot.restore_into(&mut restored);
+
+        let state = restored.audio_state();
+        let bgm = state.bgm_channel.as_ref().unwrap();
+        assert_eq!(bgm.file, "bgm/scene.ogg");
+        assert_eq!(
+            bgm.current_gain,
+            crate::audio::SoundChannel::gain_to_linear(700)
+        );
+        assert!(bgm.fade.is_none());
+        let se = state.se_channels.get("amb").unwrap();
+        assert_eq!(se.file, "se/wind.ogg");
+        assert_eq!(
+            se.current_gain,
+            crate::audio::SoundChannel::gain_to_linear(400)
+        );
+        assert!(se.skippable);
+        assert!(se.fade.is_none());
     }
 }

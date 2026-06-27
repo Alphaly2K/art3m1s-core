@@ -6,27 +6,19 @@
 //!
 //! ## 模块
 //! - [`engine`]：`AudioBackend` trait、`AudioState`、播放配置类型、淡出逻辑
-//! - [`stub`]：`StubAudioBackend` — 不产生任何音频输出的存根实现
-//! - [`rodio`]：`RodioBackend` — 基于 rodio 的真实音频后端（`audio-backend` feature）
+//! - [`stub`]：`StubAudioBackend` — 不产生任何音频输出的逻辑状态实现
 //!
 //! ## 典型接入方式
-//! 1. 后端实现 [`engine::AudioBackend`]（或使用内置的 [`StubAudioBackend`] / [`RodioBackend`]）。
-//! 2. 在帧循环中把解释器事件转发给 `AudioBackend` 的对应方法。
-//! 3. 每帧调用 `AudioBackend::advance()` 推进淡入淡出。
-//! 4. 每帧调用 `AudioBackend::poll_finish_events()` 获取声音完成事件
+//! 1. Core 在帧循环中把解释器事件归约到 [`AudioState`]。
+//! 2. 前端/宿主通过 runtime 的媒体命令回调执行真实播放。
+//! 3. Core 每帧推进淡入淡出状态，并产出声音完成 handler。
 //!    并交回解释器执行 handler。
 
 pub mod engine;
 pub mod stub;
-
-#[cfg(feature = "audio-backend")]
-pub mod rodio;
 
 pub use engine::{
     AudioBackend, AudioState, BgmConfig, FadeState, SeConfig, SoundCategory, SoundChannel,
     SoundFinishEvent, SoundFinishHandler,
 };
 pub use stub::StubAudioBackend;
-
-#[cfg(feature = "audio-backend")]
-pub use rodio::RodioBackend;

@@ -15,6 +15,10 @@ pub mod backend;
 pub mod compositor;
 pub mod ffi;
 pub mod ffi_callbacks;
+pub mod host_media;
+pub mod pipeline;
+pub mod render_pipeline;
+#[cfg(feature = "gl-backend")]
 pub mod runtime;
 pub mod save;
 pub mod text;

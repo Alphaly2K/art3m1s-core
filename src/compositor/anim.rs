@@ -1,10 +1,12 @@
-//! 图层动画：属性缓动（tween）与画面转场（transition）。
+//! 图层动画：属性缓动（tween）与帧动画（anime）。
 //!
-//! 解释器把 `[lytween]` 解析成 `Event::LayerTween`，把 `[trans]` / `[uitrans]`
-//! 解析成转场事件。这些都是基于时间的：合成器记录起止值与时长，在每帧 `build`
-//! 时按当前时间求出插值，写回图层属性。本模块只做"按时间求值"，不持有图层引用。
+//! 解释器把 `[lytween]` 解析成 `Event::LayerTween`，把 `[anime]` 解析成帧动画
+//! 事件。这些都是基于时间的：合成器记录起止值与时长，在每帧推进时由本模块
+//! 更新图层动画状态。
 
+use crate::compositor::scene::Scene;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// 缓动函数。Artemis 的 `ease` 字符串在归约阶段映射到这里。
 ///
@@ -408,6 +410,334 @@ impl Tween {
     /// 获取缓动完成的回调处理器（如果有）。
     pub fn finish_handler(&self) -> Option<&TweenHandler> {
         self.handler.as_ref()
+    }
+}
+
+/// `[lytween]` 事件归约为动画系统所需的参数。
+pub(crate) struct TweenRequest<'a> {
+    pub(crate) id: &'a str,
+    pub(crate) param: &'a str,
+    pub(crate) from: Option<&'a str>,
+    pub(crate) to: Option<&'a str>,
+    pub(crate) ease: Option<&'a str>,
+    pub(crate) time: Option<u64>,
+    pub(crate) delay: Option<u64>,
+    pub(crate) loop_count: Option<i32>,
+    pub(crate) yoyo: Option<i32>,
+    pub(crate) loop_delay: Option<u64>,
+    pub(crate) sync: bool,
+    pub(crate) delete: bool,
+    pub(crate) handler_file: Option<&'a str>,
+    pub(crate) handler_label: Option<&'a str>,
+    pub(crate) handler_handler: Option<&'a str>,
+}
+
+/// `[anime]` 帧动画事件归约为动画系统所需的参数。
+pub(crate) struct AnimeRequest<'a> {
+    pub(crate) id: &'a str,
+    pub(crate) mode: &'a str,
+    pub(crate) file: Option<&'a str>,
+    pub(crate) mask: Option<&'a str>,
+    pub(crate) time: Option<u64>,
+    pub(crate) loop_count: Option<i32>,
+    pub(crate) props: &'a HashMap<String, String>,
+}
+
+/// `[anime]` 帧动画的单帧数据。
+#[derive(Debug, Clone)]
+pub(crate) struct AnimeFrame {
+    pub(crate) time_ms: u64,
+    pub(crate) file: String,
+    #[allow(dead_code)]
+    pub(crate) mask: Option<String>,
+    pub(crate) props: HashMap<String, String>,
+}
+
+/// `[anime]` 图层的帧动画播放状态。
+#[derive(Debug, Clone)]
+pub(crate) struct AnimeState {
+    pub(crate) frames: Vec<AnimeFrame>,
+    /// -1=无限循环, 0=不循环(播一次), N=循环 N 次
+    pub(crate) loop_count: i32,
+    pub(crate) start_ms: u64,
+    pub(crate) total_duration_ms: u64,
+}
+
+/// 把一个 `[lytween]` 落成图层上的 [`Tween`]。
+///
+/// `from` 省略时取属性当前值；`to` 解析失败则忽略本次缓动（没有目标无意义）。
+pub(crate) fn apply_tween(scene: &mut Scene, clock_ms: u64, request: TweenRequest<'_>) {
+    let Some(to_value) = request.to.and_then(parse_num) else {
+        return;
+    };
+
+    scene.ensure(request.id);
+    let from_value = request
+        .from
+        .and_then(parse_num)
+        .unwrap_or_else(|| current_param_value(scene, request.id, request.param));
+
+    let start_ms = clock_ms + request.delay.unwrap_or(0);
+
+    // 解析循环：-1 -> 无限，0 -> 不循环，N -> 循环 N 次
+    let infinite_loop = request.loop_count == Some(-1);
+    let loops: Option<u32> = if infinite_loop || request.loop_count.unwrap_or(0) <= 0 {
+        None
+    } else {
+        Some(request.loop_count.unwrap() as u32)
+    };
+
+    // 解析 yoyo：-1 -> 无限乒乓，0 -> 不乒乓，N -> 乒乓 N 次
+    let yoyo_enabled = request.yoyo == Some(-1) || request.yoyo.unwrap_or(0) > 0;
+    let yoyo_loops: Option<u32> = if yoyo_enabled {
+        if request.yoyo == Some(-1) {
+            None
+        } else if request.yoyo.unwrap_or(0) > 0 {
+            Some(request.yoyo.unwrap() as u32)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let effective_loops = yoyo_loops.or(loops);
+    let infinite = infinite_loop || request.yoyo == Some(-1);
+
+    let tween = Tween {
+        param: request.param.to_string(),
+        from: from_value,
+        to: to_value,
+        easing: request.ease.map(Easing::parse).unwrap_or_default(),
+        start_ms,
+        duration_ms: request.time.unwrap_or(0),
+        infinite_loop: infinite,
+        loop_count: effective_loops,
+        yoyo: yoyo_enabled,
+        yoyo_reverse: false,
+        loop_delay_ms: request.loop_delay.unwrap_or(0),
+        delete_on_finish: request.delete,
+        handler: if request.sync
+            || request.handler_file.is_some()
+            || request.handler_label.is_some()
+            || request.handler_handler.is_some()
+            || request.delete
+        {
+            Some(TweenHandler {
+                file: request.handler_file.map(str::to_string),
+                label: request.handler_label.map(str::to_string),
+                call: false,
+                handler: request.handler_handler.map(str::to_string),
+            })
+        } else {
+            None
+        },
+    };
+
+    if let Some(layer) = scene.get_mut(request.id) {
+        layer.tweens.retain(|t| t.param != request.param);
+        layer.tweens.push(tween);
+    }
+}
+
+/// 强制完成某图层的所有缓动：把终值写回属性，清空缓动列表。
+pub(crate) fn finish_tweens(scene: &mut Scene, id: &str) {
+    if let Some(layer) = scene.get_mut(id) {
+        let finished: Vec<(String, f32)> = layer
+            .tweens
+            .iter()
+            .map(|t| (t.param.clone(), t.to))
+            .collect();
+        layer.tweens.clear();
+        let props = &mut layer.props;
+        for (param, value) in finished {
+            props.set_raw(&param, &format_param(&param, value));
+        }
+    }
+}
+
+/// 回收已结束的缓动，把终值固化到属性里，并收集完成回调。
+pub(crate) fn gc_finished_tweens(
+    scene: &mut Scene,
+    now: u64,
+    pending_tween_events: &mut Vec<TweenHandler>,
+) {
+    let mut settle: Vec<(String, String, f32)> = Vec::new();
+    let mut completed: Vec<(String, Option<TweenHandler>, bool)> = Vec::new();
+    let ids: Vec<String> = scene.iter_ids();
+    for id in &ids {
+        if let Some(layer) = scene.get(id) {
+            for t in &layer.tweens {
+                if t.is_finished(now) {
+                    settle.push((id.clone(), t.param.clone(), t.to));
+                    completed.push((id.clone(), t.handler.clone(), t.delete_on_finish));
+                }
+            }
+        }
+    }
+    for (id, param, value) in settle {
+        if let Some(layer) = scene.get_mut(&id) {
+            layer.props.set_raw(&param, &format_param(&param, value));
+            layer.tweens.retain(|t| !t.is_finished(now));
+        }
+    }
+    for (id, handler, delete) in completed {
+        if let Some(handler) = handler {
+            pending_tween_events.push(handler);
+        }
+        if delete {
+            scene.delete(&id);
+        }
+    }
+}
+
+/// 把 `[anime]` init/add/end 事件归约到帧动画状态。
+pub(crate) fn apply_anime_event(
+    scene: &mut Scene,
+    states: &mut HashMap<String, AnimeState>,
+    clock_ms: u64,
+    request: AnimeRequest<'_>,
+) {
+    match request.mode {
+        "init" => {
+            let file = request.file.unwrap_or_default().to_string();
+            scene.ensure(request.id);
+            if let Some(layer) = scene.get_mut(request.id) {
+                layer.file = Some(file.clone());
+                layer.props.merge_raw(request.props);
+            }
+            let frame = AnimeFrame {
+                time_ms: request.time.unwrap_or(0),
+                file,
+                mask: request.mask.map(str::to_string),
+                props: request.props.clone(),
+            };
+            states.insert(
+                request.id.to_string(),
+                AnimeState {
+                    frames: vec![frame],
+                    loop_count: request.loop_count.unwrap_or(-1),
+                    start_ms: 0,
+                    total_duration_ms: 0,
+                },
+            );
+        }
+        "add" => {
+            if let Some(state) = states.get_mut(request.id) {
+                state.frames.push(AnimeFrame {
+                    time_ms: request.time.unwrap_or(0),
+                    file: request.file.unwrap_or_default().to_string(),
+                    mask: request.mask.map(str::to_string),
+                    props: request.props.clone(),
+                });
+            }
+        }
+        "end" => {
+            if let Some(state) = states.get_mut(request.id) {
+                state.frames.sort_by_key(|f| f.time_ms);
+                state.total_duration_ms = request.time.unwrap_or(0);
+                state.start_ms = clock_ms;
+                apply_first_anime_frame(scene, request.id, state);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 推进帧动画：根据时钟前进到对应的帧，更新图层的文件和属性。
+pub(crate) fn update_anime_frames(
+    scene: &mut Scene,
+    states: &mut HashMap<String, AnimeState>,
+    now: u64,
+) {
+    for (layer_id, state) in states {
+        if state.frames.is_empty() || state.total_duration_ms == 0 {
+            continue;
+        }
+        let elapsed = now.saturating_sub(state.start_ms);
+
+        let t = if state.loop_count == -1 {
+            elapsed % state.total_duration_ms
+        } else if state.loop_count == 0 {
+            if elapsed >= state.total_duration_ms {
+                state.total_duration_ms - 1
+            } else {
+                elapsed
+            }
+        } else {
+            let max_elapsed = state.total_duration_ms * (state.loop_count as u64 + 1);
+            if elapsed >= max_elapsed {
+                state.total_duration_ms - 1
+            } else {
+                elapsed % state.total_duration_ms
+            }
+        };
+
+        let frame = state
+            .frames
+            .iter()
+            .rev()
+            .find(|f| f.time_ms <= t)
+            .or_else(|| state.frames.first());
+
+        if let Some(frame) = frame {
+            if let Some(layer) = scene.get_mut(layer_id) {
+                layer.file = Some(frame.file.clone());
+                layer.props.merge_raw(&frame.props);
+            }
+        }
+    }
+}
+
+fn apply_first_anime_frame(scene: &mut Scene, id: &str, state: &AnimeState) {
+    if let Some(first) = state.frames.first() {
+        if let Some(layer) = scene.get_mut(id) {
+            layer.file = Some(first.file.clone());
+            layer.props.merge_raw(&first.props);
+        }
+    }
+}
+
+/// 读取图层某属性的当前数值，作为缓动的默认起点。未知属性回退 0。
+fn current_param_value(scene: &Scene, id: &str, param: &str) -> f32 {
+    let Some(layer) = scene.get(id) else {
+        return default_param_value(param);
+    };
+    let p = &layer.props;
+    match param {
+        "left" | "x" => p.left.unwrap_or(0.0),
+        "top" | "y" => p.top.unwrap_or(0.0),
+        "xscale" | "scale_x" => p.x_scale.unwrap_or(100.0),
+        "yscale" | "scale_y" => p.y_scale.unwrap_or(100.0),
+        "rotate" => p.rotate.unwrap_or(0.0),
+        "alpha" => p.alpha.unwrap_or(255) as f32,
+        "anchorx" | "anchor_x" => p.anchor_x.unwrap_or(0.0),
+        "anchory" | "anchor_y" => p.anchor_y.unwrap_or(0.0),
+        "width" => p.width.unwrap_or(0.0),
+        "height" => p.height.unwrap_or(0.0),
+        "zoom" => p.x_scale.unwrap_or(100.0),
+        _ => default_param_value(param),
+    }
+}
+
+fn parse_num(value: &str) -> Option<f32> {
+    value.trim().parse().ok()
+}
+
+fn default_param_value(param: &str) -> f32 {
+    match param {
+        "xscale" | "yscale" | "zoom" => 100.0,
+        "alpha" => 255.0,
+        _ => 0.0,
+    }
+}
+
+/// 把缓动终值格式化回属性字符串（整数属性按整数）。
+fn format_param(param: &str, value: f32) -> String {
+    match param {
+        "alpha" | "visible" | "reversex" | "reversey" | "grayscale" | "negative" | "delete"
+        | "vertical" | "hung" | "anchorcenter" | "overflow" => (value.round() as i64).to_string(),
+        _ => value.to_string(),
     }
 }
 

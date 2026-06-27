@@ -1,77 +1,10 @@
-//! 着色器源码与程序构建。
+//! GL shader compilation and program linking.
 //!
-//! 顶点/片元着色器主体与 GL 方言无关；只有 `#version` 头和精度限定符随
-//! [`ShaderProfile`] 切换，使同一套着色器既能跑在 ANGLE 的 GLES 上，也能在桌面
-//! GL Core 上做离屏验证。
+//! Shader assets live in [`crate::render_pipeline::shader`].  This module only
+//! compiles and links the shader program selected by the render pipeline.
 
+use crate::render_pipeline::shader::{BuiltinShaderManager, ShaderManager, ShaderProfile};
 use glow::HasContext;
-
-/// 着色器方言。运行在 ANGLE 上用 [`ShaderProfile::Gles300`]；在没有 ANGLE 的开发
-/// 机上做离屏像素测试时用 [`ShaderProfile::GlCore330`]。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShaderProfile {
-    /// OpenGL ES 3.0（`#version 300 es`）—— ANGLE 目标。
-    Gles300,
-    /// 桌面 OpenGL 3.3 Core（`#version 330 core`）—— 离屏测试用。
-    GlCore330,
-}
-
-impl ShaderProfile {
-    fn version_header(self) -> &'static str {
-        match self {
-            ShaderProfile::Gles300 => "#version 300 es\nprecision highp float;\n",
-            ShaderProfile::GlCore330 => "#version 330 core\n",
-        }
-    }
-}
-
-const VERTEX_BODY: &str = r#"
-layout(location = 0) in vec2 a_pos;   // 单位方块 0..1
-layout(location = 1) in vec2 a_uv;
-
-uniform mat3 u_projection;  // 舞台像素 → NDC
-uniform mat3 u_transform;   // 图层世界变换（像素空间）
-uniform vec2 u_size;        // 绘制区域像素尺寸（裁剪时=clip宽高，否则=纹理尺寸）
-uniform vec2 u_uv_offset;   // UV 起点（归一化 0..1）
-uniform vec2 u_uv_scale;    // UV 跨度（归一化 0..1）
-
-out vec2 v_uv;
-
-void main() {
-    // 单位方块按绘制区域尺寸展开，再过世界变换到舞台像素，最后投影到 NDC。
-    vec2 local = a_pos * u_size;
-    vec3 world = u_transform * vec3(local, 1.0);
-    vec3 ndc = u_projection * vec3(world.xy, 1.0);
-    gl_Position = vec4(ndc.xy, 0.0, 1.0);
-    // 把 0..1 的顶点 UV 映射到裁剪子区域。
-    v_uv = u_uv_offset + a_uv * u_uv_scale;
-}
-"#;
-
-const FRAGMENT_BODY: &str = r#"
-in vec2 v_uv;
-out vec4 frag_color;
-
-uniform sampler2D u_sampler;
-uniform float u_opacity;
-uniform vec3 u_multiply;
-uniform int u_grayscale;
-uniform int u_negative;
-
-void main() {
-    vec4 c = texture(u_sampler, v_uv);
-    c.rgb *= u_multiply;
-    if (u_grayscale != 0) {
-        float g = dot(c.rgb, vec3(0.299, 0.587, 0.114));
-        c.rgb = vec3(g);
-    }
-    if (u_negative != 0) {
-        c.rgb = vec3(1.0) - c.rgb;
-    }
-    c.a *= u_opacity;
-    frag_color = c;
-}
-"#;
 
 /// 编译并链接渲染器用的着色器程序。
 ///
@@ -82,9 +15,13 @@ pub unsafe fn build_program(
     profile: ShaderProfile,
 ) -> Result<glow::Program, String> {
     unsafe {
+        let manager = BuiltinShaderManager;
+        let source = manager
+            .program(crate::render_pipeline::shader::SPRITE_SHADER)
+            .ok_or_else(|| "sprite shader asset missing".to_string())?;
         let header = profile.version_header();
-        let vert_src = format!("{header}{VERTEX_BODY}");
-        let frag_src = format!("{header}{FRAGMENT_BODY}");
+        let vert_src = format!("{header}{}", source.vertex_body);
+        let frag_src = format!("{header}{}", source.fragment_body);
 
         let program = gl.create_program()?;
 

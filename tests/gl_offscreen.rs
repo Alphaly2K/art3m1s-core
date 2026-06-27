@@ -13,6 +13,7 @@ use art3m1s_core::Project;
 use art3m1s_core::backend::gl::{GlRenderer, GlTextureProvider, PlaceholderKind, ShaderProfile};
 use art3m1s_core::compositor::Compositor;
 use art3m1s_core::compositor::renderer::Renderer;
+use art3m1s_core::pipeline::CompositorPipeline;
 use asb_interpreter::event::{Event, LayerEvent};
 use glow::HasContext;
 use std::collections::HashMap;
@@ -184,7 +185,7 @@ fn renders_solid_layer_to_framebuffer() {
         properties: raw(&[("xscale", "200"), ("yscale", "200")]),
     }));
 
-    let frame = comp.build(&mut provider);
+    let frame = CompositorPipeline::new(&comp).build(&mut provider);
     assert_eq!(frame.len(), 1);
     renderer.render(&frame);
     unsafe {
@@ -224,7 +225,7 @@ fn alpha_blends_against_cleared_background() {
         properties: raw(&[("xscale", "200"), ("yscale", "200"), ("alpha", "128")]),
     }));
 
-    let frame = comp.build(&mut provider);
+    let frame = CompositorPipeline::new(&comp).build(&mut provider);
     renderer.render(&frame);
     unsafe {
         gl.finish();
@@ -263,7 +264,7 @@ fn negative_filter_inverts_color() {
         properties: raw(&[("xscale", "200"), ("yscale", "200"), ("negative", "1")]),
     }));
 
-    let frame = comp.build(&mut provider);
+    let frame = CompositorPipeline::new(&comp).build(&mut provider);
     renderer.render(&frame);
     unsafe {
         gl.finish();
@@ -286,7 +287,7 @@ fn empty_frame_clears_to_black() {
         GlRenderer::new(gl.clone(), W as u32, H as u32, ShaderProfile::GlCore330).unwrap();
     let comp = Compositor::new();
     let mut provider = GlTextureProvider::new(gl.clone());
-    let frame = comp.build(&mut provider);
+    let frame = CompositorPipeline::new(&comp).build(&mut provider);
     assert!(frame.is_empty());
     renderer.render(&frame);
     unsafe {
@@ -315,7 +316,7 @@ fn layer_offset_positions_correctly() {
         id: "1".into(),
         file: "bg".into(),
     }));
-    let frame = comp.build(&mut provider);
+    let frame = CompositorPipeline::new(&comp).build(&mut provider);
     renderer.render(&frame);
     unsafe {
         gl.finish();
@@ -372,7 +373,7 @@ fn renders_real_png_asset_without_flip() {
         id: "1".into(),
         file: asset.into(),
     }));
-    let frame = comp.build(&mut provider);
+    let frame = CompositorPipeline::new(&comp).build(&mut provider);
     assert_eq!(frame.len(), 1, "应有一条绘制命令");
     assert_eq!(
         (frame.commands[0].size.width, frame.commands[0].size.height),
@@ -429,7 +430,7 @@ fn missing_asset_falls_back_to_placeholder() {
         id: "1".into(),
         properties: raw(&[("xscale", "200"), ("yscale", "200")]),
     }));
-    let frame = comp.build(&mut provider);
+    let frame = CompositorPipeline::new(&comp).build(&mut provider);
     renderer.render(&frame);
     unsafe {
         gl.finish();
