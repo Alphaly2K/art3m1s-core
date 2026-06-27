@@ -1,7 +1,7 @@
-//! 存根音频后端。
+//! 音频逻辑状态后端。
 //!
 //! 不产生任何音频输出，仅维护 [`AudioState`] 中的逻辑状态。
-//! 在真实音频后端就绪前用于编译与测试。
+//! 宿主侧音频 sink 接管真实播放时，这里作为 core 内的状态归约实现。
 
 use crate::audio::engine::{
     AudioBackend, AudioState, BgmConfig, FadeState, SeConfig, SoundCategory, SoundChannel,
@@ -9,18 +9,18 @@ use crate::audio::engine::{
     apply_channel_gain_fade, apply_channel_pan_fade,
 };
 
-/// 不输出任何音频的存根后端。
+/// 不输出任何音频的逻辑状态后端。
 ///
 /// 所有播放状态的变更都会记录在 [`AudioState`] 中，`poll_finish_events`
 /// 会返回因播放完成或 fade-out 停止而产生的完成事件。
 #[derive(Debug, Default)]
-pub struct StubAudioBackend {
+pub struct AudioStateBackend {
     state: AudioState,
     /// 自上次 `poll_finish_events` 以来积累的完成事件
     pending_finish_events: Vec<SoundFinishEvent>,
 }
 
-impl StubAudioBackend {
+impl AudioStateBackend {
     pub fn new() -> Self {
         Self::default()
     }
@@ -50,7 +50,7 @@ impl StubAudioBackend {
     }
 }
 
-impl AudioBackend for StubAudioBackend {
+impl AudioBackend for AudioStateBackend {
     // -------------------------------------------------------------------
     // BGM
     // -------------------------------------------------------------------
@@ -427,7 +427,7 @@ mod tests {
 
     #[test]
     fn play_and_stop_bgm() {
-        let mut a = StubAudioBackend::new();
+        let mut a = AudioStateBackend::new();
         assert!(!a.is_bgm_playing());
 
         a.play_bgm(
@@ -449,7 +449,7 @@ mod tests {
 
     #[test]
     fn stop_bgm_with_fade_triggers_finish_event() {
-        let mut a = StubAudioBackend::new();
+        let mut a = AudioStateBackend::new();
         a.play_bgm("bgm01.ogg", &BgmConfig::default());
         a.stop_bgm(500);
         assert!(a.is_bgm_playing()); // 还在淡出中
@@ -464,7 +464,7 @@ mod tests {
 
     #[test]
     fn play_and_stop_se() {
-        let mut a = StubAudioBackend::new();
+        let mut a = AudioStateBackend::new();
         a.play_se(
             "se01",
             "click.wav",
@@ -481,7 +481,7 @@ mod tests {
 
     #[test]
     fn duplicate_se_replaces() {
-        let mut a = StubAudioBackend::new();
+        let mut a = AudioStateBackend::new();
         a.play_se("se01", "click.wav", &SeConfig::default());
         a.play_se("se01", "boom.wav", &SeConfig::default());
         assert_eq!(
@@ -492,7 +492,7 @@ mod tests {
 
     #[test]
     fn skippable_se_not_played_when_skipping() {
-        let mut a = StubAudioBackend::new();
+        let mut a = AudioStateBackend::new();
         a.set_skipping(true);
         a.play_se(
             "se01",
@@ -507,7 +507,7 @@ mod tests {
 
     #[test]
     fn bgm_fade_gain_updates_state() {
-        let mut a = StubAudioBackend::new();
+        let mut a = AudioStateBackend::new();
         a.play_bgm("bgm01.ogg", &BgmConfig::default());
         a.fade_bgm_gain(500, 1000);
 
@@ -520,7 +520,7 @@ mod tests {
 
     #[test]
     fn advance_without_channels_is_noop() {
-        let mut a = StubAudioBackend::new();
+        let mut a = AudioStateBackend::new();
         a.advance(1000);
         assert_eq!(a.audio_state().clock_ms, 1000);
         assert!(a.poll_finish_events().is_empty());
@@ -528,7 +528,7 @@ mod tests {
 
     #[test]
     fn crossfade_bgm_starts_new_and_fades_old() {
-        let mut a = StubAudioBackend::new();
+        let mut a = AudioStateBackend::new();
         a.play_bgm("old.ogg", &BgmConfig::default());
         a.crossfade_bgm(
             "new.ogg",
@@ -552,7 +552,7 @@ mod tests {
 
     #[test]
     fn set_volume_clamps() {
-        let mut a = StubAudioBackend::new();
+        let mut a = AudioStateBackend::new();
         a.set_master_volume(1.5);
         assert_eq!(a.audio_state().master_volume, 1.0);
         a.set_master_volume(-0.5);
@@ -561,7 +561,7 @@ mod tests {
 
     #[test]
     fn set_and_remove_finish_handler() {
-        let mut a = StubAudioBackend::new();
+        let mut a = AudioStateBackend::new();
 
         a.set_sound_finish_handler(
             None,
@@ -580,7 +580,7 @@ mod tests {
 
     #[test]
     fn stop_all_sounds_clears_everything() {
-        let mut a = StubAudioBackend::new();
+        let mut a = AudioStateBackend::new();
         a.play_bgm("bgm.ogg", &BgmConfig::default());
         a.play_se("se01", "click.wav", &SeConfig::default());
         a.play_voice("v01", "line01.ogg", &SeConfig::default());
@@ -593,7 +593,7 @@ mod tests {
 
     #[test]
     fn advance_fades_gain_linear() {
-        let mut a = StubAudioBackend::new();
+        let mut a = AudioStateBackend::new();
         a.play_bgm(
             "bgm.ogg",
             &BgmConfig {

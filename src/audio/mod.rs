@@ -6,7 +6,7 @@
 //!
 //! ## 模块
 //! - [`engine`]：`AudioBackend` trait、`AudioState`、播放配置类型、淡出逻辑
-//! - [`stub`]：`StubAudioBackend` — 不产生任何音频输出的逻辑状态实现
+//! - [`state`]：`AudioStateBackend` — 逻辑状态实现
 //!
 //! ## 典型接入方式
 //! 1. Core 在帧循环中把解释器事件归约到 [`AudioState`]。
@@ -15,10 +15,10 @@
 //!    并交回解释器执行 handler。
 
 pub mod engine;
-pub mod stub;
+pub mod state;
 
 pub use engine::{
     AudioBackend, AudioState, BgmConfig, FadeState, SeConfig, SoundCategory, SoundChannel,
     SoundFinishEvent, SoundFinishHandler,
 };
-pub use stub::StubAudioBackend;
+pub use state::AudioStateBackend;

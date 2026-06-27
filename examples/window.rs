@@ -6,7 +6,7 @@
 
 use art3m1s_core::backend::gl::{GlRenderer, GlTextureProvider, ShaderProfile};
 use art3m1s_core::compositor::Compositor;
-use art3m1s_core::pipeline::CompositorPipeline;
+use art3m1s_core::render_pipeline::RenderPipeline;
 use art3m1s_core::save::{SaveData, SaveManager};
 use art3m1s_core::text::GlyphTextRenderer;
 use art3m1s_core::Project;
@@ -883,7 +883,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     compositor.advance(delta_ms);
 
                     // 渲染
-                    CompositorPipeline::new(&compositor)
+                    RenderPipeline::new(&compositor)
                         .render(&mut renderer, &mut texture_provider);
                     surface.swap_buffers(&gl_context).unwrap();
 

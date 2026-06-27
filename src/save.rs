@@ -274,7 +274,7 @@ impl SaveData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::{AudioBackend, BgmConfig, SeConfig, StubAudioBackend};
+    use crate::audio::{AudioBackend, BgmConfig, SeConfig, AudioStateBackend};
     use asb_interpreter::VariableStore;
 
     #[test]
@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn audio_snapshot_replays_active_channels_from_start() {
-        let mut audio = StubAudioBackend::new();
+        let mut audio = AudioStateBackend::new();
         audio.play_bgm(
             "bgm/scene.ogg",
             &BgmConfig {
@@ -362,7 +362,7 @@ mod tests {
         assert_eq!(snapshot.se[0].file, "se/wind.ogg");
         assert!(snapshot.se[0].skippable);
 
-        let mut restored = StubAudioBackend::new();
+        let mut restored = AudioStateBackend::new();
         snapshot.restore_into(&mut restored);
 
         let state = restored.audio_state();

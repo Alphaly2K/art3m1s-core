@@ -5,7 +5,7 @@
 //!
 //! ## 模块
 //! - [`engine`]：`VideoBackend` trait、`VideoState`、播放配置类型
-//! - [`stub`]：`StubVideoBackend` — 不产生任何视频输出的逻辑状态实现
+//! - [`state`]：`VideoStateBackend` — 逻辑状态实现
 //!
 //! ## 视频模式
 //! 1. **全屏视频**（`id=None`）：视频直接渲染到整个舞台，不创建图层
@@ -19,7 +19,7 @@
 //! Core 不持有 FFmpeg backend，也不把解码帧存回视频状态。
 
 pub mod engine;
-pub mod stub;
+pub mod state;
 
 pub use engine::{VideoBackend, VideoConfig, VideoFinishEvent, VideoFinishHandler, VideoState};
-pub use stub::StubVideoBackend;
+pub use state::VideoStateBackend;

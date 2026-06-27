@@ -83,8 +83,8 @@ impl CoreRuntime {
         let texture_provider = GlTextureProvider::new(gl.clone()).with_ffi_source();
 
         let compositor = Compositor::new_with_stage_size(stage_width, stage_height);
-        let audio = Box::new(crate::audio::StubAudioBackend::new()) as Box<dyn AudioBackend>;
-        let video = Box::new(crate::video::StubVideoBackend::new()) as Box<dyn VideoBackend>;
+        let audio = Box::new(crate::audio::AudioStateBackend::new()) as Box<dyn AudioBackend>;
+        let video = Box::new(crate::video::VideoStateBackend::new()) as Box<dyn VideoBackend>;
         let interpreter =
             asb_interpreter::Interpreter::new(asb_interpreter::InterpreterConfig::default());
 

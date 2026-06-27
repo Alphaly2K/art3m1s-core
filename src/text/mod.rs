@@ -16,12 +16,11 @@
 //! [`ScenarioText`]: asb_interpreter::event::Event::ScenarioText
 //! [`FontSettings`]: asb_interpreter::event::Event::FontSettings
 //! [`MessageLayerSwitch`]: asb_interpreter::event::Event::MessageLayerSwitch
-//! [`DrawCommand`]: crate::compositor::DrawCommand
+//! [`DrawCommand`]: crate::render_pipeline::draw::DrawCommand
 
 pub mod glyph;
 pub mod inject;
 pub mod render;
-pub mod stub;
 
 pub use glyph::GlyphTextRenderer;
 pub use inject::TextInject;
@@ -29,4 +28,3 @@ pub use render::{
     FontDesc, FontMetrics, FontState, GlyphInfo, MessageLayer, ScetweenConfig, ScetweenMode,
     ScetweenSetMode, TextAlignment, TextRenderer,
 };
-pub use stub::StubTextRenderer;

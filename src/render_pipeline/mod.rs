@@ -125,6 +125,3 @@ impl<'a> RenderPipeline<'a> {
         build_frame(&compositor.scene, compositor.clock_ms, provider, text_for)
     }
 }
-
-/// Backward-compatible name while callers migrate.
-pub type CompositorPipeline<'a> = RenderPipeline<'a>;

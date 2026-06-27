@@ -299,7 +299,7 @@ impl Default for AudioState {
 /// 3. 通过 [`AudioBackend::poll_finish_events`] 获取声音完成事件
 ///
 /// ## 计划实现
-/// - [`crate::audio::StubAudioBackend`]：无操作的逻辑状态实现，用于测试和 runtime
+/// - [`crate::audio::AudioStateBackend`]：逻辑状态实现，用于测试和 runtime
 pub trait AudioBackend {
     // -----------------------------------------------------------------------
     // BGM 操作

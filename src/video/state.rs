@@ -1,28 +1,28 @@
-//! 存根视频后端。
+//! 视频逻辑状态后端。
 //!
-//! 不产生任何视频输出的存根实现，用于测试和不支持视频的环境。
+//! 不在 core 内解码或渲染视频的逻辑状态实现，用于测试和不支持视频的环境。
 //! 所有视频操作立即完成，触发完成事件处理器。
 
 use crate::video::engine::*;
 use std::collections::VecDeque;
 
-/// 存根视频后端。
+/// 视频逻辑状态后端。
 ///
 /// 不实际解码或渲染视频，但会正确触发完成事件，
 /// 让脚本可以继续执行（等价于视频瞬间播放完毕）。
 #[derive(Debug, Default)]
-pub struct StubVideoBackend {
+pub struct VideoStateBackend {
     state: VideoState,
     finish_queue: VecDeque<VideoFinishEvent>,
 }
 
-impl StubVideoBackend {
+impl VideoStateBackend {
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-impl VideoBackend for StubVideoBackend {
+impl VideoBackend for VideoStateBackend {
     fn play_fullscreen(&mut self, config: &VideoConfig) {
         // 停止旧的全屏视频
         self.stop_fullscreen();
@@ -34,7 +34,7 @@ impl VideoBackend for StubVideoBackend {
 
         self.state.fullscreen_video = Some(channel);
 
-        // 存根模式：非循环视频立即完成
+        // 逻辑状态模式：非循环视频立即完成
         if !config.loop_play {
             let handler = self.state.finish_handler.clone();
             self.finish_queue
@@ -65,7 +65,7 @@ impl VideoBackend for StubVideoBackend {
 
         self.state.video_layers.insert(id.to_string(), channel);
 
-        // 存根模式：非循环视频立即完成
+        // 逻辑状态模式：非循环视频立即完成
         if !config.loop_play {
             let handler = self.state.finish_handler.clone();
             self.finish_queue.push_back(VideoFinishEvent {
@@ -99,7 +99,7 @@ impl VideoBackend for StubVideoBackend {
     fn advance(&mut self, delta_ms: u64) {
         self.state.clock_ms += delta_ms;
 
-        // 存根模式：不实际推进视频，因为视频已经"瞬间完成"
+        // 逻辑状态模式：不实际推进视频，因为视频已经"瞬间完成"
         // 但需要清理已完成的视频
         if let Some(ref mut video) = self.state.fullscreen_video {
             if video.playing && !video.loop_play {
@@ -133,8 +133,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_stub_fullscreen_video() {
-        let mut backend = StubVideoBackend::new();
+    fn test_state_fullscreen_video() {
+        let mut backend = VideoStateBackend::new();
 
         let config = VideoConfig {
             file: "test.mpg".to_string(),
@@ -146,7 +146,7 @@ mod tests {
         backend.play_fullscreen(&config);
         assert!(backend.is_fullscreen_playing());
 
-        // 存根模式：非循环视频立即产生完成事件
+        // 逻辑状态模式：非循环视频立即产生完成事件
         let events = backend.poll_finish_events();
         assert_eq!(events.len(), 1);
         assert!(events[0].id.is_none());
@@ -157,8 +157,8 @@ mod tests {
     }
 
     #[test]
-    fn test_stub_loop_video() {
-        let mut backend = StubVideoBackend::new();
+    fn test_state_loop_video() {
+        let mut backend = VideoStateBackend::new();
 
         let config = VideoConfig {
             file: "test.mpg".to_string(),
@@ -180,8 +180,8 @@ mod tests {
     }
 
     #[test]
-    fn test_stub_video_layer() {
-        let mut backend = StubVideoBackend::new();
+    fn test_state_video_layer() {
+        let mut backend = VideoStateBackend::new();
 
         let config = VideoConfig {
             file: "test.ogv".to_string(),
@@ -202,8 +202,8 @@ mod tests {
     }
 
     #[test]
-    fn test_stub_finish_handler() {
-        let mut backend = StubVideoBackend::new();
+    fn test_state_finish_handler() {
+        let mut backend = VideoStateBackend::new();
 
         let handler = VideoFinishHandler {
             file: Some("script.asb".to_string()),
