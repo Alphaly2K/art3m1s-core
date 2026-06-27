@@ -95,6 +95,18 @@ impl CoreRuntime {
                 Event::TakeScreenshot => {
                     self.capture_save_screenshot();
                 }
+                Event::AutoModeConfig { allow, layer } => {
+                    self.apply_automode_config(*allow, layer.clone());
+                }
+                Event::SkipConfig { allow, skip_unread } => {
+                    self.apply_skip_config(*allow, *skip_unread);
+                }
+                Event::AutoSkipDisable => {
+                    self.disable_auto_skip();
+                }
+                Event::Exec { command, mode } => {
+                    self.apply_exec_command(command, *mode);
+                }
                 Event::SaveScreenshot {
                     file,
                     width,
@@ -231,6 +243,14 @@ fn event_name(e: &Event) -> String {
         Event::YesNo { .. } => "YesNo".to_string(),
         Event::SceneIn => "SceneIn".to_string(),
         Event::SceneOut => "SceneOut".to_string(),
+        Event::AutoModeConfig { allow, layer } => {
+            format!("AutoMode allow={allow} layer={layer:?}")
+        }
+        Event::SkipConfig { allow, skip_unread } => {
+            format!("Skip allow={allow} unread={skip_unread}")
+        }
+        Event::AutoSkipDisable => "AutoSkipDisable".to_string(),
+        Event::Exec { command, mode } => format!("Exec command={command} mode={mode:?}"),
         e => {
             crate::core_debug!("[event] {:?}", e);
             "Not implemented event".to_string()

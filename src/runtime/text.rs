@@ -9,20 +9,43 @@ impl CoreRuntime {
         self.text_renderer = Some(renderer);
     }
 
-    pub(super) fn advance_text(&mut self, delta_ms: u64) {
+pub(super) fn advance_text(&mut self, delta_ms: u64) {
+        let skip_active = self.skip_active();
+        let was_skipping = self.was_skipping();
+        let mut reveal_complete = false;
         if let Some(renderer) = self.text_renderer.as_mut() {
             renderer.advance_reveal(delta_ms);
+            if skip_active {
+                renderer.reveal_all();
+            } else if was_skipping {
+                renderer.reveal_all();
+                reveal_complete = renderer.is_reveal_complete();
+            }
         }
+        if was_skipping && reveal_complete {
+            self.clear_was_skipping();
+        }
+    }
+
+    pub(super) fn reveal_text_now(&mut self) {
+        if let Some(renderer) = self.text_renderer.as_mut() {
+            renderer.reveal_all();
+        }
+    }
+
+    pub(super) fn is_text_reveal_complete(&self) -> bool {
+        self.text_renderer
+            .as_ref()
+            .map(|renderer| renderer.is_reveal_complete())
+            .unwrap_or(true)
     }
 
     pub(super) fn build_text_commands(&mut self) -> HashMap<String, Vec<DrawCommand>> {
         let Some(renderer) = self.text_renderer.as_mut() else {
             return HashMap::new();
         };
-        // 兜底揭示：本帧可能先 advance 再推文本，此时 advance_reveal
-        // 已执行但新文本尚未到达，故在渲染前再推进一次（delta=0 只会
-        // 把刚推入的首个字符设为可见，不会重复计算已逝时间）。
-        renderer.advance_reveal(0);
+        // 不再在这里调 advance_reveal(0)——那会把 reveal_index 重置为 1。
+        // advance_reveal 只在 advance_text 里每帧调一次。
         renderer.build_text_commands(&mut self.texture_provider)
     }
 

@@ -168,6 +168,9 @@ impl TextRenderer for GlyphTextRenderer<'_> {
             }
         }
         layer.text_buffer.clear();
+        layer.reveal_index = 0;
+        layer.reveal_pending = false;
+        layer.reveal_clock_ms = 0; // 切层时也要清时钟，避免旧动画时间残留
     }
 
     fn pop_message_layer(&mut self) {
@@ -188,9 +191,12 @@ impl TextRenderer for GlyphTextRenderer<'_> {
             Some(s) => s,
             None => return,
         };
-        // 新文本到来时标记待揭示
-        layer.reveal_pending = true;
-        layer.reveal_clock_ms = 0;
+        let was_empty = layer.text_buffer.is_empty();
+        if was_empty {
+            layer.reveal_pending = true;
+            layer.reveal_clock_ms = 0;
+            layer.reveal_index = 0;
+        }
 
         for c in content.chars() {
             let q = sf.outline_glyph(sf.glyph_id(c).with_scale(sz));
@@ -267,6 +273,7 @@ impl TextRenderer for GlyphTextRenderer<'_> {
             l.text_buffer.clear();
             l.reveal_index = 0;
             l.reveal_pending = false;
+            l.reveal_clock_ms = 0;
         }
     }
 
@@ -287,14 +294,14 @@ impl TextRenderer for GlyphTextRenderer<'_> {
                 continue;
             }
 
-            // 确定本帧可见的字形范围：有 scetween 就走逐字揭示（全局配置），
-            // 无 scetween 则完整渲染。
-            let visible_count = if ly.scetween.is_some() {
+            // fixed_count: 无 scetween 全量; 有 scetween 按 reveal_index
+            let visible_count = if !ly.scetween.is_empty() {
                 ly.reveal_index.min(ly.text_buffer.len())
             } else {
                 ly.text_buffer.len()
             };
-            let scetween = &ly.scetween;
+            let scethweens = &ly.scetween;
+            let text_hidden = ly.text_hidden;
 
             let sz = ly.font.size.unwrap_or(40.0);
             let scale = PxScale::from(sz);
@@ -343,7 +350,7 @@ impl TextRenderer for GlyphTextRenderer<'_> {
                 let fy = ly.top + g.offset_y + line_y;
 
                 // 计算每字符的 scetween 动画偏移
-                let anim_offset = scetween_char_offset(scetween.as_ref(), i, ly.reveal_clock_ms);
+                let anim_offset = scetween_char_offset(scethweens, i, ly.reveal_clock_ms, text_hidden);
 
                 if g.atlas_w > 0.0 && g.atlas_h > 0.0 {
                     let clip = ClipRect {
@@ -432,7 +439,19 @@ impl TextRenderer for GlyphTextRenderer<'_> {
 
     fn set_scetween(&mut self, config: ScetweenConfig) {
         let layer = self.state.active_layer_mut();
-        layer.scetween = Some(config);
+        match config.set_mode {
+            crate::text::render::ScetweenSetMode::Init => {
+                // init：替换同类型（同 ScetweenMode）的现有配置。
+                // 如果层里已有 type=in 的配置，再来一个 type=in init，旧的被替换。
+                // 不同类型（show/hide/in）互不影响，可同时存在。
+                layer.scetween.retain(|c| c.mode != config.mode);
+                layer.scetween.push(config);
+            }
+            crate::text::render::ScetweenSetMode::Add => {
+                // add：追加配置，不替换现有的。
+                layer.scetween.push(config);
+            }
+        }
     }
 
     fn reset_reveal(&mut self) {
@@ -449,82 +468,128 @@ impl TextRenderer for GlyphTextRenderer<'_> {
                 Some(l) => l,
                 None => continue,
             };
-            if !layer.reveal_pending {
+            if !layer.reveal_pending || layer.text_buffer.is_empty() {
                 continue;
             }
             layer.reveal_clock_ms = layer.reveal_clock_ms.saturating_add(delta_ms);
 
-            let is_entrance = layer
-                .scetween
-                .as_ref()
-                .map(|cfg| cfg.mode.is_entrance())
-                .unwrap_or(true);
+            let char_count = layer.text_buffer.len();
 
-            if !is_entrance {
-                layer.reveal_index = layer.text_buffer.len();
+            // 无 scetween：立即全量
+            if layer.scetween.is_empty() {
+                layer.reveal_index = char_count;
                 layer.reveal_pending = false;
                 continue;
             }
 
-            if let Some(ref cfg) = layer.scetween {
-                let char_count = layer.text_buffer.len();
-                if char_count == 0 {
+            // 根据 text_hidden 选取相关配置：
+            // - 未隐藏 → 入场配置驱动揭示（is_entrance=true）
+            // - 已隐藏 → 退场配置驱动揭示（is_entrance=false）
+            let relevant: Vec<&ScetweenConfig> = layer
+                .scetween
+                .iter()
+                .filter(|c| c.mode.is_entrance() != layer.text_hidden)
+                .collect();
+
+            // 没有相关配置 → 立即全量
+            if relevant.is_empty() {
+                layer.reveal_index = char_count;
+                layer.reveal_pending = false;
+                continue;
+            }
+
+            // 用相关配置中"最长"的总时长决定揭示进度
+            let max_delay = relevant.iter().map(|c| c.delay_per_char).max().unwrap_or(0);
+            let max_total: u64 = relevant
+                .iter()
+                .map(|c| {
+                    (char_count.saturating_sub(1) as u64)
+                        .saturating_mul(c.delay_per_char)
+                        .saturating_add(c.time_per_char)
+                })
+                .max()
+                .unwrap_or(0);
+
+            // delay=0 且 time=0：无动画，一次性全揭示
+            if max_delay == 0 && max_total == 0 {
+                layer.reveal_index = char_count;
+                layer.reveal_pending = false;
+                continue;
+            }
+
+            // delay=0：所有字符同时开始动画，reveal_index 直接置满
+            if max_delay == 0 {
+                layer.reveal_index = char_count;
+                if layer.reveal_clock_ms >= max_total {
                     layer.reveal_pending = false;
-                    continue;
                 }
-                if cfg.delay_per_char == 0 {
-                    layer.reveal_index = char_count;
-                    if cfg.time_per_char > 0 && layer.reveal_clock_ms >= cfg.time_per_char {
-                        layer.reveal_pending = false;
-                    } else if cfg.time_per_char == 0 {
-                        layer.reveal_pending = false;
-                    }
-                } else {
-                    let chars_revealed = (layer.reveal_clock_ms / cfg.delay_per_char) as usize + 1;
-                    layer.reveal_index = chars_revealed.min(char_count);
-                    if layer.reveal_index >= char_count {
-                        // 全部字符已揭示，但最后一个字符的出场动画可能还在播放
-                        let last_char_start =
-                            (char_count.saturating_sub(1) as u64) * cfg.delay_per_char;
-                        if cfg.time_per_char > 0
-                            && layer.reveal_clock_ms < last_char_start + cfg.time_per_char
-                        {
-                            // 继续标记为 pending 以播放动画
-                        } else {
-                            layer.reveal_pending = false;
-                        }
-                    }
-                }
-            } else {
-                layer.reveal_index = layer.text_buffer.len();
+                continue;
+            }
+
+            // 有 delay：按时间逐步增加 reveal_index（只增不减）
+            let chars_revealed = (layer.reveal_clock_ms / max_delay) as usize + 1;
+            let new_index = chars_revealed.min(char_count);
+            if new_index > layer.reveal_index {
+                layer.reveal_index = new_index;
+            }
+            if layer.reveal_index >= char_count && layer.reveal_clock_ms >= max_total {
                 layer.reveal_pending = false;
             }
         }
     }
 
     fn reveal_all(&mut self) {
-        let layer = self.state.active_layer_mut();
-        layer.reveal_index = layer.text_buffer.len();
-        layer.reveal_pending = false;
+        for (_lid, layer) in self.state.layers.iter_mut() {
+            if layer.text_buffer.is_empty() {
+                continue;
+            }
+            layer.reveal_index = layer.text_buffer.len();
+            layer.reveal_pending = false;
+            // Skip/click-to-reveal 必须把 scetween 时钟推到动画结束，
+            // 否则 delay=0 & time>0 的场景里所有字符的 alpha 都还停在
+            // 起始值（通常为 0），视觉上就是"只看到两三个字"或全透明。
+            if !layer.scetween.is_empty() {
+                let char_count = layer.text_buffer.len();
+                // 用相关配置（入场 or 退场）中"最长"的总时长
+                let max_total: u64 = layer
+                    .scetween
+                    .iter()
+                    .filter(|c| c.mode.is_entrance() != layer.text_hidden)
+                    .map(|c| {
+                        (char_count.saturating_sub(1) as u64)
+                            .saturating_mul(c.delay_per_char)
+                            .saturating_add(c.time_per_char)
+                    })
+                    .max()
+                    .unwrap_or(0);
+                if layer.reveal_clock_ms < max_total {
+                    layer.reveal_clock_ms = max_total;
+                }
+            }
+        }
     }
 
     fn hide_text(&mut self) {
         let layer = self.state.active_layer_mut();
+        layer.text_hidden = true;
         layer.reveal_index = 0;
+        layer.reveal_clock_ms = 0;
+        layer.reveal_pending = true;
     }
 
     fn show_text(&mut self) {
         let layer = self.state.active_layer_mut();
+        layer.text_hidden = false;
+        layer.reveal_index = 0;
+        layer.reveal_clock_ms = 0;
         layer.reveal_pending = true;
     }
 
     fn is_reveal_complete(&self) -> bool {
-        if let Some(ref active) = self.state.active_layer {
-            if let Some(layer) = self.state.layers.get(active) {
-                return !layer.reveal_pending && layer.reveal_index >= layer.text_buffer.len();
-            }
-        }
-        true
+        self.state.layers.values().all(|layer| {
+            layer.text_buffer.is_empty()
+                || (!layer.reveal_pending && layer.reveal_index >= layer.text_buffer.len())
+        })
     }
 
     fn font_state(&self) -> &FontState {
@@ -535,77 +600,110 @@ impl TextRenderer for GlyphTextRenderer<'_> {
     }
 }
 
-/// 计算单个字符的 scetween 动画偏移量。
+/// 计算单个字符在所有 scetween 配置共同作用下的动画偏移量。
 ///
+/// 根据 `text_hidden` 选取相关配置（入场 or 退场），把各配置的贡献叠加。
 /// 返回 `(offset_x, offset_y, scale_x, scale_y, rotate_degrees, alpha)`，
 /// 其中位置偏移为像素值，缩放为倍数（1.0=无缩放），alpha 为 0.0-1.0。
 fn scetween_char_offset(
-    cfg: Option<&ScetweenConfig>,
+    configs: &[ScetweenConfig],
     char_index: usize,
     reveal_clock_ms: u64,
+    text_hidden: bool,
 ) -> (f32, f32, f32, f32, f32, f32) {
-    let cfg = match cfg {
-        Some(c) => c,
-        None => return (0.0, 0.0, 1.0, 1.0, 0.0, 1.0),
-    };
+    if configs.is_empty() {
+        return (0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    }
 
-    let char_start_ms = char_index as u64 * cfg.delay_per_char;
-    if reveal_clock_ms < char_start_ms {
-        // 尚未到达该字符的动画开始时间
-        return match cfg.mode {
-            crate::text::render::ScetweenMode::In
-            | crate::text::render::ScetweenMode::Show
-            | crate::text::render::ScetweenMode::BacklogDownIn
-            | crate::text::render::ScetweenMode::BacklogUpIn => {
-                // 入场动画：字符从动画起点开始
-                scetween_start_value(cfg)
-            }
-            _ => (0.0, 0.0, 1.0, 1.0, 0.0, 1.0),
+    let mut ox = 0.0f32;
+    let mut oy = 0.0f32;
+    let mut sx = 1.0f32;
+    let mut sy = 1.0f32;
+    let mut rot = 0.0f32;
+    let mut alpha = 1.0f32;
+
+    for cfg in configs {
+        // 根据隐藏状态选取相关配置：
+        // - 未隐藏 → 入场配置（is_entrance=true）
+        // - 已隐藏 → 退场配置（is_entrance=false）
+        if cfg.mode.is_entrance() == text_hidden {
+            continue;
+        }
+
+        let char_start_ms = char_index as u64 * cfg.delay_per_char;
+        let (start_x, start_y, start_sx, start_sy, start_r, start_a) =
+            scetween_start_value(cfg);
+
+        let (t_start, t_end) = if cfg.mode.is_entrance() {
+            // 入场：从 start → normal
+            (
+                (start_x, start_y, start_sx, start_sy, start_r, start_a),
+                (0.0, 0.0, 1.0, 1.0, 0.0, 1.0),
+            )
+        } else {
+            // 退场：从 normal → start
+            (
+                (0.0, 0.0, 1.0, 1.0, 0.0, 1.0),
+                (start_x, start_y, start_sx, start_sy, start_r, start_a),
+            )
         };
+
+        if reveal_clock_ms < char_start_ms {
+            // 尚未到达该字符的动画开始时间 → 显示起点
+            ox += t_start.0;
+            oy += t_start.1;
+            sx *= t_start.2;
+            sy *= t_start.3;
+            rot += t_start.4;
+            alpha *= t_start.5;
+            continue;
+        }
+
+        let elapsed = reveal_clock_ms - char_start_ms;
+        if cfg.time_per_char == 0 || elapsed >= cfg.time_per_char {
+            // 动画已结束 → 显示终点
+            ox += t_end.0;
+            oy += t_end.1;
+            sx *= t_end.2;
+            sy *= t_end.3;
+            rot += t_end.4;
+            alpha *= t_end.5;
+            continue;
+        }
+
+        // 动画进行中 → 按缓动插值
+        let t = elapsed as f32 / cfg.time_per_char as f32;
+        let progress = cfg.ease.apply(t);
+
+        ox += t_start.0 + (t_end.0 - t_start.0) * progress;
+        oy += t_start.1 + (t_end.1 - t_start.1) * progress;
+        sx *= t_start.2 + (t_end.2 - t_start.2) * progress;
+        sy *= t_start.3 + (t_end.3 - t_start.3) * progress;
+        rot += t_start.4 + (t_end.4 - t_start.4) * progress;
+        alpha *= t_start.5 + (t_end.5 - t_start.5) * progress;
     }
 
-    let elapsed = reveal_clock_ms - char_start_ms;
-    let time = if cfg.time_per_char > 0 {
-        cfg.time_per_char
-    } else {
-        return (0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
-    };
-
-    if elapsed >= time {
-        return (0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
-    }
-
-    let t = elapsed as f32 / time as f32;
-    let progress = cfg.ease.apply(t);
-
-    // 从起始值到正常值的插值
-    let (start_x, start_y, start_sx, start_sy, start_r, start_a) = scetween_start_value(cfg);
-
-    let end_x: f32 = 0.0;
-    let end_y: f32 = 0.0;
-    let end_sx: f32 = 1.0;
-    let end_sy: f32 = 1.0;
-    let end_r: f32 = 0.0;
-    let end_a: f32 = 1.0;
-
-    (
-        start_x + (end_x - start_x) * progress,
-        start_y + (end_y - start_y) * progress,
-        start_sx + (end_sx - start_sx) * progress,
-        start_sy + (end_sy - start_sy) * progress,
-        start_r + (end_r - start_r) * progress,
-        start_a + (end_a - start_a) * progress,
-    )
+    (ox, oy, sx, sy, rot, alpha.clamp(0.0, 1.0))
 }
 
-/// 根据 scetween 配置计算动画的起始值。
+/// 根据 scetween 配置计算动画的"起点"值。
+///
+/// 注意：`cfg.diff` 对于 alpha 参数使用 Artemis 的 0-255 范围，
+/// 这里需要转换到 0-1 的归一化范围；其余参数使用原始值（像素/百分比/度）。
 fn scetween_start_value(cfg: &ScetweenConfig) -> (f32, f32, f32, f32, f32, f32) {
     let diff = cfg.diff.unwrap_or(0.0);
     match cfg.param.as_deref() {
         Some("left") => (diff, 0.0, 1.0, 1.0, 0.0, 1.0),
         Some("top") => (0.0, diff, 1.0, 1.0, 0.0, 1.0),
         Some("alpha") => {
-            let start_a = if cfg.mode.is_entrance() { 0.0 } else { 1.0 };
+            // Artemis 用 0-255 的 diff；转换到 0-1
+            let start_a = if cfg.mode.is_entrance() {
+                // 入场：alpha 从 0 渐入到 1（或从 (255+diff)/255 开始）
+                (255.0 + diff).clamp(0.0, 255.0) / 255.0
+            } else {
+                // 退场：alpha 从 1 渐出到 0（或从 (255+diff)/255 开始）
+                (255.0 + diff).clamp(0.0, 255.0) / 255.0
+            };
             (0.0, 0.0, 1.0, 1.0, 0.0, start_a)
         }
         Some("xscale") => {

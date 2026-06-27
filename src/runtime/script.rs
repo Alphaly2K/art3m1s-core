@@ -14,6 +14,8 @@ impl CoreRuntime {
         if has_tags {
             if let Some(reason @ WaitReason::Stop { .. }) = self.wait_reason.clone() {
                 self.drain_queued_tags_while_stopped(reason);
+            } else if let Some(reason) = self.wait_reason.clone() {
+                self.drain_queued_tags_while_waiting(reason);
             } else {
                 self.wait_reason = None;
             }
@@ -22,7 +24,7 @@ impl CoreRuntime {
         if self.wait_reason.is_none() {
             self.run_until_wait_or_complete();
         } else {
-            self.advance_wait_state(clicked, delta_ms, has_tags);
+            self.advance_wait_state(clicked, delta_ms);
         }
     }
 
@@ -43,22 +45,26 @@ impl CoreRuntime {
                         _ => {}
                     }
                     self.wait_reason = Some(reason);
+                    self.reset_control_wait_flags();
                     break;
                 }
                 Ok(ExecutionResult::Wait(Event::VideoPlay { .. })) => {
                     self.wait_reason = Some(WaitReason::Stop {
                         reason: Some("video".into()),
                     });
+                    self.reset_control_wait_flags();
                     break;
                 }
                 Ok(ExecutionResult::Wait(Event::Trans { .. })) => {
                     self.wait_reason = Some(WaitReason::Stop {
                         reason: Some("trans".into()),
                     });
+                    self.reset_control_wait_flags();
                     break;
                 }
                 Ok(ExecutionResult::Wait(_)) => {
                     self.wait_reason = Some(WaitReason::Generic);
+                    self.reset_control_wait_flags();
                     break;
                 }
                 Ok(ExecutionResult::Completed) | Ok(_) => break,
@@ -70,16 +76,16 @@ impl CoreRuntime {
         }
     }
 
-    fn advance_wait_state(&mut self, clicked: bool, delta_ms: u64, has_tags: bool) {
-        let Some(ref reason) = self.wait_reason else {
+    fn advance_wait_state(&mut self, clicked: bool, delta_ms: u64) {
+        let Some(reason) = self.wait_reason.clone() else {
             return;
         };
-        let video_resume = matches!(reason, WaitReason::Stop { .. })
+        let video_resume = matches!(&reason, WaitReason::Stop { .. })
             && self
                 .video_finished
                 .swap(false, std::sync::atomic::Ordering::SeqCst);
         let trans_resume = matches!(
-            reason,
+            &reason,
             WaitReason::Stop {
                 reason: Some(r)
             } if r == "trans"
@@ -91,7 +97,14 @@ impl CoreRuntime {
 
         let advance = match reason {
             WaitReason::Timed { .. } => {
-                if delta_ms >= self.timed_remaining_ms {
+                if self.skip_active() {
+                    if self.should_hold_for_skip_reveal() {
+                        false
+                    } else {
+                        self.timed_remaining_ms = 0;
+                        true
+                    }
+                } else if delta_ms >= self.timed_remaining_ms {
                     self.timed_remaining_ms = 0;
                     true
                 } else {
@@ -100,12 +113,30 @@ impl CoreRuntime {
                 }
             }
             WaitReason::Stop { .. } => false,
-            _ => !has_tags && clicked,
+            _ => {
+                if clicked {
+                    if !self.is_text_reveal_complete() {
+                        self.reveal_text_now();
+                        false
+                    } else {
+                        true
+                    }
+                } else if self.skip_active() {
+                    !self.should_hold_for_skip_reveal()
+                } else {
+                    self.should_auto_advance(delta_ms)
+                }
+            }
         };
         if advance {
-            self.wait_reason = None;
-            self.interpreter.advance_line();
+            self.advance_wait_line();
         }
+    }
+
+    fn advance_wait_line(&mut self) {
+        self.wait_reason = None;
+        self.reset_control_wait_flags();
+        self.interpreter.advance_line();
     }
 
     fn drain_queued_tags_while_stopped(&mut self, stop_reason: WaitReason) {
@@ -131,6 +162,25 @@ impl CoreRuntime {
             self.wait_reason = None;
         } else {
             self.wait_reason = Some(stop_reason);
+        }
+    }
+
+    fn drain_queued_tags_while_waiting(&mut self, wait_reason: WaitReason) {
+        let drain = match self.interpreter.drain_queued_tags_only() {
+            Ok(drain) => drain,
+            Err(e) => {
+                crate::core_error!("解释器错误: {e:?}");
+                self.wait_reason = Some(wait_reason);
+                return;
+            }
+        };
+
+        if drain.saw_return || drain.changed_position {
+            self.wait_reason = None;
+        } else if let Some(Event::Wait { reason }) = drain.wait {
+            self.wait_reason = Some(reason);
+        } else {
+            self.wait_reason = Some(wait_reason);
         }
     }
 }

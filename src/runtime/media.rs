@@ -142,6 +142,7 @@ impl CoreRuntime {
         match id {
             Some(id) => {
                 self.audio.stop_se(id, 0);
+                self.audio.audio_state_mut().voice_channels.remove(id);
             }
             None => {
                 self.audio.stop_bgm(0);
@@ -161,6 +162,15 @@ impl CoreRuntime {
                 &[],
             );
         }
+    }
+
+    pub(super) fn is_voice_playing(&self) -> bool {
+        let state = self.audio.audio_state();
+        state.voice_channels.values().any(|ch| ch.playing)
+            || state
+                .se_channels
+                .values()
+                .any(|ch| ch.playing && ch.file.contains(":vo/"))
     }
 
     pub fn notify_video_finished(&mut self, id: Option<&str>) {
@@ -353,8 +363,10 @@ impl CoreRuntime {
                 fade_time,
             } => {
                 let resolved_file = self.resolve_magic_media_path(file);
+                self.voice_serial = self.voice_serial.saturating_add(1);
+                let voice_id = format!("voice:{}", self.voice_serial);
                 self.audio.play_voice(
-                    "",
+                    &voice_id,
                     file,
                     &SeConfig {
                         loop_play: false,
@@ -368,7 +380,7 @@ impl CoreRuntime {
                 hm::emit(
                     Kind::AudioVoicePlay,
                     hm::VoicePlay {
-                        id: "",
+                        id: &voice_id,
                         file,
                         resolved_file: Some(&resolved_file),
                         gain: *gain,

@@ -44,6 +44,7 @@ impl CoreRuntime {
         self.load_default_font();
         self.register_builtin_textures();
         self.seed_savepath_and_sysload();
+        self.sync_control_status_variables();
 
         // Boot
         project

@@ -16,6 +16,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 mod callbacks;
+mod control;
 mod events;
 mod input;
 mod magic_path;
@@ -48,6 +49,8 @@ pub struct CoreRuntime {
     stage_h: u32,
     wait_reason: Option<WaitReason>,
     timed_remaining_ms: u64,
+    control: control::RuntimeControlState,
+    voice_serial: u64,
     hovered_layer: Option<String>,
     volumes: Arc<Mutex<HashMap<String, f32>>>,
     exit_requested: Arc<AtomicBool>,
@@ -114,6 +117,8 @@ impl CoreRuntime {
             stage_h: stage_height,
             wait_reason: None,
             timed_remaining_ms: 0,
+            control: control::RuntimeControlState::default(),
+            voice_serial: 0,
             hovered_layer: None,
             volumes: Arc::new(Mutex::new(HashMap::new())),
             exit_requested: Arc::new(AtomicBool::new(false)),

@@ -242,9 +242,16 @@ pub struct MessageLayer {
     /// 逐字显示：本层的新文本是否正在等待揭示
     pub reveal_pending: bool,
     /// 逐字显示配置（仅本层生效）
-    pub scetween: Option<ScetweenConfig>,
+    ///
+    /// 一个层可同时拥有多个 scetween 配置（如 show + hide + in），
+    /// 每个配置控制不同的动画属性（alpha / left / top / ...）。
+    /// 入场动画由 `ScetweenMode::is_entrance()` 为 true 的配置驱动；
+    /// 退场动画由非入场的配置驱动，在 `hide_text()` 后播放。
+    pub scetween: Vec<ScetweenConfig>,
     /// 逐字显示内部时钟（毫秒），追踪自 reveal 开始以来的时间
     pub reveal_clock_ms: u64,
+    /// 文本是否处于"隐藏"状态（sceout 之后）——决定播放入场还是退场动画
+    pub text_hidden: bool,
 }
 
 impl MessageLayer {
@@ -262,8 +269,9 @@ impl MessageLayer {
             text_buffer: Vec::new(),
             reveal_index: 0,
             reveal_pending: false,
-            scetween: None,
+            scetween: Vec::new(),
             reveal_clock_ms: 0,
+            text_hidden: false,
         }
     }
 }
