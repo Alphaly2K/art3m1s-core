@@ -103,10 +103,12 @@ checksum = "175571dd1d178ced59193a6fc02dde1b972eb0bc56c892cde9beeceac5bf0f6b"
 [[package]]
 name = "asb-decrypt"
 version = "0.1.0"
+source = "git+https://github.com/Alphaly2K/asb-decrypt#42972658e3dfbab38de3eea3b342ab647423e68b"
 
 [[package]]
 name = "asb-interpreter"
 version = "0.1.0"
+source = "git+https://github.com/Alphaly2K/art3m1s-interpreter#d97ffa90cc4308b41720f463e1170c98c5b1787c"
 dependencies = [
  "asb-decrypt",
  "encoding_rs",
@@ -1287,6 +1289,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "pfs-upk-rust"
 version = "0.1.0"
+source = "git+https://github.com/Alphaly2K/pfs-upk-rust#a53d84a59a260cb2defbc0decc251f9563577a28"
 dependencies = [
  "sha1",
  "walkdir",
