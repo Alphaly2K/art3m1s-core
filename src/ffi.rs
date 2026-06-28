@@ -411,6 +411,20 @@ pub unsafe extern "C" fn art3m1s_runtime_feed_click(rt: *mut CoreRuntime) {
 
 #[cfg(feature = "gl-backend")]
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_feed_mouse_button(
+    rt: *mut CoreRuntime,
+    button: u32,
+    pressed: i32,
+) {
+    if rt.is_null() {
+        return;
+    }
+    let rt = unsafe { &*rt };
+    rt.feed_mouse_button(button, pressed != 0);
+}
+
+#[cfg(feature = "gl-backend")]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_feed_key(rt: *mut CoreRuntime, vk: u32, pressed: i32) {
     if rt.is_null() {
         return;

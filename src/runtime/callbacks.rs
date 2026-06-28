@@ -26,6 +26,9 @@ pub(super) struct InputSnapshot {
     pub mouse_x: i32,
     pub mouse_y: i32,
     pub clicked: bool,
+    pub mouse_buttons_down: std::collections::HashSet<u32>,
+    pub mouse_buttons_down_edge: std::collections::HashSet<u32>,
+    pub mouse_buttons_up_edge: std::collections::HashSet<u32>,
     pub keys_down: std::collections::HashSet<u32>,
     pub keys_down_edge: std::collections::HashSet<u32>,
     pub keys_up_edge: std::collections::HashSet<u32>,
@@ -34,6 +37,9 @@ pub(super) struct InputSnapshot {
 
 impl InputSnapshot {
     pub fn clear_edges(&mut self) {
+        self.clicked = false;
+        self.mouse_buttons_down_edge.clear();
+        self.mouse_buttons_up_edge.clear();
         self.keys_down_edge.clear();
         self.keys_up_edge.clear();
     }

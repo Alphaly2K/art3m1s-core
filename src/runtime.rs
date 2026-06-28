@@ -27,6 +27,15 @@ mod save_io;
 mod script;
 mod text;
 
+#[derive(Default)]
+struct PointerDragState {
+    layer_id: Option<String>,
+    start_mouse_x: f32,
+    start_mouse_y: f32,
+    start_left: f32,
+    start_top: f32,
+}
+
 pub struct CoreRuntime {
     gl: Rc<glow::Context>,
     gl_ctx: Box<dyn platform::GLPlatformContext>,
@@ -54,6 +63,7 @@ pub struct CoreRuntime {
     control: control::RuntimeControlState,
     voice_serial: u64,
     hovered_layer: Option<String>,
+    pointer_drag: PointerDragState,
     volumes: Arc<Mutex<HashMap<String, f32>>>,
     exit_requested: Arc<AtomicBool>,
     /// system.ini 的 SAVEPATH 原值（可能含反斜杠/CSIDL），由 load_project 捕获。
@@ -126,6 +136,7 @@ impl CoreRuntime {
             control: control::RuntimeControlState::default(),
             voice_serial: 0,
             hovered_layer: None,
+            pointer_drag: PointerDragState::default(),
             volumes: Arc::new(Mutex::new(HashMap::new())),
             exit_requested: Arc::new(AtomicBool::new(false)),
             project_savepath: None,

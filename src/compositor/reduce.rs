@@ -136,6 +136,45 @@ impl Compositor {
         self.input_handlers
             .get(&(event_name.to_string(), key.to_string()))
     }
+
+    pub fn layer_offset(&self, id: &str) -> Option<(f32, f32)> {
+        self.scene.get(id).map(|layer| layer.props.offset())
+    }
+
+    pub fn is_layer_draggable(&self, id: &str) -> bool {
+        self.scene
+            .get(id)
+            .and_then(|layer| layer.props.custom.get("draggable"))
+            .map(|value| !matches!(value.trim(), "" | "0" | "off" | "false"))
+            .unwrap_or(false)
+    }
+
+    pub fn drag_layer_to(
+        &mut self,
+        id: &str,
+        origin_left: f32,
+        origin_top: f32,
+        delta_x: f32,
+        delta_y: f32,
+    ) -> Option<(f32, f32)> {
+        let layer = self.scene.get(id)?;
+        let (min_x, min_y, max_x, max_y) = layer
+            .props
+            .custom
+            .get("dragarea")
+            .and_then(|value| parse_drag_area(value))
+            .unwrap_or((f32::MIN, f32::MIN, f32::MAX, f32::MAX));
+
+        let left = (origin_left + delta_x).clamp(origin_left + min_x, origin_left + max_x);
+        let top = (origin_top + delta_y).clamp(origin_top + min_y, origin_top + max_y);
+
+        let mut raw = HashMap::new();
+        raw.insert("left".to_string(), trim_float(left));
+        raw.insert("top".to_string(), trim_float(top));
+        self.scene.set_props(id, &raw);
+        Some((left, top))
+    }
+
     /// 推进合成器时钟。宿主每帧用累计的真实时间调用一次。
     pub fn advance(&mut self, delta_ms: u64) {
         self.clock_ms = self.clock_ms.saturating_add(delta_ms);
@@ -363,6 +402,24 @@ impl Compositor {
     }
 }
 
+fn parse_drag_area(value: &str) -> Option<(f32, f32, f32, f32)> {
+    let mut parts = value.split(',').map(|part| part.trim().parse::<f32>().ok());
+    Some((
+        parts.next()??,
+        parts.next()??,
+        parts.next()??,
+        parts.next()??,
+    ))
+}
+
+fn trim_float(value: f32) -> String {
+    if value.fract().abs() < f32::EPSILON {
+        format!("{}", value as i32)
+    } else {
+        value.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -490,6 +547,28 @@ mod tests {
 
         assert!(c.scene().is_empty());
         assert!(c.get_input_handler("push", "1").is_none());
+    }
+
+    #[test]
+    fn drag_layer_updates_offset_with_dragarea() {
+        let mut c = Compositor::new();
+        c.apply_event(&create("1", "slider"));
+        c.apply_event(&Event::Layer(LayerEvent::SetProperties {
+            id: "1".into(),
+            properties: HashMap::from([
+                ("left".into(), "10".into()),
+                ("top".into(), "20".into()),
+                ("draggable".into(), "1".into()),
+                ("dragarea".into(), "0,-5,30,5".into()),
+            ]),
+        }));
+
+        assert!(c.is_layer_draggable("1"));
+        assert_eq!(
+            c.drag_layer_to("1", 10.0, 20.0, 100.0, -20.0),
+            Some((40.0, 15.0))
+        );
+        assert_eq!(c.layer_offset("1"), Some((40.0, 15.0)));
     }
 
     #[test]
