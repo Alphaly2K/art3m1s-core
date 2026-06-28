@@ -60,6 +60,8 @@ impl CoreRuntime {
                 input: Arc::clone(&self.input),
                 magic_paths: Arc::clone(&self.magic_paths),
                 volumes: Arc::clone(&self.volumes),
+                debug_skip_active: Arc::clone(&self.debug_skip_active),
+                script_status: Arc::clone(&self.script_status),
             }));
     }
 

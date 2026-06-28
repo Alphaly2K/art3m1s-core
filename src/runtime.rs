@@ -12,7 +12,7 @@ use asb_interpreter::Event;
 use asb_interpreter::event::WaitReason;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU8};
 use std::sync::{Arc, Mutex};
 
 mod callbacks;
@@ -43,6 +43,8 @@ pub struct CoreRuntime {
     input: Arc<Mutex<callbacks::InputSnapshot>>,
     events: Arc<Mutex<Vec<Event>>>,
     video_finished: Arc<AtomicBool>,
+    debug_skip_active: Arc<AtomicBool>,
+    script_status: Arc<AtomicU8>,
     magic_paths: Arc<magic_path::MagicPathTable>,
 
     stage_w: u32,
@@ -95,6 +97,8 @@ impl CoreRuntime {
         let input = Arc::new(Mutex::new(callbacks::InputSnapshot::default()));
         let events = Arc::new(Mutex::new(Vec::new()));
         let video_finished = Arc::new(AtomicBool::new(false));
+        let debug_skip_active = Arc::new(AtomicBool::new(false));
+        let script_status = Arc::new(AtomicU8::new(0));
         let magic_paths: Arc<magic_path::MagicPathTable> = Arc::new(Mutex::new(HashMap::new()));
 
         Ok(Self {
@@ -112,6 +116,8 @@ impl CoreRuntime {
             input,
             events,
             video_finished,
+            debug_skip_active,
+            script_status,
             magic_paths: Arc::clone(&magic_paths),
             stage_w: stage_width,
             stage_h: stage_height,

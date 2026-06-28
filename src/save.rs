@@ -232,7 +232,7 @@ impl SaveData {
     /// 从解释器当前状态构建存档数据。
     pub fn from_interpreter(interpreter: &asb_interpreter::Interpreter) -> Self {
         Self {
-            variables: interpreter.variables(),
+            variables: local_variable_snapshot(interpreter),
             current_script: interpreter.current_script().unwrap_or("").to_string(),
             current_line: interpreter.current_line(),
             call_stack: interpreter
@@ -260,7 +260,12 @@ impl SaveData {
         &self,
         interpreter: &mut asb_interpreter::Interpreter,
     ) -> asb_interpreter::Result<()> {
-        interpreter.restore_variables(self.variables.clone());
+        let mut variables = interpreter.variables();
+        variables.reset();
+        for (key, value) in self.variables.iter_local() {
+            variables.set(key, value.clone());
+        }
+        interpreter.restore_variables(variables);
         let stack: Vec<CallFrame> = self
             .call_stack
             .iter()
@@ -271,11 +276,20 @@ impl SaveData {
     }
 }
 
+fn local_variable_snapshot(interpreter: &asb_interpreter::Interpreter) -> VariableStore {
+    let current = interpreter.variables();
+    let mut snapshot = VariableStore::new();
+    for (key, value) in current.iter_local() {
+        snapshot.set(key, value.clone());
+    }
+    snapshot
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::audio::{AudioBackend, AudioStateBackend, BgmConfig, SeConfig};
-    use asb_interpreter::VariableStore;
+    use asb_interpreter::{Interpreter, InterpreterConfig, Value, VariableStore};
 
     #[test]
     fn save_data_serializes_optional_scene_snapshot() {
@@ -327,6 +341,63 @@ mod tests {
         let restored: SaveData = serde_json::from_str(json).unwrap();
         assert!(restored.scene.is_none());
         assert!(restored.audio.is_none());
+    }
+
+    #[test]
+    fn numbered_save_keeps_persistent_domains_out_of_snapshot() {
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter.set_variable("scr", Value::String("story-state".into()));
+        interpreter.set_variable("g.system", Value::String("saveg-state".into()));
+        interpreter.set_variable("s.savepath", Value::String("savedata".into()));
+
+        let data = SaveData::from_interpreter(&interpreter);
+
+        assert_eq!(
+            data.variables.get("scr"),
+            Some(&Value::String("story-state".into()))
+        );
+        assert_eq!(data.variables.get("g.system"), None);
+        assert_eq!(data.variables.get("s.savepath"), None);
+    }
+
+    #[test]
+    fn restoring_numbered_save_preserves_current_persistent_domains() {
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter
+            .load_script("dummy.ast", "[end]")
+            .expect("dummy script should load");
+        interpreter.set_variable("g.system", Value::String("current-saveg".into()));
+        interpreter.set_variable("s.savepath", Value::String("current-path".into()));
+        interpreter.set_variable("scr", Value::String("current-story".into()));
+
+        let mut legacy_variables = VariableStore::new();
+        legacy_variables.set("scr", Value::String("saved-story".into()));
+        legacy_variables.set("g.system", Value::String("stale-saveg".into()));
+        legacy_variables.set("s.savepath", Value::String("stale-path".into()));
+        let data = SaveData {
+            variables: legacy_variables,
+            current_script: "dummy.ast".to_string(),
+            current_line: 0,
+            call_stack: Vec::new(),
+            scene: None,
+            audio: None,
+        };
+
+        data.restore(&mut interpreter)
+            .expect("restore should keep loaded script position");
+
+        assert_eq!(
+            interpreter.get_variable("scr"),
+            Some(Value::String("saved-story".into()))
+        );
+        assert_eq!(
+            interpreter.get_variable("g.system"),
+            Some(Value::String("current-saveg".into()))
+        );
+        assert_eq!(
+            interpreter.get_variable("s.savepath"),
+            Some(Value::String("current-path".into()))
+        );
     }
 
     #[test]

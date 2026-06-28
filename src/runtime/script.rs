@@ -1,7 +1,10 @@
 use super::CoreRuntime;
 use crate::render_pipeline::RenderPipeline;
 use asb_interpreter::event::WaitReason;
+use asb_interpreter::tags::call_lua_function;
 use asb_interpreter::{Event, ExecutionResult};
+use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 
 impl CoreRuntime {
     pub(super) fn advance_script(&mut self, clicked: bool, delta_ms: u64) {
@@ -80,6 +83,16 @@ impl CoreRuntime {
         let Some(reason) = self.wait_reason.clone() else {
             return;
         };
+        if let WaitReason::Stop {
+            reason: Some(stop_reason),
+        } = &reason
+        {
+            if stop_reason == "exskip" {
+                self.advance_exskip_stop(reason);
+                return;
+            }
+        }
+
         let video_resume = matches!(&reason, WaitReason::Stop { .. })
             && self
                 .video_finished
@@ -137,6 +150,38 @@ impl CoreRuntime {
         self.wait_reason = None;
         self.reset_control_wait_flags();
         self.interpreter.advance_line();
+    }
+
+    fn advance_exskip_stop(&mut self, stop_reason: WaitReason) {
+        if !self.debug_skip_active.swap(false, Ordering::SeqCst) {
+            crate::core_debug!("[runtime] Stop:exskip without active debugSkip; skipping stop");
+            self.advance_wait_line();
+            return;
+        }
+
+        crate::core_debug!("[runtime] Stop:exskip; firing onDebugSkipOut");
+        if let Err(e) = self.fire_named_event_handler("onDebugSkipOut") {
+            crate::core_error!("onDebugSkipOut 错误: {e:?}");
+            self.wait_reason = Some(stop_reason);
+            return;
+        }
+
+        if self.has_queued_tags() {
+            self.drain_queued_tags_while_stopped(stop_reason);
+        } else {
+            self.advance_wait_line();
+        }
+    }
+
+    fn fire_named_event_handler(&mut self, event_name: &str) -> asb_interpreter::Result<()> {
+        let handler = {
+            let ctx = self.interpreter.engine_context();
+            ctx.lock().unwrap().event_handlers.get(event_name).cloned()
+        };
+        if let Some(func) = handler {
+            call_lua_function(self.interpreter.lua(), &func, &HashMap::new())?;
+        }
+        Ok(())
     }
 
     fn drain_queued_tags_while_stopped(&mut self, stop_reason: WaitReason) {

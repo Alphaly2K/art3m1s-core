@@ -5,6 +5,8 @@
 
 use asb_interpreter::lua_engine::EngineCallbacks;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use super::magic_path;
 use crate::ffi;
@@ -14,6 +16,8 @@ pub(super) struct FfiCallbacks {
     pub input: std::sync::Arc<std::sync::Mutex<InputSnapshot>>,
     pub magic_paths: std::sync::Arc<magic_path::MagicPathTable>,
     pub volumes: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, f32>>>,
+    pub debug_skip_active: Arc<AtomicBool>,
+    pub script_status: Arc<AtomicU8>,
 }
 
 /// Minimal input state snapshot mirrored from the host event loop.
@@ -58,7 +62,21 @@ impl EngineCallbacks for FfiCallbacks {
     }
 
     fn get_script_status(&self) -> u8 {
-        0
+        self.script_status.load(Ordering::SeqCst)
+    }
+
+    fn set_script_status(&self, status: u8) {
+        self.script_status.store(status, Ordering::SeqCst);
+        if status == 0 {
+            self.debug_skip_active.store(false, Ordering::SeqCst);
+        }
+    }
+
+    fn debug_skip(&self, index: i64) {
+        if index > 0 {
+            self.debug_skip_active.store(true, Ordering::SeqCst);
+            self.script_status.store(4, Ordering::SeqCst);
+        }
     }
 
     fn is_key_down(&self, key_id: u32) -> bool {
