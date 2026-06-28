@@ -97,6 +97,9 @@ impl EngineCallbacks for FfiCallbacks {
             s.key_overrides.remove(&from);
         } else {
             s.key_overrides.insert(from, true);
+            if to == 32 {
+                s.keys_down_edge.insert(from);
+            }
         }
     }
 

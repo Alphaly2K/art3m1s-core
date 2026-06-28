@@ -83,6 +83,7 @@ impl CoreRuntime {
         let Some(reason) = self.wait_reason.clone() else {
             return;
         };
+        let clicked = clicked || self.script_decide_edge();
         if let WaitReason::Stop {
             reason: Some(stop_reason),
         } = &reason

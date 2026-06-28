@@ -37,7 +37,6 @@ impl CoreRuntime {
             s.clicked = false;
             (v, s.mouse_x as f32, s.mouse_y as f32)
         };
-
         let new_hover = self
             .compositor
             .hit_test(mouse_x, mouse_y, &mut self.texture_provider);
@@ -51,30 +50,36 @@ impl CoreRuntime {
             self.hovered_layer = new_hover.clone();
         }
 
+        let mut handled_by_layer = false;
+        let mut handled_by_push = false;
         if clicked {
             if let Some(ref id) = new_hover {
-                enqueue_layer_handler(
+                handled_by_layer = enqueue_layer_handler(
                     &self.interpreter,
                     &self.compositor,
                     id,
                     "click",
                     &[("click", "1")],
                 );
-                enqueue_input_handler(
-                    &self.interpreter,
-                    &self.compositor,
-                    "push",
-                    "1",
-                    &[("key", "1"), ("type", "click")],
-                );
             }
+            handled_by_push = enqueue_input_handler(
+                &self.interpreter,
+                &self.compositor,
+                "push",
+                "1",
+                &[("key", "1"), ("type", "click")],
+            );
         }
 
-        clicked
+        clicked && !handled_by_layer && !handled_by_push
     }
 
     pub(super) fn clear_input_edges(&self) {
         self.input.lock().unwrap().clear_edges();
+    }
+
+    pub(super) fn script_decide_edge(&self) -> bool {
+        self.input.lock().unwrap().keys_down_edge.contains(&124)
     }
 }
 
@@ -116,12 +121,12 @@ fn enqueue_layer_handler(
     layer_id: &str,
     event_type: &str,
     runtime_params: &[(&str, &str)],
-) {
+) -> bool {
     let Some(layer) = compositor.scene().get(layer_id) else {
-        return;
+        return false;
     };
     let Some(h) = layer.event_handlers.get(event_type) else {
-        return;
+        return false;
     };
     enqueue_handler_tags(
         interpreter,
@@ -132,6 +137,7 @@ fn enqueue_layer_handler(
         &h.params,
         runtime_params,
     );
+    true
 }
 
 fn enqueue_input_handler(
@@ -140,9 +146,9 @@ fn enqueue_input_handler(
     event_name: &str,
     key: &str,
     runtime_params: &[(&str, &str)],
-) {
+) -> bool {
     let Some(h) = compositor.get_input_handler(event_name, key) else {
-        return;
+        return false;
     };
     enqueue_handler_tags(
         interpreter,
@@ -153,4 +159,5 @@ fn enqueue_input_handler(
         &h.params,
         runtime_params,
     );
+    true
 }
