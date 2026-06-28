@@ -42,6 +42,7 @@ impl InputSnapshot {
         self.mouse_buttons_up_edge.clear();
         self.keys_down_edge.clear();
         self.keys_up_edge.clear();
+        self.key_overrides.clear();
     }
 
     fn key_down(&self, vk: u32) -> bool {
@@ -100,7 +101,8 @@ impl EngineCallbacks for FfiCallbacks {
     fn override_key(&self, from: u32, to: u32) {
         let mut s = self.input.lock().unwrap();
         if to == 0 {
-            s.key_overrides.remove(&from);
+            s.key_overrides.insert(from, false);
+            s.keys_down_edge.remove(&from);
         } else {
             s.key_overrides.insert(from, true);
             if to == 32 {
@@ -184,6 +186,27 @@ impl EngineCallbacks for FfiCallbacks {
     }
     fn get_script_wait_reason(&self) -> u8 {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InputSnapshot;
+
+    #[test]
+    fn key_override_false_masks_physical_down_for_one_frame() {
+        let mut input = InputSnapshot::default();
+        input.keys_down.insert(1);
+        input.keys_down_edge.insert(1);
+        assert!(input.key_down(1));
+
+        input.key_overrides.insert(1, false);
+        input.keys_down_edge.remove(&1);
+        assert!(!input.key_down(1));
+        assert!(!input.keys_down_edge.contains(&1));
+
+        input.clear_edges();
+        assert!(input.key_down(1));
     }
 }
 

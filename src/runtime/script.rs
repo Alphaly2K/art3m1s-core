@@ -51,12 +51,15 @@ impl CoreRuntime {
                     self.reset_control_wait_flags();
                     break;
                 }
-                Ok(ExecutionResult::Wait(Event::VideoPlay { .. })) => {
+                Ok(ExecutionResult::Wait(Event::VideoPlay { id: None, .. })) => {
                     self.wait_reason = Some(WaitReason::Stop {
                         reason: Some("video".into()),
                     });
                     self.reset_control_wait_flags();
                     break;
+                }
+                Ok(ExecutionResult::Wait(Event::VideoPlay { id: Some(_), .. })) => {
+                    continue;
                 }
                 Ok(ExecutionResult::Wait(Event::Trans { .. })) => {
                     self.wait_reason = Some(WaitReason::Stop {

@@ -132,7 +132,7 @@ impl CoreRuntime {
             serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         self.compositor.reset_for_load();
         self.stop_all_media();
-        self.hovered_layer = None;
+        self.hovered_layers.clear();
         if let Some(scene) = data.scene.clone() {
             self.compositor.restore_scene(scene);
         }
@@ -161,7 +161,7 @@ impl CoreRuntime {
     pub(super) fn handle_go_title(&mut self) -> Result<(), String> {
         self.compositor.reset_for_load();
         self.stop_all_media();
-        self.hovered_layer = None;
+        self.hovered_layers.clear();
         self.save_screenshot = None;
         self.timed_remaining_ms = 0;
         self.wait_reason = None;

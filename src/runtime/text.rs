@@ -9,7 +9,7 @@ impl CoreRuntime {
         self.text_renderer = Some(renderer);
     }
 
-pub(super) fn advance_text(&mut self, delta_ms: u64) {
+    pub(super) fn advance_text(&mut self, delta_ms: u64) {
         let skip_active = self.skip_active();
         let was_skipping = self.was_skipping();
         let mut reveal_complete = false;

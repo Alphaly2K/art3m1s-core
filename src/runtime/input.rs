@@ -1,6 +1,6 @@
 use super::CoreRuntime;
 use crate::compositor::Compositor;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 impl CoreRuntime {
     pub fn feed_mouse(&self, x: i32, y: i32) {
@@ -76,27 +76,41 @@ impl CoreRuntime {
         let left_up_edge = mouse_up_edges.contains(&1);
         let left_down = mouse_buttons.contains(&1);
 
-        let new_hover = self
+        let hit_layers = self
             .compositor
-            .hit_test(mouse_x, mouse_y, &mut self.texture_provider);
-        if new_hover != self.hovered_layer {
-            if let Some(ref old) = self.hovered_layer {
-                enqueue_layer_handler(&self.interpreter, &self.compositor, old, "rollout", &[]);
+            .hit_test_all(mouse_x, mouse_y, &mut self.texture_provider);
+        let top_hover = hit_layers.first().cloned();
+        let new_hovered: HashSet<String> = hit_layers.into_iter().collect();
+        if new_hovered != self.hovered_layers {
+            let mut old_only: Vec<String> = self
+                .hovered_layers
+                .difference(&new_hovered)
+                .cloned()
+                .collect();
+            old_only.sort();
+            for old in old_only {
+                enqueue_layer_handler(&self.interpreter, &self.compositor, &old, "rollout", &[]);
             }
-            if let Some(new) = &new_hover {
-                enqueue_layer_handler(&self.interpreter, &self.compositor, new, "rollover", &[]);
+
+            let mut new_only: Vec<String> = new_hovered
+                .difference(&self.hovered_layers)
+                .cloned()
+                .collect();
+            new_only.sort();
+            for new in new_only {
+                enqueue_layer_handler(&self.interpreter, &self.compositor, &new, "rollover", &[]);
             }
-            self.hovered_layer = new_hover.clone();
+            self.hovered_layers = new_hovered;
         }
 
         let mut handled_by_layer = false;
         let mut handled_by_left_push = false;
         let mut handled_by_drag = false;
         if left_down_edge {
-            if let Some(ref id) = new_hover {
+            if let Some(ref id) = top_hover {
                 handled_by_drag = self.start_pointer_drag(id, mouse_x, mouse_y);
             }
-            if let Some(ref id) = new_hover {
+            if let Some(ref id) = top_hover {
                 if !handled_by_drag {
                     handled_by_layer = enqueue_layer_handler(
                         &self.interpreter,

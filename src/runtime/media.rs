@@ -111,24 +111,30 @@ impl CoreRuntime {
                     );
                 }
             }
+        }
 
-            let video_finish_events = self.video.poll_finish_events();
-            for event in video_finish_events {
+        let host_media = crate::ffi::media_command_callback_registered();
+        for event in self.video.poll_finish_events() {
+            if host_media && event.id.is_none() {
+                // Fullscreen video completion is owned by the host decoder.
+                continue;
+            }
+            if event.id.is_none() {
                 self.video_finished
                     .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
 
-                // Enqueue handler tags if registered
-                if let Some(handler) = event.handler {
-                    input::enqueue_handler_tags(
-                        &self.interpreter,
-                        handler.handler.as_deref(),
-                        handler.file.as_deref(),
-                        handler.label.as_deref(),
-                        handler.call,
-                        &HashMap::new(),
-                        &[],
-                    );
-                }
+            // Enqueue handler tags if registered.
+            if let Some(handler) = event.handler {
+                input::enqueue_handler_tags(
+                    &self.interpreter,
+                    handler.handler.as_deref(),
+                    handler.file.as_deref(),
+                    handler.label.as_deref(),
+                    handler.call,
+                    &HashMap::new(),
+                    &[],
+                );
             }
         }
     }
@@ -186,8 +192,10 @@ impl CoreRuntime {
         // Discard any queued fallback completion from the internal state machine.
         let _ = self.video.poll_finish_events();
 
-        self.video_finished
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if id.is_none() {
+            self.video_finished
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         if let Some(handler) = handler {
             input::enqueue_handler_tags(
                 &self.interpreter,

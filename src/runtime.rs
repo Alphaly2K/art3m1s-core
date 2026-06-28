@@ -10,7 +10,7 @@ use crate::text::TextRenderer;
 use crate::video::VideoBackend;
 use asb_interpreter::Event;
 use asb_interpreter::event::WaitReason;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU8};
 use std::sync::{Arc, Mutex};
@@ -62,7 +62,7 @@ pub struct CoreRuntime {
     timed_remaining_ms: u64,
     control: control::RuntimeControlState,
     voice_serial: u64,
-    hovered_layer: Option<String>,
+    hovered_layers: HashSet<String>,
     pointer_drag: PointerDragState,
     volumes: Arc<Mutex<HashMap<String, f32>>>,
     exit_requested: Arc<AtomicBool>,
@@ -135,7 +135,7 @@ impl CoreRuntime {
             timed_remaining_ms: 0,
             control: control::RuntimeControlState::default(),
             voice_serial: 0,
-            hovered_layer: None,
+            hovered_layers: HashSet::new(),
             pointer_drag: PointerDragState::default(),
             volumes: Arc::new(Mutex::new(HashMap::new())),
             exit_requested: Arc::new(AtomicBool::new(false)),

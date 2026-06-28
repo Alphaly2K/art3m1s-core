@@ -123,15 +123,9 @@ impl CoreRuntime {
                 crate::core_info!("[CoreRuntime] Event::Exit received, setting exit flag");
                 exit_requested_cb.store(true, std::sync::atomic::Ordering::SeqCst);
             }
-            // Pause script execution on VideoPlay, video completion is signalled via
-            // video_finished atomic → WaitReason::Stop handler resumes.
-            let pause = matches!(
-                e,
-                Event::Wait { .. }
-                    | Event::YesNo { .. }
-                    | Event::ShowDialog { .. }
-                    | Event::VideoPlay { .. }
-            ) || matches!(&e, Event::Trans { trans_type, .. } if *trans_type != 0);
+            // Only fullscreen videos block script execution. Layer videos are visual effects
+            // owned by the scene and may loop indefinitely.
+            let pause = event_requires_host_pause(&e);
             events_cb.lock().unwrap().push(e);
             if pause {
                 CallbackResult::Pause
@@ -185,9 +179,17 @@ impl CoreRuntime {
     }
 }
 
+fn event_requires_host_pause(e: &Event) -> bool {
+    matches!(
+        e,
+        Event::Wait { .. } | Event::YesNo { .. } | Event::ShowDialog { .. }
+    ) || matches!(e, Event::VideoPlay { id, .. } if id.is_none())
+        || matches!(e, Event::Trans { trans_type, .. } if *trans_type != 0)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::RuntimeResetHandler;
+    use super::{RuntimeResetHandler, event_requires_host_pause};
     use asb_interpreter::{CallbackResult, Event, ExecutionResult, Interpreter};
     use std::sync::{
         Arc,
@@ -222,5 +224,21 @@ mod tests {
             ExecutionResult::Completed | ExecutionResult::Wait(_)
         ));
         assert!(saw_go_title.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn layer_video_does_not_pause_script_execution() {
+        assert!(!event_requires_host_pause(&Event::VideoPlay {
+            id: Some("1.0.effect".into()),
+            file: ":ani/snow03.ogv".into(),
+            skip: true,
+            loop_play: true,
+        }));
+        assert!(event_requires_host_pause(&Event::VideoPlay {
+            id: None,
+            file: ":mov/op.ogv".into(),
+            skip: true,
+            loop_play: false,
+        }));
     }
 }

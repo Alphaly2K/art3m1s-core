@@ -350,7 +350,8 @@ impl TextRenderer for GlyphTextRenderer<'_> {
                 let fy = ly.top + g.offset_y + line_y;
 
                 // 计算每字符的 scetween 动画偏移
-                let anim_offset = scetween_char_offset(scethweens, i, ly.reveal_clock_ms, text_hidden);
+                let anim_offset =
+                    scetween_char_offset(scethweens, i, ly.reveal_clock_ms, text_hidden);
 
                 if g.atlas_w > 0.0 && g.atlas_h > 0.0 {
                     let clip = ClipRect {
@@ -631,8 +632,7 @@ fn scetween_char_offset(
         }
 
         let char_start_ms = char_index as u64 * cfg.delay_per_char;
-        let (start_x, start_y, start_sx, start_sy, start_r, start_a) =
-            scetween_start_value(cfg);
+        let (start_x, start_y, start_sx, start_sy, start_r, start_a) = scetween_start_value(cfg);
 
         let (t_start, t_end) = if cfg.mode.is_entrance() {
             // 入场：从 start → normal

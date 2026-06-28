@@ -424,8 +424,39 @@ fn trim_float(value: f32) -> String {
 mod tests {
     use super::*;
     use crate::compositor::mock::MockProvider;
+    use crate::render_pipeline::draw::{TextureId, TextureInfo, TextureProvider};
     use asb_interpreter::Event;
     use asb_interpreter::event::LayerEvent;
+
+    struct AlphaProvider {
+        alpha: u8,
+    }
+
+    impl TextureProvider for AlphaProvider {
+        fn resolve(&mut self, _name: &str) -> Option<(TextureId, TextureInfo)> {
+            Some((
+                TextureId(1),
+                TextureInfo {
+                    width: 100,
+                    height: 100,
+                },
+            ))
+        }
+
+        fn upload_rgba(
+            &mut self,
+            _name: &str,
+            _width: u32,
+            _height: u32,
+            _data: &[u8],
+        ) -> Option<(TextureId, TextureInfo)> {
+            None
+        }
+
+        fn pixel_alpha(&self, _texture: TextureId, _x: u32, _y: u32) -> Option<u8> {
+            Some(self.alpha)
+        }
+    }
 
     fn create(id: &str, file: &str) -> Event {
         Event::Layer(LayerEvent::Create {
@@ -547,6 +578,81 @@ mod tests {
 
         assert!(c.scene().is_empty());
         assert!(c.get_input_handler("push", "1").is_none());
+    }
+
+    #[test]
+    fn hit_test_clickablethreshold_uses_texture_alpha_not_layer_alpha() {
+        let mut c = Compositor::new();
+        c.apply_event(&create("dock", "dockarea"));
+        c.apply_event(&Event::Layer(LayerEvent::SetProperties {
+            id: "dock".into(),
+            properties: HashMap::from([
+                ("left".into(), "10".into()),
+                ("top".into(), "20".into()),
+                ("width".into(), "100".into()),
+                ("height".into(), "100".into()),
+                ("alpha".into(), "0".into()),
+                ("clickablethreshold".into(), "128".into()),
+            ]),
+        }));
+        c.apply_event(&Event::LayerEventHandler {
+            id: "dock".into(),
+            event_type: "rollover".into(),
+            mode: String::new(),
+            file: None,
+            label: None,
+            call: false,
+            handler: Some("calllua".into()),
+            penetration: false,
+            extra_params: HashMap::new(),
+        });
+
+        let mut opaque_provider = AlphaProvider { alpha: 255 };
+        assert_eq!(
+            c.hit_test(50.0, 50.0, &mut opaque_provider),
+            Some("dock".into())
+        );
+
+        let mut transparent_provider = AlphaProvider { alpha: 0 };
+        assert_eq!(c.hit_test(50.0, 50.0, &mut transparent_provider), None);
+    }
+
+    #[test]
+    fn hit_test_all_returns_overlapping_hover_layers_top_to_bottom() {
+        let mut c = Compositor::new();
+        c.apply_event(&create("1.0", "lower"));
+        c.apply_event(&create("1.1", "upper"));
+        for id in ["1.0", "1.1"] {
+            c.apply_event(&Event::Layer(LayerEvent::SetProperties {
+                id: id.into(),
+                properties: HashMap::from([
+                    ("left".into(), "0".into()),
+                    ("top".into(), "0".into()),
+                    ("width".into(), "100".into()),
+                    ("height".into(), "100".into()),
+                ]),
+            }));
+            c.apply_event(&Event::LayerEventHandler {
+                id: id.into(),
+                event_type: "rollover".into(),
+                mode: String::new(),
+                file: None,
+                label: None,
+                call: false,
+                handler: Some("calllua".into()),
+                penetration: id == "1.0",
+                extra_params: HashMap::new(),
+            });
+        }
+
+        let mut provider = MockProvider::new();
+        assert_eq!(
+            c.hit_test_all(10.0, 10.0, &mut provider),
+            vec!["1.1".to_string(), "1.0".to_string()]
+        );
+
+        let mut provider = MockProvider::new();
+        assert_eq!(c.hit_test(10.0, 10.0, &mut provider), Some("1.1".into()));
     }
 
     #[test]
