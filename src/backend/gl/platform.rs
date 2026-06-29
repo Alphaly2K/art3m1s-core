@@ -223,6 +223,7 @@ fn create_egl(
         const EGL_NONE: EGLint = 0x3038;
         const EGL_RENDERABLE_TYPE: EGLint = 0x3040;
         const EGL_OPENGL_ES2_BIT: EGLint = 0x0004;
+        const EGL_OPENGL_ES3_BIT: EGLint = 0x0040;
         const EGL_SURFACE_TYPE: EGLint = 0x3033;
         const EGL_PBUFFER_BIT: EGLint = 0x0001;
         const EGL_BLUE_SIZE: EGLint = 0x3022;
@@ -366,7 +367,9 @@ fn create_egl(
 
                 // Load libEGL。Linux 没有独立 ANGLE 时走 mesa libEGL，需要
                 // RTLD_GLOBAL 让 EGL/GL 跨库共享符号。
-                let egl_name = if cfg!(target_os = "macos") {
+                let egl_name = if cfg!(target_os = "ios") {
+                    crate::ffi::angle_lib_path("MetalANGLE.framework/MetalANGLE")
+                } else if cfg!(target_os = "macos") {
                     crate::ffi::angle_lib_path("libEGL.dylib")
                 } else if cfg!(target_os = "android") {
                     // Android 系统自带 libEGL.so，无需 ANGLE。
@@ -504,7 +507,11 @@ fn create_egl(
 
                 let config_attrs = [
                     EGL_RENDERABLE_TYPE,
-                    EGL_OPENGL_ES2_BIT,
+                    if cfg!(target_os = "ios") {
+                        EGL_OPENGL_ES3_BIT
+                    } else {
+                        EGL_OPENGL_ES2_BIT
+                    },
                     EGL_SURFACE_TYPE,
                     EGL_PBUFFER_BIT,
                     EGL_RED_SIZE,
@@ -543,8 +550,12 @@ fn create_egl(
                     return Err("eglCreatePbufferSurface failed".into());
                 }
 
-                // Request ES 2.0 context (ANGLE Metal works best with this)
-                let ctx_attrs = [0x3098 /* EGL_CONTEXT_CLIENT_VERSION */, 2, EGL_NONE];
+                let context_version = if cfg!(target_os = "ios") { 3 } else { 2 };
+                let ctx_attrs = [
+                    0x3098, /* EGL_CONTEXT_CLIENT_VERSION */
+                    context_version,
+                    EGL_NONE,
+                ];
                 let ctx =
                     egl_create_context(display, config, std::ptr::null_mut(), ctx_attrs.as_ptr());
                 if ctx.is_null() {
@@ -557,7 +568,9 @@ fn create_egl(
 
                 // Load GLESv2 for glow. Linux 必须用 RTLD_GLOBAL 让 mesa 的
                 // dispatch 层找到已预加载的 libGL 桌面符号。
-                let gles_name = if cfg!(target_os = "macos") {
+                let gles_name = if cfg!(target_os = "ios") {
+                    crate::ffi::angle_lib_path("MetalANGLE.framework/MetalANGLE")
+                } else if cfg!(target_os = "macos") {
                     crate::ffi::angle_lib_path("libGLESv2.dylib")
                 } else if cfg!(target_os = "android") {
                     // Android 系统自带 libGLESv2.so。

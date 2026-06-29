@@ -103,6 +103,12 @@ impl EngineCallbacks for FfiCallbacks {
         ffi::query_asset_size(&resolved).is_some()
     }
 
+    fn file_write(&self, path: &str, data: &[u8]) -> asb_interpreter::Result<()> {
+        let resolved = magic_path::resolve_path(&self.magic_paths, path);
+        ffi::request_write(&resolved, data)
+            .map_err(|m| asb_interpreter::Error::IoError(std::io::Error::other(m)))
+    }
+
     fn file_operation(&self, command: &str, params: HashMap<String, String>) {
         let _ = (command, params);
     }

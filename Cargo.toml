@@ -8,7 +8,6 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 pfs-upk-rust = { git = "https://github.com/Alphaly2K/pfs-upk-rust" }
-asb-interpreter = { git = "https://github.com/Alphaly2K/art3m1s-interpreter" }
 encoding_rs = "0.8"
 glam = "0.30"
 serde = { version = "1.0", features = ["derive"] }
@@ -26,6 +25,12 @@ winit = { version = "0.30", optional = true }
 glutin = { version = "0.32", optional = true }
 glutin-winit = { version = "0.5", optional = true }
 raw-window-handle = { version = "0.6", optional = true }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+asb-interpreter = { path = "../asb-interpreter", default-features = false, features = ["backend-luau"] }
+
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+asb-interpreter = { path = "../asb-interpreter", default-features = false, features = ["backend-lua51"] }
 
 [features]
 default = ["gl-backend"]
