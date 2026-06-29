@@ -148,6 +148,8 @@ impl CoreRuntime {
         self.interpreter
             .flush_pending_tags()
             .map_err(|e| format!("抽干读档标签失败: {e:?}"))?;
+        self.reload_persistent_lua_tables()
+            .map_err(|e| format!("恢复当前系统存档索引失败: {e}"))?;
         self.apply_system_audio_volume();
         if let Some(audio) = &data.audio {
             self.restore_audio_snapshot(audio);
@@ -157,6 +159,22 @@ impl CoreRuntime {
         self.wait_reason = None;
         crate::core_info!("[runtime] 已读取存档: {}", path);
         Ok(())
+    }
+
+    fn reload_persistent_lua_tables(&mut self) -> Result<(), String> {
+        self.interpreter
+            .lua()
+            .load(
+                r#"
+                if type(fload_pluto) == "function" and type(init) == "table" then
+                    if init.save_system then sys = fload_pluto(init.save_system) or sys or {} end
+                    if init.save_global then gscr = fload_pluto(init.save_global) or gscr or {} end
+                    if init.save_config then conf = fload_pluto(init.save_config) or conf or {} end
+                end
+                "#,
+            )
+            .exec()
+            .map_err(|e| e.to_string())
     }
 
     pub(super) fn handle_go_title(&mut self) -> Result<(), String> {

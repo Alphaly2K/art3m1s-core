@@ -1,6 +1,7 @@
 use super::Compositor;
 use crate::compositor::props::LayerProps;
 use crate::render_pipeline::draw::TextureProvider;
+use glam::{Affine2, Vec2};
 
 impl Compositor {
     /// 命中测试：返回舞台坐标 (x, y) 处最上层、可接收指针输入的图层 ID。
@@ -28,7 +29,7 @@ impl Compositor {
         let roots = self.scene.roots();
         let scale = self.stage_scale;
         for root in roots.iter().rev() {
-            self.hit_test_subtree(root, 0.0, 0.0, x, y, scale, provider, &mut hits);
+            self.hit_test_subtree(root, Affine2::IDENTITY, x, y, scale, provider, &mut hits);
         }
         hits
     }
@@ -36,8 +37,7 @@ impl Compositor {
     fn hit_test_subtree(
         &self,
         id: &str,
-        parent_x: f32,
-        parent_y: f32,
+        parent_transform: Affine2,
         mx: f32,
         my: f32,
         scale: f32,
@@ -53,16 +53,14 @@ impl Compositor {
             return;
         }
 
-        let (lx, ly) = props.offset();
-        let abs_x = parent_x + lx;
-        let abs_y = parent_y + ly;
+        let world = parent_transform * local_transform(props);
 
         // 先递归检测子层（高 z-order 优先，reverse 遍历）。
         // 注意按 Artemis 图层顺序排序（与绘制次序一致），不能用原始插入顺序，
         // 否则命中的 z-order 与画面不符。
         let children = self.scene.children(id);
         for child_id in children.iter().rev() {
-            self.hit_test_subtree(child_id, abs_x, abs_y, mx, my, scale, provider, hits);
+            self.hit_test_subtree(child_id, world, mx, my, scale, provider, hits);
         }
 
         // 再检测本层：注册了任意事件处理器。
@@ -86,16 +84,16 @@ impl Compositor {
                 return;
             };
 
-            if mx >= abs_x
-                && mx < abs_x + w
-                && my >= abs_y
-                && my < abs_y + h
+            let local = world.inverse().transform_point2(Vec2::new(mx, my));
+
+            if local.x >= 0.0
+                && local.x < w
+                && local.y >= 0.0
+                && local.y < h
                 && !self.is_pointer_transparent_at(
                     props,
-                    mx,
-                    my,
-                    abs_x,
-                    abs_y,
+                    local.x,
+                    local.y,
                     scale,
                     provider,
                     &layer.file,
@@ -117,10 +115,8 @@ impl Compositor {
     fn is_pointer_transparent_at(
         &self,
         props: &LayerProps,
-        mx: f32,
-        my: f32,
-        abs_x: f32,
-        abs_y: f32,
+        local_x: f32,
+        local_y: f32,
         scale: f32,
         provider: &mut dyn TextureProvider,
         file: &Option<String>,
@@ -134,10 +130,9 @@ impl Compositor {
         };
 
         // 计算该点在纹理中的局部像素坐标。
-        // mx, my 是舞台坐标；abs_x, abs_y 是图层左上角的舞台坐标；
-        // scale 是舞台到物理像素的缩放因子。
-        let local_x = ((mx - abs_x) * scale) as u32;
-        let local_y = ((my - abs_y) * scale) as u32;
+        // local_x/local_y 是逆变换后的图层局部坐标；scale 是舞台到物理像素的缩放因子。
+        let local_x = (local_x * scale) as u32;
+        let local_y = (local_y * scale) as u32;
 
         // 加上 clip 偏移（如果图层有 clip 属性）。
         let (tex_x, tex_y) = if let Some(clip) = props.clip_rect() {
@@ -162,4 +157,17 @@ impl Compositor {
 
         hit_alpha < threshold
     }
+}
+
+fn local_transform(props: &LayerProps) -> Affine2 {
+    let (left, top) = props.offset();
+    let (sx, sy) = props.scale();
+    let (ax, ay) = props.anchor();
+    let rot = props.rotation_radians();
+
+    Affine2::from_translation(Vec2::new(left, top))
+        * Affine2::from_translation(Vec2::new(ax, ay))
+        * Affine2::from_angle(rot)
+        * Affine2::from_scale(Vec2::new(sx, sy))
+        * Affine2::from_translation(Vec2::new(-ax, -ay))
 }

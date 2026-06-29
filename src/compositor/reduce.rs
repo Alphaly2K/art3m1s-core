@@ -656,6 +656,42 @@ mod tests {
     }
 
     #[test]
+    fn hit_test_respects_parent_transform() {
+        let mut c = Compositor::new();
+        c.apply_event(&create("1.0", "button"));
+        c.apply_event(&Event::Layer(LayerEvent::SetProperties {
+            id: "1".into(),
+            properties: HashMap::from([("xscale".into(), "200".into())]),
+        }));
+        c.apply_event(&Event::Layer(LayerEvent::SetProperties {
+            id: "1.0".into(),
+            properties: HashMap::from([
+                ("left".into(), "50".into()),
+                ("top".into(), "0".into()),
+                ("width".into(), "100".into()),
+                ("height".into(), "100".into()),
+            ]),
+        }));
+        c.apply_event(&Event::LayerEventHandler {
+            id: "1.0".into(),
+            event_type: "rollover".into(),
+            mode: String::new(),
+            file: None,
+            label: None,
+            call: false,
+            handler: Some("calllua".into()),
+            penetration: false,
+            extra_params: HashMap::new(),
+        });
+
+        let mut provider = MockProvider::new();
+        assert_eq!(c.hit_test(180.0, 50.0, &mut provider), Some("1.0".into()));
+
+        let mut provider = MockProvider::new();
+        assert_eq!(c.hit_test(75.0, 50.0, &mut provider), None);
+    }
+
+    #[test]
     fn drag_layer_updates_offset_with_dragarea() {
         let mut c = Compositor::new();
         c.apply_event(&create("1", "slider"));
