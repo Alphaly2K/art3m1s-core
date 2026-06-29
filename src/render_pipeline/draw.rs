@@ -79,6 +79,7 @@ pub struct DrawCommand {
     pub blend: BlendMode,
     pub color: ColorFilter,
     pub clip: ClipRect,
+    pub clip_bounds: Option<[f32; 4]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

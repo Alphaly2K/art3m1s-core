@@ -165,8 +165,8 @@ impl Compositor {
             .and_then(|value| parse_drag_area(value))
             .unwrap_or((f32::MIN, f32::MIN, f32::MAX, f32::MAX));
 
-        let left = (origin_left + delta_x).clamp(origin_left + min_x, origin_left + max_x);
-        let top = (origin_top + delta_y).clamp(origin_top + min_y, origin_top + max_y);
+        let left = (origin_left + delta_x).clamp(min_x, max_x);
+        let top = (origin_top + delta_y).clamp(min_y, max_y);
 
         let mut raw = HashMap::new();
         raw.insert("left".to_string(), trim_float(left));
@@ -662,19 +662,25 @@ mod tests {
         c.apply_event(&Event::Layer(LayerEvent::SetProperties {
             id: "1".into(),
             properties: HashMap::from([
-                ("left".into(), "10".into()),
-                ("top".into(), "20".into()),
+                ("left".into(), "80".into()),
+                ("top".into(), "0".into()),
                 ("draggable".into(), "1".into()),
-                ("dragarea".into(), "0,-5,30,5".into()),
+                ("dragarea".into(), "0,0,160,0".into()),
             ]),
         }));
 
         assert!(c.is_layer_draggable("1"));
         assert_eq!(
-            c.drag_layer_to("1", 10.0, 20.0, 100.0, -20.0),
-            Some((40.0, 15.0))
+            c.drag_layer_to("1", 80.0, 0.0, 200.0, 20.0),
+            Some((160.0, 0.0))
         );
-        assert_eq!(c.layer_offset("1"), Some((40.0, 15.0)));
+        assert_eq!(c.layer_offset("1"), Some((160.0, 0.0)));
+
+        assert_eq!(
+            c.drag_layer_to("1", 80.0, 0.0, -200.0, -20.0),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(c.layer_offset("1"), Some((0.0, 0.0)));
     }
 
     #[test]

@@ -108,7 +108,6 @@ source = "git+https://github.com/Alphaly2K/asb-decrypt#42972658e3dfbab38de3eea3b
 [[package]]
 name = "asb-interpreter"
 version = "0.1.0"
-source = "git+https://github.com/Alphaly2K/art3m1s-interpreter#d97ffa90cc4308b41720f463e1170c98c5b1787c"
 dependencies = [
  "asb-decrypt",
  "encoding_rs",

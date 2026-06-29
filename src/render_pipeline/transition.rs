@@ -148,6 +148,7 @@ pub(crate) fn overlay_old_frame(
                 blend: BlendMode::Alpha,
                 color: ColorFilter::default(),
                 clip: ClipRect::full(info),
+                clip_bounds: None,
             });
         }
         2 => {

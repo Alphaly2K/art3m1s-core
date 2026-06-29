@@ -405,6 +405,7 @@ impl TextRenderer for GlyphTextRenderer<'_> {
                             negative: false,
                         },
                         clip: clip.clone(),
+                        clip_bounds: None,
                     };
                     if has_shadow {
                         let mut sc = base;

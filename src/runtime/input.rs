@@ -175,7 +175,7 @@ impl CoreRuntime {
             &self.compositor,
             layer_id,
             "dragin",
-            &[("drag", "1")],
+            &[("drag", "1"), ("id", layer_id)],
         );
         true
     }
@@ -193,12 +193,13 @@ impl CoreRuntime {
             dx,
             dy,
         );
+        self.sync_layer_info(&layer_id);
         let _ = enqueue_layer_handler(
             &self.interpreter,
             &self.compositor,
             &layer_id,
             "drag",
-            &[("drag", "1")],
+            &[("drag", "1"), ("id", &layer_id)],
         );
         true
     }
@@ -212,7 +213,7 @@ impl CoreRuntime {
             &self.compositor,
             &layer_id,
             "dragout",
-            &[("drag", "0")],
+            &[("drag", "0"), ("id", &layer_id)],
         );
         true
     }

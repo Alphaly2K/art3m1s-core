@@ -211,6 +211,8 @@ mod tests {
         let props = LayerProps::from_raw(&raw(&[
             ("left", "100"),
             ("top", "-50"),
+            ("width", "320"),
+            ("height", "180"),
             ("xscale", "200"),
             ("yscale", "50"),
             ("alpha", "128"),
@@ -219,6 +221,8 @@ mod tests {
         ]));
 
         assert_eq!(props.offset(), (100.0, -50.0));
+        assert_eq!(props.width, Some(320.0));
+        assert_eq!(props.height, Some(180.0));
         assert_eq!(props.scale(), (2.0, 0.5));
         assert!((props.opacity() - 128.0 / 255.0).abs() < 1e-6);
         assert!(props.is_visible());

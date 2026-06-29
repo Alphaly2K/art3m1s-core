@@ -2,6 +2,7 @@ use super::CoreRuntime;
 use crate::compositor::CompositorEvent;
 use asb_interpreter::Event;
 use asb_interpreter::event::{LayerEvent, WaitReason};
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
 impl CoreRuntime {
@@ -129,9 +130,69 @@ impl CoreRuntime {
             self.apply_text_event(event);
             if let Some(event) = CompositorEvent::from_interpreter(event) {
                 self.compositor.apply_event(event);
+                self.sync_layer_info_all();
             }
             crate::core_debug!("[event] {}", event_name(event));
         }
+    }
+
+    pub(super) fn sync_layer_info_all(&self) {
+        let mut out = HashMap::new();
+        for layer in self.compositor.scene().all_layers() {
+            let (left, top) = layer.props.offset();
+            let (width, height) =
+                if let (Some(width), Some(height)) = (layer.props.width, layer.props.height) {
+                    (width, height)
+                } else if let Some([_, _, width, height]) = layer.props.clip_rect() {
+                    (width, height)
+                } else {
+                    (0.0, 0.0)
+                };
+            out.insert(
+                layer.id.clone(),
+                HashMap::from([
+                    ("left".to_string(), trim_layer_float(left)),
+                    ("top".to_string(), trim_layer_float(top)),
+                    ("width".to_string(), trim_layer_float(width)),
+                    ("height".to_string(), trim_layer_float(height)),
+                ]),
+            );
+        }
+        *self.layer_info.lock().unwrap() = out;
+    }
+
+    pub(super) fn sync_layer_info(&self, id: &str) {
+        let mut table = self.layer_info.lock().unwrap();
+        let Some(layer) = self.compositor.scene().get(id) else {
+            table.remove(id);
+            return;
+        };
+        let (left, top) = layer.props.offset();
+        let (width, height) =
+            if let (Some(width), Some(height)) = (layer.props.width, layer.props.height) {
+                (width, height)
+            } else if let Some([_, _, width, height]) = layer.props.clip_rect() {
+                (width, height)
+            } else {
+                (0.0, 0.0)
+            };
+        table.insert(
+            id.to_string(),
+            HashMap::from([
+                ("left".to_string(), trim_layer_float(left)),
+                ("top".to_string(), trim_layer_float(top)),
+                ("width".to_string(), trim_layer_float(width)),
+                ("height".to_string(), trim_layer_float(height)),
+            ]),
+        );
+    }
+}
+
+fn trim_layer_float(value: f32) -> String {
+    if value.fract().abs() < f32::EPSILON {
+        (value as i32).to_string()
+    } else {
+        value.to_string()
     }
 }
 

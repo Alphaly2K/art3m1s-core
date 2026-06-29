@@ -214,6 +214,22 @@ impl GlRenderer {
     unsafe fn draw_one(&self, cmd: &DrawCommand) {
         let gl = &self.gl;
         unsafe {
+            if let Some([x, y, w, h]) = cmd.clip_bounds {
+                if w <= 0.0 || h <= 0.0 {
+                    return;
+                }
+                let sx = self.viewport_width as f32 / self.stage_width;
+                let sy = self.viewport_height as f32 / self.stage_height;
+                let left = (x * sx).floor() as i32;
+                let bottom = ((self.stage_height - (y + h)) * sy).floor() as i32;
+                let width = (w * sx).ceil().max(1.0) as i32;
+                let height = (h * sy).ceil().max(1.0) as i32;
+                gl.enable(glow::SCISSOR_TEST);
+                gl.scissor(left, bottom, width, height);
+            } else {
+                gl.disable(glow::SCISSOR_TEST);
+            }
+
             self.set_blend(cmd.blend);
 
             // transform: glam::Affine2 → mat3（列主序）。
@@ -284,6 +300,7 @@ impl Renderer for GlRenderer {
                 self.draw_one(cmd);
             }
 
+            gl.disable(glow::SCISSOR_TEST);
             gl.bind_vertex_array(None);
             gl.use_program(None);
         }

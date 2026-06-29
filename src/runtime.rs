@@ -55,6 +55,7 @@ pub struct CoreRuntime {
     debug_skip_active: Arc<AtomicBool>,
     script_status: Arc<AtomicU8>,
     magic_paths: Arc<magic_path::MagicPathTable>,
+    layer_info: callbacks::LayerInfoTable,
 
     stage_w: u32,
     stage_h: u32,
@@ -110,6 +111,7 @@ impl CoreRuntime {
         let debug_skip_active = Arc::new(AtomicBool::new(false));
         let script_status = Arc::new(AtomicU8::new(0));
         let magic_paths: Arc<magic_path::MagicPathTable> = Arc::new(Mutex::new(HashMap::new()));
+        let layer_info = Arc::new(Mutex::new(HashMap::new()));
 
         Ok(Self {
             gl,
@@ -129,6 +131,7 @@ impl CoreRuntime {
             debug_skip_active,
             script_status,
             magic_paths: Arc::clone(&magic_paths),
+            layer_info: Arc::clone(&layer_info),
             stage_w: stage_width,
             stage_h: stage_height,
             wait_reason: None,

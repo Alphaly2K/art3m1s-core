@@ -136,6 +136,7 @@ impl CoreRuntime {
         if let Some(scene) = data.scene.clone() {
             self.compositor.restore_scene(scene);
         }
+        self.sync_layer_info_all();
         data.restore(&mut self.interpreter)
             .map_err(|e| format!("恢复存档状态失败: {e:?}"))?;
 
@@ -160,6 +161,7 @@ impl CoreRuntime {
 
     pub(super) fn handle_go_title(&mut self) -> Result<(), String> {
         self.compositor.reset_for_load();
+        self.sync_layer_info_all();
         self.stop_all_media();
         self.hovered_layers.clear();
         self.save_screenshot = None;

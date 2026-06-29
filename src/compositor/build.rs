@@ -34,6 +34,7 @@ pub fn build_frame(
             now_ms,
             Affine2::IDENTITY,
             1.0,
+            None,
             provider,
             &mut frame,
             text_for,
@@ -49,6 +50,7 @@ fn visit(
     now_ms: u64,
     parent_transform: Affine2,
     parent_opacity: f32,
+    parent_clip: Option<[f32; 4]>,
     provider: &mut dyn TextureProvider,
     frame: &mut DrawList,
     text_for: Option<&dyn Fn(&str) -> Vec<DrawCommand>>,
@@ -68,6 +70,7 @@ fn visit(
     let local = local_transform(&props);
     let world = parent_transform * local;
     let opacity = parent_opacity * props.opacity();
+    let clip_bounds = subtree_clip_bounds(&props, world, parent_clip, provider);
 
     // 只有绑定了非空文件名且能解析到资源的节点才产出绘制命令；纯分组节点只传
     // 递变换。空文件名（如 config 的纯色图层 `lyc2{color=...}`，无 file，Create
@@ -99,13 +102,22 @@ fn visit(
             blend: blend_mode(&props),
             color: color_filter(&props),
             clip,
+            clip_bounds,
         });
     }
 
     // 按 Artemis 图层顺序遍历子图层（数字优先，数字按值，字符串按字典序）。
     for child in scene.children(id) {
         visit(
-            scene, &child, now_ms, world, opacity, provider, frame, text_for,
+            scene,
+            &child,
+            now_ms,
+            world,
+            opacity,
+            clip_bounds,
+            provider,
+            frame,
+            text_for,
         );
     }
 
@@ -114,6 +126,7 @@ fn visit(
         for mut cmd in tf(id) {
             cmd.transform = world * cmd.transform;
             cmd.opacity *= opacity;
+            cmd.clip_bounds = intersect_clip_bounds(cmd.clip_bounds, clip_bounds);
             frame.push(cmd);
         }
     }
@@ -158,6 +171,58 @@ fn local_transform(props: &LayerProps) -> Affine2 {
     let from_anchor = Affine2::from_translation(Vec2::new(-ax, -ay));
 
     translate * to_anchor * rotate * scale * from_anchor
+}
+
+fn subtree_clip_bounds(
+    props: &LayerProps,
+    world: Affine2,
+    parent_clip: Option<[f32; 4]>,
+    provider: &mut dyn TextureProvider,
+) -> Option<[f32; 4]> {
+    let local = props
+        .custom
+        .get("intermediate_render_mask")
+        .and_then(|mask| provider.resolve(mask))
+        .map(|(_, info)| [0.0, 0.0, info.width as f32, info.height as f32])
+        .or_else(|| {
+            if props.intermediate_render.is_some() {
+                props.clip.map(|[x, y, w, h]| [x, y, w, h])
+            } else {
+                None
+            }
+        });
+
+    let local = local.map(|rect| transform_rect(world, rect));
+    intersect_clip_bounds(parent_clip, local)
+}
+
+fn intersect_clip_bounds(a: Option<[f32; 4]>, b: Option<[f32; 4]>) -> Option<[f32; 4]> {
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            let left = a[0].max(b[0]);
+            let top = a[1].max(b[1]);
+            let right = (a[0] + a[2]).min(b[0] + b[2]);
+            let bottom = (a[1] + a[3]).min(b[1] + b[3]);
+            Some([left, top, (right - left).max(0.0), (bottom - top).max(0.0)])
+        }
+        (Some(rect), None) | (None, Some(rect)) => Some(rect),
+        (None, None) => None,
+    }
+}
+
+fn transform_rect(transform: Affine2, rect: [f32; 4]) -> [f32; 4] {
+    let [x, y, w, h] = rect;
+    let points = [
+        transform.transform_point2(Vec2::new(x, y)),
+        transform.transform_point2(Vec2::new(x + w, y)),
+        transform.transform_point2(Vec2::new(x, y + h)),
+        transform.transform_point2(Vec2::new(x + w, y + h)),
+    ];
+    let min_x = points.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+    let min_y = points.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+    let max_x = points.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
+    let max_y = points.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
+    [min_x, min_y, max_x - min_x, max_y - min_y]
 }
 
 fn blend_mode(props: &LayerProps) -> BlendMode {
@@ -218,6 +283,29 @@ mod tests {
         let cmd = frame.commands[0];
         let origin = cmd.transform.transform_point2(Vec2::ZERO);
         assert_eq!(origin.x, 100.0);
+    }
+
+    #[test]
+    fn intermediate_render_mask_clips_subtree_to_mask_size() {
+        let mut scene = Scene::new();
+        scene.set_props(
+            "1",
+            &raw(&[
+                ("left", "100"),
+                ("top", "50"),
+                ("intermediate_render", "1"),
+                ("intermediate_render_mask", "mask"),
+            ]),
+        );
+        scene.create("1.0", Some("fg".into()));
+
+        let mut provider = MockProvider::new();
+        let frame = build_frame(&scene, 0, &mut provider, None);
+        assert_eq!(frame.len(), 1);
+        assert_eq!(
+            frame.commands[0].clip_bounds,
+            Some([100.0, 50.0, TEXTURE_SIZE as f32, TEXTURE_SIZE as f32])
+        );
     }
 
     #[test]

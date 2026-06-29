@@ -11,10 +11,14 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use super::magic_path;
 use crate::ffi;
 
+pub(super) type LayerInfoTable =
+    std::sync::Arc<std::sync::Mutex<HashMap<String, HashMap<String, String>>>>;
+
 /// Engine callbacks that use the FFI bridge for all file access.
 pub(super) struct FfiCallbacks {
     pub input: std::sync::Arc<std::sync::Mutex<InputSnapshot>>,
     pub magic_paths: std::sync::Arc<magic_path::MagicPathTable>,
+    pub layer_info: LayerInfoTable,
     pub volumes: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, f32>>>,
     pub debug_skip_active: Arc<AtomicBool>,
     pub script_status: Arc<AtomicU8>,
@@ -186,6 +190,10 @@ impl EngineCallbacks for FfiCallbacks {
     }
     fn get_script_wait_reason(&self) -> u8 {
         0
+    }
+
+    fn get_layer_info(&self, id: &str) -> Option<HashMap<String, String>> {
+        self.layer_info.lock().unwrap().get(id).cloned()
     }
 }
 
