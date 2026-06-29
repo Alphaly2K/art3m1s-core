@@ -65,29 +65,8 @@ impl EngineCallbacks for FfiCallbacks {
     fn enqueue_tag(&self, _tag: String, _params: HashMap<String, String>) {}
     fn set_event_handler(&self, _handlers: HashMap<String, String>) {}
 
-    fn set_magic_path(&self, name: &str, path: &str) {
-        self.magic_paths
-            .lock()
-            .unwrap()
-            .insert(name.to_string(), path.to_string());
-    }
-
     fn get_script_status(&self) -> u8 {
         self.script_status.load(Ordering::SeqCst)
-    }
-
-    fn set_script_status(&self, status: u8) {
-        self.script_status.store(status, Ordering::SeqCst);
-        if status == 0 {
-            self.debug_skip_active.store(false, Ordering::SeqCst);
-        }
-    }
-
-    fn debug_skip(&self, index: i64) {
-        if index > 0 {
-            self.debug_skip_active.store(true, Ordering::SeqCst);
-            self.script_status.store(4, Ordering::SeqCst);
-        }
     }
 
     fn is_key_down(&self, key_id: u32) -> bool {
@@ -100,19 +79,6 @@ impl EngineCallbacks for FfiCallbacks {
 
     fn is_key_up_edge(&self, key_id: u32) -> bool {
         self.input.lock().unwrap().keys_up_edge.contains(&key_id)
-    }
-
-    fn override_key(&self, from: u32, to: u32) {
-        let mut s = self.input.lock().unwrap();
-        if to == 0 {
-            s.key_overrides.insert(from, false);
-            s.keys_down_edge.remove(&from);
-        } else {
-            s.key_overrides.insert(from, true);
-            if to == 32 {
-                s.keys_down_edge.insert(from);
-            }
-        }
     }
 
     fn is_decide(&self) -> bool {
@@ -137,6 +103,88 @@ impl EngineCallbacks for FfiCallbacks {
         ffi::query_asset_size(&resolved).is_some()
     }
 
+    fn file_operation(&self, command: &str, params: HashMap<String, String>) {
+        let _ = (command, params);
+    }
+
+    fn include(&self, _path: &str) {}
+
+    fn override_key(&self, from: u32, to: u32) {
+        let mut s = self.input.lock().unwrap();
+        if to == 0 {
+            s.key_overrides.insert(from, false);
+            s.keys_down_edge.remove(&from);
+        } else {
+            s.key_overrides.insert(from, true);
+            if to == 32 {
+                s.keys_down_edge.insert(from);
+            }
+        }
+    }
+
+    fn set_flick_sensitivity(&self, _sensitivity: f64) {}
+
+    fn get_script_block(&self) -> HashMap<String, String> {
+        HashMap::new()
+    }
+
+    fn get_script_stack(&self) -> Vec<HashMap<String, String>> {
+        vec![]
+    }
+
+    fn get_script_wait_reason(&self) -> u8 {
+        0
+    }
+
+    fn get_layer_info(&self, id: &str) -> Option<HashMap<String, String>> {
+        self.layer_info.lock().unwrap().get(id).cloned()
+    }
+
+    fn set_script_status(&self, status: u8) {
+        self.script_status.store(status, Ordering::SeqCst);
+        if status == 0 {
+            self.debug_skip_active.store(false, Ordering::SeqCst);
+        }
+    }
+
+    fn set_magic_path(&self, name: &str, path: &str) {
+        self.magic_paths
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), path.to_string());
+    }
+
+    fn debug_skip(&self, index: i64) {
+        if index > 0 {
+            self.debug_skip_active.store(true, Ordering::SeqCst);
+            self.script_status.store(4, Ordering::SeqCst);
+        }
+    }
+    fn set_master_volume(&self, volume: f32) {
+        self.volumes
+            .lock()
+            .unwrap()
+            .insert("master".to_string(), volume);
+    }
+    fn set_bgm_volume(&self, volume: f32) {
+        self.volumes
+            .lock()
+            .unwrap()
+            .insert("bgm".to_string(), volume);
+    }
+    fn set_se_volume(&self, volume: f32) {
+        self.volumes
+            .lock()
+            .unwrap()
+            .insert("se".to_string(), volume);
+    }
+    fn set_voice_volume(&self, volume: f32) {
+        self.volumes
+            .lock()
+            .unwrap()
+            .insert("voice".to_string(), volume);
+    }
+
     fn load_png_comments(&self, path: &str) -> Option<HashMap<String, String>> {
         let resolved = magic_path::resolve_path(&self.magic_paths, path);
         let bytes = ffi::request_asset(&resolved)?;
@@ -146,54 +194,6 @@ impl EngineCallbacks for FfiCallbacks {
         } else {
             Some(comments)
         }
-    }
-
-    fn file_operation(&self, command: &str, params: HashMap<String, String>) {
-        let _ = (command, params);
-    }
-
-    fn set_master_volume(&self, volume: f32) {
-        self.volumes
-            .lock()
-            .unwrap()
-            .insert("master".to_string(), volume);
-    }
-
-    fn set_bgm_volume(&self, volume: f32) {
-        self.volumes
-            .lock()
-            .unwrap()
-            .insert("bgm".to_string(), volume);
-    }
-
-    fn set_se_volume(&self, volume: f32) {
-        self.volumes
-            .lock()
-            .unwrap()
-            .insert("se".to_string(), volume);
-    }
-
-    fn set_voice_volume(&self, volume: f32) {
-        self.volumes
-            .lock()
-            .unwrap()
-            .insert("voice".to_string(), volume);
-    }
-
-    fn include(&self, _path: &str) {}
-    fn set_flick_sensitivity(&self, _sensitivity: f64) {}
-    fn get_script_block(&self) -> HashMap<String, String> {
-        HashMap::new()
-    }
-    fn get_script_stack(&self) -> Vec<HashMap<String, String>> {
-        vec![]
-    }
-    fn get_script_wait_reason(&self) -> u8 {
-        0
-    }
-
-    fn get_layer_info(&self, id: &str) -> Option<HashMap<String, String>> {
-        self.layer_info.lock().unwrap().get(id).cloned()
     }
 }
 
