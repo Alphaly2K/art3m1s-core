@@ -391,6 +391,39 @@ pub unsafe extern "C" fn art3m1s_runtime_load_project(
 
 #[cfg(feature = "gl-backend")]
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_load_project_bytes(
+    rt: *mut CoreRuntime,
+    ini_content: *const u8,
+    ini_len: usize,
+    platform: *const c_char,
+) -> i32 {
+    if rt.is_null() || ini_content.is_null() || platform.is_null() {
+        return -1;
+    }
+    let rt = unsafe { &mut *rt };
+    let ini = unsafe { std::slice::from_raw_parts(ini_content, ini_len) };
+    let Ok(plat) = (unsafe { std::ffi::CStr::from_ptr(platform).to_str() }) else {
+        return -1;
+    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rt.load_project_bytes(ini, plat)
+    }));
+    match result {
+        Ok(Ok(())) => 0,
+        Ok(Err(e)) => {
+            core_error!("art3m1s_runtime_load_project_bytes: {e}");
+            -1
+        }
+        Err(panic_info) => {
+            let msg = panic_msg(&panic_info);
+            core_error!("art3m1s_runtime_load_project_bytes panicked: {msg}");
+            -1
+        }
+    }
+}
+
+#[cfg(feature = "gl-backend")]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_feed_mouse(rt: *mut CoreRuntime, x: i32, y: i32) {
     if rt.is_null() {
         return;

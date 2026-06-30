@@ -149,7 +149,7 @@ impl ProjectConfig {
             charset: values
                 .get("CHARSET")
                 .cloned()
-                .unwrap_or_else(|| "UTF-8".to_string()),
+                .unwrap_or_else(|| "Shift_JIS".to_string()),
             boot_script,
             frameless: ini_bool(values.get("FRAMELESS")),
             resizable: ini_bool(values.get("RESIZABLE")),
@@ -166,10 +166,7 @@ impl ProjectConfig {
 
     /// Convert the project config into the interpreter's environment config.
     pub fn to_interpreter_config(&self, project_root: Option<&Path>) -> InterpreterConfig {
-        let encoding = match self.charset.to_ascii_uppercase().as_str() {
-            "SHIFT_JIS" | "SHIFT-JIS" | "SJIS" => encoding_rs::SHIFT_JIS,
-            _ => encoding_rs::UTF_8,
-        };
+        let encoding = encoding_for_charset(&self.charset);
 
         InterpreterConfig {
             encoding,
@@ -191,6 +188,20 @@ impl ProjectConfig {
             // system.ini 段名为大写（WINDOWS/ANDROID/IOS/WASM），脚本机种表用小写键。
             platform: self.platform.to_ascii_lowercase(),
         }
+    }
+
+    /// Parse a raw `system.ini` byte stream.
+    ///
+    /// Artemis treats `CHARSET` as the script and rendered-font-cache encoding,
+    /// and its documented default is Shift_JIS.  The keys needed to discover
+    /// the selected platform section and `CHARSET=` are ASCII-compatible in
+    /// both Shift_JIS and UTF-8, so we first scan those bytes without decoding,
+    /// then decode the whole file with the discovered encoding.
+    pub fn from_system_ini_bytes(contents: &[u8], platform: &str) -> Result<Self> {
+        let charset = detect_ini_charset(contents, platform);
+        let encoding = encoding_for_charset(&charset);
+        let (decoded, _, _) = encoding.decode(contents);
+        Self::from_system_ini(&decoded, platform)
     }
 }
 
@@ -215,15 +226,26 @@ impl Project {
         Ok(Self { root, config })
     }
 
+    /// Open a project from raw `system.ini` bytes.
+    pub fn open_from_bytes(
+        root: impl Into<PathBuf>,
+        ini_content: &[u8],
+        platform: &str,
+    ) -> Result<Self> {
+        let root = root.into();
+        let config = ProjectConfig::from_system_ini_bytes(ini_content, platform)?;
+        Ok(Self { root, config })
+    }
+
     /// Open an unpacked project directory and parse its `system.ini`.
     pub fn open(root: impl Into<PathBuf>, platform: &str) -> Result<Self> {
         let root = root.into();
         let ini_path = root.join("system.ini");
-        let ini = std::fs::read_to_string(&ini_path).map_err(|source| CoreError::Io {
+        let ini = std::fs::read(&ini_path).map_err(|source| CoreError::Io {
             path: ini_path,
             source,
         })?;
-        let config = ProjectConfig::from_system_ini(&ini, platform)?;
+        let config = ProjectConfig::from_system_ini_bytes(&ini, platform)?;
         Ok(Self { root, config })
     }
 
@@ -343,6 +365,73 @@ fn parse_ini(contents: &str) -> HashMap<String, HashMap<String, String>> {
     sections
 }
 
+fn encoding_for_charset(charset: &str) -> &'static encoding_rs::Encoding {
+    match charset.trim().to_ascii_uppercase().as_str() {
+        "UTF-8" | "UTF8" => encoding_rs::UTF_8,
+        "SHIFT_JIS" | "SHIFT-JIS" | "SJIS" => encoding_rs::SHIFT_JIS,
+        _ => encoding_rs::SHIFT_JIS,
+    }
+}
+
+fn detect_ini_charset(contents: &[u8], platform: &str) -> String {
+    let section = platform.trim().to_ascii_uppercase();
+    let mut current: Option<String> = None;
+
+    for raw_line in contents.split(|&b| b == b'\n' || b == b'\r') {
+        let line = trim_ascii(raw_line);
+        if line.is_empty() || line[0] == b';' || line[0] == b'#' {
+            continue;
+        }
+
+        if line.starts_with(b"[") && line.ends_with(b"]") {
+            let name = trim_ascii(&line[1..line.len() - 1]);
+            current = Some(ascii_upper_string(name));
+            continue;
+        }
+
+        if current.as_deref() != Some(section.as_str()) {
+            continue;
+        }
+
+        let Some(eq) = line.iter().position(|&b| b == b'=') else {
+            continue;
+        };
+        let key = ascii_upper_string(trim_ascii(&line[..eq]));
+        if key == "CHARSET" {
+            return ascii_lossy(trim_ascii(&line[eq + 1..]));
+        }
+    }
+
+    "Shift_JIS".to_string()
+}
+
+fn trim_ascii(bytes: &[u8]) -> &[u8] {
+    let mut start = 0;
+    let mut end = bytes.len();
+    while start < end && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    while end > start && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    &bytes[start..end]
+}
+
+fn ascii_upper_string(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|&b| (b as char).to_ascii_uppercase())
+        .collect()
+}
+
+fn ascii_lossy(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .take_while(|&&b| b.is_ascii())
+        .map(|&b| b as char)
+        .collect()
+}
+
 fn required_string(values: &HashMap<String, String>, section: &str, key: &str) -> Result<String> {
     values
         .get(key)
@@ -419,4 +508,44 @@ fn to_interpreter_error(error: CoreError) -> asb_interpreter::Error {
         std::io::ErrorKind::InvalidInput,
         error.to_string(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_ini_bytes_default_to_shift_jis() {
+        let (title, _, _) = encoding_rs::SHIFT_JIS.encode("タイトル");
+        let mut ini = b"[WINDOWS]\nWIDTH=800\nHEIGHT=600\nBOOT=boot.iet\nTITLE=".to_vec();
+        ini.extend_from_slice(&title);
+        ini.extend_from_slice(b"\n");
+
+        let config = ProjectConfig::from_system_ini_bytes(&ini, "WINDOWS").unwrap();
+
+        assert_eq!(config.charset, "Shift_JIS");
+        assert_eq!(
+            config.raw.get("TITLE").map(String::as_str),
+            Some("タイトル")
+        );
+        assert_eq!(
+            config.to_interpreter_config(None).encoding.name(),
+            "Shift_JIS"
+        );
+    }
+
+    #[test]
+    fn system_ini_bytes_respect_utf8_charset() {
+        let ini =
+            "[WINDOWS]\nWIDTH=800\nHEIGHT=600\nBOOT=boot.iet\nCHARSET=UTF-8\nTITLE=タイトル\n";
+
+        let config = ProjectConfig::from_system_ini_bytes(ini.as_bytes(), "WINDOWS").unwrap();
+
+        assert_eq!(config.charset, "UTF-8");
+        assert_eq!(
+            config.raw.get("TITLE").map(String::as_str),
+            Some("タイトル")
+        );
+        assert_eq!(config.to_interpreter_config(None).encoding.name(), "UTF-8");
+    }
 }

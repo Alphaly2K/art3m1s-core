@@ -23,7 +23,17 @@ impl CoreRuntime {
     pub fn load_project(&mut self, ini_content: &str, platform: &str) -> Result<(), String> {
         let project =
             Project::open_from_data("", ini_content, platform).map_err(|e| e.to_string())?;
+        self.load_open_project(project)
+    }
 
+    /// Load a project from raw system.ini bytes.
+    pub fn load_project_bytes(&mut self, ini_content: &[u8], platform: &str) -> Result<(), String> {
+        let project =
+            Project::open_from_bytes("", ini_content, platform).map_err(|e| e.to_string())?;
+        self.load_open_project(project)
+    }
+
+    fn load_open_project(&mut self, project: Project) -> Result<(), String> {
         let new_width = project.config().stage_width;
         let new_height = project.config().stage_height;
 
@@ -39,7 +49,7 @@ impl CoreRuntime {
 
         self.wire_engine_callbacks();
         self.wire_file_loader();
-        self.wire_texture_source(ini_content);
+        self.wire_texture_source();
         self.wire_event_callback();
         self.load_default_font();
         self.register_builtin_textures();
@@ -83,13 +93,15 @@ impl CoreRuntime {
             }));
     }
 
-    fn wire_texture_source(&mut self, ini_content: &str) {
+    fn wire_texture_source(&mut self) {
         // Re-create texture provider with magic-path-aware FFI source
         let gl_for_tex = self.gl.clone();
-        let project_name = ini_content
-            .lines()
-            .find(|l| l.starts_with("TITLE="))
-            .and_then(|l| l.split_once('=').map(|(_, v)| v.trim().to_string()))
+        let project_name = self
+            .interpreter
+            .config()
+            .env
+            .get("TITLE")
+            .cloned()
             .unwrap_or_default();
         let magic_paths_tex = Arc::clone(&self.magic_paths);
         self.texture_provider =
