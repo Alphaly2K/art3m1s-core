@@ -8,9 +8,11 @@
 use crate::compositor::props::LayerProps;
 use crate::compositor::scene::Scene;
 use crate::render_pipeline::draw::{
-    BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, TextureProvider,
+    BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, ShaderEffect, ShaderGroup,
+    TextureProvider,
 };
 use glam::{Affine2, Vec2};
+use std::collections::BTreeMap;
 
 /// 在时刻 `now_ms` 把 `scene` 构建成一帧绘制列表。
 ///
@@ -35,6 +37,7 @@ pub fn build_frame(
             Affine2::IDENTITY,
             1.0,
             None,
+            None,
             provider,
             &mut frame,
             text_for,
@@ -51,6 +54,7 @@ fn visit(
     parent_transform: Affine2,
     parent_opacity: f32,
     parent_clip: Option<[f32; 4]>,
+    inherited_shader: Option<ShaderEffect>,
     provider: &mut dyn TextureProvider,
     frame: &mut DrawList,
     text_for: Option<&dyn Fn(&str) -> Vec<DrawCommand>>,
@@ -71,6 +75,18 @@ fn visit(
     let world = parent_transform * local;
     let opacity = parent_opacity * props.opacity();
     let clip_bounds = subtree_clip_bounds(&props, world, parent_clip, provider);
+    let children = scene.children(id);
+    let local_shader = declared_shader(scene, &props, provider);
+    let group_shader = local_shader
+        .as_ref()
+        .and_then(|shader| shader.clone())
+        .filter(|_| props.intermediate_render.is_some() || !children.is_empty());
+    let command_shader = if group_shader.is_some() {
+        inherited_shader.clone()
+    } else {
+        local_shader.unwrap_or(inherited_shader.clone())
+    };
+    let group_start = frame.len();
 
     // 只有绑定了非空文件名且能解析到资源的节点才产出绘制命令；纯分组节点只传
     // 递变换。空文件名（如 config 的纯色图层 `lyc2{color=...}`，无 file，Create
@@ -103,11 +119,12 @@ fn visit(
             color: color_filter(&props),
             clip,
             clip_bounds,
+            shader: command_shader.clone(),
         });
     }
 
     // 按 Artemis 图层顺序遍历子图层（数字优先，数字按值，字符串按字典序）。
-    for child in scene.children(id) {
+    for child in children {
         visit(
             scene,
             &child,
@@ -115,6 +132,7 @@ fn visit(
             world,
             opacity,
             clip_bounds,
+            command_shader.clone(),
             provider,
             frame,
             text_for,
@@ -130,6 +148,96 @@ fn visit(
             frame.push(cmd);
         }
     }
+
+    if let Some(effect) = group_shader {
+        let end = frame.len();
+        if end > group_start {
+            frame.push_shader_group(ShaderGroup {
+                start: group_start,
+                end,
+                effect,
+                clip_bounds,
+            });
+        }
+    }
+}
+
+/// `Some(None)` means the layer explicitly specified `shader=""`.
+fn declared_shader(
+    scene: &Scene,
+    props: &LayerProps,
+    provider: &mut dyn TextureProvider,
+) -> Option<Option<ShaderEffect>> {
+    let Some(shader_name) = props.shader.as_deref() else {
+        return None;
+    };
+    if shader_name.is_empty() {
+        return Some(None);
+    }
+
+    let mut uniforms = BTreeMap::new();
+    for name in &props.shader_constants {
+        let value = shader_uniform_value(props, name);
+        if let Some(value) = value {
+            uniforms.insert(name.clone(), value);
+        }
+    }
+
+    let user_texture = props
+        .shader_textures
+        .iter()
+        .find(|name| name.eq_ignore_ascii_case("textureUser"))
+        .and_then(|name| props.custom.get(name))
+        .and_then(|reference| {
+            scene
+                .get(reference)
+                .and_then(|layer| layer.file.as_deref())
+                .or(Some(reference.as_str()))
+        })
+        .and_then(|file| provider.resolve(file).map(|(texture, _)| texture));
+    let mask_texture = props
+        .custom
+        .get("mask")
+        .and_then(|reference| {
+            scene
+                .get(reference)
+                .and_then(|layer| layer.file.as_deref())
+                .or(Some(reference.as_str()))
+        })
+        .and_then(|file| provider.resolve(file).map(|(texture, _)| texture));
+
+    Some(Some(ShaderEffect {
+        name: shader_name.to_string(),
+        uniforms,
+        mask_texture,
+        user_texture,
+    }))
+}
+
+fn shader_uniform_value(props: &LayerProps, name: &str) -> Option<Vec<f32>> {
+    let raw = props
+        .custom
+        .get(name)
+        .map(String::as_str)
+        .or_else(|| match name {
+            "width" => props.width.map(|_| ""),
+            "height" => props.height.map(|_| ""),
+            _ => None,
+        });
+
+    if raw == Some("") {
+        return match name {
+            "width" => props.width.map(|value| vec![value]),
+            "height" => props.height.map(|value| vec![value]),
+            _ => None,
+        };
+    }
+
+    let values: Vec<f32> = raw?
+        .split(',')
+        .filter_map(|part| part.trim().parse::<f32>().ok())
+        .collect();
+    (!values.is_empty()).then_some(values)
 }
 
 /// 复制属性并叠加当前时刻的缓动值。
@@ -280,7 +388,7 @@ mod tests {
         let frame = build_frame(&scene, 0, &mut provider, None);
         assert_eq!(frame.len(), 1); // 只有 1.0 产出
         // 子图层继承了父的平移 100。
-        let cmd = frame.commands[0];
+        let cmd = &frame.commands[0];
         let origin = cmd.transform.transform_point2(Vec2::ZERO);
         assert_eq!(origin.x, 100.0);
     }
@@ -306,6 +414,57 @@ mod tests {
             frame.commands[0].clip_bounds,
             Some([100.0, 50.0, TEXTURE_SIZE as f32, TEXTURE_SIZE as f32])
         );
+    }
+
+    #[test]
+    fn shader_constants_and_user_texture_reach_draw_command() {
+        let mut scene = Scene::new();
+        scene.create("1", Some("foreground".into()));
+        scene.create("900", Some("effect.png".into()));
+        scene.set_props("900", &raw(&[("visible", "0")]));
+        scene.set_props(
+            "1",
+            &raw(&[
+                ("shader", "compbr"),
+                ("shaderconstant", "param,weights"),
+                ("param", "0.5"),
+                ("weights", "0.1,0.2,0.3"),
+                ("shadertexture", "textureUser"),
+                ("textureUser", "900"),
+            ]),
+        );
+
+        let mut provider = MockProvider::new();
+        let frame = build_frame(&scene, 0, &mut provider, None);
+        let command = &frame.commands[0];
+        let effect = command.shader.as_ref().unwrap();
+        assert_eq!(effect.name, "compbr");
+        assert_eq!(effect.uniforms["param"], [0.5]);
+        assert_eq!(effect.uniforms["weights"], [0.1, 0.2, 0.3]);
+        assert_eq!(provider.name_of(effect.user_texture.unwrap()), "effect.png");
+    }
+
+    #[test]
+    fn group_shader_creates_one_subtree_pass() {
+        let mut scene = Scene::new();
+        scene.set_props("1", &raw(&[("shader", "gray")]));
+        scene.create("1.0", Some("a".into()));
+        scene.create("1.1", Some("b".into()));
+        scene.set_props("1.1", &raw(&[("shader", "")]));
+
+        let mut provider = MockProvider::new();
+        let frame = build_frame(&scene, 0, &mut provider, None);
+        assert_eq!(frame.shader_groups.len(), 1);
+        let group = &frame.shader_groups[0];
+        assert_eq!(group.start, 0);
+        assert_eq!(group.end, 2);
+        assert_eq!(group.effect.name, "gray");
+        let b = frame
+            .commands
+            .iter()
+            .find(|command| provider.name_of(command.texture) == "b")
+            .unwrap();
+        assert!(b.shader.is_none());
     }
 
     #[test]
@@ -362,7 +521,7 @@ mod tests {
 
         let mut provider = MockProvider::new();
         let frame = build_frame(&scene, 0, &mut provider, None);
-        let cmd = frame.commands[0];
+        let cmd = &frame.commands[0];
         let anchor = cmd.transform.transform_point2(Vec2::new(10.0, 10.0));
         assert!((anchor.x - 10.0).abs() < 1e-4);
         assert!((anchor.y - 10.0).abs() < 1e-4);

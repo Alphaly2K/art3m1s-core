@@ -81,6 +81,36 @@ pub fn emit_media_command(kind: &str, payload: serde_json::Value) {
     }
 }
 
+// ── UI command callback ────────────────────────────────────────
+
+type UiCommandCallback = unsafe extern "C" fn(kind: *const c_char, payload_json: *const c_char);
+
+static UI_COMMAND_CB: Mutex<Option<UiCommandCallback>> = Mutex::new(None);
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_register_ui_command_callback(cb: UiCommandCallback) {
+    *UI_COMMAND_CB.lock().unwrap() = Some(cb);
+}
+
+pub fn ui_command_callback_registered() -> bool {
+    UI_COMMAND_CB.lock().unwrap().is_some()
+}
+
+pub fn emit_ui_command(kind: &str, payload: serde_json::Value) {
+    let Some(cb) = *UI_COMMAND_CB.lock().unwrap() else {
+        return;
+    };
+    let Ok(kind) = CString::new(kind) else {
+        return;
+    };
+    let Ok(payload) = CString::new(payload.to_string()) else {
+        return;
+    };
+    unsafe {
+        cb(kind.as_ptr(), payload.as_ptr());
+    }
+}
+
 #[macro_export]
 macro_rules! core_info {
     ($($arg:tt)*) => { $crate::ffi::log("I", &format!($($arg)*)); };
@@ -468,6 +498,25 @@ pub unsafe extern "C" fn art3m1s_runtime_feed_key(rt: *mut CoreRuntime, vk: u32,
     } else {
         rt.feed_key_up(vk);
     }
+}
+
+#[cfg(feature = "gl-backend")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_submit_dialog(
+    rt: *mut CoreRuntime,
+    accepted: i32,
+    text: *const c_char,
+) -> i32 {
+    if rt.is_null() {
+        return 0;
+    }
+    let text = if text.is_null() {
+        None
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(text).to_str().ok() }
+    };
+    let rt = unsafe { &mut *rt };
+    i32::from(rt.submit_dialog_response(accepted != 0, text))
 }
 
 #[cfg(feature = "gl-backend")]

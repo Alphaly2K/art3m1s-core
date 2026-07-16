@@ -8,6 +8,14 @@ use std::sync::atomic::Ordering;
 
 impl CoreRuntime {
     pub(super) fn advance_script(&mut self, clicked: bool, delta_ms: u64) {
+        // Native dialogs are modal from the scenario script's point of view. The dialog event can
+        // be emitted from an estag queue that already contains its continuation; draining that
+        // queue before the host responds runs stop/wait tags behind the dialog and corrupts the
+        // scenario wait state.
+        if self.pending_dialog.is_some() {
+            return;
+        }
+
         // onEnterFrame
         if let Err(e) = self.interpreter.fire_enter_frame() {
             crate::core_error!("onEnterFrame 错误: {e:?}");
@@ -41,7 +49,7 @@ impl CoreRuntime {
             match self.interpreter.run() {
                 Ok(ExecutionResult::Wait(Event::Wait { reason })) => {
                     match &reason {
-                        WaitReason::Timed { milliseconds } => {
+                        WaitReason::Timed { milliseconds, .. } => {
                             self.timed_remaining_ms = *milliseconds;
                         }
                         WaitReason::Stop { .. } => {}
@@ -113,8 +121,11 @@ impl CoreRuntime {
         }
 
         let advance = match reason {
-            WaitReason::Timed { .. } => {
-                if self.skip_active() {
+            WaitReason::Timed { input, .. } => {
+                if timed_wait_accepts_click(input, clicked) {
+                    self.timed_remaining_ms = 0;
+                    true
+                } else if self.skip_active() {
                     if self.should_hold_for_skip_reveal() {
                         false
                     } else {
@@ -150,7 +161,7 @@ impl CoreRuntime {
         }
     }
 
-    fn advance_wait_line(&mut self) {
+    pub(super) fn advance_wait_line(&mut self) {
         self.wait_reason = None;
         self.reset_control_wait_flags();
         self.interpreter.advance_line();
@@ -231,5 +242,22 @@ impl CoreRuntime {
         } else {
             self.wait_reason = Some(wait_reason);
         }
+    }
+}
+
+fn timed_wait_accepts_click(input: i32, clicked: bool) -> bool {
+    input == 1 && clicked
+}
+
+#[cfg(test)]
+mod tests {
+    use super::timed_wait_accepts_click;
+
+    #[test]
+    fn timed_wait_only_accepts_click_for_input_one() {
+        assert!(!timed_wait_accepts_click(0, true));
+        assert!(timed_wait_accepts_click(1, true));
+        assert!(!timed_wait_accepts_click(2, true));
+        assert!(!timed_wait_accepts_click(1, false));
     }
 }

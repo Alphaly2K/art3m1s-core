@@ -19,10 +19,33 @@ pub unsafe fn build_program(
         let source = manager
             .program(crate::render_pipeline::shader::SPRITE_SHADER)
             .ok_or_else(|| "sprite shader asset missing".to_string())?;
-        let header = profile.version_header();
-        let vert_src = format!("{header}{}", source.vertex_body);
-        let frag_src = format!("{header}{}", source.fragment_body);
+        build_program_from_bodies(gl, profile, source.vertex_body, source.fragment_body)
+    }
+}
 
+pub unsafe fn build_effect_program(
+    gl: &glow::Context,
+    profile: ShaderProfile,
+    hlsl: &[u8],
+) -> Result<glow::Program, String> {
+    let manager = BuiltinShaderManager;
+    let source = manager
+        .program(crate::render_pipeline::shader::SPRITE_SHADER)
+        .ok_or_else(|| "sprite shader asset missing".to_string())?;
+    let fragment = crate::render_pipeline::hlsl::translate_effect(hlsl)?;
+    unsafe { build_program_from_bodies(gl, profile, source.vertex_body, &fragment) }
+}
+
+unsafe fn build_program_from_bodies(
+    gl: &glow::Context,
+    profile: ShaderProfile,
+    vertex_body: &str,
+    fragment_body: &str,
+) -> Result<glow::Program, String> {
+    unsafe {
+        let header = profile.version_header();
+        let vert_src = format!("{header}{vertex_body}");
+        let frag_src = format!("{header}{fragment_body}");
         let program = gl.create_program()?;
 
         let shaders = [

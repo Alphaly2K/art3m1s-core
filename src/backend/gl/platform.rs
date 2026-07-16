@@ -675,6 +675,7 @@ pub unsafe fn create_fbo_target(
             glow::UNSIGNED_BYTE,
             glow::PixelUnpackData::Slice(None),
         );
+        configure_render_texture(gl);
         let fbo = gl
             .create_framebuffer()
             .map_err(|e| format!("create_framebuffer: {e}"))?;
@@ -707,6 +708,7 @@ pub unsafe fn create_fbo_target(
                 glow::UNSIGNED_BYTE,
                 glow::PixelUnpackData::Slice(None),
             );
+            configure_render_texture(gl);
             let fbo2 = gl
                 .create_framebuffer()
                 .map_err(|e| format!("create_framebuffer(retry): {e}"))?;
@@ -725,6 +727,31 @@ pub unsafe fn create_fbo_target(
             return Ok((fbo2, tex2));
         }
         Ok((fbo, tex))
+    }
+}
+
+unsafe fn configure_render_texture(gl: &glow::Context) {
+    unsafe {
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_S,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_T,
+            glow::CLAMP_TO_EDGE as i32,
+        );
     }
 }
 

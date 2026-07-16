@@ -46,6 +46,12 @@ pub struct LayerProps {
     /// Artemis 离屏中间渲染标记。设置后该图层作为渲染目标，`clip` 为目标尺寸而
     /// 非可视裁剪，不应影响纹理的采样区域。
     pub intermediate_render: Option<u8>,
+    /// Artemis `lyshader` 注册表中的 shader id。空字符串表示显式关闭继承的 shader。
+    pub shader: Option<String>,
+    /// `shaderconstant="red,green,blue"` 声明的 uniform 名称。
+    pub shader_constants: Vec<String>,
+    /// `shadertexture="textureUser"` 声明的附加纹理槽名称。
+    pub shader_textures: Vec<String>,
     /// 未被识别的属性，原样保留。
     pub custom: HashMap<String, String>,
 }
@@ -99,6 +105,13 @@ impl LayerProps {
             // 正确忽略同组的 clip（那是渲染目标尺寸，不是可视裁剪）。
             "intermediate_render" => {
                 self.intermediate_render = v.parse::<u8>().ok().or(self.intermediate_render);
+            }
+            "shader" => self.shader = Some(v.to_string()),
+            "shaderconstant" => {
+                self.shader_constants = parse_name_list(v);
+            }
+            "shadertexture" => {
+                self.shader_textures = parse_name_list(v);
             }
             // file 属性在 SetProperties 事件里偶尔出现，但图层文件已在 Create 时确定，忽略。
             "file" => {}
@@ -195,6 +208,15 @@ fn parse_clip(value: &str) -> Option<[f32; 4]> {
     Some([x, y, w, h])
 }
 
+fn parse_name_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,5 +293,25 @@ mod tests {
         assert!((c[0] - 1.0).abs() < 1e-6);
         assert!((c[1] - 128.0 / 255.0).abs() < 1e-6);
         assert_eq!(c[2], 0.0);
+    }
+
+    #[test]
+    fn parses_shader_binding_declarations() {
+        let props = LayerProps::from_raw(&raw(&[
+            ("shader", "sepia"),
+            ("shaderconstant", "red, green,blue"),
+            ("shadertexture", "textureUser"),
+            ("red", "0.1"),
+            ("textureUser", "1.0.effect"),
+        ]));
+
+        assert_eq!(props.shader.as_deref(), Some("sepia"));
+        assert_eq!(props.shader_constants, ["red", "green", "blue"]);
+        assert_eq!(props.shader_textures, ["textureUser"]);
+        assert_eq!(props.custom.get("red").map(String::as_str), Some("0.1"));
+        assert_eq!(
+            props.custom.get("textureUser").map(String::as_str),
+            Some("1.0.effect")
+        );
     }
 }

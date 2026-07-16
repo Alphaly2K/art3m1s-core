@@ -484,6 +484,9 @@ impl From<&str> for TextAlignment {
 // ---------------------------------------------------------------------------
 
 pub trait TextRenderer {
+    /// 切换当前用于光栅化的字体文件。
+    fn set_font_bytes(&mut self, bytes: &'static [u8]) -> Result<(), String>;
+
     /// 应用字体属性。
     fn apply_font_settings(&mut self, settings: &HashMap<String, String>);
 

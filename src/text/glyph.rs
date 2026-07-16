@@ -103,11 +103,16 @@ impl<'font> GlyphTextRenderer<'font> {
     }
     pub fn set_font(&mut self, bytes: &'font [u8]) -> Result<(), String> {
         self.font = Some(FontRef::try_from_slice(bytes).map_err(|e| format!("{e}"))?);
+        self.cache.clear();
         Ok(())
     }
 }
 
 impl TextRenderer for GlyphTextRenderer<'_> {
+    fn set_font_bytes(&mut self, bytes: &'static [u8]) -> Result<(), String> {
+        self.set_font(bytes)
+    }
+
     fn apply_font_settings(&mut self, s: &HashMap<String, String>) {
         let l = self.state.active_layer_mut();
         // 按 Artemis 约定，stack 参数默认为 1（true）：应用新样式前先把当前样式压栈，
@@ -406,9 +411,10 @@ impl TextRenderer for GlyphTextRenderer<'_> {
                         },
                         clip: clip.clone(),
                         clip_bounds: None,
+                        shader: None,
                     };
                     if has_shadow {
-                        let mut sc = base;
+                        let mut sc = base.clone();
                         let sd = ly.font.shadow_size.unwrap_or(2.0);
                         sc.color.multiply = oc;
                         sc.transform = Affine2::from_translation(Vec2::new(pos_x + sd, pos_y + sd));
@@ -417,7 +423,7 @@ impl TextRenderer for GlyphTextRenderer<'_> {
                     if has_outline {
                         let os = ly.font.outline_size.unwrap_or(1.0);
                         for &(ox, oy) in &OUTLINE_OFFSETS {
-                            let mut ocp = base;
+                            let mut ocp = base.clone();
                             ocp.color.multiply = oc;
                             ocp.transform = Affine2::from_translation(Vec2::new(
                                 pos_x + ox * os,

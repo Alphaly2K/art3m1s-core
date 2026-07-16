@@ -1,5 +1,6 @@
 use super::CoreRuntime;
 use crate::compositor::Compositor;
+use asb_interpreter::event::WaitReason;
 use std::collections::{HashMap, HashSet};
 
 impl CoreRuntime {
@@ -145,7 +146,21 @@ impl CoreRuntime {
             }
         }
 
-        left_down_edge && !handled_by_layer && !handled_by_left_push && !handled_by_drag
+        let push_absorbs_default_click =
+            global_push_absorbs_default_click(self.wait_reason.as_ref(), handled_by_left_push);
+        let clicked =
+            left_down_edge && !handled_by_layer && !push_absorbs_default_click && !handled_by_drag;
+        if left_down_edge {
+            crate::core_debug!(
+                "[input] left-down wait={:?} layer={} push={} drag={} advance={}",
+                self.wait_reason,
+                handled_by_layer,
+                handled_by_left_push,
+                handled_by_drag,
+                clicked
+            );
+        }
+        clicked
     }
 
     pub(super) fn clear_input_edges(&self) {
@@ -223,6 +238,13 @@ fn is_mouse_button(key: u32) -> bool {
     matches!(key, 1..=3)
 }
 
+fn global_push_absorbs_default_click(
+    wait_reason: Option<&WaitReason>,
+    handled_by_left_push: bool,
+) -> bool {
+    handled_by_left_push && !matches!(wait_reason, Some(WaitReason::Timed { input: 1, .. }))
+}
+
 fn has_drag_handler(compositor: &Compositor, layer_id: &str) -> bool {
     compositor
         .scene()
@@ -233,6 +255,32 @@ fn has_drag_handler(compositor: &Compositor, layer_id: &str) -> bool {
                 || layer.event_handlers.contains_key("dragout")
         })
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::global_push_absorbs_default_click;
+    use asb_interpreter::event::WaitReason;
+
+    #[test]
+    fn input_enabled_timed_wait_keeps_default_click_despite_global_push() {
+        let input_wait = WaitReason::Timed {
+            milliseconds: 2500,
+            input: 1,
+        };
+        let non_input_wait = WaitReason::Timed {
+            milliseconds: 2500,
+            input: 0,
+        };
+
+        assert!(!global_push_absorbs_default_click(Some(&input_wait), true));
+        assert!(global_push_absorbs_default_click(
+            Some(&non_input_wait),
+            true
+        ));
+        assert!(global_push_absorbs_default_click(None, true));
+        assert!(!global_push_absorbs_default_click(None, false));
+    }
 }
 
 pub(super) fn enqueue_handler_tags(

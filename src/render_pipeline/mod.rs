@@ -9,12 +9,13 @@
 use crate::compositor::build::build_frame;
 use crate::compositor::reduce::Compositor;
 pub mod draw;
+pub mod hlsl;
 pub mod shader;
 pub mod transition;
 
 pub use draw::{
-    BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, Renderer, TextureId, TextureInfo,
-    TextureProvider,
+    BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, Renderer, ShaderEffect, ShaderGroup,
+    TextureId, TextureInfo, TextureProvider,
 };
 pub use shader::{BuiltinShaderManager, ShaderManager, ShaderProfile, ShaderProgramSource};
 

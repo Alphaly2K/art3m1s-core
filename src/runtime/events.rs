@@ -108,6 +108,21 @@ impl CoreRuntime {
                 Event::Exec { command, mode } => {
                     self.apply_exec_command(command, *mode);
                 }
+                Event::ShowDialog {
+                    title,
+                    message,
+                    varname,
+                    textfield,
+                    textfield_size,
+                } => {
+                    self.request_dialog(
+                        title,
+                        message,
+                        varname.as_deref(),
+                        textfield.as_deref(),
+                        *textfield_size,
+                    );
+                }
                 Event::SaveScreenshot {
                     file,
                     width,
@@ -123,6 +138,12 @@ impl CoreRuntime {
                         crate::core_error!("[runtime] 保存缩略图失败 {}: {}", file, e);
                     }
                 }
+                Event::Custom { tag, params } if tag == "lyshader" => {
+                    self.handle_shader_load(params);
+                }
+                Event::ShaderLoad { id, file } => {
+                    self.load_shader(id, file);
+                }
                 _ => {}
             }
 
@@ -133,6 +154,37 @@ impl CoreRuntime {
                 self.sync_layer_info_all();
             }
             crate::core_debug!("[event] {}", event_name(event));
+        }
+    }
+
+    fn handle_shader_load(&mut self, params: &HashMap<String, String>) {
+        let Some(id) = params.get("id").filter(|id| !id.is_empty()) else {
+            crate::core_warn!("[shader] lyshader 缺少 id");
+            return;
+        };
+        let Some(file) = params.get("file").filter(|file| !file.is_empty()) else {
+            crate::core_warn!("[shader] lyshader id={} 缺少 file", id);
+            return;
+        };
+
+        self.load_shader(id, file);
+    }
+
+    fn load_shader(&mut self, id: &str, file: &str) {
+        let source = match crate::ffi::request_file(file) {
+            Ok(source) => source,
+            Err(error) => {
+                crate::core_warn!("[shader] 读取失败 id={} file={}: {}", id, file, error);
+                return;
+            }
+        };
+        match self.renderer.register_hlsl_shader(id, &source) {
+            Ok(()) => {
+                crate::core_info!("[shader] 已加载 id={} file={}", id, file);
+            }
+            Err(error) => {
+                crate::core_error!("[shader] 编译失败 id={} file={}: {}", id, file, error);
+            }
         }
     }
 
@@ -275,7 +327,12 @@ fn event_name(e: &Event) -> String {
                 Some(r) => format!("Wait(Stop:{r})"),
                 None => "Wait(Stop)".to_string(),
             },
-            WaitReason::Timed { .. } => "Wait(Timed)".to_string(),
+            WaitReason::Timed {
+                milliseconds,
+                input,
+            } => {
+                format!("Wait(Timed time={milliseconds} input={input})")
+            }
             WaitReason::KeyWait { .. } => "Wait(KeyWait)".to_string(),
             _ => "Wait".to_string(),
         },
@@ -300,7 +357,15 @@ fn event_name(e: &Event) -> String {
         }
         Event::Exit => "Exit".to_string(),
         Event::GoTitle => "GoTitle".to_string(),
-        Event::ShowDialog { .. } => "ShowDialog".to_string(),
+        Event::ShowDialog {
+            title,
+            varname,
+            textfield,
+            textfield_size,
+            ..
+        } => format!(
+            "ShowDialog title={title:?} var={varname:?} textfield={textfield:?} size={textfield_size:?}"
+        ),
         Event::YesNo { .. } => "YesNo".to_string(),
         Event::SceneIn => "SceneIn".to_string(),
         Event::SceneOut => "SceneOut".to_string(),
@@ -312,6 +377,12 @@ fn event_name(e: &Event) -> String {
         }
         Event::AutoSkipDisable => "AutoSkipDisable".to_string(),
         Event::Exec { command, mode } => format!("Exec command={command} mode={mode:?}"),
+        Event::Custom { tag, params } if tag == "lyshader" => format!(
+            "ShaderLoad id={:?} file={:?}",
+            params.get("id"),
+            params.get("file")
+        ),
+        Event::ShaderLoad { id, file } => format!("ShaderLoad id={id} file={file}"),
         e => {
             crate::core_debug!("[event] {:?}", e);
             "Not implemented event".to_string()

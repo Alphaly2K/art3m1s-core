@@ -50,6 +50,12 @@ impl CoreRuntime {
     }
 
     pub(super) fn apply_text_event(&mut self, event: &Event) {
+        if let Event::FontSettings(settings) | Event::FontDefault(settings) = event
+            && let Some(face) = settings.get("face").filter(|face| !face.is_empty())
+        {
+            self.load_script_font(face);
+        }
+
         let Some(renderer) = self.text_renderer.as_mut() else {
             return;
         };
@@ -75,6 +81,24 @@ impl CoreRuntime {
             Event::SceneIn => renderer.show_text(),
             Event::SceneOut => renderer.hide_text(),
             _ => {}
+        }
+    }
+
+    fn load_script_font(&mut self, face: &str) {
+        if self.loaded_font_face.as_deref() == Some(face) {
+            return;
+        }
+        let Some(renderer) = self.text_renderer.as_mut() else {
+            return;
+        };
+        match crate::load_font_ffi(face).and_then(|bytes| renderer.set_font_bytes(bytes)) {
+            Ok(()) => {
+                crate::core_info!("[text] 已加载脚本字体: {face}");
+                self.loaded_font_face = Some(face.to_string());
+            }
+            Err(error) => {
+                crate::core_warn!("[text] 脚本字体加载失败 {face}: {error}");
+            }
         }
     }
 }

@@ -3,6 +3,7 @@
 //! The compositor builds logical scene state; the render pipeline owns the
 //! backend-facing draw commands and provider/renderer traits.
 
+use std::collections::BTreeMap;
 use std::fmt::Debug;
 
 /// Opaque backend texture handle.
@@ -70,7 +71,23 @@ impl ColorFilter {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShaderEffect {
+    pub name: String,
+    pub uniforms: BTreeMap<String, Vec<f32>>,
+    pub mask_texture: Option<TextureId>,
+    pub user_texture: Option<TextureId>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShaderGroup {
+    pub start: usize,
+    pub end: usize,
+    pub effect: ShaderEffect,
+    pub clip_bounds: Option<[f32; 4]>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct DrawCommand {
     pub texture: TextureId,
     pub size: TextureInfo,
@@ -80,6 +97,7 @@ pub struct DrawCommand {
     pub color: ColorFilter,
     pub clip: ClipRect,
     pub clip_bounds: Option<[f32; 4]>,
+    pub shader: Option<ShaderEffect>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -102,6 +120,7 @@ impl ClipRect {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DrawList {
     pub commands: Vec<DrawCommand>,
+    pub shader_groups: Vec<ShaderGroup>,
 }
 
 impl DrawList {
@@ -111,6 +130,10 @@ impl DrawList {
 
     pub fn push(&mut self, command: DrawCommand) {
         self.commands.push(command);
+    }
+
+    pub fn push_shader_group(&mut self, group: ShaderGroup) {
+        self.shader_groups.push(group);
     }
 
     pub fn len(&self) -> usize {

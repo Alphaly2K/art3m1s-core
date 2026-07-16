@@ -323,8 +323,23 @@ impl Project {
 /// Load a font file through the FFI bridge and return a `&'static` slice
 /// suitable for [`crate::text::GlyphTextRenderer::set_font`].
 pub fn load_font_ffi(path: &str) -> std::result::Result<&'static [u8], String> {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+
+    static FONT_CACHE: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<(String, u64), &'static [u8]>>,
+    > = std::sync::OnceLock::new();
+    let cache = FONT_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     let bytes = crate::ffi::request_file(path)?;
-    Ok(Box::leak(bytes.into_boxed_slice()))
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    let key = (path.to_string(), hasher.finish());
+    if let Some(bytes) = cache.lock().unwrap().get(&key).copied() {
+        return Ok(bytes);
+    }
+
+    let bytes = Box::leak(bytes.into_boxed_slice());
+    cache.lock().unwrap().insert(key, bytes);
+    Ok(bytes)
 }
 
 // ═══════════════════════════════════════════════════════════════════

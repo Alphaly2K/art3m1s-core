@@ -19,8 +19,12 @@
 //! 舞台坐标映射到 NDC，因此 [`DrawCommand::transform`] 可以直接当作像素空间的
 //! 仿射变换使用。
 
-use crate::render_pipeline::draw::{BlendMode, DrawCommand, DrawList, Renderer};
+use crate::render_pipeline::draw::{
+    BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, Renderer, TextureId, TextureInfo,
+};
 use glow::HasContext;
+use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::rc::Rc;
 
 pub mod platform;
@@ -38,6 +42,12 @@ pub use provider::{AssetSource, GlTextureProvider, PlaceholderKind};
 pub struct GlRenderer {
     gl: Rc<glow::Context>,
     program: glow::Program,
+    program_bindings: ProgramBindings,
+    custom_programs: HashMap<String, CustomProgram>,
+    profile: ShaderProfile,
+    white_texture: glow::Texture,
+    transparent_texture: glow::Texture,
+    group_targets: Vec<GroupTarget>,
     vao: glow::VertexArray,
     #[allow(dead_code)]
     vbo: glow::Buffer,
@@ -50,17 +60,6 @@ pub struct GlRenderer {
     /// 视口必须用物理像素，否则画面只占左下角并出现拉伸/花屏。默认等于舞台尺寸。
     viewport_width: i32,
     viewport_height: i32,
-    // uniform location 缓存
-    u_projection: Option<glow::UniformLocation>,
-    u_transform: Option<glow::UniformLocation>,
-    u_size: Option<glow::UniformLocation>,
-    u_uv_offset: Option<glow::UniformLocation>,
-    u_uv_scale: Option<glow::UniformLocation>,
-    u_opacity: Option<glow::UniformLocation>,
-    u_multiply: Option<glow::UniformLocation>,
-    u_grayscale: Option<glow::UniformLocation>,
-    u_negative: Option<glow::UniformLocation>,
-    u_sampler: Option<glow::UniformLocation>,
 }
 
 impl GlRenderer {
@@ -77,6 +76,9 @@ impl GlRenderer {
     ) -> Result<Self, String> {
         unsafe {
             let program = shader::build_program(&gl, profile)?;
+            let program_bindings = ProgramBindings::new(&gl, program);
+            let white_texture = create_solid_texture(&gl, [255, 255, 255, 255])?;
+            let transparent_texture = create_solid_texture(&gl, [0, 0, 0, 0])?;
 
             // 单位四边形，两个三角形，含纹理坐标。布局：x, y, u, v。
             // 顶点位置是 0..1 的单位方块，顶点着色器再乘以 size 与 transform。
@@ -113,20 +115,15 @@ impl GlRenderer {
             );
             gl.bind_vertex_array(None);
 
-            let u = |name: &str| gl.get_uniform_location(program, name);
             let renderer = GlRenderer {
-                u_projection: u("u_projection"),
-                u_transform: u("u_transform"),
-                u_size: u("u_size"),
-                u_uv_offset: u("u_uv_offset"),
-                u_uv_scale: u("u_uv_scale"),
-                u_opacity: u("u_opacity"),
-                u_multiply: u("u_multiply"),
-                u_grayscale: u("u_grayscale"),
-                u_negative: u("u_negative"),
-                u_sampler: u("u_sampler"),
                 gl: gl.clone(),
                 program,
+                program_bindings,
+                custom_programs: HashMap::new(),
+                profile,
+                white_texture,
+                transparent_texture,
+                group_targets: Vec::new(),
                 vao,
                 vbo,
                 stage_width: stage_width as f32,
@@ -167,6 +164,154 @@ impl GlRenderer {
         self.stage_height = height as f32;
     }
 
+    /// Register one Artemis `[lyshader]` HLSL effect under its script id.
+    pub fn register_hlsl_shader(&mut self, name: &str, source: &[u8]) -> Result<(), String> {
+        let program = unsafe { shader::build_effect_program(&self.gl, self.profile, source)? };
+        let bindings = ProgramBindings::new(&self.gl, program);
+        if let Some(old) = self
+            .custom_programs
+            .insert(name.to_string(), CustomProgram { program, bindings })
+        {
+            unsafe {
+                self.gl.delete_program(old.program);
+            }
+        }
+        Ok(())
+    }
+
+    unsafe fn ensure_group_target(
+        &mut self,
+        depth: usize,
+    ) -> Result<(glow::Framebuffer, glow::Texture), String> {
+        let width = self.stage_width as i32;
+        let height = self.stage_height as i32;
+        while self.group_targets.len() <= depth {
+            let (framebuffer, texture) =
+                unsafe { platform::create_fbo_target(&self.gl, width, height)? };
+            self.group_targets.push(GroupTarget {
+                framebuffer,
+                texture,
+                width,
+                height,
+            });
+        }
+
+        if self.group_targets[depth].width != width || self.group_targets[depth].height != height {
+            let old = self.group_targets[depth];
+            unsafe {
+                self.gl.delete_framebuffer(old.framebuffer);
+                self.gl.delete_texture(old.texture);
+            }
+            let (framebuffer, texture) =
+                unsafe { platform::create_fbo_target(&self.gl, width, height)? };
+            self.group_targets[depth] = GroupTarget {
+                framebuffer,
+                texture,
+                width,
+                height,
+            };
+        }
+        let target = self.group_targets[depth];
+        Ok((target.framebuffer, target.texture))
+    }
+
+    unsafe fn render_range(
+        &mut self,
+        frame: &DrawList,
+        start: usize,
+        end: usize,
+        excluded_group: Option<usize>,
+        depth: usize,
+        viewport: (i32, i32),
+        top_left_target: bool,
+    ) {
+        let mut index = start;
+        while index < end {
+            let group = frame
+                .shader_groups
+                .iter()
+                .enumerate()
+                .filter(|(group_index, group)| {
+                    Some(*group_index) != excluded_group && group.start == index && group.end <= end
+                })
+                .max_by_key(|(group_index, group)| (group.end, *group_index))
+                .map(|(group_index, group)| (group_index, group.clone()));
+
+            let Some((group_index, group)) = group else {
+                unsafe {
+                    self.draw_one(&frame.commands[index], top_left_target, viewport);
+                }
+                index += 1;
+                continue;
+            };
+
+            let parent_framebuffer = framebuffer_from_raw(unsafe {
+                self.gl.get_parameter_i32(glow::FRAMEBUFFER_BINDING)
+            });
+            let Ok((group_framebuffer, group_texture)) =
+                (unsafe { self.ensure_group_target(depth) })
+            else {
+                unsafe {
+                    self.render_range(
+                        frame,
+                        group.start,
+                        group.end,
+                        Some(group_index),
+                        depth,
+                        viewport,
+                        top_left_target,
+                    );
+                }
+                index = group.end;
+                continue;
+            };
+            unsafe {
+                self.gl
+                    .bind_framebuffer(glow::FRAMEBUFFER, Some(group_framebuffer));
+                self.gl
+                    .viewport(0, 0, self.stage_width as i32, self.stage_height as i32);
+                self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
+                self.gl.clear(glow::COLOR_BUFFER_BIT);
+                self.render_range(
+                    frame,
+                    group.start,
+                    group.end,
+                    Some(group_index),
+                    depth + 1,
+                    (self.stage_width as i32, self.stage_height as i32),
+                    false,
+                );
+
+                self.gl
+                    .bind_framebuffer(glow::FRAMEBUFFER, parent_framebuffer);
+                self.gl.viewport(0, 0, viewport.0, viewport.1);
+                self.draw_one(
+                    &DrawCommand {
+                        texture: TextureId(group_texture.0.get() as u64),
+                        size: TextureInfo {
+                            width: self.stage_width as u32,
+                            height: self.stage_height as u32,
+                        },
+                        transform: glam::Affine2::IDENTITY,
+                        opacity: 1.0,
+                        blend: BlendMode::Alpha,
+                        color: ColorFilter::default(),
+                        clip: ClipRect {
+                            uv_offset: [0.0, 0.0],
+                            uv_scale: [1.0, 1.0],
+                            quad_size: [self.stage_width, self.stage_height],
+                        },
+                        clip_bounds: group.clip_bounds,
+                        shader: Some(group.effect),
+                    },
+                    top_left_target,
+                    viewport,
+                );
+            }
+            index = group.end;
+        }
+    }
+
     /// 把舞台像素坐标映射到 NDC 的正交投影（行主序 3x3，列向量约定）。
     ///
     /// 舞台：x∈[0,W] 映射到 [-1,1]，y∈[0,H] 映射到 [1,-1]（Y 翻转，原点左上）。
@@ -184,6 +329,22 @@ impl GlRenderer {
             0.0, // col 1
             -1.0,
             1.0,
+            1.0, // col 2
+        ]
+    }
+
+    fn texture_target_projection(&self) -> [f32; 9] {
+        let w = self.stage_width;
+        let h = self.stage_height;
+        [
+            2.0 / w,
+            0.0,
+            0.0, // col 0
+            0.0,
+            2.0 / h,
+            0.0, // col 1
+            -1.0,
+            -1.0,
             1.0, // col 2
         ]
     }
@@ -211,17 +372,39 @@ impl GlRenderer {
     }
 
     /// 画单条命令。调用方需已 use program / bind vao / 设好投影。
-    unsafe fn draw_one(&self, cmd: &DrawCommand) {
+    unsafe fn draw_one(&self, cmd: &DrawCommand, top_left_target: bool, viewport: (i32, i32)) {
         let gl = &self.gl;
         unsafe {
+            let custom_program = cmd
+                .shader
+                .as_ref()
+                .and_then(|effect| self.custom_programs.get(&effect.name));
+            let (program, bindings) = custom_program
+                .map(|custom| (custom.program, &custom.bindings))
+                .unwrap_or((self.program, &self.program_bindings));
+            gl.use_program(Some(program));
+            gl.uniform_matrix_3_f32_slice(
+                bindings.projection.as_ref(),
+                false,
+                &if top_left_target {
+                    self.projection()
+                } else {
+                    self.texture_target_projection()
+                },
+            );
+
             if let Some([x, y, w, h]) = cmd.clip_bounds {
                 if w <= 0.0 || h <= 0.0 {
                     return;
                 }
-                let sx = self.viewport_width as f32 / self.stage_width;
-                let sy = self.viewport_height as f32 / self.stage_height;
+                let sx = viewport.0 as f32 / self.stage_width;
+                let sy = viewport.1 as f32 / self.stage_height;
                 let left = (x * sx).floor() as i32;
-                let bottom = ((self.stage_height - (y + h)) * sy).floor() as i32;
+                let bottom = if top_left_target {
+                    ((self.stage_height - (y + h)) * sy).floor() as i32
+                } else {
+                    (y * sy).floor() as i32
+                };
                 let width = (w * sx).ceil().max(1.0) as i32;
                 let height = (h * sy).ceil().max(1.0) as i32;
                 gl.enable(glow::SCISSOR_TEST);
@@ -240,43 +423,78 @@ impl GlRenderer {
                 m.y_axis.x, m.y_axis.y, 0.0, // col 1
                 t.x, t.y, 1.0, // col 2
             ];
-            gl.uniform_matrix_3_f32_slice(self.u_transform.as_ref(), false, &transform3);
+            gl.uniform_matrix_3_f32_slice(bindings.transform.as_ref(), false, &transform3);
             // 用裁剪后的 quad 尺寸（而不是整张纹理尺寸）展开单位方块。
             gl.uniform_2_f32(
-                self.u_size.as_ref(),
+                bindings.size.as_ref(),
                 cmd.clip.quad_size[0],
                 cmd.clip.quad_size[1],
             );
             // UV 重映射：把 0..1 的顶点 UV 映射到裁剪子区域。
             gl.uniform_2_f32(
-                self.u_uv_offset.as_ref(),
+                bindings.uv_offset.as_ref(),
                 cmd.clip.uv_offset[0],
                 cmd.clip.uv_offset[1],
             );
             gl.uniform_2_f32(
-                self.u_uv_scale.as_ref(),
+                bindings.uv_scale.as_ref(),
                 cmd.clip.uv_scale[0],
                 cmd.clip.uv_scale[1],
             );
-            gl.uniform_1_f32(self.u_opacity.as_ref(), cmd.opacity);
+            gl.uniform_1_f32(bindings.opacity.as_ref(), cmd.opacity);
             let c = cmd.color;
             gl.uniform_3_f32(
-                self.u_multiply.as_ref(),
+                bindings.multiply.as_ref(),
                 c.multiply[0],
                 c.multiply[1],
                 c.multiply[2],
             );
-            gl.uniform_1_i32(self.u_grayscale.as_ref(), c.grayscale as i32);
-            gl.uniform_1_i32(self.u_negative.as_ref(), c.negative as i32);
+            gl.uniform_1_i32(bindings.grayscale.as_ref(), c.grayscale as i32);
+            gl.uniform_1_i32(bindings.negative.as_ref(), c.negative as i32);
 
             gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(
-                glow::TEXTURE_2D,
-                Some(glow::NativeTexture(
-                    std::num::NonZeroU32::new(cmd.texture.0 as u32).expect("texture id 非零"),
-                )),
-            );
-            gl.uniform_1_i32(self.u_sampler.as_ref(), 0);
+            gl.bind_texture(glow::TEXTURE_2D, texture_from_id(cmd.texture));
+
+            if custom_program.is_some() {
+                gl.uniform_1_i32(bindings.texture_fore.as_ref(), 0);
+                let mask_texture = cmd
+                    .shader
+                    .as_ref()
+                    .and_then(|effect| effect.mask_texture)
+                    .and_then(texture_from_id)
+                    .unwrap_or(self.white_texture);
+                bind_texture(gl, 1, mask_texture);
+                gl.uniform_1_i32(bindings.texture_mask.as_ref(), 1);
+                bind_texture(gl, 2, self.transparent_texture);
+                gl.uniform_1_i32(bindings.texture_back.as_ref(), 2);
+
+                let user_texture = cmd
+                    .shader
+                    .as_ref()
+                    .and_then(|effect| effect.user_texture)
+                    .and_then(texture_from_id)
+                    .unwrap_or(self.transparent_texture);
+                bind_texture(gl, 3, user_texture);
+                gl.uniform_1_i32(bindings.texture_user.as_ref(), 3);
+
+                gl.uniform_1_f32(bindings.alpha.as_ref(), cmd.opacity);
+                gl.uniform_3_f32(
+                    bindings.color_multiply.as_ref(),
+                    c.multiply[0],
+                    c.multiply[1],
+                    c.multiply[2],
+                );
+                if let Some(effect) = &cmd.shader {
+                    for (name, values) in &effect.uniforms {
+                        gl.uniform_1_f32_slice(
+                            gl.get_uniform_location(program, name).as_ref(),
+                            values,
+                        );
+                    }
+                }
+            } else {
+                gl.uniform_1_i32(bindings.sampler.as_ref(), 0);
+            }
 
             gl.draw_arrays(glow::TRIANGLES, 0, 6);
         }
@@ -285,20 +503,23 @@ impl GlRenderer {
 
 impl Renderer for GlRenderer {
     fn render(&mut self, frame: &DrawList) {
-        let gl = &self.gl;
+        let gl = self.gl.clone();
         unsafe {
             gl.viewport(0, 0, self.viewport_width, self.viewport_height);
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
 
-            gl.use_program(Some(self.program));
             gl.bind_vertex_array(Some(self.vao));
-            let proj = self.projection();
-            gl.uniform_matrix_3_f32_slice(self.u_projection.as_ref(), false, &proj);
 
-            for cmd in &frame.commands {
-                self.draw_one(cmd);
-            }
+            self.render_range(
+                frame,
+                0,
+                frame.commands.len(),
+                None,
+                0,
+                (self.viewport_width, self.viewport_height),
+                true,
+            );
 
             gl.disable(glow::SCISSOR_TEST);
             gl.bind_vertex_array(None);
@@ -312,9 +533,129 @@ impl Drop for GlRenderer {
         let gl = &self.gl;
         unsafe {
             gl.delete_program(self.program);
+            for program in self.custom_programs.values() {
+                gl.delete_program(program.program);
+            }
+            gl.delete_texture(self.white_texture);
+            gl.delete_texture(self.transparent_texture);
+            for target in &self.group_targets {
+                gl.delete_framebuffer(target.framebuffer);
+                gl.delete_texture(target.texture);
+            }
             gl.delete_vertex_array(self.vao);
             gl.delete_buffer(self.vbo);
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GroupTarget {
+    framebuffer: glow::Framebuffer,
+    texture: glow::Texture,
+    width: i32,
+    height: i32,
+}
+
+struct CustomProgram {
+    program: glow::Program,
+    bindings: ProgramBindings,
+}
+
+struct ProgramBindings {
+    projection: Option<glow::UniformLocation>,
+    transform: Option<glow::UniformLocation>,
+    size: Option<glow::UniformLocation>,
+    uv_offset: Option<glow::UniformLocation>,
+    uv_scale: Option<glow::UniformLocation>,
+    opacity: Option<glow::UniformLocation>,
+    multiply: Option<glow::UniformLocation>,
+    grayscale: Option<glow::UniformLocation>,
+    negative: Option<glow::UniformLocation>,
+    sampler: Option<glow::UniformLocation>,
+    texture_back: Option<glow::UniformLocation>,
+    texture_fore: Option<glow::UniformLocation>,
+    texture_mask: Option<glow::UniformLocation>,
+    texture_user: Option<glow::UniformLocation>,
+    alpha: Option<glow::UniformLocation>,
+    color_multiply: Option<glow::UniformLocation>,
+}
+
+impl ProgramBindings {
+    fn new(gl: &glow::Context, program: glow::Program) -> Self {
+        let get = |name| unsafe { gl.get_uniform_location(program, name) };
+        Self {
+            projection: get("u_projection"),
+            transform: get("u_transform"),
+            size: get("u_size"),
+            uv_offset: get("u_uv_offset"),
+            uv_scale: get("u_uv_scale"),
+            opacity: get("u_opacity"),
+            multiply: get("u_multiply"),
+            grayscale: get("u_grayscale"),
+            negative: get("u_negative"),
+            sampler: get("u_sampler"),
+            texture_back: get("u_texture_back"),
+            texture_fore: get("u_texture_fore"),
+            texture_mask: get("u_texture_mask"),
+            texture_user: get("u_texture_user"),
+            alpha: get("alpha"),
+            color_multiply: get("colorMultiply"),
+        }
+    }
+}
+
+fn texture_from_id(id: crate::render_pipeline::draw::TextureId) -> Option<glow::Texture> {
+    NonZeroU32::new(id.0 as u32).map(glow::NativeTexture)
+}
+
+fn framebuffer_from_raw(raw: i32) -> Option<glow::Framebuffer> {
+    NonZeroU32::new(raw as u32).map(glow::NativeFramebuffer)
+}
+
+unsafe fn bind_texture(gl: &glow::Context, unit: u32, texture: glow::Texture) {
+    unsafe {
+        gl.active_texture(glow::TEXTURE0 + unit);
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+    }
+}
+
+unsafe fn create_solid_texture(gl: &glow::Context, rgba: [u8; 4]) -> Result<glow::Texture, String> {
+    unsafe {
+        let texture = gl.create_texture()?;
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_S,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_T,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA as i32,
+            1,
+            1,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(&rgba)),
+        );
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        Ok(texture)
     }
 }
 

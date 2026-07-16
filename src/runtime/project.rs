@@ -44,6 +44,8 @@ impl CoreRuntime {
 
         self.project_savepath = project.config().savepath.clone();
         self.save_screenshot = None;
+        self.loaded_font_face = None;
+        self.pending_dialog = None;
         self.interpreter = project.create_interpreter();
         self.interpreter.register_tag("reset", RuntimeResetHandler);
 
@@ -149,16 +151,18 @@ impl CoreRuntime {
     }
 
     fn load_default_font(&mut self) {
+        let mut text = GlyphTextRenderer::new();
         match crate::load_font_ffi("font/sourcehansans-medium.otf") {
             Ok(font) => {
-                let mut text = GlyphTextRenderer::new();
-                let _ = text.set_font(font);
-                self.set_text_renderer(Box::new(text));
+                if text.set_font(font).is_ok() {
+                    self.loaded_font_face = Some("font/sourcehansans-medium.otf".to_string());
+                }
             }
             Err(e) => {
-                crate::core_warn!("[CoreRuntime] 字体加载失败: {e}");
+                crate::core_debug!("[CoreRuntime] 默认字体不可用，等待脚本指定字体: {e}");
             }
         }
+        self.set_text_renderer(Box::new(text));
     }
 
     fn register_builtin_textures(&mut self) {

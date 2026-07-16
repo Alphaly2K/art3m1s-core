@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 
 mod callbacks;
 mod control;
+mod dialog;
 mod events;
 mod input;
 mod magic_path;
@@ -34,6 +35,13 @@ struct PointerDragState {
     start_mouse_y: f32,
     start_left: f32,
     start_top: f32,
+}
+
+#[derive(Debug, Clone)]
+struct PendingDialog {
+    varname: Option<String>,
+    textfield: Option<String>,
+    textfield_size: Option<usize>,
 }
 
 pub struct CoreRuntime {
@@ -73,6 +81,8 @@ pub struct CoreRuntime {
     savepath: String,
     /// `[takess]` 缓存的游戏画面。`[savess]` 后续从这里缩放/编码，不能重新截保存 UI。
     save_screenshot: Option<save_io::ScreenshotBuffer>,
+    loaded_font_face: Option<String>,
+    pending_dialog: Option<PendingDialog>,
 }
 
 impl CoreRuntime {
@@ -145,6 +155,8 @@ impl CoreRuntime {
             project_savepath: None,
             savepath: "save".to_string(),
             save_screenshot: None,
+            loaded_font_face: None,
+            pending_dialog: None,
         })
     }
 
