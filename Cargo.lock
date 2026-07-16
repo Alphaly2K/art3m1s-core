@@ -103,6 +103,7 @@ checksum = "175571dd1d178ced59193a6fc02dde1b972eb0bc56c892cde9beeceac5bf0f6b"
 [[package]]
 name = "asb-decrypt"
 version = "0.1.0"
+source = "git+https://github.com/Alphaly2K/asb-decrypt#c553e95d3bfcd5463c5dbe217cb76e65616c3c1e"
 dependencies = [
  "encoding_rs",
 ]
@@ -110,6 +111,7 @@ dependencies = [
 [[package]]
 name = "asb-interpreter"
 version = "0.1.0"
+source = "git+https://github.com/Alphaly2K/art3m1s-interpreter#051b40c5c7bfc7a4100c97c97f77558a75a5f740"
 dependencies = [
  "asb-decrypt",
  "encoding_rs",

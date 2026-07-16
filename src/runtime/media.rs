@@ -3,7 +3,7 @@ use crate::audio::{BgmConfig, SeConfig, SoundFinishHandler};
 use crate::host_media::{self as hm, HostMediaCommandKind as Kind};
 use crate::runtime::input;
 use crate::save::AudioSnapshot;
-use crate::video::{VideoConfig, VideoFinishHandler};
+use crate::video::{VideoConfig, VideoFinishHandler, video_layer_texture_name};
 use asb_interpreter::Event;
 use std::collections::HashMap;
 
@@ -38,8 +38,18 @@ impl CoreRuntime {
     }
 
     pub(super) fn stop_all_media(&mut self) {
+        let video_layer_ids: Vec<String> = self
+            .video
+            .video_state()
+            .video_layers
+            .keys()
+            .cloned()
+            .collect();
         self.audio.stop_all_sounds();
         self.video.stop_all_videos();
+        for id in video_layer_ids {
+            self.clear_video_layer_texture(&id);
+        }
         hm::emit(Kind::AudioStopAll, hm::EmptyPayload {});
         hm::emit(Kind::VideoStopAll, hm::EmptyPayload {});
     }
@@ -94,10 +104,13 @@ impl CoreRuntime {
     }
 
     pub(super) fn advance_media_and_enqueue_finish_handlers(&mut self, delta_ms: u64) {
+        let host_media = crate::ffi::media_command_callback_registered();
         self.audio.advance(delta_ms);
-        self.video.advance(delta_ms);
+        if !host_media {
+            self.video.advance(delta_ms);
+        }
 
-        if !crate::ffi::media_command_callback_registered() {
+        if !host_media {
             for event in self.audio.poll_finish_events() {
                 if let Some(handler) = event.handler {
                     input::enqueue_handler_tags(
@@ -113,11 +126,13 @@ impl CoreRuntime {
             }
         }
 
-        let host_media = crate::ffi::media_command_callback_registered();
         for event in self.video.poll_finish_events() {
-            if host_media && event.id.is_none() {
-                // Fullscreen video completion is owned by the host decoder.
+            if host_media {
+                // Completion is owned by the host decoder for both modes.
                 continue;
+            }
+            if let Some(id) = event.id.as_deref() {
+                self.clear_video_layer_texture(id);
             }
             if event.id.is_none() {
                 self.video_finished
@@ -184,6 +199,7 @@ impl CoreRuntime {
         match id {
             Some(layer_id) => {
                 self.video.stop_layer(layer_id);
+                self.clear_video_layer_texture(layer_id);
             }
             None => {
                 self.video.stop_fullscreen();
@@ -207,6 +223,49 @@ impl CoreRuntime {
                 &[],
             );
         }
+    }
+
+    /// Upload a decoded RGBA frame directly from host-owned memory.
+    ///
+    /// The caller only needs to keep `rgba` alive for this synchronous call.
+    /// The provider sends it directly to GL and does not retain a CPU copy.
+    pub fn upload_video_layer_frame(
+        &mut self,
+        id: &str,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> bool {
+        let is_playing = self
+            .video
+            .video_state()
+            .video_layers
+            .get(id)
+            .is_some_and(|channel| channel.playing);
+        if !is_playing {
+            return false;
+        }
+
+        let texture_name = video_layer_texture_name(id);
+        let saved_ctx = self.gl_ctx.bind_save();
+        let uploaded = self
+            .texture_provider
+            .upload_video_rgba(&texture_name, width, height, rgba);
+        self.gl_ctx.restore(saved_ctx);
+        uploaded
+    }
+
+    fn bind_video_layer_texture(&mut self, id: &str) {
+        self.compositor
+            .set_layer_file(id, Some(video_layer_texture_name(id)));
+        self.sync_layer_info_all();
+    }
+
+    fn clear_video_layer_texture(&mut self, id: &str) {
+        let texture_name = video_layer_texture_name(id);
+        self.compositor
+            .clear_layer_file_if_matches(id, &texture_name);
+        self.sync_layer_info_all();
     }
 
     fn apply_audio_event(&mut self, event: &Event) -> bool {
@@ -454,7 +513,10 @@ impl CoreRuntime {
                     delay_margin_ms: None,
                 };
                 match id {
-                    Some(layer_id) => self.video.play_layer(layer_id, &config),
+                    Some(layer_id) => {
+                        self.video.play_layer(layer_id, &config);
+                        self.bind_video_layer_texture(layer_id);
+                    }
                     None => self.video.play_fullscreen(&config),
                 }
                 hm::emit(

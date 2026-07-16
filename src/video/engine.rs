@@ -1,15 +1,40 @@
 //! 视频状态与宿主视频协议。
 //!
 //! Core does not own an FFmpeg/Theora backend and does not keep decoded video
-//! frames.  It keeps script-visible video state and synchronization points, then
-//! emits host media commands.  The frontend/host decides whether to use a
+//! frames. It keeps script-visible video state and synchronization points, then
+//! emits host media commands. The frontend/host decides whether to use a
 //! platform decoder, native fallback, or a texture-producing decoder.
 //!
 //! ## 与合成器的关系
-//! 视频子系统与 [`crate::compositor::Compositor`] 平级。合成器只看到普通图层状态；
-//! 宿主侧视频输出不进入 core 的 render pipeline。
+//! 视频子系统与 [`crate::compositor::Compositor`] 平级。全屏视频由宿主直接显示；
+//! 图层视频由宿主解码后把帧上传成 core 内部命名纹理，再作为普通图层进入 render
+//! pipeline。core 不拥有具体的视频解码器。
 
 use std::collections::HashMap;
+
+/// Host-decoded layer video textures live in a reserved resource namespace.
+pub const VIDEO_LAYER_TEXTURE_PREFIX: &str = "__video_layer__:";
+
+pub fn video_layer_texture_name(id: &str) -> String {
+    format!("{VIDEO_LAYER_TEXTURE_PREFIX}{id}")
+}
+
+pub fn is_video_layer_texture_name(name: &str) -> bool {
+    name.starts_with(VIDEO_LAYER_TEXTURE_PREFIX)
+}
+
+#[cfg(test)]
+mod texture_name_tests {
+    use super::*;
+
+    #[test]
+    fn layer_texture_name_uses_reserved_namespace() {
+        let name = video_layer_texture_name("mw.movie");
+        assert_eq!(name, "__video_layer__:mw.movie");
+        assert!(is_video_layer_texture_name(&name));
+        assert!(!is_video_layer_texture_name("movie/opening"));
+    }
+}
 
 // ---------------------------------------------------------------------------
 // 播放配置

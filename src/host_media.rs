@@ -4,8 +4,8 @@
 //! Audio sample transport is intentionally not part of this Dart-facing FFI
 //! path: stable audio should be implemented by the host/native side as an audio
 //! sink (ring buffer or native pull callback), while Dart controls lifecycle.
-//! Video decode/display is also host-owned; core keeps only video state and
-//! synchronization points.
+//! Video decode is also host-owned. Fullscreen display stays in the host;
+//! decoded layer frames enter core through the native frame-upload FFI.
 
 use serde::Serialize;
 use serde_json::json;
@@ -26,7 +26,6 @@ pub enum HostMediaCommandKind {
     AudioStopAll,
     VideoPlay,
     VideoStopAll,
-    VideoLayerFrame,
 }
 
 impl HostMediaCommandKind {
@@ -46,7 +45,6 @@ impl HostMediaCommandKind {
             Self::AudioStopAll => "audio_stop_all",
             Self::VideoPlay => "video_play",
             Self::VideoStopAll => "video_stop_all",
-            Self::VideoLayerFrame => "video_layer_frame",
         }
     }
 }
@@ -153,19 +151,6 @@ pub struct VideoPlay<'a> {
     pub skippable: bool,
     #[serde(rename = "loop")]
     pub loop_play: bool,
-}
-
-/// Host-to-renderer handoff marker for video layers.
-///
-/// Core may emit this once it supports host-provided layer textures.  The
-/// payload intentionally describes a texture/resource handle, not decoded PCM
-/// or raw video bytes moving through Dart.
-#[derive(Debug, Serialize)]
-pub struct VideoLayerFrame<'a> {
-    pub id: &'a str,
-    pub texture: &'a str,
-    pub width: u32,
-    pub height: u32,
 }
 
 #[cfg(test)]

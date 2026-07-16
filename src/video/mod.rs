@@ -21,5 +21,8 @@
 pub mod engine;
 pub mod state;
 
-pub use engine::{VideoBackend, VideoConfig, VideoFinishEvent, VideoFinishHandler, VideoState};
+pub use engine::{
+    VideoBackend, VideoConfig, VideoFinishEvent, VideoFinishHandler, VideoState,
+    is_video_layer_texture_name, video_layer_texture_name,
+};
 pub use state::VideoStateBackend;

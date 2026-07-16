@@ -91,9 +91,70 @@ impl GlTextureProvider {
     ) -> (TextureId, TextureInfo) {
         self.remove_if_cached(name);
         let entry = unsafe { self.create_texture(width, height, rgba) };
+        // mpv's stable zero-copy software output is `rgb0`: the fourth byte is
+        // padding, not alpha. Keep the four-byte upload alignment but force the
+        // sampled alpha channel to one in GL, avoiding a per-pixel CPU pass.
+        if let Some(raw) = NonZeroU32::new(entry.0.0 as u32) {
+            unsafe {
+                self.gl
+                    .bind_texture(glow::TEXTURE_2D, Some(glow::NativeTexture(raw)));
+                self.gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_SWIZZLE_A,
+                    glow::ONE as i32,
+                );
+                self.gl.bind_texture(glow::TEXTURE_2D, None);
+            }
+        }
         self.cache.insert(name.to_string(), entry);
         self.pixels.insert(entry.0, (width, height, rgba.to_vec()));
         entry
+    }
+
+    /// Upload one host-decoded RGBA video frame without retaining a CPU copy.
+    /// Reuses the GL texture while the frame dimensions stay unchanged.
+    pub fn upload_video_rgba(&mut self, name: &str, width: u32, height: u32, rgba: &[u8]) -> bool {
+        let Some(expected_len) = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+        else {
+            return false;
+        };
+        if width == 0 || height == 0 || rgba.len() < expected_len {
+            return false;
+        }
+        let rgba = &rgba[..expected_len];
+
+        if let Some((texture, info)) = self.cache.get(name).copied()
+            && info.width == width
+            && info.height == height
+            && let Some(raw) = NonZeroU32::new(texture.0 as u32)
+        {
+            unsafe {
+                self.gl
+                    .bind_texture(glow::TEXTURE_2D, Some(glow::NativeTexture(raw)));
+                self.gl.tex_sub_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    0,
+                    0,
+                    width as i32,
+                    height as i32,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(rgba)),
+                );
+                self.gl.bind_texture(glow::TEXTURE_2D, None);
+            }
+            self.pixels.remove(&texture);
+            return true;
+        }
+
+        self.remove_if_cached(name);
+        let entry = unsafe { self.create_texture(width, height, rgba) };
+        self.cache.insert(name.to_string(), entry);
+        self.pixels.remove(&entry.0);
+        true
     }
 
     fn remove_if_cached(&mut self, name: &str) {
@@ -194,6 +255,11 @@ impl TextureProvider for GlTextureProvider {
     fn resolve(&mut self, name: &str) -> Option<(TextureId, TextureInfo)> {
         if let Some(entry) = self.cache.get(name) {
             return Some(*entry);
+        }
+
+        // Dynamic video textures do not exist until the host uploads frame 0.
+        if crate::video::is_video_layer_texture_name(name) {
+            return None;
         }
 
         // 1) 有字节源且能取到字节并解码成功 → 上传真实纹理。

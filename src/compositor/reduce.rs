@@ -103,6 +103,14 @@ impl Compositor {
         self.scene.ensure(id);
     }
 
+    pub fn set_layer_file(&mut self, id: &str, file: Option<String>) {
+        self.scene.set_file(id, file);
+    }
+
+    pub fn clear_layer_file_if_matches(&mut self, id: &str, expected: &str) {
+        self.scene.clear_file_if_matches(id, expected);
+    }
+
     pub fn restore_scene(&mut self, scene: Scene) {
         self.scene.replace_with(scene);
         self.pending_tween_events.clear();

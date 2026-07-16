@@ -65,9 +65,9 @@ Core 只传逻辑相对路径，例如 `savedata/save0001.dat` 或游戏 `SAVEPA
 
 ### 音频和视频由宿主播放
 
-Core 维护音视频逻辑状态、finish handler 和脚本同步点，但不在生产路径中解码或输出音频 PCM/视频帧。音视频事件会转换成 `host_media.rs` 的 JSON 命令，由 Flutter `MediaBridge` 执行。
+Core 维护音视频逻辑状态、finish handler 和脚本同步点，但不包含 FFmpeg 等解码器。音视频事件会转换成 `host_media.rs` 的 JSON 命令，由宿主媒体层执行。
 
-全屏视频会暂停脚本，播放完成后宿主通过 `art3m1s_runtime_notify_video_finished` 通知 core 恢复。图层 video 当前不以 Flutter overlay 实现，代码中保留 TODO。
+全屏视频仍由宿主显示，播放完成后宿主通过 `art3m1s_runtime_notify_video_finished` 通知 core 恢复。图层视频由宿主原生解码层把 RGBA8 裸指针同步传给 `art3m1s_runtime_upload_video_layer_frame`；core 不复制或长期保留 CPU 帧，直接更新动态 GL 纹理并按普通图层参与合成。宿主必须保证该指针在调用返回前有效，并串行化同一 runtime 的上传与渲染调用。
 
 ### 存档分两层
 
@@ -87,6 +87,7 @@ Core 维护音视频逻辑状态、finish handler 和脚本同步点，但不在
 | `art3m1s_runtime_feed_mouse_button(rt, button, pressed)` | 更新鼠标按钮 |
 | `art3m1s_runtime_feed_key(rt, vk, pressed)` | 更新 Windows VK 键 |
 | `art3m1s_runtime_notify_video_finished(rt, id)` | 宿主视频播放完成 |
+| `art3m1s_runtime_upload_video_layer_frame(rt, id, w, h, rgba, len)` | 同步上传宿主解码的图层视频 RGBA8 帧 |
 | `art3m1s_runtime_notify_sound_finished(rt, id)` | 宿主音频播放完成 |
 | `art3m1s_runtime_destroy(rt)` | 销毁 runtime |
 

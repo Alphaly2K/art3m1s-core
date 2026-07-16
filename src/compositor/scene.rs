@@ -125,6 +125,21 @@ impl Scene {
         self.nodes.get_mut(id)
     }
 
+    pub fn set_file(&mut self, id: &str, file: Option<String>) {
+        self.ensure_path(id);
+        if let Some(layer) = self.nodes.get_mut(id) {
+            layer.file = file;
+        }
+    }
+
+    pub fn clear_file_if_matches(&mut self, id: &str, expected: &str) {
+        if let Some(layer) = self.nodes.get_mut(id)
+            && layer.file.as_deref() == Some(expected)
+        {
+            layer.file = None;
+        }
+    }
+
     /// 获取指定图层的子图层 ID，按 Artemis 图层顺序排序。
     pub fn children(&self, id: &str) -> Vec<String> {
         self.get(id)

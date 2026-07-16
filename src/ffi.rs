@@ -575,6 +575,59 @@ pub unsafe extern "C" fn art3m1s_runtime_notify_video_finished(
     rt.notify_video_finished(id);
 }
 
+/// Upload one RGBA8 frame for a currently playing video layer.
+///
+/// This call is synchronous. `rgba` is borrowed only for the duration of the
+/// call and is passed directly to GL without an intermediate CPU-side copy.
+/// The host must serialize this with other calls using the same runtime.
+///
+/// Returns 1 on success and 0 for invalid arguments, a stale layer, or failure.
+#[cfg(feature = "gl-backend")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_upload_video_layer_frame(
+    rt: *mut CoreRuntime,
+    id: *const c_char,
+    width: u32,
+    height: u32,
+    rgba: *const u8,
+    rgba_len: usize,
+) -> c_int {
+    if rt.is_null() || id.is_null() || rgba.is_null() || width == 0 || height == 0 {
+        return 0;
+    }
+    let Ok(id) = (unsafe { std::ffi::CStr::from_ptr(id).to_str() }) else {
+        return 0;
+    };
+    if id.is_empty() {
+        return 0;
+    }
+    let Some(expected_len) = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+    else {
+        return 0;
+    };
+    if rgba_len < expected_len {
+        return 0;
+    }
+
+    let rgba = unsafe { std::slice::from_raw_parts(rgba, expected_len) };
+    let rt = unsafe { &mut *rt };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rt.upload_video_layer_frame(id, width, height, rgba)
+    })) {
+        Ok(true) => 1,
+        Ok(false) => 0,
+        Err(panic_info) => {
+            core_error!(
+                "art3m1s_runtime_upload_video_layer_frame panicked: {}",
+                panic_msg(&panic_info)
+            );
+            0
+        }
+    }
+}
+
 #[cfg(feature = "gl-backend")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_notify_sound_finished(
