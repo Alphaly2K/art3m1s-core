@@ -320,7 +320,7 @@ impl EmoteEyeControl {
 
 fn number(value: &PsbValue) -> Option<f32> {
     match value {
-        PsbValue::Integer(value) => Some(signed_timeline_integer(*value) as f32),
+        PsbValue::Integer(value) => Some(*value as f32),
         PsbValue::Float(value) => Some(*value),
         PsbValue::Double(value) => Some(*value as f32),
         _ => None,
@@ -328,36 +328,20 @@ fn number(value: &PsbValue) -> Option<f32> {
 }
 
 fn control_frame(value: &PsbValue) -> Option<f32> {
-    match value {
-        PsbValue::Integer(255) => Some(-1.0),
-        _ => number(value),
-    }
+    // 0xFF 单字节在 PSB 解码层已按符号扩展为 -1（"无限制"哨兵），无需特判。
+    number(value)
 }
 
 fn variable_number(value: &PsbValue) -> Option<f32> {
     match value {
-        PsbValue::Integer(value) => Some(signed_variable_integer(*value) as f32),
+        PsbValue::Integer(value) => Some(*value as f32),
         PsbValue::Float(value) => Some(*value),
         PsbValue::Double(value) => Some(*value as f32),
         _ => None,
     }
 }
 
-fn signed_variable_integer(value: i64) -> i64 {
-    if (i8::MAX as i64 + 1..=u8::MAX as i64).contains(&value) {
-        value - (u8::MAX as i64 + 1)
-    } else {
-        signed_timeline_integer(value)
-    }
-}
 
-fn signed_timeline_integer(value: i64) -> i64 {
-    if (i16::MAX as i64 + 1..=u16::MAX as i64).contains(&value) {
-        value - (u16::MAX as i64 + 1)
-    } else {
-        value
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -381,11 +365,6 @@ mod tests {
             ],
         };
         assert_eq!(track.sample(5.0), Some(50.0));
-    }
-
-    #[test]
-    fn decodes_wrapped_negative_variable_values() {
-        assert_eq!(signed_variable_integer(241), -15);
     }
 
     #[test]

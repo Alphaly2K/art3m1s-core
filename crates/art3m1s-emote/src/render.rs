@@ -141,7 +141,11 @@ impl<'a> EmoteMotionEvaluator<'a> {
                     "missing referenced motion {character}/{motion_label}"
                 ))
             })?;
-        let motion_time = if motion.last_time > motion.loop_time && motion_time > motion.last_time {
+        // loop_time < 0（原始 0xFF 哨兵）表示不循环，走 clamp 分支。
+        let motion_time = if motion.loop_time >= 0.0
+            && motion.last_time > motion.loop_time
+            && motion_time > motion.last_time
+        {
             motion.loop_time
                 + (motion_time - motion.loop_time) % (motion.last_time - motion.loop_time)
         } else {

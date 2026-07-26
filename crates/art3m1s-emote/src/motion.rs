@@ -334,7 +334,7 @@ fn number_list(value: &PsbValue) -> Option<Vec<f32>> {
 
 fn number(value: &PsbValue) -> Option<f32> {
     match value {
-        PsbValue::Integer(value) => Some(signed_motion_integer(*value) as f32),
+        PsbValue::Integer(value) => Some(*value as f32),
         PsbValue::Float(value) => Some(*value),
         PsbValue::Double(value) => Some(*value as f32),
         _ => None,
@@ -343,43 +343,22 @@ fn number(value: &PsbValue) -> Option<f32> {
 
 fn variable_number(value: &PsbValue) -> Option<f32> {
     match value {
-        PsbValue::Integer(value) => Some(signed_variable_integer(*value) as f32),
+        PsbValue::Integer(value) => Some(*value as f32),
         PsbValue::Float(value) => Some(*value),
         PsbValue::Double(value) => Some(*value as f32),
         _ => None,
     }
 }
 
-fn signed_variable_integer(value: i64) -> i64 {
-    if (i8::MAX as i64 + 1..=u8::MAX as i64).contains(&value) {
-        value - (u8::MAX as i64 + 1)
-    } else {
-        signed_motion_integer(value)
-    }
-}
 
-fn signed_motion_integer(value: i64) -> i64 {
-    if (i16::MAX as i64 + 1..=u16::MAX as i64).contains(&value) {
-        value - (u16::MAX as i64 + 1)
-    } else {
-        value
-    }
-}
 
 #[cfg(test)]
 mod tests {
-    use super::{EmoteMotionParameter, signed_motion_integer, signed_variable_integer};
-
-    #[test]
-    fn restores_signed_sixteen_bit_motion_values() {
-        assert_eq!(signed_motion_integer(64_736), -800);
-        assert_eq!(signed_motion_integer(32_768), -32_768);
-        assert_eq!(signed_motion_integer(32_767), 32_767);
-    }
+    use super::EmoteMotionParameter;
 
     #[test]
     fn maps_wrapped_parameter_ranges_to_motion_frames() {
-        assert_eq!(signed_variable_integer(226), -30);
+        // 符号扩展现在发生在 PSB 解码层（0xE2 单字节 → -30）。
         let parameter = EmoteMotionParameter {
             id: "body_UD".into(),
             range_begin: -30.0,

@@ -191,7 +191,7 @@ fn required_u32(value: &PsbValue, key: &str) -> Result<u32> {
 
 fn required_f32(value: &PsbValue, key: &str) -> Result<f32> {
     match value.get(key) {
-        Some(PsbValue::Integer(value)) => Ok(signed_atlas_integer(*value) as f32),
+        Some(PsbValue::Integer(value)) => Ok(*value as f32),
         Some(PsbValue::Float(value)) => Ok(*value),
         Some(PsbValue::Double(value)) => Ok(*value as f32),
         _ => Err(EmoteError::InvalidFormat(format!(
@@ -200,13 +200,6 @@ fn required_f32(value: &PsbValue, key: &str) -> Result<f32> {
     }
 }
 
-fn signed_atlas_integer(value: i64) -> i64 {
-    if (i16::MAX as i64 + 1..=u16::MAX as i64).contains(&value) {
-        value - (u16::MAX as i64 + 1)
-    } else {
-        value
-    }
-}
 
 fn decode_dxt5(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
     let blocks_x = width.div_ceil(4) as usize;

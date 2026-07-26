@@ -421,12 +421,7 @@ impl ValueParser<'_> {
             0x05..=0x0c => {
                 let width = (kind - 0x04) as usize;
                 let raw = read_compact_u64(self.data, offset + 1, width)?;
-                let value = match width {
-                    4 => i32::from_le_bytes((raw as u32).to_le_bytes()) as i64,
-                    8 => i64::from_le_bytes(raw.to_le_bytes()),
-                    _ => raw as i64,
-                };
-                Ok(PsbValue::Integer(value))
+                Ok(PsbValue::Integer(sign_extend(raw, width)))
             }
             0x0d..=0x14 => {
                 let (_, values, _) = parse_array(self.data, offset)?;
@@ -680,5 +675,36 @@ mod tests {
         let str3 = [1, 2];
 
         assert_eq!(decode_names(&str1, &str2, &str3).unwrap(), ["a", "ab"]);
+    }
+}
+
+
+/// PSB 的整数按最小字节宽度存储且为有符号数：任何宽度都必须按其宽度
+/// 符号扩展（0xFF 单字节 = -1，而不是 255）。
+fn sign_extend(raw: u64, width: usize) -> i64 {
+    if width >= 8 {
+        raw as i64
+    } else {
+        let shift = 64 - width * 8;
+        ((raw << shift) as i64) >> shift
+    }
+}
+
+#[cfg(test)]
+mod sign_extend_tests {
+    use super::sign_extend;
+
+    #[test]
+    fn extends_by_storage_width() {
+        assert_eq!(sign_extend(0xFF, 1), -1);
+        assert_eq!(sign_extend(0x7F, 1), 127);
+        assert_eq!(sign_extend(226, 1), -30);
+        assert_eq!(sign_extend(0xFFFF, 2), -1);
+        assert_eq!(sign_extend(64_736, 2), -800);
+        assert_eq!(sign_extend(32_767, 2), 32_767);
+        assert_eq!(sign_extend(0xFF_FFFF, 3), -1);
+        assert_eq!(sign_extend(0x7F_FFFF, 3), 0x7F_FFFF);
+        assert_eq!(sign_extend(0xFFFF_FFFF, 4), -1);
+        assert_eq!(sign_extend(u64::MAX, 8), -1);
     }
 }
