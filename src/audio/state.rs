@@ -50,7 +50,6 @@ impl AudioStateBackend {
     }
 }
 
-
 /// 按统一规则构建一个就绪声道：raw 增益/声像换算 + 可选淡入。
 /// play_bgm / crossfade_bgm / play_se / play_voice 共用，防止四处分叉。
 fn build_channel(

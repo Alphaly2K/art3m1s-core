@@ -415,7 +415,9 @@ impl GlyphIconConfig {
         Self {
             layer: non_empty("layer").map(str::to_string),
             rplayer: non_empty("rplayer").map(str::to_string),
-            left: non_empty("left").and_then(|v| v.parse().ok()).unwrap_or(0.0),
+            left: non_empty("left")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.0),
             top: non_empty("top").and_then(|v| v.parse().ok()).unwrap_or(0.0),
             rpleft: non_empty("rpleft")
                 .and_then(|v| v.parse().ok())

@@ -422,7 +422,12 @@ mod tests {
             7
         );
         assert_eq!(
-            engine_status_for(Some(&WaitReason::Stop { reason: None }), false, false, false),
+            engine_status_for(
+                Some(&WaitReason::Stop { reason: None }),
+                false,
+                false,
+                false
+            ),
             3
         );
     }

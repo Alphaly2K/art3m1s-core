@@ -83,7 +83,11 @@ impl CoreRuntime {
                         if let Err(e) = self.copy_save_file(src, dst, command == "move") {
                             crate::core_warn!(
                                 "[runtime] 文件{}失败 {} -> {}: {}",
-                                if command == "move" { "移动" } else { "复制" },
+                                if command == "move" {
+                                    "移动"
+                                } else {
+                                    "复制"
+                                },
                                 src,
                                 dst,
                                 e
@@ -825,8 +829,7 @@ impl CoreRuntime {
                             .map(|path| crate::ffi::query_asset_size(&path).is_some())
                             .unwrap_or(false)
                     } else {
-                        let resolved =
-                            super::magic_path::resolve_path(&magic_for_exists, file);
+                        let resolved = super::magic_path::resolve_path(&magic_for_exists, file);
                         crate::ffi::query_asset_size(&resolved).is_some()
                     }
                 }),
@@ -931,7 +934,11 @@ fn event_summary(e: &Event) -> String {
             }
         },
         Event::LayerTween {
-            id, param, to, time, ..
+            id,
+            param,
+            to,
+            time,
+            ..
         } => {
             format!("LayerTween id={id} {param}->{to:?} time={time:?}")
         }

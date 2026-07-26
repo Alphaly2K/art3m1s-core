@@ -5,10 +5,7 @@ use asb_interpreter::Event;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
-fn text_span_ready(
-    state: &crate::text::render::FontState,
-    span: &TextSpanToken,
-) -> Option<bool> {
+fn text_span_ready(state: &crate::text::render::FontState, span: &TextSpanToken) -> Option<bool> {
     let layer = state.layers.get(&span.layer_id)?;
     (layer.generation == span.generation).then_some(!layer.reveal_pending)
 }
@@ -149,8 +146,9 @@ impl CoreRuntime {
         };
         *BACKLOG_SNAPSHOT.lock().unwrap() = build_backlog_snapshot(renderer.font_state());
         // 顺带刷新文本度量（get_message_layer_width/height/line_width）。
-        *TEXT_METRICS.lock().unwrap() =
-            renderer.active_layer_text_metrics().unwrap_or((0.0, 0.0, 0.0));
+        *TEXT_METRICS.lock().unwrap() = renderer
+            .active_layer_text_metrics()
+            .unwrap_or((0.0, 0.0, 0.0));
     }
 
     pub(super) fn advance_text(&mut self, delta_ms: u64) {
@@ -265,18 +263,18 @@ impl CoreRuntime {
                 // [rt omitblankline=]：换行前按标签值更新"末行为空则不换行"，
                 // 再执行换行（配置在 layout 上，push_line_break 会读取）。
                 Event::LineBreak { omitblankline } => {
-                    renderer.font_state_mut().set_rt_omit_blank_line(*omitblankline);
+                    renderer
+                        .font_state_mut()
+                        .set_rt_omit_blank_line(*omitblankline);
                     renderer.push_line_break();
                 }
                 Event::PageBreak { backlog } => renderer.push_page_break(*backlog),
                 Event::GlyphConfig(config) => renderer.set_glyph_config(config),
                 // [indent]：对话缩进的字符对/识别范围/嵌套（空 pair 即禁用缩进）。
                 Event::IndentConfig { pair, range, nest } => {
-                    renderer.font_state_mut().set_indent(
-                        Some(pair.as_str()),
-                        *range,
-                        Some(*nest),
-                    );
+                    renderer
+                        .font_state_mut()
+                        .set_indent(Some(pair.as_str()), *range, Some(*nest));
                 }
                 // [prohibit]：自定义行首/行尾禁则字符集，覆盖内置默认表。
                 Event::ProhibitConfig { head, foot } => {
@@ -576,13 +574,19 @@ mod tests {
         let mut snap = BacklogSnapshot::default();
         snap.pages.push((
             vec!["[print data=\"页0\"]".to_string()],
-            vec!["[font size=\"40\"]".to_string(), "[print data=\"页0\"]".to_string()],
+            vec![
+                "[font size=\"40\"]".to_string(),
+                "[print data=\"页0\"]".to_string(),
+            ],
         ));
         snap.message_layers.insert(
             "adv01".to_string(),
             (
                 vec!["[print data=\"当前\"]".to_string()],
-                vec!["[font size=\"40\"]".to_string(), "[print data=\"当前\"]".to_string()],
+                vec![
+                    "[font size=\"40\"]".to_string(),
+                    "[print data=\"当前\"]".to_string(),
+                ],
             ),
         );
 
@@ -658,7 +662,8 @@ mod tests {
     fn snapshot_static_round_trips() {
         // 直接写进程级快照再读回，验证 backlog_snapshot() 访问路径（宿主钩子读取入口）。
         let mut snap = BacklogSnapshot::default();
-        snap.pages.push((vec!["[print data=\"x\"]".to_string()], Vec::new()));
+        snap.pages
+            .push((vec!["[print data=\"x\"]".to_string()], Vec::new()));
         *BACKLOG_SNAPSHOT.lock().unwrap() = snap.clone();
         assert_eq!(backlog_snapshot(), snap);
         // 复位，避免污染其它测试（进程级静态共享）
@@ -736,9 +741,9 @@ mod tests {
 
     #[test]
     fn click_wait_placement_feeds_compositor_show_and_hide() {
+        use crate::compositor::Compositor;
         use crate::render_pipeline::draw::TextureId;
         use crate::text::render::GlyphInfo;
-        use crate::compositor::Compositor;
         use asb_interpreter::Event;
         use asb_interpreter::event::LayerEvent;
 

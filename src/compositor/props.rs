@@ -250,12 +250,7 @@ pub fn parse_hex_color(value: &str) -> Option<[u8; 4]> {
         .trim_start_matches("0X");
     let digits = u32::from_str_radix(hex, 16).ok()?;
     match hex.len() {
-        6 => Some([
-            255,
-            (digits >> 16) as u8,
-            (digits >> 8) as u8,
-            digits as u8,
-        ]),
+        6 => Some([255, (digits >> 16) as u8, (digits >> 8) as u8, digits as u8]),
         8 => Some([
             (digits >> 24) as u8,
             (digits >> 16) as u8,

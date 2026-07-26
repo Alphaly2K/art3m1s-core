@@ -33,8 +33,7 @@ fn ab_loop_file(file: &str) -> Option<String> {
         }
         _ => (file, ""),
     };
-    stem.strip_suffix("_a")
-        .map(|base| format!("{base}_b{ext}"))
+    stem.strip_suffix("_a").map(|base| format!("{base}_b{ext}"))
 }
 
 impl CoreRuntime {
@@ -434,13 +433,7 @@ impl CoreRuntime {
                 // [span] time=毫秒渐变时间，缺省立即切换
                 let time_ms = time.unwrap_or(0);
                 self.audio.pan_bgm(*pan, time_ms);
-                hm::emit(
-                    Kind::AudioBgmPan,
-                    hm::BgmPan {
-                        pan: *pan,
-                        time_ms,
-                    },
-                );
+                hm::emit(Kind::AudioBgmPan, hm::BgmPan { pan: *pan, time_ms });
                 true
             }
             Event::BgmCrossFade {

@@ -177,9 +177,9 @@ impl CoreRuntime {
         let _ = self
             .texture_provider
             .upload_rgba(":bg/black", 2, 2, &[0, 0, 0, 255].repeat(4));
-        let _ = self
-            .texture_provider
-            .upload_rgba(":bg/white", 2, 2, &[255, 255, 255, 255].repeat(4));
+        let _ =
+            self.texture_provider
+                .upload_rgba(":bg/white", 2, 2, &[255, 255, 255, 255].repeat(4));
     }
 
     fn seed_savepath_and_sysload(&mut self) {

@@ -610,8 +610,16 @@ mod tests {
         let files = scene.collect_files();
         assert!(files.contains("fg"));
         assert!(files.contains("m"));
-        assert!(files.contains(&crate::render_pipeline::draw::masked_texture_name("fg", "m")));
-        assert!(files.contains(&crate::render_pipeline::draw::solid_texture_name([1, 2, 3, 4])));
+        assert!(
+            files.contains(&crate::render_pipeline::draw::masked_texture_name(
+                "fg", "m"
+            ))
+        );
+        assert!(
+            files.contains(&crate::render_pipeline::draw::solid_texture_name([
+                1, 2, 3, 4
+            ]))
+        );
         assert!(files.contains("face-mask"));
         assert!(files.contains("shader-user"));
         assert!(files.contains("shader-mask"));

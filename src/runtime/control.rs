@@ -196,7 +196,10 @@ impl RuntimeControlState {
 
     /// 标记剧情文本行为已读。返回是否是新标记（用于决定是否需要持久化）。
     pub(super) fn mark_read(&mut self, script: &str, line: usize) -> bool {
-        self.read_lines.entry(script.to_string()).or_default().insert(line)
+        self.read_lines
+            .entry(script.to_string())
+            .or_default()
+            .insert(line)
     }
 
     /// 已读跳过遇未读是否应停止：已读判定开启 且 skip 配置为"不跳过未读"。
@@ -219,10 +222,7 @@ impl RuntimeControlState {
     /// 从持久化数据恢复已读记录（合并，不清空现有）。
     pub(super) fn read_lines_import(&mut self, data: HashMap<String, Vec<usize>>) {
         for (script, lines) in data {
-            self.read_lines
-                .entry(script)
-                .or_default()
-                .extend(lines);
+            self.read_lines.entry(script).or_default().extend(lines);
         }
     }
 
@@ -919,8 +919,8 @@ fn exec_input_route(command: &str) -> Option<(&'static str, &'static str)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ROLE_ADVANCE, ROLE_AVOID_IN, ROLE_AVOID_OUT, ROLE_CONTROL_SKIP, ROLE_HIDE_IN,
-        ROLE_SKIP_IN, RuntimeControlState, exec_input_route, parse_keyconfig,
+        ROLE_ADVANCE, ROLE_AVOID_IN, ROLE_AVOID_OUT, ROLE_CONTROL_SKIP, ROLE_HIDE_IN, ROLE_SKIP_IN,
+        RuntimeControlState, exec_input_route, parse_keyconfig,
     };
     use std::collections::HashMap;
 
@@ -1055,12 +1055,11 @@ mod tests {
         // 缺省无键位（游戏用 keyconfig 分配），配置后应能解析。
         assert_eq!(ROLE_AVOID_IN, 15);
         assert_eq!(ROLE_AVOID_OUT, 16);
-        let (role_in, keys_in) =
-            parse_keyconfig(&HashMap::from([
-                ("role".into(), "15".into()),
-                ("keys".into(), "88".into()),
-            ]))
-            .expect("role 15 应可解析");
+        let (role_in, keys_in) = parse_keyconfig(&HashMap::from([
+            ("role".into(), "15".into()),
+            ("keys".into(), "88".into()),
+        ]))
+        .expect("role 15 应可解析");
         assert_eq!(role_in, ROLE_AVOID_IN);
         assert_eq!(keys_in, vec![88]);
 

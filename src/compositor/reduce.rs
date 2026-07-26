@@ -730,11 +730,7 @@ impl Compositor {
         if let Some(mask) = raw.get("mask") {
             let shader_active = raw.get("shader").is_some_and(|s| !s.is_empty())
                 || self.scene.get(&id).is_some_and(|layer| {
-                    layer
-                        .props
-                        .shader
-                        .as_deref()
-                        .is_some_and(|s| !s.is_empty())
+                    layer.props.shader.as_deref().is_some_and(|s| !s.is_empty())
                 });
             if !shader_active {
                 self.scene

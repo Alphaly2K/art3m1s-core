@@ -272,7 +272,11 @@ impl CoreRuntime {
         match state {
             0 | 1 => {
                 if self.control.autosave_allow == 1 {
-                    self.autosave_now(if state == 0 { "引擎退出" } else { "切后台" });
+                    self.autosave_now(if state == 0 {
+                        "引擎退出"
+                    } else {
+                        "切后台"
+                    });
                 }
             }
             _ => {}
@@ -354,9 +358,9 @@ impl CoreRuntime {
         let (resource_name, path) = self.screenshot_paths_for(file)?;
 
         crate::ffi::request_write(&path, &png)?;
-        let _ = self
-            .texture_provider
-            .upload_rgba(&resource_name, target_width, target_height, &rgba);
+        let _ =
+            self.texture_provider
+                .upload_rgba(&resource_name, target_width, target_height, &rgba);
         crate::core_info!(
             "[runtime] 已保存缩略图: {} (resource={}, {}x{})",
             path,

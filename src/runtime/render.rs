@@ -117,8 +117,8 @@ impl CoreRuntime {
     /// 按行末处理（page_end=false，用 [glyph] 的 layer）。精确的页末检测需解释器透传
     /// rp 换页信号，见任务 skipped 说明。
     fn drive_click_wait_icon(&mut self) {
-        let show = wait_reason_is_click_wait(self.wait_reason.as_ref())
-            && self.is_text_reveal_complete();
+        let show =
+            wait_reason_is_click_wait(self.wait_reason.as_ref()) && self.is_text_reveal_complete();
         if show {
             self.enter_click_wait_icon(false);
         } else {

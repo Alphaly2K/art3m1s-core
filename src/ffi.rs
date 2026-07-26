@@ -4,8 +4,8 @@
 //! filesystem operation inside the core is routed through those callbacks,
 //! keeping the core entirely free of direct I/O.
 use std::ffi::{CString, c_char, c_int, c_longlong};
-use std::sync::OnceLock;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 // ── Global debug flag ──────────────────────────────────────────
@@ -149,7 +149,11 @@ type JsonCommandCallback = unsafe extern "C" fn(kind: *const c_char, payload_jso
 static MEDIA_COMMAND_CB: Mutex<Option<JsonCommandCallback>> = Mutex::new(None);
 static UI_COMMAND_CB: Mutex<Option<JsonCommandCallback>> = Mutex::new(None);
 
-fn emit_json_command(slot: &Mutex<Option<JsonCommandCallback>>, kind: &str, payload: serde_json::Value) {
+fn emit_json_command(
+    slot: &Mutex<Option<JsonCommandCallback>>,
+    kind: &str,
+    payload: serde_json::Value,
+) {
     let Some(cb) = *slot.lock().unwrap() else {
         return;
     };

@@ -28,6 +28,5 @@ pub use glyph::GlyphTextRenderer;
 pub use inject::{FfiTextInject, InjectionChain, TextInject};
 pub use render::{
     FontDesc, FontMetrics, FontState, GlyphInfo, LinkHitArea, LinkRange, MessageLayer, RubyRange,
-    TextSpanToken,
-    ScetweenConfig, ScetweenMode, ScetweenSetMode, TextAlignment, TextRenderer,
+    ScetweenConfig, ScetweenMode, ScetweenSetMode, TextAlignment, TextRenderer, TextSpanToken,
 };

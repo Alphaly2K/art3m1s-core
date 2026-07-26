@@ -706,7 +706,10 @@ mod tests {
         // lyc 缺省 file + color=AARRGGBB 的单色图层模式。
         scene.ensure("5");
         scene.set_solid_color("5", Some([255, 0, 0, 128]));
-        scene.set_props("5", &raw(&[("width", "320"), ("height", "40"), ("left", "10")]));
+        scene.set_props(
+            "5",
+            &raw(&[("width", "320"), ("height", "40"), ("left", "10")]),
+        );
 
         let mut provider = MockProvider::new();
         let frame = build_frame(&scene, 0, &mut provider, None);
@@ -770,13 +773,15 @@ mod tests {
     fn file_override_redirects_layer_texture() {
         let mut scene = Scene::new();
         scene.create("1", Some("bg".into()));
-        let overrides =
-            HashMap::from([("1".to_string(), "__lyedit_1_1__".to_string())]);
+        let overrides = HashMap::from([("1".to_string(), "__lyedit_1_1__".to_string())]);
 
         let mut provider = MockProvider::new();
         let frame =
             build_frame_with_content(&scene, 0, &mut provider, None, None, Some(&overrides));
-        assert_eq!(provider.name_of(frame.commands[0].texture), "__lyedit_1_1__");
+        assert_eq!(
+            provider.name_of(frame.commands[0].texture),
+            "__lyedit_1_1__"
+        );
     }
 
     #[test]

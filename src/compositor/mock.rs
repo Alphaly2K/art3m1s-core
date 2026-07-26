@@ -95,11 +95,7 @@ impl TextureProvider for MockProvider {
     }
 
     /// file+mask 合成在 mock 里退化为解析组合名，便于断言蒙版路径被走到。
-    fn resolve_with_mask(
-        &mut self,
-        file: &str,
-        mask: &str,
-    ) -> Option<(TextureId, TextureInfo)> {
+    fn resolve_with_mask(&mut self, file: &str, mask: &str) -> Option<(TextureId, TextureInfo)> {
         let name = crate::render_pipeline::draw::masked_texture_name(file, mask);
         self.resolve(&name)
     }

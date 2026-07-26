@@ -220,7 +220,10 @@ impl InputSnapshot {
 
     /// 单键覆盖优先于全键覆盖。
     fn override_mask(&self, vk: u32) -> Option<u32> {
-        self.key_overrides.get(&vk).copied().or(self.override_all_keys)
+        self.key_overrides
+            .get(&vk)
+            .copied()
+            .or(self.override_all_keys)
     }
 
     fn key_down(&self, vk: u32) -> bool {
@@ -281,7 +284,9 @@ impl InputSnapshot {
     /// 是否存在脚本注入的「决定/按下边沿」覆盖（[stop] 唤醒的判定来源）。
     pub(super) fn scripted_down_edge(&self) -> bool {
         let edge_bits = OVERRIDE_IS_DOWN_EDGE | OVERRIDE_IS_DECIDE;
-        self.key_overrides.values().any(|mask| mask & edge_bits != 0)
+        self.key_overrides
+            .values()
+            .any(|mask| mask & edge_bits != 0)
             || self
                 .override_all_keys
                 .is_some_and(|mask| mask & edge_bits != 0)
@@ -402,11 +407,7 @@ impl EngineCallbacks for FfiCallbacks {
     fn set_use_multi_touch(&self, mode: i64) {
         // setUseMultiTouch.txt：-1 无限；否则处理至多 mode 个触摸点。
         let mut s = self.input.lock().unwrap();
-        s.touch_control.multi_touch_limit = if mode < 0 {
-            None
-        } else {
-            Some(mode as u32)
-        };
+        s.touch_control.multi_touch_limit = if mode < 0 { None } else { Some(mode as u32) };
     }
 
     fn set_use_touch_hold(&self, enabled: bool) {
@@ -894,7 +895,10 @@ mod tests {
         let mut cache = HashMap::new();
 
         // 同一路径 bind 两次只加载一次，需要 unbind 两次才真正释放。
-        assert_eq!(surface_cache_bind(&mut cache, "image/a", || Some(vec![1])), 1);
+        assert_eq!(
+            surface_cache_bind(&mut cache, "image/a", || Some(vec![1])),
+            1
+        );
         assert_eq!(
             surface_cache_bind(&mut cache, "image/a", || panic!("不应重复加载")),
             2

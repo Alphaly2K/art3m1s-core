@@ -242,10 +242,7 @@ mod tests {
             ("size".to_string(), "40".to_string()),
             ("color".to_string(), "FFFFFF".to_string()),
         ]));
-        assert_eq!(
-            font.to_tag_string(),
-            "[font color=\"FFFFFF\" size=\"40\"]"
-        );
+        assert_eq!(font.to_tag_string(), "[font color=\"FFFFFF\" size=\"40\"]");
         // 引号与反斜杠转义
         assert_eq!(
             BacklogTag::Text("a\"b\\c".into()).to_tag_string(),

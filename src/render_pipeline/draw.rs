@@ -50,11 +50,7 @@ pub trait TextureProvider {
     ///
     /// 默认实现忽略蒙版、退化为普通 `resolve`；有像素访问能力的后端应覆写为
     /// 真正的双图合成（out.rgb = file.rgb，out.a = file.a × mask 灰度）。
-    fn resolve_with_mask(
-        &mut self,
-        file: &str,
-        _mask: &str,
-    ) -> Option<(TextureId, TextureInfo)> {
+    fn resolve_with_mask(&mut self, file: &str, _mask: &str) -> Option<(TextureId, TextureInfo)> {
         self.resolve(file)
     }
 

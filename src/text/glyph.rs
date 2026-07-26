@@ -218,9 +218,7 @@ pub(crate) fn layout_glyphs(
                 let mut b = i;
                 // keep_ranges（注音区间等）：断点落在区间内部 → 整个区间
                 // 回退到下一行；区间从行首开始（整行装不下）时强制截断
-                if let Some(&(rs, _)) = keep_ranges
-                    .iter()
-                    .find(|&&(rs, re)| rs < b && b < re)
+                if let Some(&(rs, _)) = keep_ranges.iter().find(|&&(rs, re)| rs < b && b < re)
                     && rs > line_start
                 {
                     b = rs;
@@ -375,7 +373,11 @@ impl TextRenderer for GlyphTextRenderer<'_> {
     }
 
     fn active_font_face(&self) -> Option<&str> {
-        let id = self.state.active_layer.as_deref().unwrap_or(DEFAULT_MESSAGE_LAYER);
+        let id = self
+            .state
+            .active_layer
+            .as_deref()
+            .unwrap_or(DEFAULT_MESSAGE_LAYER);
         self.state
             .layers
             .get(id)
@@ -442,9 +444,7 @@ impl TextRenderer for GlyphTextRenderer<'_> {
                 .map(|l| (l.left, l.top, l.width, l.height, l.font.clone()))
         });
         // stack=0（chgmsg）不压栈，避免存档中消息层堆栈膨胀。
-        if stack
-            && let Some(ref prev_id) = self.state.active_layer
-        {
+        if stack && let Some(ref prev_id) = self.state.active_layer {
             self.state.layer_stack.push(prev_id.clone());
         }
         self.state.active_layer = id.map(|s| s.to_string());
@@ -577,16 +577,12 @@ impl TextRenderer for GlyphTextRenderer<'_> {
     }
 
     fn replace_text_span(&mut self, span: &TextSpanToken, content: &str) -> Option<isize> {
-        let valid = self
-            .state
-            .layers
-            .get(&span.layer_id)
-            .is_some_and(|layer| {
-                layer.generation == span.generation
-                    && span.start <= span.end
-                    && span.end <= layer.text_buffer.len()
-                    && layer.font.face == span.font_face
-            });
+        let valid = self.state.layers.get(&span.layer_id).is_some_and(|layer| {
+            layer.generation == span.generation
+                && span.start <= span.end
+                && span.end <= layer.text_buffer.len()
+                && layer.font.face == span.font_face
+        });
         if !valid {
             return None;
         }
@@ -610,7 +606,9 @@ impl TextRenderer for GlyphTextRenderer<'_> {
         let sz = layer.font.size.unwrap_or(DEFAULT_FONT_SIZE);
         let scale = PxScale::from(sz);
         // 未加载字体时以字号近似行高，换行字形不依赖光栅化
-        let line_height = scaled(&self.font, scale).map(|sf| sf.height()).unwrap_or(sz);
+        let line_height = scaled(&self.font, scale)
+            .map(|sf| sf.height())
+            .unwrap_or(sz);
         // 再现记录：只记实际生效的换行（被 omitblankline 省略的重放时同样省略）
         layer.page_tags.push(BacklogTag::LineBreak);
         layer.text_buffer.push(GlyphInfo {
@@ -1566,9 +1564,11 @@ mod tests {
         let mut renderer = GlyphTextRenderer::new();
         // 空缓冲 + 默认 omit=1 → 跳过换行
         renderer.push_line_break();
-        assert!(renderer.font_state().layers[super::DEFAULT_MESSAGE_LAYER]
-            .text_buffer
-            .is_empty());
+        assert!(
+            renderer.font_state().layers[super::DEFAULT_MESSAGE_LAYER]
+                .text_buffer
+                .is_empty()
+        );
 
         // 有文本时正常换行；紧接着的第二次换行（末行为空）被省略
         renderer
@@ -1809,9 +1809,10 @@ mod tests {
         assert_eq!(l.rubies[0].text, "カピバラ");
         assert_eq!(l.rubies[0].size, 20.0, "rubysize 缺省 = 正文字号 40 的一半");
         assert_eq!(l.keep_ranges(), vec![(2, 4)]);
-        assert!(l
-            .page_tags
-            .contains(&BacklogTag::RubyStart("カピバラ".into())));
+        assert!(
+            l.page_tags
+                .contains(&BacklogTag::RubyStart("カピバラ".into()))
+        );
         assert!(l.page_tags.contains(&BacklogTag::RubyEnd));
     }
 
@@ -1862,7 +1863,10 @@ mod tests {
         // hover：进入区域置位并报告变化；重复移动不报变化；移出取消
         assert!(r.update_link_hover(110.0, 60.0));
         assert!(r.font_state().layers[super::DEFAULT_MESSAGE_LAYER].links[0].hovered);
-        assert!(!r.update_link_hover(111.0, 61.0), "hover 状态未变不应报变化");
+        assert!(
+            !r.update_link_hover(111.0, 61.0),
+            "hover 状态未变不应报变化"
+        );
         assert!(r.update_link_hover(0.0, 0.0));
         assert!(!r.font_state().layers[super::DEFAULT_MESSAGE_LAYER].links[0].hovered);
 
@@ -1979,11 +1983,12 @@ mod tests {
 
         // 换页后本页再现标签清空
         r.push_page_break(None);
-        assert!(r
-            .font_state()
-            .get_message_tags(super::DEFAULT_MESSAGE_LAYER, false)
-            .unwrap()
-            .is_empty());
+        assert!(
+            r.font_state()
+                .get_message_tags(super::DEFAULT_MESSAGE_LAYER, false)
+                .unwrap()
+                .is_empty()
+        );
     }
 }
 
