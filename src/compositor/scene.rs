@@ -21,6 +21,15 @@ pub struct Layer {
     pub id: String,
     /// 绑定的逻辑资源名；`None` 表示纯分组节点。
     pub file: Option<String>,
+    /// `lyc` 缺省 file 的单色图层模式：RGBA 填充色（宽高取 props.width/height）。
+    /// 与 `file` 互斥——设置了 `file` 时忽略。
+    #[serde(default)]
+    pub solid_color: Option<[u8; 4]>,
+    /// `lyc` 的 mask 参数：蒙版图路径。绘制时经
+    /// [`TextureProvider::resolve_with_mask`](crate::render_pipeline::draw::TextureProvider::resolve_with_mask)
+    /// 与 `file` 合成 alpha。
+    #[serde(default)]
+    pub mask: Option<String>,
     pub props: LayerProps,
     /// 作用在本节点属性上的进行中缓动。
     pub tweens: Vec<Tween>,
@@ -114,6 +123,10 @@ pub struct Scene {
     nodes: HashMap<String, Layer>,
     /// 顶层节点 ID，按插入顺序——决定根层之间的绘制先后。
     roots: Vec<String>,
+    /// `[lyprop id="!"]` 操作的"包含所有图层的根图层"的属性。
+    /// 变换/不透明度/可见性作用于整棵场景树。
+    #[serde(default)]
+    root_props: LayerProps,
 }
 
 impl Scene {
@@ -146,6 +159,76 @@ impl Scene {
         {
             layer.file = None;
         }
+    }
+
+    /// 设置图层的蒙版图路径（`lyc` mask 参数）。空字符串/None 表示清除。
+    pub fn set_mask(&mut self, id: &str, mask: Option<String>) {
+        self.ensure_path(id);
+        if let Some(layer) = self.nodes.get_mut(id) {
+            layer.mask = mask.filter(|m| !m.is_empty());
+        }
+    }
+
+    /// 把图层设为单色模式（`lyc` 缺省 file + color）。会清除已绑定的 file。
+    /// 宽高由调用方通过 props 的 width/height 设置。
+    pub fn set_solid_color(&mut self, id: &str, rgba: Option<[u8; 4]>) {
+        self.ensure_path(id);
+        if let Some(layer) = self.nodes.get_mut(id) {
+            layer.solid_color = rgba;
+            if rgba.is_some() {
+                layer.file = None;
+            }
+        }
+    }
+
+    /// `[lyprop id="!"]`：根图层属性（作用于整棵场景树）。
+    pub fn root_props(&self) -> &LayerProps {
+        &self.root_props
+    }
+
+    /// 图层是否"有效可见"：自身 `visible != false`，且从根到它的祖先链上
+    /// 每一层都可见，且根图层（`!`）可见。与命中检测/绘制的可见性剔除一致。
+    ///
+    /// 用于 link 命中检测：mw 隐藏（自身或祖先 visible=0）后，其文本层的
+    /// link 命中区必须失效，否则点在已隐藏的文本区会误触发链接跳转。
+    /// 图层不存在时视为不可见。
+    pub fn is_effectively_visible(&self, id: &str) -> bool {
+        if !self.root_props.is_visible() {
+            return false;
+        }
+        // 目标层本身必须存在。
+        if self.nodes.get(id).is_none() {
+            return false;
+        }
+        let mut current = Some(id);
+        while let Some(node_id) = current {
+            // 未物化的中间祖先按"未显式隐藏"处理，继续上溯。
+            if let Some(layer) = self.nodes.get(node_id)
+                && layer.props.visible == Some(false)
+            {
+                return false;
+            }
+            current = parent_id(node_id);
+        }
+        true
+    }
+
+    /// 增量合并根图层属性（`[lyprop id="!"]`）。
+    pub fn set_root_props(&mut self, raw: &HashMap<String, String>) {
+        self.root_props.merge_raw(raw);
+    }
+
+    /// 收集以 `id` 为根的整棵子树的所有节点 ID（含自身）。
+    pub fn subtree_ids(&self, id: &str) -> Vec<String> {
+        let mut ids = Vec::new();
+        let mut stack = vec![id.to_string()];
+        while let Some(current) = stack.pop() {
+            if let Some(node) = self.nodes.get(&current) {
+                stack.extend(node.children.iter().cloned());
+                ids.push(current);
+            }
+        }
+        ids
     }
 
     /// 获取指定图层的子图层 ID，按 Artemis 图层顺序排序。
@@ -185,8 +268,28 @@ impl Scene {
     }
 
     /// 收集当前场景中所有图层引用的纹理文件名称。
+    ///
+    /// 除图层直接绑定的 `file` 外，还包括：
+    /// - file+mask 双图合成纹理的缓存名（否则每帧被 retain 驱逐重建）；
+    /// - 单色图层的 1x1 纯色纹理缓存名。
     pub fn collect_files(&self) -> std::collections::HashSet<String> {
-        self.nodes.values().filter_map(|l| l.file.clone()).collect()
+        let mut files = std::collections::HashSet::new();
+        for layer in self.nodes.values() {
+            if let Some(file) = &layer.file {
+                files.insert(file.clone());
+                if let Some(mask) = &layer.mask
+                    && !file.is_empty()
+                {
+                    files.insert(crate::render_pipeline::draw::masked_texture_name(
+                        file, mask,
+                    ));
+                    files.insert(mask.clone());
+                }
+            } else if let Some(rgba) = layer.solid_color {
+                files.insert(crate::render_pipeline::draw::solid_texture_name(rgba));
+            }
+        }
+        files
     }
 
     /// 确保某 ID 的节点存在（含祖先链接），不改动已有属性。
@@ -197,9 +300,15 @@ impl Scene {
     /// 创建或替换一个图层。会按需创建缺失的祖先节点（作为纯分组容器），并把它
     /// 登记到父节点的子列表（或根列表）中。若 ID 已存在，则保留其在树中的位置，
     /// 只更新 `file`，属性留给后续 `[lyprop]` 设置。
+    ///
+    /// 加载了非空 `file` 时同时清除单色模式（二者互斥；蒙版由后续
+    /// `set_mask` 重新指定）。
     pub fn create(&mut self, id: &str, file: Option<String>) {
         self.ensure_path(id);
         if let Some(layer) = self.nodes.get_mut(id) {
+            if file.as_deref().is_some_and(|f| !f.is_empty()) {
+                layer.solid_color = None;
+            }
             layer.file = file;
         }
     }
@@ -440,6 +549,46 @@ mod tests {
     }
 
     #[test]
+    fn collect_files_includes_masked_and_solid_cache_names() {
+        let mut scene = Scene::new();
+        scene.create("1", Some("fg".into()));
+        scene.set_mask("1", Some("m".into()));
+        scene.ensure("2");
+        scene.set_solid_color("2", Some([1, 2, 3, 4]));
+
+        let files = scene.collect_files();
+        assert!(files.contains("fg"));
+        assert!(files.contains("m"));
+        assert!(files.contains(&crate::render_pipeline::draw::masked_texture_name("fg", "m")));
+        assert!(files.contains(&crate::render_pipeline::draw::solid_texture_name([1, 2, 3, 4])));
+    }
+
+    #[test]
+    fn create_with_file_clears_solid_mode() {
+        let mut scene = Scene::new();
+        scene.ensure("1");
+        scene.set_solid_color("1", Some([9, 9, 9, 9]));
+        scene.create("1", Some("real".into()));
+        let layer = scene.get("1").unwrap();
+        assert_eq!(layer.solid_color, None);
+        assert_eq!(layer.file.as_deref(), Some("real"));
+    }
+
+    #[test]
+    fn scene_with_root_props_roundtrips_and_legacy_deserializes() {
+        let mut scene = Scene::new();
+        scene.set_root_props(&raw(&[("alpha", "128")]));
+        let json = serde_json::to_string(&scene).unwrap();
+        let back: Scene = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.root_props().alpha, Some(128));
+
+        // 旧存档（无 root_props / solid_color / mask 字段）仍可反序列化。
+        let legacy = r#"{"nodes":{},"roots":[]}"#;
+        let scene: Scene = serde_json::from_str(legacy).unwrap();
+        assert!(scene.root_props().alpha.is_none());
+    }
+
+    #[test]
     fn rename_rejects_existing_target() {
         let mut scene = Scene::new();
         scene.create("1.0", Some("a".into()));
@@ -447,5 +596,38 @@ mod tests {
         assert!(!scene.rename("1.0", "1.1"));
         // 原节点保持不变。
         assert_eq!(scene.get("1.0").unwrap().file.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn effective_visibility_is_ancestor_aware() {
+        let mut scene = Scene::new();
+        // 消息窗 mw（1.mw）下挂文本层（1.mw.adv）。
+        scene.create("1.mw", Some("mw".into()));
+        scene.create("1.mw.adv", Some("adv".into()));
+
+        // 默认可见。
+        assert!(scene.is_effectively_visible("1.mw.adv"));
+
+        // 隐藏 mw（父层 visible=0）→ 文本层有效不可见（右键关闭消息窗的情形）。
+        scene.set_props("1.mw", &HashMap::from([("visible".into(), "0".into())]));
+        assert!(!scene.is_effectively_visible("1.mw.adv"));
+        assert!(!scene.is_effectively_visible("1.mw"));
+
+        // 恢复 mw → 文本层重新可见。
+        scene.set_props("1.mw", &HashMap::from([("visible".into(), "1".into())]));
+        assert!(scene.is_effectively_visible("1.mw.adv"));
+
+        // 文本层自身隐藏也算不可见。
+        scene.set_props("1.mw.adv", &HashMap::from([("visible".into(), "0".into())]));
+        assert!(!scene.is_effectively_visible("1.mw.adv"));
+
+        // 根图层（!）隐藏 → 一切不可见。
+        scene.set_props("1.mw.adv", &HashMap::from([("visible".into(), "1".into())]));
+        scene.set_root_props(&HashMap::from([("visible".into(), "0".into())]));
+        assert!(!scene.is_effectively_visible("1.mw.adv"));
+
+        // 不存在的图层视为不可见。
+        scene.set_root_props(&HashMap::from([("visible".into(), "1".into())]));
+        assert!(!scene.is_effectively_visible("9.9.9"));
     }
 }

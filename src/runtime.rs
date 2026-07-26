@@ -100,6 +100,9 @@ pub struct CoreRuntime {
     loaded_font_face: Option<String>,
     pending_dialog: Option<PendingDialog>,
     active_inline_event_frame: Option<InlineEventFrame>,
+    /// 引擎侧最近一次写入 `script_status` 的值。用于区分「引擎状态迁移」与
+    /// 「脚本经 e:setScriptStatus 强制改写」：原子量与该值不一致即为脚本改写。
+    last_engine_status: u8,
 }
 
 impl CoreRuntime {
@@ -186,6 +189,7 @@ impl CoreRuntime {
             loaded_font_face: None,
             pending_dialog: None,
             active_inline_event_frame: None,
+            last_engine_status: 0,
         })
     }
 
@@ -209,6 +213,14 @@ impl CoreRuntime {
         // 渲染完后必须 restore，否则宿主后续的 GL 调用全打到我们的离屏 FBO，
         // 宿主窗口就黑了。
         let saved_ctx = self.gl_ctx.bind_save();
+
+        // isPush 的按键重复语义依赖每键按下时间戳，逐帧维护。
+        self.input
+            .lock()
+            .unwrap()
+            .note_frame_for_push(std::time::Instant::now());
+        // getScriptStatus 的引擎状态自动迁移 + setScriptStatus(0) 的唤醒语义。
+        self.sync_script_status();
 
         let clicked = self.process_pointer_handlers();
         self.advance_script(clicked, delta_ms);
@@ -247,5 +259,161 @@ impl CoreRuntime {
     pub fn is_exit_requested(&self) -> bool {
         self.exit_requested
             .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// 每帧同步脚本引擎执行状态（getScriptStatus 语义，见
+    /// docs/lua/engine/getScriptStatus.txt）到 `script_status` 原子量，
+    /// 并落实 e:setScriptStatus 的两类强制改写：
+    /// - 设 0（运行中）：从等待/停止状态唤醒（setScriptStatus.txt 提到的
+    ///   「相对安全用法」——从停止切换到执行）；
+    /// - 设非 0：尊重脚本值，直到引擎自身状态迁移产生新状态。
+    fn sync_script_status(&mut self) {
+        use std::sync::atomic::Ordering;
+
+        let current = self.script_status.load(Ordering::SeqCst);
+        if current != self.last_engine_status {
+            // 原子量与引擎上次写入不一致 ⇒ 脚本经 e:setScriptStatus 改写过。
+            if current == 0 {
+                // 设 0 唤醒：清除当前等待并越过触发等待的指令。
+                if self.wait_reason.is_some() {
+                    self.advance_wait_line();
+                }
+                self.last_engine_status = 0;
+            } else {
+                // 非零强制值：本帧保持，引擎状态迁移时再覆盖。
+                self.last_engine_status = current;
+                return;
+            }
+        }
+
+        let computed = engine_status_for(
+            self.wait_reason.as_ref(),
+            self.pending_dialog.is_some(),
+            self.debug_skip_active.load(Ordering::SeqCst),
+            self.is_exit_requested(),
+        );
+        if computed != self.last_engine_status {
+            self.script_status.store(computed, Ordering::SeqCst);
+            self.last_engine_status = computed;
+        }
+    }
+}
+
+/// 把引擎运行状态映射为脚本可见的执行状态码（getScriptStatus.txt）：
+/// 0 执行中 / 1 等待点击 / 2 过渡中 / 3 停止（计时器或输入恢复）/
+/// 4 停止（仅计时器）/ 7 全屏视频播放中 / 9 对话框显示中 / 14 引擎退出。
+fn engine_status_for(
+    wait_reason: Option<&WaitReason>,
+    dialog_open: bool,
+    debug_skip: bool,
+    exit_requested: bool,
+) -> u8 {
+    if exit_requested {
+        return 14;
+    }
+    if debug_skip {
+        // debugSkip 快进：既有约定为 4（不接受用户输入的停止）。
+        return 4;
+    }
+    if dialog_open {
+        return 9;
+    }
+    match wait_reason {
+        None => 0,
+        Some(WaitReason::Stop { reason: Some(r) }) if r == "video" => 7,
+        Some(WaitReason::Stop { reason: Some(r) }) if r == "trans" || r.starts_with("tween:") => 2,
+        Some(WaitReason::Stop { .. }) => 3,
+        // 等待点击（@ / 文本推进 / wait input=1）。
+        Some(WaitReason::Generic) | Some(WaitReason::Generic0) => 1,
+        Some(WaitReason::Timed { input: 1, .. }) => 1,
+        // 纯计时等待：仅计时器恢复。
+        Some(WaitReason::Timed { .. }) => 4,
+        // SE / 视频层 / 文本缓动等事件等待：停止、由事件恢复。
+        Some(_) => 3,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::engine_status_for;
+    use asb_interpreter::event::WaitReason;
+
+    #[test]
+    fn engine_status_maps_wait_states_to_script_status_codes() {
+        // 0 执行中。
+        assert_eq!(engine_status_for(None, false, false, false), 0);
+        // 1 等待点击（@ 与 wait input=1）。
+        assert_eq!(
+            engine_status_for(Some(&WaitReason::Generic), false, false, false),
+            1
+        );
+        assert_eq!(
+            engine_status_for(
+                Some(&WaitReason::Timed {
+                    milliseconds: 100,
+                    input: 1
+                }),
+                false,
+                false,
+                false
+            ),
+            1
+        );
+        // 4 纯计时等待。
+        assert_eq!(
+            engine_status_for(
+                Some(&WaitReason::Timed {
+                    milliseconds: 100,
+                    input: 0
+                }),
+                false,
+                false,
+                false
+            ),
+            4
+        );
+        // 2 过渡中 / 7 全屏视频 / 3 一般停止。
+        assert_eq!(
+            engine_status_for(
+                Some(&WaitReason::Stop {
+                    reason: Some("trans".into())
+                }),
+                false,
+                false,
+                false
+            ),
+            2
+        );
+        assert_eq!(
+            engine_status_for(
+                Some(&WaitReason::Stop {
+                    reason: Some("video".into())
+                }),
+                false,
+                false,
+                false
+            ),
+            7
+        );
+        assert_eq!(
+            engine_status_for(Some(&WaitReason::Stop { reason: None }), false, false, false),
+            3
+        );
+    }
+
+    #[test]
+    fn dialog_debug_skip_and_exit_take_precedence() {
+        // 9 对话框优先于等待状态。
+        assert_eq!(
+            engine_status_for(Some(&WaitReason::Generic), true, false, false),
+            9
+        );
+        // 4 debugSkip 快进。
+        assert_eq!(
+            engine_status_for(Some(&WaitReason::Generic), false, true, false),
+            4
+        );
+        // 14 引擎退出最高优先。
+        assert_eq!(engine_status_for(None, true, true, true), 14);
     }
 }

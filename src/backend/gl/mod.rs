@@ -95,6 +95,20 @@ impl GlRenderer {
                     bindings: ProgramBindings::new(&gl, alpha_mask_program),
                 },
             );
+            // [trans type=2] 规则图像转场内置 shader，与 alpha-mask 同样在
+            // 初始化时编译并注册到 custom_programs。
+            let rule_trans_program = shader::build_builtin_program(
+                &gl,
+                profile,
+                crate::render_pipeline::shader::RULE_TRANS_SHADER,
+            )?;
+            custom_programs.insert(
+                crate::render_pipeline::shader::RULE_TRANS_SHADER.to_owned(),
+                CustomProgram {
+                    program: rule_trans_program,
+                    bindings: ProgramBindings::new(&gl, rule_trans_program),
+                },
+            );
 
             // 单位四边形，两个三角形，含纹理坐标。布局：x, y, u, v。
             // 顶点位置是 0..1 的单位方块，顶点着色器再乘以 size 与 transform。

@@ -68,6 +68,8 @@ fn build_channel(
     channel.playing = true;
     channel.loop_play = loop_play;
     channel.skippable = skippable;
+    // 记录开播时刻：`[wait se=ID time=N]` 的 N 从 SE 开始播放起算。
+    channel.started_at_ms = clock_ms;
 
     if let Some(gain) = gain {
         channel.raw_gain = gain;

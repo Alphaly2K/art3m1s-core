@@ -145,8 +145,12 @@ pub struct VideoState {
     pub fullscreen_video: Option<VideoChannel>,
     /// 活跃的视频图层通道表（按 ID 索引）
     pub video_layers: HashMap<String, VideoChannel>,
-    /// 视频播放完成事件处理器（全局，非图层绑定）
+    /// 全屏/全局视频完成事件处理器（`setonvideofinish` 不带 id 时登记）。
     pub finish_handler: Option<VideoFinishHandler>,
+    /// 按图层 ID 索引的视频完成事件处理器（`setonvideofinish id=层ID`）。
+    ///
+    /// 对应音频侧 `se_finish_handlers` 的做法：多视频图层并行时各自派发。
+    pub layer_finish_handlers: HashMap<String, VideoFinishHandler>,
     /// 视频子系统内部时钟（毫秒），用于视频进度计时
     pub clock_ms: u64,
 }
@@ -210,10 +214,14 @@ pub trait VideoBackend {
     // -----------------------------------------------------------------------
 
     /// 注册视频播放完成事件处理器。
-    fn set_finish_handler(&mut self, handler: VideoFinishHandler);
+    ///
+    /// `id` 为 `Some(层ID)` 时按图层登记；`None` 表全局/全屏视频。
+    fn set_finish_handler(&mut self, id: Option<&str>, handler: VideoFinishHandler);
 
     /// 解除视频播放完成事件处理器。
-    fn remove_finish_handler(&mut self);
+    ///
+    /// `id` 为 `Some(层ID)` 时按图层解除；`None` 表全局/全屏视频。
+    fn remove_finish_handler(&mut self, id: Option<&str>);
 
     // -----------------------------------------------------------------------
     // 帧循环

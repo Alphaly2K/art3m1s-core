@@ -6,7 +6,7 @@
 //! selection.  Concrete backends compile the selected shaders and execute the
 //! passes.
 
-use crate::compositor::build::{build_frame, build_frame_with_content};
+use crate::compositor::build::build_frame_with_content;
 use crate::compositor::reduce::Compositor;
 pub mod draw;
 pub mod hlsl;
@@ -58,15 +58,28 @@ impl<'a> RenderPipeline<'a> {
         text_for: Option<&LayerDrawSource<'_>>,
     ) -> DrawList {
         let compositor = self.compositor;
+        // [lyedit] 像素加工在进入帧构建前落地（需要 provider 才能读写像素）。
+        compositor.process_layer_edits(provider);
+        let overrides = compositor.layer_edit_overrides();
         let mut frame = build_frame_with_content(
             &compositor.scene,
             compositor.clock_ms,
             provider,
             content_for,
             text_for,
+            if overrides.is_empty() {
+                None
+            } else {
+                Some(&overrides)
+            },
         );
 
-        transition::overlay_old_frame(&compositor.trans_state, compositor.clock_ms, &mut frame);
+        transition::overlay_old_frame(
+            &compositor.trans_state,
+            compositor.clock_ms,
+            &mut frame,
+            provider,
+        );
         frame
     }
 
@@ -96,7 +109,18 @@ impl<'a> RenderPipeline<'a> {
     }
 
     pub fn retained_files(&self) -> Vec<String> {
-        transition::retained_files(&self.compositor.trans_state)
+        let mut files = transition::retained_files(&self.compositor.trans_state);
+        // [lyedit] 生成的加工后纹理不在场景 file 列表里，显式保活。
+        files.extend(self.compositor.layer_edit_overrides().into_values());
+        files
+    }
+
+    /// 用户输入请求跳过进行中的转场（`[trans]` input 参数语义）。
+    ///
+    /// `in_skip_mode`：引擎当前是否处于跳过（skip）状态，input=2 时用。
+    /// 返回是否真的跳过了转场。宿主在转场等待期间收到点击时调用。
+    pub fn skip_transition_by_input(&self, in_skip_mode: bool) -> bool {
+        transition::skip_by_input(&self.compositor.trans_state, in_skip_mode)
     }
 
     /// Builds only the scene DrawList, with no transition overlay.
@@ -112,6 +136,19 @@ impl<'a> RenderPipeline<'a> {
         text_for: Option<&LayerDrawSource<'_>>,
     ) -> DrawList {
         let compositor = self.compositor;
-        build_frame(&compositor.scene, compositor.clock_ms, provider, text_for)
+        compositor.process_layer_edits(provider);
+        let overrides = compositor.layer_edit_overrides();
+        build_frame_with_content(
+            &compositor.scene,
+            compositor.clock_ms,
+            provider,
+            None,
+            text_for,
+            if overrides.is_empty() {
+                None
+            } else {
+                Some(&overrides)
+            },
+        )
     }
 }

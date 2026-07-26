@@ -28,38 +28,51 @@ pub fn build_frame(
     provider: &mut dyn TextureProvider,
     text_for: Option<&LayerDrawSource<'_>>,
 ) -> DrawList {
-    build_frame_with_content(scene, now_ms, provider, None, text_for)
+    build_frame_with_content(scene, now_ms, provider, None, text_for, None)
 }
 
 /// Builds a frame with optional host-owned visual content injected before a
 /// layer's children, plus text injected after its children.
+///
+/// `file_overrides`：图层 ID → 纹理名的重定向表（`[lyedit]` 加工后的纹理），
+/// 命中时替代该图层的 `file` 解析。
 pub fn build_frame_with_content(
     scene: &Scene,
     now_ms: u64,
     provider: &mut dyn TextureProvider,
     content_for: Option<&LayerDrawSource<'_>>,
     text_for: Option<&LayerDrawSource<'_>>,
+    file_overrides: Option<&std::collections::HashMap<String, String>>,
 ) -> DrawList {
     let mut frame = DrawList::new();
+    // `[lyprop id="!"]`：根图层属性作用于整棵场景树。
+    let root_props = scene.root_props();
+    if !root_props.is_visible() {
+        return frame;
+    }
+    let root_transform = root_props.local_transform();
+    let root_opacity = root_props.opacity();
     for root in scene.roots() {
         visit(
             scene,
             &root,
             now_ms,
-            Affine2::IDENTITY,
-            1.0,
+            root_transform,
+            root_opacity,
             None,
             None,
             provider,
             &mut frame,
             content_for,
             text_for,
+            file_overrides,
         );
     }
     frame
 }
 
 /// 递归访问一个节点：合成本地变换，向子节点继承，产出绘制命令。
+#[allow(clippy::too_many_arguments)]
 fn visit(
     scene: &Scene,
     id: &str,
@@ -72,6 +85,7 @@ fn visit(
     frame: &mut DrawList,
     content_for: Option<&LayerDrawSource<'_>>,
     text_for: Option<&LayerDrawSource<'_>>,
+    file_overrides: Option<&std::collections::HashMap<String, String>>,
 ) {
     let Some(layer) = scene.get(id) else {
         return;
@@ -103,13 +117,21 @@ fn visit(
     let group_start = frame.len();
 
     // 只有绑定了非空文件名且能解析到资源的节点才产出绘制命令；纯分组节点只传
-    // 递变换。空文件名（如 config 的纯色图层 `lyc2{color=...}`，无 file，Create
-    // 事件 file=""）不是纹理引用——跳过，否则 provider.resolve("") 会回退到品红
-    // 占位纹理，在屏幕左上角显示紫黑块。注：合成器暂无纯色矩形渲染路径，故这类
-    // 纯色图层（透明锚点 / 白条 / 黑底等）目前不绘制。
-    if let Some(file) = &layer.file
+    // 递变换。空文件名（Create 事件 file=""）不是纹理引用——跳过，否则
+    // provider.resolve("") 会回退到品红占位纹理，在屏幕左上角显示紫黑块。
+    // lyedit 加工过的图层经 file_overrides 重定向到加工后纹理；带 lyc mask 的
+    // 图层经 resolve_with_mask 取 file+mask 合成纹理。
+    let override_name = file_overrides
+        .and_then(|map| map.get(id))
+        .map(String::as_str);
+    let effective_file = override_name.or(layer.file.as_deref());
+    if let Some(file) = effective_file
         && !file.is_empty()
-        && let Some((texture, info)) = provider.resolve(file)
+        && let Some((texture, info)) = match (&layer.mask, override_name) {
+            // lyedit 结果已是最终像素，不再叠加蒙版。
+            (Some(mask), None) if !mask.is_empty() => provider.resolve_with_mask(file, mask),
+            _ => provider.resolve(file),
+        }
     {
         // 计算裁剪矩形
         let clip = if let Some(clip_rect) = props.clip_rect() {
@@ -132,6 +154,32 @@ fn visit(
             blend: blend_mode(&props),
             color: color_filter(&props),
             clip,
+            clip_bounds,
+            shader: command_shader.clone(),
+            mesh: None,
+            stencil: None,
+        });
+    } else if effective_file.is_none_or(str::is_empty)
+        && let Some(rgba) = layer.solid_color
+        && let (Some(w), Some(h)) = (props.width, props.height)
+        && w > 0.0
+        && h > 0.0
+        && let Some((texture, info)) = provider.solid_texture(rgba)
+    {
+        // `lyc` 缺省 file 的单色图层：1x1 纯色纹理拉伸到 width×height。
+        // 颜色（含 AARRGGBB 的 alpha）烘焙在纹理里，图层 alpha 继续走 opacity。
+        frame.push(DrawCommand {
+            texture,
+            size: info,
+            transform: world,
+            opacity,
+            blend: blend_mode(&props),
+            color: color_filter(&props),
+            clip: ClipRect {
+                uv_offset: [0.0, 0.0],
+                uv_scale: [1.0, 1.0],
+                quad_size: [w, h],
+            },
             clip_bounds,
             shader: command_shader.clone(),
             mesh: None,
@@ -168,6 +216,7 @@ fn visit(
             frame,
             content_for,
             text_for,
+            file_overrides,
         );
     }
 
@@ -277,6 +326,11 @@ fn shader_uniform_value(props: &LayerProps, name: &str) -> Option<Vec<f32>> {
 fn resolved_props(layer: &crate::compositor::scene::Layer, now_ms: u64) -> LayerProps {
     let mut props = layer.props.clone();
     for tween in &layer.tweens {
+        // tweenset 组内同参数可排多段：未到启动时刻的成员不参与求值，
+        // 否则其 from 值会盖掉正在播放的前一段。
+        if tween.set_id.is_some() && now_ms < tween.start_ms {
+            continue;
+        }
         let value = tween.value_at(now_ms);
         props.set_raw(&tween.param, &LayerProps::format_value(&tween.param, value));
     }
@@ -432,7 +486,8 @@ mod tests {
         };
 
         let mut provider = MockProvider::new();
-        let frame = build_frame_with_content(&scene, 0, &mut provider, Some(&content_for), None);
+        let frame =
+            build_frame_with_content(&scene, 0, &mut provider, Some(&content_for), None, None);
         assert_eq!(frame.commands.len(), 2);
         assert_eq!(frame.commands[0].texture, TextureId(999));
         assert_eq!(provider.name_of(frame.commands[1].texture), "child");
@@ -602,6 +657,7 @@ mod tests {
             loop_delay_ms: 0,
             delete_on_finish: false,
             handler: None,
+            set_id: None,
         });
 
         let mut provider = MockProvider::new();
@@ -642,6 +698,85 @@ mod tests {
         // UV scale 应该是裁剪宽高除以纹理尺寸
         assert!((cmd.clip.uv_scale[0] - 100.0 / 256.0).abs() < 1e-6);
         assert!((cmd.clip.uv_scale[1] - 50.0 / 256.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn solid_color_layer_draws_stretched_1x1_texture() {
+        let mut scene = Scene::new();
+        // lyc 缺省 file + color=AARRGGBB 的单色图层模式。
+        scene.ensure("5");
+        scene.set_solid_color("5", Some([255, 0, 0, 128]));
+        scene.set_props("5", &raw(&[("width", "320"), ("height", "40"), ("left", "10")]));
+
+        let mut provider = MockProvider::new();
+        let frame = build_frame(&scene, 0, &mut provider, None);
+        assert_eq!(frame.len(), 1);
+        let cmd = &frame.commands[0];
+        assert_eq!(
+            provider.name_of(cmd.texture),
+            crate::render_pipeline::draw::solid_texture_name([255, 0, 0, 128])
+        );
+        // 1x1 纹理拉伸到 width×height。
+        assert_eq!(cmd.size.width, 1);
+        assert_eq!(cmd.clip.quad_size, [320.0, 40.0]);
+        assert_eq!(cmd.transform.translation.x, 10.0);
+    }
+
+    #[test]
+    fn solid_color_layer_without_size_is_skipped() {
+        let mut scene = Scene::new();
+        scene.ensure("5");
+        scene.set_solid_color("5", Some([255, 255, 255, 255]));
+        // 未设置 width/height：无法确定矩形，跳过绘制。
+        let mut provider = MockProvider::new();
+        let frame = build_frame(&scene, 0, &mut provider, None);
+        assert!(frame.is_empty());
+    }
+
+    #[test]
+    fn layer_mask_resolves_combined_texture() {
+        let mut scene = Scene::new();
+        scene.create("1", Some("fg".into()));
+        scene.set_mask("1", Some("fgmask".into()));
+
+        let mut provider = MockProvider::new();
+        let frame = build_frame(&scene, 0, &mut provider, None);
+        assert_eq!(frame.len(), 1);
+        assert_eq!(
+            provider.name_of(frame.commands[0].texture),
+            crate::render_pipeline::draw::masked_texture_name("fg", "fgmask")
+        );
+    }
+
+    #[test]
+    fn root_props_transform_and_alpha_apply_to_whole_tree() {
+        let mut scene = Scene::new();
+        scene.create("1", Some("a".into()));
+        scene.set_root_props(&raw(&[("left", "100"), ("alpha", "128")]));
+
+        let mut provider = MockProvider::new();
+        let frame = build_frame(&scene, 0, &mut provider, None);
+        let cmd = &frame.commands[0];
+        assert_eq!(cmd.transform.translation.x, 100.0);
+        assert!((cmd.opacity - 128.0 / 255.0).abs() < 0.01);
+
+        // 根图层隐藏 → 整棵树不绘制。
+        scene.set_root_props(&raw(&[("visible", "0")]));
+        let frame = build_frame(&scene, 0, &mut provider, None);
+        assert!(frame.is_empty());
+    }
+
+    #[test]
+    fn file_override_redirects_layer_texture() {
+        let mut scene = Scene::new();
+        scene.create("1", Some("bg".into()));
+        let overrides =
+            HashMap::from([("1".to_string(), "__lyedit_1_1__".to_string())]);
+
+        let mut provider = MockProvider::new();
+        let frame =
+            build_frame_with_content(&scene, 0, &mut provider, None, None, Some(&overrides));
+        assert_eq!(provider.name_of(frame.commands[0].texture), "__lyedit_1_1__");
     }
 
     #[test]

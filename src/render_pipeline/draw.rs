@@ -37,6 +37,51 @@ pub trait TextureProvider {
 
     /// Retains only the named resources. Implementations may no-op.
     fn retain(&mut self, _names: &std::collections::HashSet<String>) {}
+
+    /// 取一张 1x1 纯色纹理（`lyc` 缺省 file 的单色图层模式用）。
+    ///
+    /// 默认实现直接按稳定名字上传；带缓存的后端（如 GL provider）应覆写为
+    /// 先查缓存，避免每帧重建纹理。
+    fn solid_texture(&mut self, rgba: [u8; 4]) -> Option<(TextureId, TextureInfo)> {
+        self.upload_rgba(&solid_texture_name(rgba), 1, 1, &rgba)
+    }
+
+    /// 解析 `file` 并用 `mask` 灰度图合成 alpha 后的组合纹理（`lyc` mask 参数）。
+    ///
+    /// 默认实现忽略蒙版、退化为普通 `resolve`；有像素访问能力的后端应覆写为
+    /// 真正的双图合成（out.rgb = file.rgb，out.a = file.a × mask 灰度）。
+    fn resolve_with_mask(
+        &mut self,
+        file: &str,
+        _mask: &str,
+    ) -> Option<(TextureId, TextureInfo)> {
+        self.resolve(file)
+    }
+
+    /// 读取某逻辑资源的 CPU 侧 RGBA 像素（`lyedit` 像素加工用）。
+    ///
+    /// 返回 `(宽, 高, RGBA8)`。无法提供像素（无 CPU 缓存）时返回 `None`。
+    fn pixels_of(&mut self, _name: &str) -> Option<(u32, u32, Vec<u8>)> {
+        None
+    }
+}
+
+/// `lyc` 单色图层使用的 1x1 纯色纹理的稳定缓存名。
+///
+/// provider 缓存与 `Scene::collect_files` 的保活列表都用这个名字，保证纹理
+/// 不会被逐帧驱逐重建。
+pub fn solid_texture_name(rgba: [u8; 4]) -> String {
+    format!(
+        "__solid_{:02x}{:02x}{:02x}{:02x}__",
+        rgba[0], rgba[1], rgba[2], rgba[3]
+    )
+}
+
+/// `lyc` file+mask 双图合成纹理的稳定缓存名。
+///
+/// provider 缓存与 `Scene::collect_files` 的保活列表共用，避免 retain 驱逐。
+pub fn masked_texture_name(file: &str, mask: &str) -> String {
+    format!("{file}\u{1f}mask\u{1f}{mask}")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

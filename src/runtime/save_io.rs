@@ -9,6 +9,8 @@ use std::collections::HashMap;
 const SAVEG_FILE: &str = "saveg.dat";
 /// `syssave()` 落盘的系统域文件名。
 const SYSTEM_FILE: &str = "system.dat";
+/// [autosave] 自动保存的存档文件名。
+const AUTOSAVE_FILE: &str = "__Autosave.dat";
 
 #[derive(Clone)]
 pub(super) struct ScreenshotBuffer {
@@ -141,7 +143,14 @@ impl CoreRuntime {
 
     /// 处理 [load]：经宿主读回调读取 JSON → 恢复变量与执行位置 → 触发 onLoad
     /// 把变量反序列化回 `sys` 等 Lua 表 → 抽干队列 → 清等待状态让脚本续跑。
-    pub(super) fn handle_load_game(&mut self, file: &str) -> Result<(), String> {
+    ///
+    /// `trans_type`：`[load type=0..2]` 指定时在加载完成后执行一次转场
+    /// （与 trans 标签 type 同值）；缺省瞬切。
+    pub(super) fn handle_load_game(
+        &mut self,
+        file: &str,
+        trans_type: Option<i32>,
+    ) -> Result<(), String> {
         let path = self.save_path_for(file)?;
         let bytes = crate::ffi::request_file(&path)?;
         let data: crate::save::SaveData =
@@ -173,6 +182,12 @@ impl CoreRuntime {
             self.restore_audio_snapshot(audio);
         }
 
+        // [load type=..]：加载完成后启动一次转场。下一帧渲染前合成器会捕获
+        // FBO 里残留的读档前旧画面作为转场旧帧，再淡入恢复后的场景。
+        if let Some(event) = load_transition_event(trans_type) {
+            self.compositor.apply_event(&event);
+        }
+
         // 清除等待状态，使下一帧 run() 从恢复后的位置继续执行。
         self.wait_reason = None;
         crate::core_info!("[runtime] 已读取存档: {}", path);
@@ -193,6 +208,36 @@ impl CoreRuntime {
             )
             .exec()
             .map_err(|e| e.to_string())
+    }
+
+    /// 执行一次自动保存（[autosave] 语义）。存档文件固定为 __Autosave.dat。
+    fn autosave_now(&mut self, reason: &str) {
+        crate::core_info!("[autosave] 触发（{reason}）→ {AUTOSAVE_FILE}");
+        if let Err(e) = self.handle_save_game(AUTOSAVE_FILE) {
+            crate::core_warn!("[autosave] 保存失败: {e}");
+        }
+    }
+
+    /// allow=2：进入用户输入等待时自动保存。由 advance_script 在等待建立时调用。
+    pub(super) fn maybe_autosave_on_input_wait(&mut self) {
+        if self.control.autosave_allow == 2 {
+            self.autosave_now("输入等待");
+        }
+    }
+
+    /// 宿主生命周期通知（FFI `art3m1s_runtime_notify_lifecycle`）。
+    ///
+    /// state：0=引擎退出前、1=切到后台（iOS/Android）、2=回到前台。
+    /// [autosave allow=1] 时在退出/切后台时自动保存。
+    pub fn notify_lifecycle(&mut self, state: i32) {
+        match state {
+            0 | 1 => {
+                if self.control.autosave_allow == 1 {
+                    self.autosave_now(if state == 0 { "引擎退出" } else { "切后台" });
+                }
+            }
+            _ => {}
+        }
     }
 
     pub(super) fn handle_go_title(&mut self) -> Result<(), String> {
@@ -303,6 +348,26 @@ impl CoreRuntime {
     }
 }
 
+/// 把 `[load type=..]` 的转场类型换成合成器可消费的 `Event::Trans`。
+///
+/// 文档：type 0..2 与 trans 标签 type 同值（0=瞬切、1=交叉淡化、2=规则图转场，
+/// load 无 rule 参数故 2 退化为淡化）；缺省不执行转场。时长/输入用 trans 的
+/// 缺省值（time 缺省由合成器决定，input=1 允许输入跳过）。
+fn load_transition_event(trans_type: Option<i32>) -> Option<asb_interpreter::Event> {
+    let trans_type = trans_type?;
+    if !(0..=2).contains(&trans_type) {
+        crate::core_warn!("[load] 非法转场 type={trans_type}，跳过转场");
+        return None;
+    }
+    Some(asb_interpreter::Event::Trans {
+        trans_type,
+        time: None,
+        rule: None,
+        vague: None,
+        input: 1,
+    })
+}
+
 /// 规范化 system.ini 的 SAVEPATH 为沙箱内的逻辑相对子目录前缀。
 ///
 /// 原值可能是 Windows 风格（含反斜杠、盘符、CSIDL 特殊文件夹名），桌面/移动端都
@@ -345,6 +410,12 @@ fn normalize_relative_path(path: &str) -> Option<String> {
     } else {
         Some(parts.join("/"))
     }
+}
+
+/// 供事件侧钩子（var system=file_exists save=1 / file_update_time）使用的
+/// 存档路径归一入口，与 [`CoreRuntime::save_path_for`] 同一套规则。
+pub(super) fn qualify_save_path_for_hooks(file: &str, savepath: &str) -> Result<String, String> {
+    qualify_save_path(file, savepath)
 }
 
 fn qualify_save_path(file: &str, savepath: &str) -> Result<String, String> {
@@ -406,8 +477,8 @@ fn encode_png_rgba(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Stri
 #[cfg(test)]
 mod tests {
     use super::{
-        ScreenshotBuffer, encode_png_rgba, qualify_save_path, resize_screenshot_rgba,
-        sanitize_savepath,
+        ScreenshotBuffer, encode_png_rgba, load_transition_event, qualify_save_path,
+        resize_screenshot_rgba, sanitize_savepath,
     };
 
     #[test]
@@ -440,6 +511,39 @@ mod tests {
         );
         assert_eq!(sanitize_savepath(Some("../bad/save")), "bad/save");
         assert_eq!(sanitize_savepath(None), "save");
+    }
+
+    #[test]
+    fn load_type_starts_a_transition_after_restore() {
+        // 缺省不转场；越界 type 也不转场。
+        assert!(load_transition_event(None).is_none());
+        assert!(load_transition_event(Some(3)).is_none());
+        assert!(load_transition_event(Some(-1)).is_none());
+
+        // type=1 应产出交叉淡化的 Trans 事件，应用后转场进入进行中状态。
+        let event = load_transition_event(Some(1)).expect("type=1 应转场");
+        match &event {
+            asb_interpreter::Event::Trans {
+                trans_type, input, ..
+            } => {
+                assert_eq!(*trans_type, 1);
+                assert_eq!(*input, 1);
+            }
+            other => panic!("期望 Trans 事件，得到 {other:?}"),
+        }
+        let mut compositor = crate::compositor::Compositor::new();
+        compositor.apply_event(&event);
+        assert!(
+            crate::render_pipeline::RenderPipeline::new(&compositor).is_transition_in_progress()
+        );
+
+        // type=0 = 瞬间切换：应用后不进入转场状态（与 trans type=0 同义）。
+        let instant = load_transition_event(Some(0)).expect("type=0 也是合法取值");
+        let mut compositor = crate::compositor::Compositor::new();
+        compositor.apply_event(&instant);
+        assert!(
+            !crate::render_pipeline::RenderPipeline::new(&compositor).is_transition_in_progress()
+        );
     }
 
     #[test]

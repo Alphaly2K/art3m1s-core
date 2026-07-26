@@ -78,6 +78,11 @@ pub struct BgmPlay<'a> {
     pub gain: Option<i32>,
     pub pan: Option<i32>,
     pub fade_ms: u64,
+    /// A-B 循环的循环段文件（`foo_a.ogg`→`foo_b.ogg` 命名约定）：
+    /// 宿主播完引导段（file）后应无限循环该文件；None=普通播放。
+    pub loop_file: Option<&'a str>,
+    /// 循环段文件的 magic path 解析结果。
+    pub resolved_loop_file: Option<&'a str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -94,6 +99,8 @@ pub struct BgmFade {
 #[derive(Debug, Serialize)]
 pub struct BgmPan {
     pub pan: i32,
+    /// 渐变时间（毫秒），0=立即切换
+    pub time_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -137,6 +144,8 @@ pub struct SeFade<'a> {
 pub struct SePan<'a> {
     pub id: &'a str,
     pub pan: i32,
+    /// 渐变时间（毫秒），0=立即切换
+    pub time_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -162,6 +171,60 @@ pub struct VideoPlay<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bgm_play_payload_carries_ab_loop_segment() {
+        // splay 的 A-B 循环：foo_a（引导段）+ foo_b（循环段）随命令一起下发宿主
+        let value = serde_json::to_value(BgmPlay {
+            file: "bgm/foo_a.ogg",
+            resolved_file: Some("sound/bgm/foo_a.ogg"),
+            loop_play: true,
+            gain: None,
+            pan: None,
+            fade_ms: 0,
+            loop_file: Some("bgm/foo_b.ogg"),
+            resolved_loop_file: Some("sound/bgm/foo_b.ogg"),
+        })
+        .unwrap();
+        assert_eq!(value["loop_file"], "bgm/foo_b.ogg");
+        assert_eq!(value["resolved_loop_file"], "sound/bgm/foo_b.ogg");
+
+        // 普通播放：字段为 null，宿主按整曲循环处理
+        let value = serde_json::to_value(BgmPlay {
+            file: "bgm/theme.ogg",
+            resolved_file: None,
+            loop_play: true,
+            gain: None,
+            pan: None,
+            fade_ms: 0,
+            loop_file: None,
+            resolved_loop_file: None,
+        })
+        .unwrap();
+        assert!(value["loop_file"].is_null());
+    }
+
+    #[test]
+    fn pan_wire_payloads_carry_fade_time() {
+        // [span]/[sepan] 的 time 参数经 time_ms 字段透传给宿主渐变
+        let value = serde_json::to_value(BgmPan {
+            pan: -1000,
+            time_ms: 500,
+        })
+        .unwrap();
+        assert_eq!(value["pan"], -1000);
+        assert_eq!(value["time_ms"], 500);
+
+        let value = serde_json::to_value(SePan {
+            id: "1.80",
+            pan: 1000,
+            time_ms: 0,
+        })
+        .unwrap();
+        assert_eq!(value["id"], "1.80");
+        assert_eq!(value["pan"], 1000);
+        assert_eq!(value["time_ms"], 0);
+    }
 
     #[test]
     fn video_play_wire_payload_keeps_frontend_field_names() {

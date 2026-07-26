@@ -223,13 +223,47 @@ fn parse_bool(value: &str) -> Option<bool> {
     }
 }
 
-/// 解析 `"r,g,b"`（0-255）为归一化 RGB。
+/// 解析 colormultiply 的两种写法为归一化 RGB：
+/// - 文档格式 `RRGGBB` 十六进制（`FFFFFF` = 禁用 = 单位乘算）；
+/// - 兼容旧脚本的 `"r,g,b"`（0-255）逗号格式。
 fn parse_rgb(value: &str) -> Option<[f32; 3]> {
-    let mut it = value.split(',').map(|c| c.trim().parse::<f32>());
-    let r = it.next()?.ok()?;
-    let g = it.next()?.ok()?;
-    let b = it.next()?.ok()?;
-    Some([r / 255.0, g / 255.0, b / 255.0])
+    if value.contains(',') {
+        let mut it = value.split(',').map(|c| c.trim().parse::<f32>());
+        let r = it.next()?.ok()?;
+        let g = it.next()?.ok()?;
+        let b = it.next()?.ok()?;
+        return Some([r / 255.0, g / 255.0, b / 255.0]);
+    }
+    // RRGGBB 十六进制（AARRGGBB 时取低 6 位的 RRGGBB）。
+    let [_, r, g, b] = parse_hex_color(value)?;
+    Some([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0])
+}
+
+/// 解析 `RRGGBB` / `AARRGGBB` 十六进制颜色为 `[A, R, G, B]`（RRGGBB 时 A=255）。
+///
+/// 兼容可选的 `#` / `0x` 前缀。`lyc` 单色图层与 `lyprop` colormultiply 共用。
+pub fn parse_hex_color(value: &str) -> Option<[u8; 4]> {
+    let hex = value
+        .trim()
+        .trim_start_matches('#')
+        .trim_start_matches("0x")
+        .trim_start_matches("0X");
+    let digits = u32::from_str_radix(hex, 16).ok()?;
+    match hex.len() {
+        6 => Some([
+            255,
+            (digits >> 16) as u8,
+            (digits >> 8) as u8,
+            digits as u8,
+        ]),
+        8 => Some([
+            (digits >> 24) as u8,
+            (digits >> 16) as u8,
+            (digits >> 8) as u8,
+            digits as u8,
+        ]),
+        _ => None,
+    }
 }
 
 /// 解析 `"x,y,w,h"`（纹理像素）为裁剪矩形。四个分量缺一不可。
@@ -337,6 +371,29 @@ mod tests {
         assert!((c[0] - 1.0).abs() < 1e-6);
         assert!((c[1] - 128.0 / 255.0).abs() < 1e-6);
         assert_eq!(c[2], 0.0);
+    }
+
+    #[test]
+    fn color_multiply_accepts_hex_rrggbb() {
+        // 文档格式：RRGGBB 十六进制。
+        let props = LayerProps::from_raw(&raw(&[("colormultiply", "F0C891")]));
+        let c = props.color_multiply.unwrap();
+        assert!((c[0] - 0xF0 as f32 / 255.0).abs() < 1e-6);
+        assert!((c[1] - 0xC8 as f32 / 255.0).abs() < 1e-6);
+        assert!((c[2] - 0x91 as f32 / 255.0).abs() < 1e-6);
+
+        // FFFFFF = 禁用 = 单位乘算。
+        let props = LayerProps::from_raw(&raw(&[("colormultiply", "FFFFFF")]));
+        assert_eq!(props.color_multiply, Some([1.0, 1.0, 1.0]));
+    }
+
+    #[test]
+    fn parse_hex_color_handles_rrggbb_and_aarrggbb() {
+        assert_eq!(parse_hex_color("FF0000"), Some([255, 255, 0, 0]));
+        assert_eq!(parse_hex_color("#00FF00"), Some([255, 0, 255, 0]));
+        assert_eq!(parse_hex_color("80FF8040"), Some([0x80, 0xFF, 0x80, 0x40]));
+        assert_eq!(parse_hex_color("xyz"), None);
+        assert_eq!(parse_hex_color("FFF"), None);
     }
 
     #[test]

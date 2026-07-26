@@ -5,7 +5,37 @@ use crate::runtime::input;
 use crate::save::AudioSnapshot;
 use crate::video::{VideoConfig, VideoFinishHandler, video_layer_texture_name};
 use asb_interpreter::Event;
+use asb_interpreter::tags::var_handler::{SoundChannelInfo, SoundInfoSnapshot};
 use std::collections::HashMap;
+use std::sync::Mutex;
+
+/// 声音播放状态镜像，供 `var system=get_sound_info` 的宿主查询钩子读取。
+///
+/// 钩子是进程级注册点（var 标签路径拿不到 runtime 实例），因此这里维护一份
+/// 进程级快照，media 事件应用后与每帧推进时刷新。
+static SOUND_INFO: Mutex<SoundInfoSnapshot> = Mutex::new(SoundInfoSnapshot {
+    bgm: None,
+    se: Vec::new(),
+});
+
+/// 读取当前声音快照（get_sound_info 钩子入口）。
+pub(super) fn sound_info_snapshot() -> SoundInfoSnapshot {
+    SOUND_INFO.lock().unwrap().clone()
+}
+
+/// splay 的 A-B 循环文件名约定：file 以 `_a` 结尾（扩展名前）时，
+/// 返回把 `_a` 换成 `_b` 的循环段文件名；否则 None。
+fn ab_loop_file(file: &str) -> Option<String> {
+    // 只在最后一个路径段上找扩展名，避免把目录里的点当扩展名分隔符
+    let (stem, ext) = match file.rfind('.') {
+        Some(dot) if !file[dot..].contains('/') && !file[dot..].contains('\\') => {
+            (&file[..dot], &file[dot..])
+        }
+        _ => (file, ""),
+    };
+    stem.strip_suffix("_a")
+        .map(|base| format!("{base}_b{ext}"))
+}
 
 impl CoreRuntime {
     pub fn set_volume(&mut self, volume_type: &str, value: f32) {
@@ -52,6 +82,7 @@ impl CoreRuntime {
         }
         hm::emit(Kind::AudioStopAll, hm::EmptyPayload {});
         hm::emit(Kind::VideoStopAll, hm::EmptyPayload {});
+        self.refresh_sound_info_snapshot();
     }
 
     pub(super) fn restore_audio_snapshot(&mut self, snapshot: &AudioSnapshot) {
@@ -59,6 +90,14 @@ impl CoreRuntime {
 
         if let Some(bgm) = &snapshot.bgm {
             let resolved_file = self.resolve_magic_media_path(&bgm.file);
+            // 读档恢复同样按文件名约定重建 A-B 循环段
+            let loop_file = bgm.loop_play.then(|| ab_loop_file(&bgm.file)).flatten();
+            if let Some(channel) = &mut self.audio.audio_state_mut().bgm_channel {
+                channel.loop_file = loop_file.clone();
+            }
+            let resolved_loop_file = loop_file
+                .as_deref()
+                .map(|f| self.resolve_magic_media_path(f));
             hm::emit(
                 Kind::AudioBgmPlay,
                 hm::BgmPlay {
@@ -68,6 +107,8 @@ impl CoreRuntime {
                     gain: Some(bgm.gain),
                     pan: Some(bgm.pan),
                     fade_ms: 0,
+                    loop_file: loop_file.as_deref(),
+                    resolved_loop_file: resolved_loop_file.as_deref(),
                 },
             );
         }
@@ -103,9 +144,25 @@ impl CoreRuntime {
         }
     }
 
+    /// 把音频状态镜像进 get_sound_info 快照（BGM + SE，SE 按 ID 升序）。
+    pub(super) fn refresh_sound_info_snapshot(&self) {
+        let state = self.audio.audio_state();
+        let to_info = |channel: &crate::audio::SoundChannel| SoundChannelInfo {
+            id: channel.id.clone(),
+            playing: channel.playing,
+            gain: i64::from(channel.raw_gain),
+            pan: i64::from(channel.raw_pan),
+        };
+        let bgm = state.bgm_channel.as_ref().map(&to_info);
+        let mut se: Vec<SoundChannelInfo> = state.se_channels.values().map(&to_info).collect();
+        se.sort_by(|a, b| a.id.cmp(&b.id));
+        *SOUND_INFO.lock().unwrap() = SoundInfoSnapshot { bgm, se };
+    }
+
     pub(super) fn advance_media_and_enqueue_finish_handlers(&mut self, delta_ms: u64) {
         let host_media = crate::ffi::media_command_callback_registered();
         self.audio.advance(delta_ms);
+        self.refresh_sound_info_snapshot();
         if !host_media {
             self.video.advance(delta_ms);
         }
@@ -171,6 +228,7 @@ impl CoreRuntime {
         }
         // Discard queued fallback completions from the internal state machine.
         let _ = self.audio.poll_finish_events();
+        self.refresh_sound_info_snapshot();
 
         if let Some(handler) = handler {
             input::enqueue_handler_tags(
@@ -195,7 +253,17 @@ impl CoreRuntime {
     }
 
     pub fn notify_video_finished(&mut self, id: Option<&str>) {
-        let handler = self.video.video_state().finish_handler.clone();
+        // 图层视频优先取按 ID 登记的处理器，缺省回退到全局；全屏视频用全局。
+        let handler = match id {
+            Some(layer_id) => self
+                .video
+                .video_state()
+                .layer_finish_handlers
+                .get(layer_id)
+                .or(self.video.video_state().finish_handler.as_ref())
+                .cloned(),
+            None => self.video.video_state().finish_handler.clone(),
+        };
         match id {
             Some(layer_id) => {
                 self.video.stop_layer(layer_id);
@@ -269,6 +337,15 @@ impl CoreRuntime {
     }
 
     fn apply_audio_event(&mut self, event: &Event) -> bool {
+        let applied = self.apply_audio_event_inner(event);
+        if applied {
+            // 音频状态变化后刷新 get_sound_info 快照
+            self.refresh_sound_info_snapshot();
+        }
+        applied
+    }
+
+    fn apply_audio_event_inner(&mut self, event: &Event) -> bool {
         match event {
             Event::BgmPlay {
                 file,
@@ -276,6 +353,7 @@ impl CoreRuntime {
                 gain,
                 pan,
                 fade_time,
+                buffer,
             } => {
                 let resolved_file = self.resolve_magic_media_path(file);
                 self.audio.play_bgm(
@@ -285,9 +363,17 @@ impl CoreRuntime {
                         gain: *gain,
                         pan: *pan,
                         fade_in_ms: fade_time.unwrap_or(0),
-                        buffer_size: None,
+                        buffer_size: *buffer,
                     },
                 );
+                // A-B 循环：file 为 foo_a.* 且循环播放时，引导段播完后无限循环 foo_b.*
+                let loop_file = loop_play.then(|| ab_loop_file(file)).flatten();
+                if let Some(channel) = &mut self.audio.audio_state_mut().bgm_channel {
+                    channel.loop_file = loop_file.clone();
+                }
+                let resolved_loop_file = loop_file
+                    .as_deref()
+                    .map(|f| self.resolve_magic_media_path(f));
                 hm::emit(
                     Kind::AudioBgmPlay,
                     hm::BgmPlay {
@@ -297,6 +383,8 @@ impl CoreRuntime {
                         gain: *gain,
                         pan: *pan,
                         fade_ms: fade_time.unwrap_or(0),
+                        loop_file: loop_file.as_deref(),
+                        resolved_loop_file: resolved_loop_file.as_deref(),
                     },
                 );
                 true
@@ -322,9 +410,17 @@ impl CoreRuntime {
                 );
                 true
             }
-            Event::BgmPan { pan } => {
-                self.audio.pan_bgm(*pan, 0);
-                hm::emit(Kind::AudioBgmPan, hm::BgmPan { pan: *pan });
+            Event::BgmPan { pan, time } => {
+                // [span] time=毫秒渐变时间，缺省立即切换
+                let time_ms = time.unwrap_or(0);
+                self.audio.pan_bgm(*pan, time_ms);
+                hm::emit(
+                    Kind::AudioBgmPan,
+                    hm::BgmPan {
+                        pan: *pan,
+                        time_ms,
+                    },
+                );
                 true
             }
             Event::BgmCrossFade {
@@ -418,30 +514,49 @@ impl CoreRuntime {
                 );
                 true
             }
-            Event::SePan { id, pan } => {
-                self.audio.pan_se(id, *pan, 0);
-                hm::emit(Kind::AudioSePan, hm::SePan { id, pan: *pan });
+            Event::SePan { id, pan, time } => {
+                // [sepan] time=毫秒渐变时间，缺省立即切换
+                let time_ms = time.unwrap_or(0);
+                self.audio.pan_se(id, *pan, time_ms);
+                hm::emit(
+                    Kind::AudioSePan,
+                    hm::SePan {
+                        id,
+                        pan: *pan,
+                        time_ms,
+                    },
+                );
                 true
             }
             Event::VoicePlay {
+                id,
                 file,
+                loop_play,
                 gain,
                 pan,
                 fade_time,
+                skippable,
             } => {
                 let resolved_file = self.resolve_magic_media_path(file);
-                self.voice_serial = self.voice_serial.saturating_add(1);
-                let voice_id = format!("voice:{}", self.voice_serial);
+                // 脚本显式给了 id 时用之（可被 sestop/sepan 等按 ID 控制），
+                // 缺省沿用自动编号 voice:{serial}。
+                let voice_id = match id {
+                    Some(id) if !id.is_empty() => id.clone(),
+                    _ => {
+                        self.voice_serial = self.voice_serial.saturating_add(1);
+                        format!("voice:{}", self.voice_serial)
+                    }
+                };
                 self.audio.play_voice(
                     &voice_id,
                     file,
                     &SeConfig {
-                        loop_play: false,
+                        loop_play: *loop_play,
                         gain: *gain,
                         pan: *pan,
                         fade_in_ms: fade_time.unwrap_or(0),
                         buffer_size: None,
-                        skippable: false,
+                        skippable: *skippable,
                     },
                 );
                 hm::emit(
@@ -498,19 +613,24 @@ impl CoreRuntime {
 
     fn apply_video_event(&mut self, event: &Event) -> bool {
         match event {
+            // TODO(video): skip=2（仅右键菜单方式跳过）目前与 1 同样按可跳过
+            // 转发给宿主；mode（Windows VMR/EVR）对 Flutter 宿主不适用，忽略。
             Event::VideoPlay {
                 id,
                 file,
                 skip,
                 loop_play,
+                delay_margin_ms,
+                mode: _,
             } => {
                 crate::core_debug!("[Video] VideoPlay: file={}, id={:?}", file, id);
                 let resolved_file = self.resolve_magic_media_path(file);
+                let skippable = *skip != 0;
                 let config = VideoConfig {
                     file: file.clone(),
-                    skippable: *skip,
+                    skippable,
                     loop_play: *loop_play,
-                    delay_margin_ms: None,
+                    delay_margin_ms: *delay_margin_ms,
                 };
                 match id {
                     Some(layer_id) => {
@@ -525,28 +645,35 @@ impl CoreRuntime {
                         id: id.as_deref(),
                         file,
                         resolved_file: Some(&resolved_file),
-                        skippable: *skip,
+                        skippable,
                         loop_play: *loop_play,
                     },
                 );
                 true
             }
+            // setonvideofinish：id=Some(层ID) 按图层登记完成处理器，
+            // id=None 为全屏/全局处理器（对齐音频 se_finish_handlers 的按 ID 派发）。
             Event::VideoFinishHandler {
+                id,
                 file,
                 label,
                 call,
                 handler,
             } => {
-                self.video.set_finish_handler(VideoFinishHandler {
-                    file: file.clone(),
-                    label: label.clone(),
-                    call: *call,
-                    handler: handler.clone(),
-                });
+                self.video.set_finish_handler(
+                    id.as_deref(),
+                    VideoFinishHandler {
+                        file: file.clone(),
+                        label: label.clone(),
+                        call: *call,
+                        handler: handler.clone(),
+                    },
+                );
                 true
             }
-            Event::VideoFinishHandlerDel => {
-                self.video.remove_finish_handler();
+            // delonvideofinish：按 id 解除对应图层处理器；id=None 清全局处理器。
+            Event::VideoFinishHandlerDel { id } => {
+                self.video.remove_finish_handler(id.as_deref());
                 true
             }
             _ => false,
@@ -596,5 +723,31 @@ impl CoreRuntime {
                 },
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ab_loop_file;
+
+    #[test]
+    fn ab_loop_naming_convention_maps_a_segment_to_b_segment() {
+        // 文档 splay.md：foo_a.ogg（引导段）→ foo_b.ogg（循环段）
+        assert_eq!(ab_loop_file("foo_a.ogg"), Some("foo_b.ogg".to_string()));
+        assert_eq!(
+            ab_loop_file("bgm/theme_a.ogg"),
+            Some("bgm/theme_b.ogg".to_string())
+        );
+        // magic path / 无扩展名也按词尾 _a 处理
+        assert_eq!(ab_loop_file(":bgm/foo_a"), Some(":bgm/foo_b".to_string()));
+
+        // 非 _a 结尾不构成 A-B 循环
+        assert_eq!(ab_loop_file("foo.ogg"), None);
+        assert_eq!(ab_loop_file("foo_b.ogg"), None);
+        // 目录名里的点不能被当成扩展名分隔符
+        assert_eq!(
+            ab_loop_file("dir.v2/foo_a.ogg"),
+            Some("dir.v2/foo_b.ogg".to_string())
+        );
     }
 }

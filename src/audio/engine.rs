@@ -205,6 +205,12 @@ pub struct SoundChannel {
     pub fade: Option<FadeState>,
     /// skippable=1 时，在快进/跳过期间不播放该 SE。
     pub skippable: bool,
+    /// A-B 循环的循环段文件（splay 的 `foo_a.ogg`→`foo_b.ogg` 约定）：
+    /// 引导段（file）播完后无限循环该文件；None=普通整曲循环/不循环。
+    pub loop_file: Option<String>,
+    /// 开始播放时刻（音频子系统时钟，毫秒）。
+    /// `[wait se=ID time=N]` 的 N 从该时刻起算。
+    pub started_at_ms: u64,
 }
 
 impl SoundChannel {
@@ -221,6 +227,8 @@ impl SoundChannel {
             current_pan: 0.0,
             fade: None,
             skippable: false,
+            loop_file: None,
+            started_at_ms: 0,
         }
     }
 

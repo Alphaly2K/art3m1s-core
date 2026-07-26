@@ -26,10 +26,17 @@ impl Compositor {
     /// `penetration=1` 判定层接收 rollover/rollout，单一最上层命中会漏掉下层热区。
     pub fn hit_test_all(&self, x: f32, y: f32, provider: &mut dyn TextureProvider) -> Vec<String> {
         let mut hits = Vec::new();
+        // `[lyprop id="!"]` 根图层属性同样作用于命中检测：整树隐藏时无命中，
+        // 根变换让命中几何与绘制几何一致。
+        let root_props = self.scene.root_props();
+        if !root_props.is_visible() {
+            return hits;
+        }
+        let root_transform = root_props.local_transform();
         let roots = self.scene.roots();
         let scale = self.stage_scale;
         for root in roots.iter().rev() {
-            self.hit_test_subtree(root, Affine2::IDENTITY, x, y, scale, provider, &mut hits);
+            self.hit_test_subtree(root, root_transform, x, y, scale, provider, &mut hits);
         }
         hits
     }

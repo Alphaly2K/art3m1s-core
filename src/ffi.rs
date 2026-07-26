@@ -6,11 +6,48 @@
 use std::ffi::{CString, c_char, c_int, c_longlong};
 use std::sync::OnceLock;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 // ── Global debug flag ──────────────────────────────────────────
 
 static DEBUG: AtomicBool = AtomicBool::new(false);
+
+// ── 脚本 [debug] 标签的日志模式/级别 ───────────────────────────
+//
+// 文档语义：mode 0=禁用日志（产品版）、1=输出到控制台、2=IPC 输出（Windows
+// 遗留，这里与 1 同样走宿主日志回调）；level 控制输出级别。启动默认
+// mode=0 level=0。[debugprint] 只有在 mode!=0 且自身 level 不超过当前
+// level 设置时才输出。存成进程级原子量：日志配置本就是全局的，且
+// CoreRuntime 结构体不归本模块管。
+
+static SCRIPT_DEBUG_MODE: AtomicI32 = AtomicI32::new(0);
+static SCRIPT_DEBUG_LEVEL: AtomicI32 = AtomicI32::new(0);
+
+/// 应用 `[debug]` 标签：mode/level 缺省时保持之前设置（文档行为）。
+pub fn set_script_debug_config(mode: Option<i32>, level: Option<i32>) {
+    if let Some(mode) = mode {
+        SCRIPT_DEBUG_MODE.store(mode, Ordering::Relaxed);
+    }
+    if let Some(level) = level {
+        SCRIPT_DEBUG_LEVEL.store(level, Ordering::Relaxed);
+    }
+}
+
+pub fn script_debug_mode() -> i32 {
+    SCRIPT_DEBUG_MODE.load(Ordering::Relaxed)
+}
+
+pub fn script_debug_level() -> i32 {
+    SCRIPT_DEBUG_LEVEL.load(Ordering::Relaxed)
+}
+
+/// `[debugprint level=N]` 是否应输出。
+///
+/// mode=0 一律不输出；level=0 是"仅脚本日志"档，故门控取
+/// `N <= 当前 level`（debugprint 属于脚本日志，level=0 时也放行 N=0）。
+pub fn script_debug_print_allowed(level: i32) -> bool {
+    script_debug_mode() != 0 && level <= script_debug_level()
+}
 
 /// 从 catch_unwind 的 payload 提取 panic message。
 fn panic_msg(payload: &Box<dyn std::any::Any + Send>) -> String {
@@ -46,7 +83,54 @@ pub unsafe extern "C" fn art3m1s_register_log_callback(cb: LogCallback) {
     *LOG_CB.lock().unwrap() = Some(cb);
 }
 
+// ── 日志过滤钩子（setLogFilter 的 core 侧）────────────────────────
+//
+// Artemis 的 e:setLogFilter 允许 Lua 函数在日志输出前拦截：返回 1 抑制
+// 原始日志（过滤器内可用 e:debug 输出改写后的日志）。core 的日志输出
+// 汇聚在 [`log`]，这里提供进程级过滤钩子；解释器侧注册 Lua 过滤函数的
+// 绑定落地后，把"调用 Lua 过滤器"的闭包装进来即可。
+//
+// 重入保护：过滤器自身输出的日志（e:debug）不再进过滤器，防递归。
+
+/// 过滤钩子：`(level, msg) -> true 表示抑制该条日志`。
+pub type LogFilterHook = Box<dyn Fn(&str, &str) -> bool + Send + Sync>;
+
+static LOG_FILTER: Mutex<Option<LogFilterHook>> = Mutex::new(None);
+
+thread_local! {
+    /// 当前线程是否正在过滤器内（此时产生的日志绕过过滤，防递归）。
+    static IN_LOG_FILTER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 安装/卸载日志过滤钩子（None=卸载）。
+pub fn set_log_filter(hook: Option<LogFilterHook>) {
+    *LOG_FILTER.lock().unwrap() = hook;
+}
+
+/// 日志是否应被过滤器抑制。过滤器内产生的日志一律放行。
+fn log_suppressed_by_filter(level: &str, msg: &str) -> bool {
+    if IN_LOG_FILTER.with(|flag| flag.get()) {
+        return false;
+    }
+    // 把钩子从槽里短暂取出来调用，避免过滤器内再打日志时死锁 Mutex。
+    let Some(hook) = LOG_FILTER.lock().unwrap().take() else {
+        return false;
+    };
+    IN_LOG_FILTER.with(|flag| flag.set(true));
+    let suppressed = hook(level, msg);
+    IN_LOG_FILTER.with(|flag| flag.set(false));
+    // 归还钩子（期间若有人重装了新钩子，以新钩子为准）。
+    let mut slot = LOG_FILTER.lock().unwrap();
+    if slot.is_none() {
+        *slot = Some(hook);
+    }
+    suppressed
+}
+
 pub fn log(level: &str, msg: &str) {
+    if log_suppressed_by_filter(level, msg) {
+        return;
+    }
     let Some(cb) = *LOG_CB.lock().unwrap() else {
         return;
     };
@@ -263,6 +347,106 @@ pub fn request_delete(path: &str) -> Result<(), String> {
         return Err(format!("delete failed: {path}"));
     }
     Ok(())
+}
+
+// ── File stat callback（存档文件更新时间查询）────────────────────
+//
+// `var system=file_update_time` 需要存档文件的修改时间。存档在应用沙箱内由
+// 宿主管理，core 不直接 stat 文件系统；宿主注册回调，把本地时间分量
+// [年,月,日,时,分,秒] 写入 out（时区换算由宿主完成）。返回写入的分量数
+// （应为 6），文件不存在或失败时返回 <0。
+
+type FileStatCallback =
+    unsafe extern "C" fn(path: *const c_char, out_components: *mut i64, out_len: c_int) -> c_int;
+
+static FILE_STAT: Mutex<Option<FileStatCallback>> = Mutex::new(None);
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_register_file_stat(cb: FileStatCallback) {
+    *FILE_STAT.lock().unwrap() = Some(cb);
+}
+
+/// 查询文件更新时间的本地时间分量 [年,月,日,时,分,秒]。
+/// 未注册回调或文件不存在时返回 None。
+pub fn request_file_mtime(path: &str) -> Option<[i64; 6]> {
+    let cb = (*FILE_STAT.lock().unwrap())?;
+    let c_path = CString::new(path).ok()?;
+    let mut out = [0i64; 6];
+    let n = unsafe { cb(c_path.as_ptr(), out.as_mut_ptr(), out.len() as c_int) };
+    if n >= 6 { Some(out) } else { None }
+}
+
+// ── Clipboard ────────────────────────────────────────────────────
+
+/// `e:writeClipboard` 的核心侧出口：经 ui_command 转发宿主
+/// （Flutter Clipboard.setData）。原版仅 Windows；非 Windows 宿主可忽略。
+pub fn write_clipboard(text: &str) {
+    emit_ui_command("write_clipboard", serde_json::json!({ "string": text }));
+}
+
+// ── 字体枚举 / 窗口状态查询 ────────────────────────────────────────
+//
+// `var system=get_font` 与 `fullscreen`/`minimize` 需要宿主（Flutter）回答
+// 可用字体族与窗口状态。宿主注册这两个查询回调后即返回真实数据；未注册时
+// 保持保守默认（空字体列表 / 非全屏非最小化）。
+
+/// 字体列表查询：`monospace`/`vertical` 为过滤标志（非 0 表示只要等宽/竖排）。
+/// 结果为换行分隔的字体族名写入 `buf`（UTF-8，最多 `buf_cap` 字节），返回写入
+/// 字节数；<0 表示无结果。
+type FontQueryCallback =
+    unsafe extern "C" fn(monospace: c_int, vertical: c_int, buf: *mut u8, buf_cap: c_int) -> c_int;
+
+/// 窗口状态查询：返回位标志 bit0=全屏、bit1=最小化。
+type WindowStateCallback = unsafe extern "C" fn() -> c_int;
+
+static FONT_QUERY_CB: Mutex<Option<FontQueryCallback>> = Mutex::new(None);
+static WINDOW_STATE_CB: Mutex<Option<WindowStateCallback>> = Mutex::new(None);
+
+const FONT_LIST_CAP: usize = 16384;
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_register_font_query(cb: FontQueryCallback) {
+    *FONT_QUERY_CB.lock().unwrap() = Some(cb);
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_register_window_state_query(cb: WindowStateCallback) {
+    *WINDOW_STATE_CB.lock().unwrap() = Some(cb);
+}
+
+/// 查询可用字体族列表。未注册宿主回调时返回空列表。
+pub fn query_font_list(monospace: bool, vertical: bool) -> Vec<String> {
+    let Some(cb) = *FONT_QUERY_CB.lock().unwrap() else {
+        return Vec::new();
+    };
+    let mut buf = vec![0u8; FONT_LIST_CAP];
+    let n = unsafe {
+        cb(
+            monospace as c_int,
+            vertical as c_int,
+            buf.as_mut_ptr(),
+            buf.len() as c_int,
+        )
+    };
+    if n < 0 || n as usize > buf.len() {
+        return Vec::new();
+    }
+    buf.truncate(n as usize);
+    String::from_utf8_lossy(&buf)
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// 查询窗口状态：`(全屏, 最小化)`。未注册宿主回调时返回 `(false, false)`。
+pub fn query_window_state() -> (bool, bool) {
+    let Some(cb) = *WINDOW_STATE_CB.lock().unwrap() else {
+        return (false, false);
+    };
+    let flags = unsafe { cb() };
+    (flags & 0b01 != 0, flags & 0b10 != 0)
 }
 
 // ── Save directory ───────────────────────────────────────────────
@@ -541,6 +725,24 @@ pub unsafe extern "C" fn art3m1s_runtime_feed_mouse_button(
     rt.feed_mouse_button(button, pressed != 0);
 }
 
+/// 宿主投喂一次触摸事件：`id` 触摸点唯一标识（手指），`phase` 0=down/1=move/2=up，
+/// `x`/`y` 为舞台坐标。getTouchCount / getTouchPoint 从这些数据读真实触摸态。
+#[cfg(feature = "gl-backend")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_feed_touch(
+    rt: *mut CoreRuntime,
+    id: u32,
+    phase: u8,
+    x: i32,
+    y: i32,
+) {
+    if rt.is_null() {
+        return;
+    }
+    let rt = unsafe { &*rt };
+    rt.feed_touch(id, phase, x, y);
+}
+
 #[cfg(feature = "gl-backend")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_feed_key(rt: *mut CoreRuntime, vk: u32, pressed: i32) {
@@ -758,4 +960,167 @@ pub unsafe extern "C" fn art3m1s_runtime_is_exit_requested(rt: *const CoreRuntim
     }
     let rt = unsafe { &*rt };
     if rt.is_exit_requested() { 1 } else { 0 }
+}
+
+/// 宿主生命周期通知：state 0=引擎退出前、1=切到后台、2=回到前台。
+/// [autosave allow=1] 时核心在退出/切后台时自动保存。
+#[cfg(feature = "gl-backend")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_notify_lifecycle(rt: *mut CoreRuntime, state: c_int) {
+    if rt.is_null() {
+        return;
+    }
+    let rt = unsafe { &mut *rt };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rt.notify_lifecycle(state);
+    }));
+    if let Err(panic_info) = result {
+        core_error!(
+            "art3m1s_runtime_notify_lifecycle panicked: {}",
+            panic_msg(&panic_info)
+        );
+    }
+}
+
+/// 宿主窗口按钮按下（setonwindowbutton，仅 Windows）：
+/// button 0=关闭(×) / 1=最大化 / 2=最小化。
+#[cfg(feature = "gl-backend")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_notify_window_button(rt: *mut CoreRuntime, button: c_int) {
+    if rt.is_null() {
+        return;
+    }
+    let rt = unsafe { &mut *rt };
+    rt.notify_window_button(button);
+}
+
+/// 宿主屏幕方向变化（setondirchg，仅 iOS）：
+/// direction 0=纵向 / 1=横向Home右 / 2=倒置纵向 / 3=横向Home左。
+#[cfg(feature = "gl-backend")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_notify_direction_changed(
+    rt: *mut CoreRuntime,
+    direction: c_int,
+) {
+    if rt.is_null() {
+        return;
+    }
+    let rt = unsafe { &mut *rt };
+    rt.notify_direction_changed(direction);
+}
+
+/// 宿主回填 httpget/httppost 的结果：status_code 为 HTTP 响应码（失败传 0），
+/// body 为响应体字节（可为 NULL）。返回 1 表示有挂起请求被完成。
+#[cfg(feature = "gl-backend")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_submit_http_result(
+    rt: *mut CoreRuntime,
+    status_code: c_int,
+    body: *const u8,
+    body_len: c_int,
+) -> c_int {
+    if rt.is_null() {
+        return 0;
+    }
+    let body = if body.is_null() || body_len <= 0 {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(body, body_len as usize) }
+    };
+    let rt = unsafe { &mut *rt };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rt.submit_http_result(status_code, body)
+    }));
+    match result {
+        Ok(true) => 1,
+        Ok(false) => 0,
+        Err(panic_info) => {
+            core_error!(
+                "art3m1s_runtime_submit_http_result panicked: {}",
+                panic_msg(&panic_info)
+            );
+            0
+        }
+    }
+}
+
+/// 宿主把字符串结果写回解释器变量（callnative/purchase 的结果回注通道，
+/// 支持 `result.title` 等子键路径）。
+#[cfg(feature = "gl-backend")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_set_string_variable(
+    rt: *mut CoreRuntime,
+    name: *const c_char,
+    value: *const c_char,
+) {
+    if rt.is_null() || name.is_null() || value.is_null() {
+        return;
+    }
+    let Ok(name) = (unsafe { std::ffi::CStr::from_ptr(name).to_str() }) else {
+        return;
+    };
+    let Ok(value) = (unsafe { std::ffi::CStr::from_ptr(value).to_str() }) else {
+        return;
+    };
+    let rt = unsafe { &mut *rt };
+    rt.set_string_variable(name, value);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        log_suppressed_by_filter, script_debug_print_allowed, set_log_filter,
+        set_script_debug_config,
+    };
+
+    /// 日志过滤钩子是进程级状态，单测里串行验证后卸载，避免影响其它测试。
+    #[test]
+    fn log_filter_hook_suppresses_and_guards_reentrancy() {
+        // 未安装钩子：一律放行
+        assert!(!log_suppressed_by_filter("I", "hello"));
+
+        // 安装：返回 true 抑制含 "noisy" 的日志；过滤器内再打日志不得递归。
+        set_log_filter(Some(Box::new(|_level, msg| {
+            // 过滤器内的日志输出（等价 e:debug）应绕过过滤器直接放行
+            assert!(!super::log_suppressed_by_filter("D", "inner log"));
+            msg.contains("noisy")
+        })));
+        assert!(log_suppressed_by_filter("I", "noisy line"));
+        assert!(!log_suppressed_by_filter("I", "normal line"));
+
+        // 卸载后恢复放行
+        set_log_filter(None);
+        assert!(!log_suppressed_by_filter("I", "noisy line"));
+    }
+
+    /// 全局原子量的门控逻辑放在同一个测试里串行验证，避免并行测试互踩。
+    #[test]
+    fn script_debug_config_gates_debugprint_output() {
+        // 启动默认 mode=0 level=0：任何 debugprint 都不输出。
+        set_script_debug_config(Some(0), Some(0));
+        assert!(!script_debug_print_allowed(0));
+        assert!(!script_debug_print_allowed(3));
+
+        // mode=1 level=0：仅放行 level<=0 的脚本日志。
+        set_script_debug_config(Some(1), None);
+        assert!(script_debug_print_allowed(0));
+        assert!(!script_debug_print_allowed(1));
+
+        // level=2：放行 0..=2，拦下 3。
+        set_script_debug_config(None, Some(2));
+        assert!(script_debug_print_allowed(2));
+        assert!(!script_debug_print_allowed(3));
+
+        // mode/level 缺省时保持之前设置（文档："缺省=保持之前设置"）。
+        set_script_debug_config(None, None);
+        assert!(script_debug_print_allowed(2));
+
+        // mode=2（IPC 模式）也按"非 0 即输出"处理。
+        set_script_debug_config(Some(2), Some(3));
+        assert!(script_debug_print_allowed(3));
+
+        // 回到禁用态，避免影响其它依赖默认值的行为。
+        set_script_debug_config(Some(0), Some(0));
+        assert!(!script_debug_print_allowed(0));
+    }
 }

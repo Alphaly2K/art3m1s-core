@@ -54,7 +54,7 @@ dependencies = [
 
 [[package]]
 name = "asb-interpreter"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "asb-decrypt",
  "encoding_rs",

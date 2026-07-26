@@ -8,6 +8,9 @@ use std::sync::atomic::Ordering;
 
 impl CoreRuntime {
     pub(super) fn advance_script(&mut self, clicked: bool, delta_ms: u64) {
+        // 安装 var system=file_*/get_sound_info 的宿主查询钩子（每 runtime 一次；
+        // 放在这里保证 load_project 之后、脚本第一次执行之前完成）。
+        self.ensure_host_query_hooks();
         self.refresh_inline_event_frame();
         // Native dialogs are modal from the scenario script's point of view. The dialog event can
         // be emitted from an estag queue that already contains its continuation; draining that
@@ -16,10 +19,18 @@ impl CoreRuntime {
         if self.pending_dialog.is_some() {
             return;
         }
-
         // onEnterFrame
         if let Err(e) = self.interpreter.fire_enter_frame() {
             crate::core_error!("onEnterFrame 错误: {e:?}");
+        }
+
+        // httpget/httppost 挂起：宿主回填结果前脚本不推进。放在 onEnterFrame
+        // 之后——文档允许脚本在 Lua 每帧处理里把 s.http.cancel 置 1 中断请求。
+        if self.http_request_pending() {
+            self.poll_pending_http_cancel();
+            if self.http_request_pending() {
+                return;
+            }
         }
 
         let has_tags = self.has_queued_tags();
@@ -37,6 +48,10 @@ impl CoreRuntime {
 
         if self.wait_reason.is_none() {
             self.run_until_wait_or_complete();
+            // [autosave allow=2]：每次进入用户输入等待时自动保存。
+            if wait_reason_is_input_wait(self.wait_reason.as_ref()) {
+                self.maybe_autosave_on_input_wait();
+            }
         } else {
             self.advance_wait_state(clicked, delta_ms);
         }
@@ -125,12 +140,25 @@ impl CoreRuntime {
             && self
                 .video_finished
                 .swap(false, std::sync::atomic::Ordering::SeqCst);
-        let trans_resume = matches!(
+        let is_trans_wait = matches!(
             &reason,
             WaitReason::Stop {
                 reason: Some(r)
             } if r == "trans"
-        ) && !RenderPipeline::new(&self.compositor).is_transition_in_progress();
+        );
+        // 转场等待期间收到点击：按 [trans] 的 input 参数策略尝试提前结束转场
+        // （input=0 禁止；input=2 仅在已处于跳过态时放行；缺省/1 允许）。
+        // 跳过态（skip）同样视作输入意图，让 input=2 生效。
+        if trans_input_skip_requested(
+            is_trans_wait,
+            clicked,
+            self.skip_active(),
+            RenderPipeline::new(&self.compositor).is_transition_in_progress(),
+        ) {
+            RenderPipeline::new(&self.compositor).skip_transition_by_input(self.skip_active());
+        }
+        let trans_resume =
+            is_trans_wait && !RenderPipeline::new(&self.compositor).is_transition_in_progress();
         if video_resume || trans_resume {
             self.wait_reason = None;
             return;
@@ -160,6 +188,23 @@ impl CoreRuntime {
             // however, explicitly wake it by injecting a key edge with
             // e:overrideKey(..., status=32), as UI return paths commonly do.
             WaitReason::Stop { .. } => stop_wait_accepts_scripted_decide(scripted_decide),
+            // [wait se=ID (time=N)]：等待该 SE 播放结束；带 time 时等待
+            // "从 SE 开播起 N 毫秒"。变体未携带 input 参数，按缺省 input=0
+            // 处理点击（不解除）；跳过态直接放行以免锁死（近似 input=2）。
+            WaitReason::Se { ref id, time } => {
+                self.skip_active() || self.se_wait_finished(id, time)
+            }
+            // [wait video=层ID]：等待该视频层播放结束（宿主经
+            // notify_video_finished(id) 或状态后端自然完成解除）。
+            WaitReason::VideoLayer { ref id } => {
+                self.skip_active() || !self.video.is_layer_playing(id)
+            }
+            // [wait scenario=1|2]：等待场景文本出现/隐藏的 Tween 完成。
+            // 本实现里隐藏（mode=2）是瞬时的，等待立即解除；
+            // 出现（mode=1）等逐字揭示完成。
+            WaitReason::ScenarioTween { mode } => {
+                self.skip_active() || mode != 1 || self.is_text_reveal_complete()
+            }
             _ => {
                 if clicked {
                     if !self.is_text_reveal_complete() {
@@ -184,6 +229,31 @@ impl CoreRuntime {
         self.wait_reason = None;
         self.reset_control_wait_flags();
         self.interpreter.advance_line();
+    }
+
+    /// `[wait se=ID (time=N)]` 的解除条件。
+    ///
+    /// - SE 不存在或已停止 → 解除（含宿主经 notify_sound_finished 报告完成）；
+    /// - 带 time → 从 SE 开播时刻起满 N 毫秒解除（文档：与 time 并用时从
+    ///   SE 播放开始时间起算）；
+    /// - 不带 time 且没有宿主音频后端 → 立即解除（状态后端不模拟真实时长，
+    ///   避免开发环境死等）。
+    fn se_wait_finished(&self, id: &str, time: Option<u64>) -> bool {
+        let state = self.audio.audio_state();
+        let channel = state
+            .se_channels
+            .get(id)
+            .or_else(|| state.voice_channels.get(id));
+        let Some(channel) = channel else {
+            return true;
+        };
+        if !channel.playing {
+            return true;
+        }
+        match time {
+            Some(time) => state.clock_ms >= channel.started_at_ms.saturating_add(time),
+            None => !crate::ffi::media_command_callback_registered(),
+        }
     }
 
     fn advance_exskip_stop(&mut self, stop_reason: WaitReason) {
@@ -338,9 +408,38 @@ fn stop_wait_accepts_scripted_decide(scripted_decide: bool) -> bool {
     scripted_decide
 }
 
+/// 转场等待期间是否应尝试用输入提前结束转场。
+///
+/// 仅当处于转场等待（`is_trans_wait`）、有转场正在进行（`transition_in_progress`）、
+/// 且存在输入意图（物理点击 `clicked` 或已处于跳过态 `skip_active`）时才尝试。
+/// 是否真正跳过再由 [`RenderPipeline::skip_transition_by_input`] 按 `[trans]`
+/// 的 input 参数（0/1/2）裁决。
+fn trans_input_skip_requested(
+    is_trans_wait: bool,
+    clicked: bool,
+    skip_active: bool,
+    transition_in_progress: bool,
+) -> bool {
+    is_trans_wait && transition_in_progress && (clicked || skip_active)
+}
+
+/// 是否属于"用户输入等待"（[autosave allow=2] 的自动保存触发点）：
+/// 点击等待（Generic/Generic0）与按键等待（exkey）算；
+/// 定时/停止/媒体同步类等待不算。
+fn wait_reason_is_input_wait(reason: Option<&WaitReason>) -> bool {
+    matches!(
+        reason,
+        Some(WaitReason::Generic) | Some(WaitReason::Generic0) | Some(WaitReason::KeyWait { .. })
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{stop_wait_accepts_scripted_decide, timed_wait_accepts_click};
+    use super::{
+        stop_wait_accepts_scripted_decide, timed_wait_accepts_click, trans_input_skip_requested,
+        wait_reason_is_input_wait,
+    };
+    use asb_interpreter::event::WaitReason;
 
     #[test]
     fn timed_wait_only_accepts_click_for_input_one() {
@@ -354,5 +453,94 @@ mod tests {
     fn stop_wait_only_accepts_a_scripted_decide_edge() {
         assert!(stop_wait_accepts_scripted_decide(true));
         assert!(!stop_wait_accepts_scripted_decide(false));
+    }
+
+    #[test]
+    fn trans_input_skip_requires_trans_wait_progress_and_input() {
+        // 非转场等待：永不尝试。
+        assert!(!trans_input_skip_requested(false, true, true, true));
+        // 转场已结束（无进行中）：无需尝试。
+        assert!(!trans_input_skip_requested(true, true, false, false));
+        // 转场进行中但无输入意图：不尝试。
+        assert!(!trans_input_skip_requested(true, false, false, true));
+        // 转场进行中 + 物理点击：尝试。
+        assert!(trans_input_skip_requested(true, true, false, true));
+        // 转场进行中 + 跳过态（无物理点击）：尝试（让 input=2 生效）。
+        assert!(trans_input_skip_requested(true, false, true, true));
+    }
+
+    #[test]
+    fn trans_skip_by_input_respects_trans_input_policy() {
+        use crate::compositor::Compositor;
+        use crate::render_pipeline::RenderPipeline;
+        use asb_interpreter::Event;
+
+        // input=0：禁止输入跳过，点击也不结束转场。
+        let mut c = Compositor::new();
+        c.apply_event(&Event::Trans {
+            trans_type: 1,
+            time: Some(1000),
+            rule: None,
+            vague: None,
+            input: 0,
+        });
+        assert!(RenderPipeline::new(&c).is_transition_in_progress());
+        assert!(!RenderPipeline::new(&c).skip_transition_by_input(false));
+        assert!(RenderPipeline::new(&c).is_transition_in_progress());
+
+        // input=2：仅在已处于跳过态时结束转场。
+        let mut c = Compositor::new();
+        c.apply_event(&Event::Trans {
+            trans_type: 1,
+            time: Some(1000),
+            rule: None,
+            vague: None,
+            input: 2,
+        });
+        assert!(!RenderPipeline::new(&c).skip_transition_by_input(false));
+        assert!(RenderPipeline::new(&c).is_transition_in_progress());
+        assert!(RenderPipeline::new(&c).skip_transition_by_input(true));
+        assert!(!RenderPipeline::new(&c).is_transition_in_progress());
+
+        // input=1（缺省）：点击直接结束转场。
+        let mut c = Compositor::new();
+        c.apply_event(&Event::Trans {
+            trans_type: 1,
+            time: Some(1000),
+            rule: None,
+            vague: None,
+            input: 1,
+        });
+        assert!(RenderPipeline::new(&c).skip_transition_by_input(false));
+        assert!(!RenderPipeline::new(&c).is_transition_in_progress());
+    }
+
+    #[test]
+    fn autosave_triggers_only_on_user_input_waits() {
+        // allow=2 语义：每次出现"用户输入等待"时保存——点击/按键等待算，
+        // 定时等待、stop、SE/视频/场景 Tween 等媒体同步等待不算。
+        assert!(wait_reason_is_input_wait(Some(&WaitReason::Generic)));
+        assert!(wait_reason_is_input_wait(Some(&WaitReason::Generic0)));
+        assert!(wait_reason_is_input_wait(Some(&WaitReason::KeyWait {
+            buttons: vec![]
+        })));
+        assert!(!wait_reason_is_input_wait(Some(&WaitReason::Timed {
+            milliseconds: 100,
+            input: 1
+        })));
+        assert!(!wait_reason_is_input_wait(Some(&WaitReason::Stop {
+            reason: None
+        })));
+        assert!(!wait_reason_is_input_wait(Some(&WaitReason::Se {
+            id: "bar".into(),
+            time: None
+        })));
+        assert!(!wait_reason_is_input_wait(Some(&WaitReason::VideoLayer {
+            id: "mv".into()
+        })));
+        assert!(!wait_reason_is_input_wait(Some(
+            &WaitReason::ScenarioTween { mode: 1 }
+        )));
+        assert!(!wait_reason_is_input_wait(None));
     }
 }

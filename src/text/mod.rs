@@ -18,13 +18,15 @@
 //! [`MessageLayerSwitch`]: asb_interpreter::event::Event::MessageLayerSwitch
 //! [`DrawCommand`]: crate::render_pipeline::draw::DrawCommand
 
+pub mod backlog;
 pub mod glyph;
 pub mod inject;
 pub mod render;
 
+pub use backlog::{Backlog, BacklogPage, BacklogSettings, BacklogTag};
 pub use glyph::GlyphTextRenderer;
 pub use inject::{FfiTextInject, InjectionChain, TextInject};
 pub use render::{
-    FontDesc, FontMetrics, FontState, GlyphInfo, MessageLayer, ScetweenConfig, ScetweenMode,
-    ScetweenSetMode, TextAlignment, TextRenderer,
+    FontDesc, FontMetrics, FontState, GlyphInfo, LinkHitArea, LinkRange, MessageLayer, RubyRange,
+    ScetweenConfig, ScetweenMode, ScetweenSetMode, TextAlignment, TextRenderer,
 };

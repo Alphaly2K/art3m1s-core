@@ -17,6 +17,8 @@ pub struct MockProvider {
     next: u64,
     /// 这些名字会被当作"资源缺失"，`resolve` 返回 `None`。
     missing: Vec<String>,
+    /// 资源名 → CPU 侧 RGBA 像素（lyedit 测试用；upload_rgba 也会记录）。
+    pixels: HashMap<String, (u32, u32, Vec<u8>)>,
 }
 
 impl MockProvider {
@@ -35,6 +37,16 @@ impl MockProvider {
             .get(&id.0)
             .map(String::as_str)
             .unwrap_or("<unknown>")
+    }
+
+    /// 预置某资源名的 CPU 像素（`pixels_of` 读取，lyedit 测试用）。
+    pub fn put_pixels(&mut self, name: &str, width: u32, height: u32, data: Vec<u8>) {
+        self.pixels.insert(name.to_string(), (width, height, data));
+    }
+
+    /// 读取（上传或预置的）CPU 像素副本，断言 lyedit 结果时用。
+    pub fn pixels_named(&self, name: &str) -> Option<&(u32, u32, Vec<u8>)> {
+        self.pixels.get(name)
     }
 }
 
@@ -66,7 +78,7 @@ impl TextureProvider for MockProvider {
         name: &str,
         width: u32,
         height: u32,
-        _data: &[u8],
+        data: &[u8],
     ) -> Option<(TextureId, TextureInfo)> {
         let id = if let Some(id) = self.by_name.get(name) {
             *id
@@ -77,6 +89,22 @@ impl TextureProvider for MockProvider {
             self.by_id.insert(id.0, name.to_string());
             id
         };
+        self.pixels
+            .insert(name.to_string(), (width, height, data.to_vec()));
         Some((id, TextureInfo { width, height }))
+    }
+
+    /// file+mask 合成在 mock 里退化为解析组合名，便于断言蒙版路径被走到。
+    fn resolve_with_mask(
+        &mut self,
+        file: &str,
+        mask: &str,
+    ) -> Option<(TextureId, TextureInfo)> {
+        let name = crate::render_pipeline::draw::masked_texture_name(file, mask);
+        self.resolve(&name)
+    }
+
+    fn pixels_of(&mut self, name: &str) -> Option<(u32, u32, Vec<u8>)> {
+        self.pixels.get(name).cloned()
     }
 }

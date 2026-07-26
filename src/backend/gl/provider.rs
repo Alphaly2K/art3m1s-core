@@ -321,6 +321,57 @@ impl TextureProvider for GlTextureProvider {
         rgba.get(idx).copied()
     }
 
+    /// 1x1 纯色纹理（`lyc` 单色图层）：按稳定名缓存，避免每帧重建。
+    fn solid_texture(&mut self, rgba: [u8; 4]) -> Option<(TextureId, TextureInfo)> {
+        let name = crate::render_pipeline::draw::solid_texture_name(rgba);
+        if let Some(entry) = self.cache.get(&name) {
+            return Some(*entry);
+        }
+        GlTextureProvider::upload_rgba(self, &name, 1, 1, &rgba)
+    }
+
+    /// `lyc` file+mask 双图合成：out.rgb = file.rgb，out.a = file.a × mask 灰度。
+    ///
+    /// 结果按组合名缓存。任一图取不到 / 解码失败 / 尺寸不一致（文档要求同尺寸）
+    /// 时退化为普通 resolve(file)。
+    fn resolve_with_mask(&mut self, file: &str, mask: &str) -> Option<(TextureId, TextureInfo)> {
+        let name = crate::render_pipeline::draw::masked_texture_name(file, mask);
+        if let Some(entry) = self.cache.get(&name) {
+            return Some(*entry);
+        }
+
+        let combined = self.source.as_ref().and_then(|source| {
+            let file_bytes = source(file)?;
+            let mask_bytes = source(mask)?;
+            let (fw, fh, mut fpx) = decode_rgba(&file_bytes)?;
+            let (mw, mh, mpx) = decode_rgba(&mask_bytes)?;
+            if (fw, fh) != (mw, mh) {
+                crate::core_warn!(
+                    "[lyc] mask 尺寸不一致: {file}({fw}x{fh}) vs {mask}({mw}x{mh})，忽略蒙版"
+                );
+                return None;
+            }
+            // 灰度蒙版：白=不透明。取 R 通道（灰度图 R=G=B）乘进 file 的 alpha。
+            for (dst, m) in fpx.chunks_exact_mut(4).zip(mpx.chunks_exact(4)) {
+                dst[3] = ((dst[3] as u16 * m[0] as u16) / 255) as u8;
+            }
+            Some((fw, fh, fpx))
+        });
+
+        match combined {
+            Some((w, h, pixels)) => GlTextureProvider::upload_rgba(self, &name, w, h, &pixels),
+            None => self.resolve(file),
+        }
+    }
+
+    /// 读取逻辑资源的 CPU 侧像素副本（`lyedit` 用）。
+    fn pixels_of(&mut self, name: &str) -> Option<(u32, u32, Vec<u8>)> {
+        let (texture, _) = self.resolve(name)?;
+        self.pixels
+            .get(&texture)
+            .map(|(w, h, rgba)| (*w, *h, rgba.clone()))
+    }
+
     fn retain(&mut self, names: &std::collections::HashSet<String>) {
         let stale: Vec<String> = self
             .cache

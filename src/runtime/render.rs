@@ -2,6 +2,7 @@ use super::CoreRuntime;
 use crate::backend::gl::platform;
 use crate::render_pipeline::RenderPipeline;
 use crate::render_pipeline::draw::{Renderer, TextureProvider};
+use asb_interpreter::event::WaitReason;
 use glow::HasContext;
 
 impl CoreRuntime {
@@ -51,6 +52,15 @@ impl CoreRuntime {
             );
         }
 
+        // backlog / message-tags 查询快照：每帧从 text_renderer 抽取再现标签刷新，
+        // 供解释器 var system=get_backlog_* / get_message_tags 的宿主查询钩子读取。
+        self.sync_backlog_snapshot();
+
+        // glyph 点击等待图标：进入点击等待（Generic/Generic0）且文本已全部显出时，
+        // 把等待图标图层移动到最后一个字符旁并显示；否则隐藏。每帧驱动，避免依赖
+        // script.rs 的 wait 建立/退出路径（那不在本任务白名单内）。
+        self.drive_click_wait_icon();
+
         let text_map = self.build_text_commands();
         let (emote_map, emote_files) = self.build_emote_commands();
         let content_for: Option<&crate::render_pipeline::LayerDrawSource<'_>> =
@@ -95,5 +105,56 @@ impl CoreRuntime {
         }
 
         pixels
+    }
+
+    /// 每帧驱动 glyph 点击等待图标的显隐。
+    ///
+    /// 仅在处于点击等待（[wt]/[wt0] → `WaitReason::Generic`/`Generic0`）且当前页
+    /// 文本已逐字显出完毕时显示图标；退出等待或文本仍在逐字时隐藏。位置与图层由
+    /// 文本子系统的 `click_wait_icon_placement` 决定（[glyph] 未配置图标图层则不显）。
+    ///
+    /// page_end 判定：解释器目前不区分行末/页末等待（两者都是 Generic），此处一律
+    /// 按行末处理（page_end=false，用 [glyph] 的 layer）。精确的页末检测需解释器透传
+    /// rp 换页信号，见任务 skipped 说明。
+    fn drive_click_wait_icon(&mut self) {
+        let show = wait_reason_is_click_wait(self.wait_reason.as_ref())
+            && self.is_text_reveal_complete();
+        if show {
+            self.enter_click_wait_icon(false);
+        } else {
+            self.exit_click_wait_icon();
+        }
+    }
+}
+
+/// 是否处于点击等待（行末/页末点击继续）。[wt]/[wt0] 建立 Generic/Generic0；
+/// 定时/停止/媒体同步类等待不算点击等待，不驱动等待图标。
+fn wait_reason_is_click_wait(reason: Option<&WaitReason>) -> bool {
+    matches!(
+        reason,
+        Some(WaitReason::Generic) | Some(WaitReason::Generic0)
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wait_reason_is_click_wait;
+    use asb_interpreter::event::WaitReason;
+
+    #[test]
+    fn click_wait_covers_generic_variants_only() {
+        assert!(wait_reason_is_click_wait(Some(&WaitReason::Generic)));
+        assert!(wait_reason_is_click_wait(Some(&WaitReason::Generic0)));
+        assert!(!wait_reason_is_click_wait(None));
+        assert!(!wait_reason_is_click_wait(Some(&WaitReason::Timed {
+            milliseconds: 100,
+            input: 1,
+        })));
+        assert!(!wait_reason_is_click_wait(Some(&WaitReason::Stop {
+            reason: None,
+        })));
+        assert!(!wait_reason_is_click_wait(Some(&WaitReason::KeyWait {
+            buttons: vec![],
+        })));
     }
 }

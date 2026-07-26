@@ -257,14 +257,18 @@ mod tests {
         assert!(!event_requires_host_pause(&Event::VideoPlay {
             id: Some("1.0.effect".into()),
             file: ":ani/snow03.ogv".into(),
-            skip: true,
+            skip: 1,
             loop_play: true,
+            delay_margin_ms: None,
+            mode: None,
         }));
         assert!(event_requires_host_pause(&Event::VideoPlay {
             id: None,
             file: ":mov/op.ogv".into(),
-            skip: true,
+            skip: 1,
             loop_play: false,
+            delay_margin_ms: None,
+            mode: None,
         }));
     }
 }

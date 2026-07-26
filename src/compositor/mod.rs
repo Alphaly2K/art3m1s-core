@@ -17,6 +17,7 @@
 pub mod anim;
 pub mod build;
 pub mod events;
+pub(crate) mod lyedit;
 /// 测试用假后端；不参与生产 cdylib 编译。
 #[cfg(test)]
 pub mod mock;

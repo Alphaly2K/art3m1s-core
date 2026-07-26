@@ -35,6 +35,13 @@ impl CoreRuntime {
         }
     }
 
+    /// 宿主触摸事件入口：`phase` 0=down/1=move/2=up。快照层负责多点上限截断、
+    /// flick 阈值判定等。
+    pub fn feed_touch(&self, id: u32, phase: u8, x: i32, y: i32) {
+        let mut s = self.input.lock().unwrap();
+        s.feed_touch(id, phase, x, y);
+    }
+
     pub fn feed_key_down(&self, vk: u32) {
         let mut s = self.input.lock().unwrap();
         if s.keys_down.insert(vk) {
@@ -59,6 +66,7 @@ impl CoreRuntime {
             mouse_down_edges,
             mouse_up_edges,
             key_down_edges,
+            keys_down,
         ) = {
             let s = self.input.lock().unwrap();
             let clicked = s.clicked;
@@ -72,12 +80,30 @@ impl CoreRuntime {
                 s.mouse_buttons_down_edge.clone(),
                 s.mouse_buttons_up_edge.clone(),
                 key_down_edges,
+                s.keys_down.clone(),
             )
         };
         let left_down_edge = legacy_clicked || mouse_down_edges.contains(&1);
         let left_up_edge = mouse_up_edges.contains(&1);
         let left_down = mouse_buttons.contains(&1);
         let mut needs_inline_event_frame = false;
+
+        // controlskip：按住 keyconfig role 14 的键（缺省 Ctrl=17）期间强制跳过。
+        self.update_control_skip_from_keys(&keys_down);
+
+        // hide 模式：左键单击先恢复消息窗，本帧不再进入常规点击/前进链。
+        // （右键恢复走下方 trigger_rclick 的隐藏分支。）
+        if self.hide_active() && left_down_edge {
+            self.exit_hide_mode();
+            return false;
+        }
+
+        // 文本内联链接（[link]）：鼠标移动刷新 hover 强调；点击命中链接则以其
+        // file/label 触发 jump 并吞掉该次点击（不再推进剧情）。
+        self.update_link_hover(mouse_x, mouse_y);
+        if left_down_edge && self.handle_link_click(mouse_x, mouse_y) {
+            return false;
+        }
 
         let hit_layers = self
             .compositor
@@ -158,7 +184,13 @@ impl CoreRuntime {
             needs_inline_event_frame |= dispatch.needs_return_frame;
         }
 
+        let mut role_advance = false;
         for key in key_down_edges {
+            // 右键/ESC：先走引擎的 rclick 链（隐藏恢复 / rclick 脚本）；
+            // 被消费时不再派发同键的 push 处理器。
+            if is_rclick_trigger_key(key) && self.trigger_rclick() {
+                continue;
+            }
             let key_string = key.to_string();
             let event_type = if is_mouse_button(key) { "click" } else { "key" };
             let dispatch = enqueue_input_handler(
@@ -172,6 +204,8 @@ impl CoreRuntime {
             if key == 1 && dispatch.handled {
                 handled_by_left_push = true;
             }
+            // keyconfig 的 role 分配（前进/隐藏/日志/自动/跳过等）。
+            role_advance |= self.handle_role_key_edge(key);
         }
 
         if needs_inline_event_frame {
@@ -180,8 +214,12 @@ impl CoreRuntime {
 
         let push_absorbs_default_click =
             global_push_absorbs_default_click(self.wait_reason.as_ref(), handled_by_left_push);
-        let clicked =
-            left_down_edge && !handled_by_layer && !push_absorbs_default_click && !handled_by_drag;
+        let clicked = (left_down_edge
+            && !handled_by_layer
+            && !push_absorbs_default_click
+            && !handled_by_drag)
+            // keyconfig role 0（前进，缺省 Enter）与单击等效
+            || role_advance;
         if left_down_edge {
             crate::core_debug!(
                 "[input] left-down wait={:?} top={:?} click_layers={:?} layer={} push={} drag={} advance={}",
@@ -256,14 +294,46 @@ impl CoreRuntime {
         {
             return HandlerDispatch::default();
         }
-        let Some((left, top)) = self.compositor.layer_offset(layer_id) else {
+        self.begin_pointer_drag(layer_id, mouse_x, mouse_y)
+    }
+
+    /// `[lydrag]`：把图层强制设为拖动状态。
+    ///
+    /// 典型用途是滑块：点击滑轨后先用 lyprop 把旋钮移到鼠标下，再用 lydrag
+    /// 立即开始拖动。与常规拖动入口不同，这里跳过 `is_layer_draggable` /
+    /// 拖动处理器检查，也不要求鼠标悬停在该图层上；之后每帧由
+    /// `continue_pointer_drag` 照常接管。
+    pub(super) fn force_pointer_drag(&mut self, layer_id: &str) {
+        let (mouse_x, mouse_y) = {
+            let s = self.input.lock().unwrap();
+            (s.mouse_x as f32, s.mouse_y as f32)
+        };
+        let dispatch = self.begin_pointer_drag(layer_id, mouse_x, mouse_y);
+        if !dispatch.handled {
+            crate::core_warn!("[lydrag] 图层不存在，忽略: {layer_id}");
+            return;
+        }
+        if dispatch.needs_return_frame {
+            self.begin_inline_event_frame();
+        }
+    }
+
+    /// 常规/强制拖动共用的启动逻辑：记录起点并派发 dragin 处理器。
+    fn begin_pointer_drag(
+        &mut self,
+        layer_id: &str,
+        mouse_x: f32,
+        mouse_y: f32,
+    ) -> HandlerDispatch {
+        let Some(state) = forced_drag_state(
+            layer_id,
+            mouse_x,
+            mouse_y,
+            self.compositor.layer_offset(layer_id),
+        ) else {
             return HandlerDispatch::default();
         };
-        self.pointer_drag.layer_id = Some(layer_id.to_string());
-        self.pointer_drag.start_mouse_x = mouse_x;
-        self.pointer_drag.start_mouse_y = mouse_y;
-        self.pointer_drag.start_left = left;
-        self.pointer_drag.start_top = top;
+        self.pointer_drag = state;
         let dispatch = enqueue_layer_handler(
             &self.interpreter,
             &self.compositor,
@@ -302,6 +372,51 @@ impl CoreRuntime {
             handled: true,
             needs_return_frame: dispatch.needs_return_frame,
         }
+    }
+
+    /// 每帧按鼠标位置刷新文本链接的 hover 强调。返回 hover 是否发生变化
+    /// （runtime 目前每帧都重建文本命令，返回值仅供未来节流用）。
+    fn update_link_hover(&mut self, mouse_x: f32, mouse_y: f32) -> bool {
+        match self.text_renderer.as_mut() {
+            Some(renderer) => renderer.update_link_hover(mouse_x, mouse_y),
+            None => false,
+        }
+    }
+
+    /// 点击命中文本链接时以其 file/label 触发 jump，并返回 true 表示已吞掉本次
+    /// 点击（不再传给剧情推进）。未命中返回 false。
+    ///
+    /// 命中区必须落在**有效可见**的消息层上：mw 被隐藏（如右键关闭消息窗）后，
+    /// 其文本缓冲与链接区间仍在 renderer 里，但那片区域不该再响应链接点击，
+    /// 否则点在已隐藏的旧文本区会误触发跳转，导致剧情推进卡死。
+    fn handle_link_click(&mut self, mouse_x: f32, mouse_y: f32) -> bool {
+        let Some(renderer) = self.text_renderer.as_ref() else {
+            return false;
+        };
+        let area = renderer
+            .link_hit_areas()
+            .into_iter()
+            .filter(|a| a.contains(mouse_x, mouse_y))
+            .find(|a| {
+                link_area_has_jump_target(a)
+                    && self.compositor.is_message_layer_visible(&a.layer_id)
+            });
+        let Some(area) = area else {
+            return false;
+        };
+        // 纯跳转（非 call）：入队 "jump" 标签，交由 advance_script 在当前
+        // 等待/停止态下排水执行——命中链接后剧情跳转到目标并从那里继续，
+        // 不返回原位置，故无需内联返回帧（与图层 click 的 file/label 跳转一致）。
+        enqueue_handler_tags(
+            &self.interpreter,
+            None,
+            area.file.as_deref(),
+            area.label.as_deref(),
+            false,
+            &HashMap::new(),
+            &[],
+        );
+        true
     }
 
     fn finish_pointer_drag(&mut self) -> HandlerDispatch {
@@ -352,11 +467,41 @@ fn is_mouse_button(key: u32) -> bool {
     matches!(key, 1..=3)
 }
 
+/// 触发右键链（rclick 脚本 / 隐藏恢复）的按键：鼠标右键(2)、ESC(27)。
+/// docs/spec/key_assign.md：右键、ESC → 调用右键脚本 rclick.iet。
+fn is_rclick_trigger_key(key: u32) -> bool {
+    matches!(key, 2 | 27)
+}
+
 fn global_push_absorbs_default_click(
     wait_reason: Option<&WaitReason>,
     handled_by_left_push: bool,
 ) -> bool {
     handled_by_left_push && !matches!(wait_reason, Some(WaitReason::Timed { input: 1, .. }))
+}
+
+/// 计算拖动起始状态：只要求图层存在（能取到 offset），不做 draggable /
+/// 处理器 / 鼠标悬停检查——这是 `[lydrag]` 强制拖动语义的核心。
+fn forced_drag_state(
+    layer_id: &str,
+    mouse_x: f32,
+    mouse_y: f32,
+    layer_offset: Option<(f32, f32)>,
+) -> Option<super::PointerDragState> {
+    let (left, top) = layer_offset?;
+    Some(super::PointerDragState {
+        layer_id: Some(layer_id.to_string()),
+        start_mouse_x: mouse_x,
+        start_mouse_y: mouse_y,
+        start_left: left,
+        start_top: top,
+    })
+}
+
+/// 文本链接命中区域是否有可跳转目标（file 或 label 至少其一非空）。
+/// 二者皆空的链接视为无目标，点击不吞、照常推进剧情。
+fn link_area_has_jump_target(area: &crate::text::render::LinkHitArea) -> bool {
+    area.file.is_some() || area.label.is_some()
 }
 
 fn has_drag_handler(compositor: &Compositor, layer_id: &str) -> bool {
@@ -397,10 +542,11 @@ fn event_dispatch_layers(
 #[cfg(test)]
 mod tests {
     use super::{
-        InlineEventFrame, detach_inline_event_marker, event_dispatch_layers,
-        global_push_absorbs_default_click, inline_event_marker_is_active,
+        InlineEventFrame, detach_inline_event_marker, event_dispatch_layers, forced_drag_state,
+        global_push_absorbs_default_click, inline_event_marker_is_active, link_area_has_jump_target,
     };
     use crate::compositor::Compositor;
+    use crate::text::render::LinkHitArea;
     use asb_interpreter::CallFrame;
     use asb_interpreter::event::{Event, WaitReason};
     use std::collections::HashMap;
@@ -479,6 +625,53 @@ mod tests {
             &[caller.clone(), marker]
         ));
         assert!(!inline_event_marker_is_active(&frame, &[caller]));
+    }
+
+    #[test]
+    fn forced_drag_only_requires_the_layer_to_exist() {
+        // [lydrag]：即便图层未标记 draggable、鼠标不在图层上，也应进入拖动态；
+        // 起点取当前鼠标坐标与图层 offset。
+        let state = forced_drag_state("knob", 320.0, 240.0, Some((80.0, 10.0))).unwrap();
+        assert_eq!(state.layer_id.as_deref(), Some("knob"));
+        assert_eq!(state.start_mouse_x, 320.0);
+        assert_eq!(state.start_mouse_y, 240.0);
+        assert_eq!(state.start_left, 80.0);
+        assert_eq!(state.start_top, 10.0);
+
+        // 图层不存在（取不到 offset）时不得进入拖动态。
+        assert!(forced_drag_state("missing", 0.0, 0.0, None).is_none());
+    }
+
+    #[test]
+    fn link_area_jump_target_requires_file_or_label() {
+        let base = LinkHitArea {
+            layer_id: "msg".into(),
+            link_index: 0,
+            left: 0.0,
+            top: 0.0,
+            width: 10.0,
+            height: 10.0,
+            file: None,
+            label: None,
+        };
+        // file/label 皆空 → 无目标，点击不吞。
+        assert!(!link_area_has_jump_target(&base));
+        // 只有 file。
+        assert!(link_area_has_jump_target(&LinkHitArea {
+            file: Some("scene2.asb".into()),
+            ..base.clone()
+        }));
+        // 只有 label。
+        assert!(link_area_has_jump_target(&LinkHitArea {
+            label: Some("branch_a".into()),
+            ..base.clone()
+        }));
+        // 两者都有。
+        assert!(link_area_has_jump_target(&LinkHitArea {
+            file: Some("scene2.asb".into()),
+            label: Some("branch_a".into()),
+            ..base
+        }));
     }
 
     #[test]

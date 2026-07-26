@@ -52,6 +52,11 @@ impl ShaderManager for BuiltinShaderManager {
                 vertex_body: SPRITE_VERTEX_BODY,
                 fragment_body: ALPHA_MASK_FRAGMENT_BODY,
             }),
+            RULE_TRANS_SHADER => Some(ShaderProgramSource {
+                name: RULE_TRANS_SHADER,
+                vertex_body: SPRITE_VERTEX_BODY,
+                fragment_body: RULE_TRANS_FRAGMENT_BODY,
+            }),
             _ => None,
         }
     }
@@ -59,6 +64,8 @@ impl ShaderManager for BuiltinShaderManager {
 
 pub const SPRITE_SHADER: &str = "sprite";
 pub const ALPHA_MASK_SHADER: &str = "alpha-mask";
+/// `[trans type=2]` 规则图像转场：旧帧按 rule 灰度阈值逐像素溶解。
+pub const RULE_TRANS_SHADER: &str = "rule-trans";
 
 const SPRITE_VERTEX_BODY: &str = r#"
 layout(location = 0) in vec2 a_pos;   // unit quad 0..1
@@ -102,6 +109,39 @@ void main() {
         c.rgb = vec3(1.0) - c.rgb;
     }
     c.a *= u_opacity;
+    frag_color = c;
+}
+"#;
+
+/// 规则图像转场（Artemis `[trans type=2]`）。
+///
+/// - `u_texture_fore`：转场开始时捕获的旧画面。
+/// - `u_texture_mask`：rule 灰度规则图（拉伸铺满全屏采样）。
+/// - `progress`：0.0-1.0 转场进度。
+/// - `vague`：边缘软化宽度（已归一化到 0-1，脚本 vague≈32 → 32/255）。
+///
+/// 语义：规则图亮度低的像素先切换到新画面。把进度重映射到 `[-vague, 1]`，
+/// 用 smoothstep 在 `[t, t+vague]` 区间做软边——progress=0 时旧帧完全可见，
+/// progress=1 时旧帧完全消失。
+const RULE_TRANS_FRAGMENT_BODY: &str = r#"
+in vec2 v_uv;
+out vec4 frag_color;
+
+uniform sampler2D u_texture_fore;
+uniform sampler2D u_texture_mask;
+uniform float alpha;
+uniform vec3 colorMultiply;
+uniform float progress;
+uniform float vague;
+
+void main() {
+    vec4 c = texture(u_texture_fore, v_uv);
+    float rule = texture(u_texture_mask, v_uv).r;
+    float v = max(vague, 1.0 / 255.0);
+    float t = progress * (1.0 + v) - v;
+    float keep = smoothstep(t, t + v, rule);
+    c.rgb *= colorMultiply;
+    c.a *= alpha * keep;
     frag_color = c;
 }
 "#;

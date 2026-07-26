@@ -3,10 +3,119 @@ use crate::render_pipeline::draw::DrawCommand;
 use crate::text::render::{ScetweenConfig, TextRenderer};
 use asb_interpreter::Event;
 use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+
+/// backlog / message-tags 的进程级镜像，供解释器 `var system=get_backlog_size /
+/// get_backlog_tags / get_message_tags` 的宿主查询钩子读取。
+///
+/// 钩子是进程级注册点（var 标签路径拿不到 runtime 实例，且 text_renderer 非
+/// Send+Sync 不能直接跨线程借入），因此这里维护一份可克隆的快照：runtime 每帧从
+/// text_renderer 抽取 backlog/消息层的再现标签序列刷进来，钩子只读它并按伪数组
+/// 约定（name.0..N + name.size）落值。allfont=0/1 两套预先算好，查询时按需取用。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BacklogSnapshot {
+    /// 每页的再现标签：`.0`=allfont=0 的序列、`.1`=allfont=1 的序列。
+    /// 页码即下标（0=最旧页），长度即 get_backlog_size 的结果。
+    pub pages: Vec<(Vec<String>, Vec<String>)>,
+    /// 各消息层当前显示文本的再现标签：id → (allfont=0, allfont=1)。
+    pub message_layers: HashMap<String, (Vec<String>, Vec<String>)>,
+}
+
+// 这三个访问器是给解释器宿主查询钩子（var system=get_backlog_* / get_message_tags）
+// 消费的读取入口；钩子接线在 ../asb-interpreter 与 events.rs（超出本任务白名单，见
+// skipped）。在此之前非测试构建里它们无调用方，故允许 dead_code 以免噪声。
+#[allow(dead_code)]
+impl BacklogSnapshot {
+    /// get_backlog_size：已存页数。
+    pub fn backlog_size(&self) -> usize {
+        self.pages.len()
+    }
+
+    /// get_backlog_tags：第 `page` 页的再现标签（越界返回 None）。
+    pub fn backlog_tags(&self, page: usize, allfont: bool) -> Option<Vec<String>> {
+        self.pages
+            .get(page)
+            .map(|(no, yes)| if allfont { yes.clone() } else { no.clone() })
+    }
+
+    /// get_message_tags：消息层 `id` 的再现标签（层不存在返回 None）。
+    pub fn message_tags(&self, id: &str, allfont: bool) -> Option<Vec<String>> {
+        self.message_layers
+            .get(id)
+            .map(|(no, yes)| if allfont { yes.clone() } else { no.clone() })
+    }
+}
+
+// HashMap::new() 非 const，无法直接放进 `static Mutex<_>`（Vec::new() 可以），
+// 故用 LazyLock 首次访问时构造缺省快照。
+static BACKLOG_SNAPSHOT: LazyLock<Mutex<BacklogSnapshot>> =
+    LazyLock::new(|| Mutex::new(BacklogSnapshot::default()));
+
+/// 读取当前 backlog 快照（get_backlog_* / get_message_tags 钩子入口）。
+///
+/// 消费方是解释器宿主查询钩子（接线见 skipped），故非测试构建里暂无调用方。
+#[allow(dead_code)]
+pub(crate) fn backlog_snapshot() -> BacklogSnapshot {
+    BACKLOG_SNAPSHOT.lock().unwrap().clone()
+}
+
+/// 从 FontState 抽取 backlog / 消息层再现标签，构造快照。
+///
+/// 拆成自由函数便于用 GlyphTextRenderer 直接单测，无需 GL runtime。
+fn build_backlog_snapshot(state: &crate::text::render::FontState) -> BacklogSnapshot {
+    let mut snapshot = BacklogSnapshot::default();
+    // backlog 各页两套（allfont=0/1）再现标签，页码即下标（0=最旧页）。
+    for page in 0..state.get_backlog_size() {
+        let no = state.get_backlog_tags(page, false).unwrap_or_default();
+        let yes = state.get_backlog_tags(page, true).unwrap_or_default();
+        snapshot.pages.push((no, yes));
+    }
+    // 各消息层当前显示文本两套再现标签。
+    for id in state.layers.keys() {
+        let no = state.get_message_tags(id, false).unwrap_or_default();
+        let yes = state.get_message_tags(id, true).unwrap_or_default();
+        snapshot.message_layers.insert(id.clone(), (no, yes));
+    }
+    snapshot
+}
+
+/// 把当前活动消息层登记为合成器默认消息层，并建立「消息层 ID → 场景图层 ID」映射，
+/// 使 [lyprop id="~xxx"] / id="~" 能解析到对应场景图层。
+///
+/// 消息层与场景图层此处同名（MessageLayerSwitch 分支已 ensure_layer 出同名场景层），
+/// 故绑定为 id→id；将来若解耦可在此改写映射目标。`active` 为 None（消息层被弹空）
+/// 时清默认消息层。拆成自由函数便于用 Compositor 直接单测。
+fn apply_message_layer_binding(
+    compositor: &mut crate::compositor::Compositor,
+    active: Option<String>,
+) {
+    match active {
+        Some(message_id) => {
+            compositor.set_message_layer_binding(&message_id, &message_id);
+            compositor.set_default_message_layer(Some(message_id));
+        }
+        // 后续 [lyprop id="~"] 找不到默认层时按合成器约定忽略该操作。
+        None => compositor.set_default_message_layer(None),
+    }
+}
 
 impl CoreRuntime {
     pub(super) fn set_text_renderer(&mut self, renderer: Box<dyn TextRenderer>) {
         self.text_renderer = Some(renderer);
+    }
+
+    /// 从 text_renderer 抽取 backlog / 消息层再现标签，刷进进程级快照，供解释器
+    /// `var system=get_backlog_size / get_backlog_tags / get_message_tags` 的宿主
+    /// 查询钩子读取。每帧（render 前）调用一次即可保证查询读到最新值。
+    ///
+    /// 注意：解释器侧的钩子字段与 execute_var_system 接线尚未落地（在
+    /// ../asb-interpreter，超出本任务白名单），改动点见任务 skipped。快照本身
+    /// 已可用，钩子接上后即刻生效。
+    pub(super) fn sync_backlog_snapshot(&self) {
+        let Some(renderer) = self.text_renderer.as_ref() else {
+            return;
+        };
+        *BACKLOG_SNAPSHOT.lock().unwrap() = build_backlog_snapshot(renderer.font_state());
     }
 
     pub(super) fn advance_text(&mut self, delta_ms: u64) {
@@ -74,14 +183,19 @@ impl CoreRuntime {
                 Event::FontInit => renderer.font_init(),
                 Event::FontClose => renderer.font_pop(),
                 Event::FontDefault(settings) => renderer.font_default(settings),
+                // TODO(chgmsg): stack=0 时不应把前一设置压入消息层堆栈；
+                // layered 的分层消息层语义也未实现（字段已随事件透传）。
                 Event::MessageLayerSwitch { id, .. } => {
                     if let Some(layer_id) = id {
                         self.compositor.ensure_layer(layer_id);
                     }
                     renderer.switch_message_layer(id.as_deref());
+                    // 消息层切换后的 lyprop `~` 绑定在 renderer 借用结束后统一处理
+                    // （见函数末尾 sync_message_layer_binding）。
                 }
                 Event::MessageLayerPop => renderer.pop_message_layer(),
-                Event::LineBreak => renderer.push_line_break(),
+                // TODO(rt): omitblankline=1 时若末行为空行应跳过换行（布局在 glyph.rs）。
+                Event::LineBreak { .. } => renderer.push_line_break(),
                 Event::PageBreak { backlog } => renderer.push_page_break(*backlog),
                 Event::GlyphConfig(config) => renderer.set_glyph_config(config),
                 Event::TextAnimation(params) => {
@@ -89,6 +203,60 @@ impl CoreRuntime {
                 }
                 Event::SceneIn => renderer.show_text(),
                 Event::SceneOut => renderer.hide_text(),
+                // ── ruby / link ──
+                Event::RubyStart { text } => renderer.ruby_start(text),
+                Event::RubyEnd => renderer.ruby_end(),
+                // 解释器已补齐 shadowcolor/outlinecolor 字段，直接透传。
+                Event::LinkStart {
+                    file,
+                    label,
+                    link_type,
+                    color,
+                    shadowcolor,
+                    outlinecolor,
+                } => renderer.link_start(
+                    file.as_deref(),
+                    label.as_deref(),
+                    *link_type,
+                    color.as_deref(),
+                    shadowcolor.as_deref(),
+                    outlinecolor.as_deref(),
+                ),
+                Event::LinkEnd => renderer.link_end(),
+                Event::LinkEnable => renderer.set_links_enabled(true),
+                Event::LinkDisable => renderer.set_links_enabled(false),
+                // ── backlog ──
+                // [backlog]：解释器已补齐 messagelayer/includefont/hide/layer/clear
+                // 字段，在 BacklogSettings 上逐一落值（None=继承先前设置）。
+                Event::BacklogConfig {
+                    allow,
+                    messagelayer,
+                    includefont,
+                    hide,
+                    layer,
+                    clear,
+                } => {
+                    let backlog = &mut renderer.font_state_mut().backlog;
+                    backlog.settings.allow = *allow;
+                    if let Some(ml) = messagelayer {
+                        backlog.settings.message_layer = ml.clone();
+                    }
+                    if let Some(inc) = includefont {
+                        backlog.settings.include_font = *inc;
+                    }
+                    if let Some(h) = hide {
+                        backlog.settings.hide = h.clone();
+                    }
+                    // layer=None 表示禁用自动显示（文档：缺省则禁用），直接覆盖。
+                    backlog.settings.layer = layer.clone();
+                    if *clear {
+                        backlog.clear();
+                    }
+                }
+                // [writebacklog]：mode=1 换页存历史（rp 的 backlog 参数可逐次覆盖）
+                Event::WriteBacklogConfig { mode } => {
+                    renderer.font_state_mut().backlog.set_write_mode(*mode);
+                }
                 _ => {}
             }
             match event {
@@ -104,6 +272,54 @@ impl CoreRuntime {
         if let Some(face) = restored_face {
             self.load_script_font(&face);
         }
+
+        // ── lyprop `~` 消息层绑定接线 ────────────────────────────────
+        // 文本子系统创建/切换消息层时，把「消息层 ID → 场景图层 ID」登记进合成器，
+        // 使 [lyprop id="~xxx"] / id="~" 能解析到对应场景图层。这里放在 renderer
+        // 借用结束之后：切换后活动消息层由 renderer 决定，需回读它拿真实 ID。
+        match event {
+            Event::MessageLayerSwitch { .. } | Event::MessageLayerPop => {
+                self.sync_message_layer_binding();
+            }
+            _ => {}
+        }
+    }
+
+    /// 把当前活动消息层登记为合成器的默认消息层，并建立「消息层 ID → 场景图层
+    /// ID」映射。消息层与场景图层此处同名（MessageLayerSwitch 分支已 ensure_layer
+    /// 出同名场景层），故绑定为 id→id；将来若解耦可在此改写映射目标。
+    pub(super) fn sync_message_layer_binding(&mut self) {
+        let Some(renderer) = self.text_renderer.as_ref() else {
+            return;
+        };
+        let active = renderer.font_state().active_layer.clone();
+        apply_message_layer_binding(&mut self.compositor, active);
+    }
+
+    // ── glyph 点击等待图标接线 ───────────────────────────────────────
+    //
+    // 进入行末/页末点击等待时把等待图标图层移动到最后一个字符旁并显示；
+    // 退出等待时隐藏。位置由文本子系统的 click_wait_icon_placement 计算，
+    // 显隐由合成器的 show/hide_click_wait_icon 落到场景。
+
+    /// 进入点击等待时显示等待图标。
+    ///
+    /// `page_end`=false 为行末等待（用 glyph 的 layer + left/top），true 为页末
+    /// 等待（用 rplayer + rpleft/rptop）。未配置图标图层或当前层无文本时不显示。
+    pub(super) fn enter_click_wait_icon(&mut self, page_end: bool) {
+        let placement = self
+            .text_renderer
+            .as_ref()
+            .and_then(|renderer| renderer.click_wait_icon_placement(page_end));
+        if let Some(p) = placement {
+            self.compositor
+                .show_click_wait_icon(&p.layer_id, p.left, p.top, p.homing);
+        }
+    }
+
+    /// 退出点击等待时隐藏等待图标。
+    pub(super) fn exit_click_wait_icon(&mut self) {
+        self.compositor.hide_click_wait_icon();
     }
 
     fn load_script_font(&mut self, face: &str) {
@@ -122,5 +338,250 @@ impl CoreRuntime {
                 crate::core_warn!("[text] 脚本字体加载失败 {face}: {error}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BacklogSnapshot, BACKLOG_SNAPSHOT, backlog_snapshot, build_backlog_snapshot};
+    use crate::text::GlyphTextRenderer;
+    use crate::text::render::TextRenderer;
+    use std::collections::HashMap;
+
+    #[test]
+    fn snapshot_accessors_follow_pseudo_array_conventions() {
+        let mut snap = BacklogSnapshot::default();
+        snap.pages.push((
+            vec!["[print data=\"页0\"]".to_string()],
+            vec!["[font size=\"40\"]".to_string(), "[print data=\"页0\"]".to_string()],
+        ));
+        snap.message_layers.insert(
+            "adv01".to_string(),
+            (
+                vec!["[print data=\"当前\"]".to_string()],
+                vec!["[font size=\"40\"]".to_string(), "[print data=\"当前\"]".to_string()],
+            ),
+        );
+
+        // get_backlog_size
+        assert_eq!(snap.backlog_size(), 1);
+        // get_backlog_tags：allfont=0/1 两套、越界 None
+        assert_eq!(
+            snap.backlog_tags(0, false).unwrap(),
+            vec!["[print data=\"页0\"]"]
+        );
+        assert_eq!(snap.backlog_tags(0, true).unwrap().len(), 2);
+        assert!(snap.backlog_tags(1, false).is_none());
+        // get_message_tags：按 id 查、不存在 None
+        assert_eq!(
+            snap.message_tags("adv01", false).unwrap(),
+            vec!["[print data=\"当前\"]"]
+        );
+        assert_eq!(snap.message_tags("adv01", true).unwrap().len(), 2);
+        assert!(snap.message_tags("missing", false).is_none());
+    }
+
+    #[test]
+    fn build_snapshot_extracts_backlog_pages_and_message_tags() {
+        let mut r = GlyphTextRenderer::new();
+        // 存两页历史（writebacklog mode=1 后连续换页）
+        r.font_state_mut().backlog.set_write_mode(true);
+        r.push_text("第一页", false);
+        r.push_page_break(None);
+        r.push_text("第二页", false);
+        r.push_page_break(None);
+        // 当前消息层再留一页未换页的文本，供 get_message_tags 抽取
+        r.push_text("当前行", false);
+
+        let snap = build_backlog_snapshot(r.font_state());
+
+        // backlog：两页，页码即下标，与 get_backlog_tags 一致
+        assert_eq!(snap.backlog_size(), 2);
+        assert_eq!(
+            snap.backlog_tags(0, false).unwrap(),
+            vec!["[print data=\"第一页\"]"]
+        );
+        assert_eq!(
+            snap.backlog_tags(1, false).unwrap(),
+            vec!["[print data=\"第二页\"]"]
+        );
+        // 默认消息层当前文本再现标签
+        let msg = snap
+            .message_tags(crate::text::glyph::DEFAULT_MESSAGE_LAYER, false)
+            .unwrap();
+        assert_eq!(msg, vec!["[print data=\"当前行\"]"]);
+    }
+
+    #[test]
+    fn build_snapshot_allfont_prepends_page_font() {
+        let mut r = GlyphTextRenderer::new();
+        r.font_default(&HashMap::from([("size".to_string(), "40".to_string())]));
+        r.push_text("あ", false);
+
+        let snap = build_backlog_snapshot(r.font_state());
+        let with_font = snap
+            .message_tags(crate::text::glyph::DEFAULT_MESSAGE_LAYER, true)
+            .unwrap();
+        // allfont=1 时以页首字体的 [font …] 开头
+        assert_eq!(with_font[0], "[font size=\"40\"]");
+        // allfont=0 时不含字体标签
+        let no_font = snap
+            .message_tags(crate::text::glyph::DEFAULT_MESSAGE_LAYER, false)
+            .unwrap();
+        assert_eq!(no_font, vec!["[print data=\"あ\"]"]);
+    }
+
+    #[test]
+    fn snapshot_static_round_trips() {
+        // 直接写进程级快照再读回，验证 backlog_snapshot() 访问路径（宿主钩子读取入口）。
+        let mut snap = BacklogSnapshot::default();
+        snap.pages.push((vec!["[print data=\"x\"]".to_string()], Vec::new()));
+        *BACKLOG_SNAPSHOT.lock().unwrap() = snap.clone();
+        assert_eq!(backlog_snapshot(), snap);
+        // 复位，避免污染其它测试（进程级静态共享）
+        *BACKLOG_SNAPSHOT.lock().unwrap() = BacklogSnapshot::default();
+    }
+
+    // ── 任务 #3：lyprop `~` 消息层绑定 ──
+
+    #[test]
+    fn message_layer_binding_registers_active_layer_and_resolves_tilde() {
+        use super::apply_message_layer_binding;
+        use crate::compositor::Compositor;
+        use asb_interpreter::Event;
+        use asb_interpreter::event::LayerEvent;
+
+        let mut c = Compositor::new();
+        // 场景图层与消息层同名（apply_text_event 的 ensure_layer 语义）
+        c.apply_event(&Event::Layer(LayerEvent::Create {
+            id: "mw".into(),
+            file: "mw_bg".into(),
+        }));
+
+        // 切到消息层 mw 后接线绑定（等价 sync_message_layer_binding 读到 active="mw"）
+        apply_message_layer_binding(&mut c, Some("mw".to_string()));
+
+        // `~mw` 应解析到场景图层 mw
+        c.apply_event(&Event::Layer(LayerEvent::SetProperty {
+            id: "~mw".into(),
+            property: "alpha".into(),
+            value: "100".into(),
+        }));
+        assert_eq!(c.scene().get("mw").unwrap().props.alpha, Some(100));
+        // `~`（默认消息层）也应指向 mw
+        c.apply_event(&Event::Layer(LayerEvent::SetProperty {
+            id: "~".into(),
+            property: "left".into(),
+            value: "42".into(),
+        }));
+        assert_eq!(c.scene().get("mw").unwrap().props.left, Some(42.0));
+    }
+
+    #[test]
+    fn message_layer_binding_none_clears_default() {
+        use super::apply_message_layer_binding;
+        use crate::compositor::Compositor;
+        use asb_interpreter::Event;
+        use asb_interpreter::event::LayerEvent;
+
+        let mut c = Compositor::new();
+        c.apply_event(&Event::Layer(LayerEvent::Create {
+            id: "mw".into(),
+            file: "mw_bg".into(),
+        }));
+        apply_message_layer_binding(&mut c, Some("mw".to_string()));
+        // 弹空活动消息层：清默认消息层，`~` 此后无目标（合成器忽略该操作）
+        apply_message_layer_binding(&mut c, None);
+        c.apply_event(&Event::Layer(LayerEvent::SetProperty {
+            id: "~".into(),
+            property: "left".into(),
+            value: "99".into(),
+        }));
+        // 默认消息层已清空，left 不应被改动
+        assert_ne!(c.scene().get("mw").unwrap().props.left, Some(99.0));
+    }
+
+    #[test]
+    fn switch_message_layer_exposes_active_id_for_binding() {
+        // 验证接线依赖的数据流：switch 后 font_state().active_layer 即目标消息层 ID。
+        let mut r = GlyphTextRenderer::new();
+        r.switch_message_layer(Some("mw"));
+        assert_eq!(r.font_state().active_layer.as_deref(), Some("mw"));
+    }
+
+    // ── 任务 #2：glyph 点击等待图标 ──
+
+    #[test]
+    fn click_wait_placement_feeds_compositor_show_and_hide() {
+        use crate::render_pipeline::draw::TextureId;
+        use crate::text::render::GlyphInfo;
+        use crate::compositor::Compositor;
+        use asb_interpreter::Event;
+        use asb_interpreter::event::LayerEvent;
+
+        // 等宽字形（宽/步进 10），无字体时 push_text 不产字形，故直接注入缓冲。
+        fn glyph(c: char) -> GlyphInfo {
+            GlyphInfo {
+                character: c.to_string(),
+                texture_id: TextureId(0),
+                atlas_x: 0.0,
+                atlas_y: 0.0,
+                atlas_w: 0.0,
+                atlas_h: 0.0,
+                offset_x: 0.0,
+                offset_y: 0.0,
+                width: 10.0,
+                height: 0.0,
+                advance_x: 10.0,
+            }
+        }
+
+        let mut r = GlyphTextRenderer::new();
+        // 配置行末图标图层为 "90"，无偏移、homing=1
+        r.set_glyph_config(&HashMap::from([
+            ("layer".to_string(), "90".to_string()),
+            ("homing".to_string(), "1".to_string()),
+        ]));
+        {
+            let layer = r.font_state_mut().active_layer_mut();
+            layer.left = 100.0;
+            layer.top = 200.0;
+            layer.text_buffer = vec![glyph('あ')];
+        }
+
+        // 行末等待（page_end=false）应得到摆放信息
+        let placement = r
+            .click_wait_icon_placement(false)
+            .expect("配置了 layer 且有文本，应返回摆放信息");
+        assert_eq!(placement.layer_id, "90");
+        assert!(placement.homing);
+
+        // 把摆放信息喂给合成器（等价 enter_click_wait_icon）
+        let mut c = Compositor::new();
+        c.apply_event(&Event::Layer(LayerEvent::Create {
+            id: "90".into(),
+            file: "icon".into(),
+        }));
+        c.show_click_wait_icon(
+            &placement.layer_id,
+            placement.left,
+            placement.top,
+            placement.homing,
+        );
+        assert_eq!(c.active_wait_icon(), Some("90"));
+        assert_eq!(c.scene().get("90").unwrap().props.visible, Some(true));
+
+        // 退出等待隐藏（等价 exit_click_wait_icon）
+        c.hide_click_wait_icon();
+        assert_eq!(c.active_wait_icon(), None);
+        assert_eq!(c.scene().get("90").unwrap().props.visible, Some(false));
+    }
+
+    #[test]
+    fn click_wait_placement_none_without_glyph_layer() {
+        // [glyph] 未配置图标图层：即使有文本也不应返回摆放信息（不显示图标）。
+        let mut r = GlyphTextRenderer::new();
+        r.push_text("あ", false);
+        assert!(r.click_wait_icon_placement(false).is_none());
     }
 }

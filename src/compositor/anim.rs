@@ -314,6 +314,10 @@ pub struct Tween {
     pub delete_on_finish: bool,
     /// 缓动完成后的回调处理器（`sync` / `file` / `label` / `handler`）。
     pub handler: Option<TweenHandler>,
+    /// 所属 `[tweenset]` Tween 集编号。组内 tween 顺序执行；删除组内任一
+    /// tween 关联图层或 lytweendel 完成其一时，同组其余 tween 一并删除。
+    #[serde(default)]
+    pub set_id: Option<u64>,
 }
 
 impl Tween {
@@ -430,6 +434,9 @@ pub(crate) struct TweenRequest<'a> {
     pub(crate) handler_file: Option<&'a str>,
     pub(crate) handler_label: Option<&'a str>,
     pub(crate) handler_handler: Option<&'a str>,
+    /// 所属 `[tweenset]` 组编号；组内 tween 不做同参数替换（同图层同参数
+    /// 允许多段依次排队）。
+    pub(crate) set_id: Option<u64>,
 }
 
 /// `[anime]` 帧动画事件归约为动画系统所需的参数。
@@ -448,7 +455,8 @@ pub(crate) struct AnimeRequest<'a> {
 pub(crate) struct AnimeFrame {
     pub(crate) time_ms: u64,
     pub(crate) file: String,
-    #[allow(dead_code)]
+    /// 本帧的蒙版图路径；换帧时写入 `Layer::mask`，绘制时经
+    /// `resolve_with_mask` 与本帧图像合成 alpha。
     pub(crate) mask: Option<String>,
     pub(crate) props: HashMap<String, String>,
 }
@@ -532,26 +540,51 @@ pub(crate) fn apply_tween(scene: &mut Scene, clock_ms: u64, request: TweenReques
         } else {
             None
         },
+        set_id: request.set_id,
     };
 
     if let Some(layer) = scene.get_mut(request.id) {
-        layer.tweens.retain(|t| t.param != request.param);
+        // tweenset 组内允许同图层同参数排多段（顺序执行），不做替换；
+        // 组外维持"后者覆盖前者"的 Artemis 语义。
+        if request.set_id.is_none() {
+            layer.tweens.retain(|t| t.param != request.param);
+        }
         layer.tweens.push(tween);
     }
 }
 
 /// 强制完成某图层的所有缓动：把终值写回属性，清空缓动列表。
+///
+/// 文档（tweenset.md）：通过 lytweendel 完成 Tween 集内的某个 Tween 时，
+/// 该集内其他所有 Tween 也一并删除（不落终值）。
 pub(crate) fn finish_tweens(scene: &mut Scene, id: &str) {
+    let mut set_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
     if let Some(layer) = scene.get_mut(id) {
         let finished: Vec<(String, f32)> = layer
             .tweens
             .iter()
             .map(|t| (t.param.clone(), t.to))
             .collect();
+        set_ids.extend(layer.tweens.iter().filter_map(|t| t.set_id));
         layer.tweens.clear();
         let props = &mut layer.props;
         for (param, value) in finished {
             props.set_raw(&param, &format_param(&param, value));
+        }
+    }
+    remove_tween_sets(scene, &set_ids);
+}
+
+/// 级联删除：清除场景中所有属于给定 Tween 集的缓动（不落终值）。
+pub(crate) fn remove_tween_sets(scene: &mut Scene, set_ids: &std::collections::HashSet<u64>) {
+    if set_ids.is_empty() {
+        return;
+    }
+    for id in scene.iter_ids() {
+        if let Some(layer) = scene.get_mut(&id) {
+            layer
+                .tweens
+                .retain(|t| t.set_id.is_none_or(|sid| !set_ids.contains(&sid)));
         }
     }
 }
@@ -604,6 +637,7 @@ pub(crate) fn apply_anime_event(
             scene.ensure(request.id);
             if let Some(layer) = scene.get_mut(request.id) {
                 layer.file = Some(file.clone());
+                layer.mask = request.mask.map(str::to_string);
                 layer.props.merge_raw(request.props);
             }
             let frame = AnimeFrame {
@@ -645,28 +679,34 @@ pub(crate) fn apply_anime_event(
 }
 
 /// 推进帧动画：根据时钟前进到对应的帧，更新图层的文件和属性。
+///
+/// 有限次播放（loop=0 播一次、loop=N 播 N 次）结束后停在最后一帧，
+/// 并清理播放状态——最后一帧已固化到图层，之后不再逐帧覆盖属性。
 pub(crate) fn update_anime_frames(
     scene: &mut Scene,
     states: &mut HashMap<String, AnimeState>,
     now: u64,
 ) {
-    for (layer_id, state) in states {
+    let mut finished: Vec<String> = Vec::new();
+    for (layer_id, state) in states.iter() {
         if state.frames.is_empty() || state.total_duration_ms == 0 {
             continue;
         }
         let elapsed = now.saturating_sub(state.start_ms);
 
-        let t = if state.loop_count == -1 {
+        let t = if state.loop_count < 0 {
+            // -1（及其它负值）按无限循环处理。
             elapsed % state.total_duration_ms
-        } else if state.loop_count == 0 {
-            if elapsed >= state.total_duration_ms {
-                state.total_duration_ms - 1
-            } else {
-                elapsed
-            }
         } else {
-            let max_elapsed = state.total_duration_ms * (state.loop_count as u64 + 1);
+            // 文档：loop=0 仅播放一次，loop=N 播放 N 次——总时长 = 次数 × 单轮。
+            let rounds = if state.loop_count == 0 {
+                1
+            } else {
+                state.loop_count as u64
+            };
+            let max_elapsed = state.total_duration_ms * rounds;
             if elapsed >= max_elapsed {
+                finished.push(layer_id.clone());
                 state.total_duration_ms - 1
             } else {
                 elapsed % state.total_duration_ms
@@ -683,9 +723,13 @@ pub(crate) fn update_anime_frames(
         if let Some(frame) = frame {
             if let Some(layer) = scene.get_mut(layer_id) {
                 layer.file = Some(frame.file.clone());
+                layer.mask = frame.mask.clone();
                 layer.props.merge_raw(&frame.props);
             }
         }
+    }
+    for id in finished {
+        states.remove(&id);
     }
 }
 
@@ -693,6 +737,7 @@ fn apply_first_anime_frame(scene: &mut Scene, id: &str, state: &AnimeState) {
     if let Some(first) = state.frames.first() {
         if let Some(layer) = scene.get_mut(id) {
             layer.file = Some(first.file.clone());
+            layer.mask = first.mask.clone();
             layer.props.merge_raw(&first.props);
         }
     }
@@ -757,6 +802,7 @@ mod tests {
             loop_delay_ms: 0,
             delete_on_finish: false,
             handler: None,
+            set_id: None,
         }
     }
 
@@ -845,6 +891,157 @@ mod tests {
         // Cycle 1: 1000-2000, delay: 2000-2500, Cycle 2: 2500-3500
         assert!(!t.is_finished(3400));
         assert!(t.is_finished(3500));
+    }
+
+    // ── anime 帧动画播放 ──
+
+    fn anime_state(loop_count: i32) -> AnimeState {
+        let frame = |time_ms: u64, file: &str| AnimeFrame {
+            time_ms,
+            file: file.to_string(),
+            mask: None,
+            props: HashMap::new(),
+        };
+        AnimeState {
+            frames: vec![frame(0, "f0"), frame(100, "f1")],
+            loop_count,
+            start_ms: 0,
+            total_duration_ms: 200,
+        }
+    }
+
+    fn layer_file(scene: &Scene, id: &str) -> Option<String> {
+        scene.get(id).and_then(|layer| layer.file.clone())
+    }
+
+    #[test]
+    fn anime_loop_n_plays_exactly_n_rounds_then_stops_on_last_frame() {
+        let mut scene = Scene::new();
+        scene.ensure("a");
+        let mut states = HashMap::from([("a".to_string(), anime_state(2))]);
+
+        // 第 1 轮：0-99ms f0，100-199ms f1。
+        update_anime_frames(&mut scene, &mut states, 50);
+        assert_eq!(layer_file(&scene, "a").as_deref(), Some("f0"));
+        update_anime_frames(&mut scene, &mut states, 150);
+        assert_eq!(layer_file(&scene, "a").as_deref(), Some("f1"));
+
+        // 第 2 轮：250ms 折回第 2 轮的 50ms → f0，仍在播放。
+        update_anime_frames(&mut scene, &mut states, 250);
+        assert_eq!(layer_file(&scene, "a").as_deref(), Some("f0"));
+        assert!(states.contains_key("a"));
+
+        // 恰到 2 轮总时长（400ms）：结束——停在最后一帧并清理状态。
+        // 旧实现 max_elapsed=total*(N+1) 会在这里多播一轮。
+        update_anime_frames(&mut scene, &mut states, 400);
+        assert_eq!(layer_file(&scene, "a").as_deref(), Some("f1"));
+        assert!(states.is_empty());
+
+        // 清理后继续推进不再改变画面。
+        update_anime_frames(&mut scene, &mut states, 999);
+        assert_eq!(layer_file(&scene, "a").as_deref(), Some("f1"));
+    }
+
+    #[test]
+    fn anime_loop_zero_plays_once_then_cleans_up() {
+        let mut scene = Scene::new();
+        scene.ensure("a");
+        let mut states = HashMap::from([("a".to_string(), anime_state(0))]);
+
+        update_anime_frames(&mut scene, &mut states, 150);
+        assert_eq!(layer_file(&scene, "a").as_deref(), Some("f1"));
+        assert!(states.contains_key("a"));
+
+        update_anime_frames(&mut scene, &mut states, 200);
+        assert_eq!(layer_file(&scene, "a").as_deref(), Some("f1"));
+        assert!(states.is_empty());
+    }
+
+    #[test]
+    fn anime_frames_apply_per_frame_mask() {
+        let mut scene = Scene::new();
+        scene.ensure("a");
+        let mut states = HashMap::from([(
+            "a".to_string(),
+            AnimeState {
+                frames: vec![
+                    AnimeFrame {
+                        time_ms: 0,
+                        file: "f0".into(),
+                        mask: Some("m0".into()),
+                        props: HashMap::new(),
+                    },
+                    AnimeFrame {
+                        time_ms: 100,
+                        file: "f1".into(),
+                        mask: None,
+                        props: HashMap::new(),
+                    },
+                ],
+                loop_count: -1,
+                start_ms: 0,
+                total_duration_ms: 200,
+            },
+        )]);
+
+        update_anime_frames(&mut scene, &mut states, 50);
+        assert_eq!(scene.get("a").unwrap().mask.as_deref(), Some("m0"));
+        // 第二帧无蒙版：切帧时清除。
+        update_anime_frames(&mut scene, &mut states, 150);
+        assert_eq!(scene.get("a").unwrap().mask, None);
+    }
+
+    #[test]
+    fn anime_init_event_applies_mask() {
+        let mut scene = Scene::new();
+        let mut states = HashMap::new();
+        apply_anime_event(
+            &mut scene,
+            &mut states,
+            0,
+            AnimeRequest {
+                id: "a",
+                mode: "init",
+                file: Some("f0"),
+                mask: Some("m0"),
+                time: None,
+                loop_count: None,
+                props: &HashMap::new(),
+            },
+        );
+        assert_eq!(scene.get("a").unwrap().mask.as_deref(), Some("m0"));
+    }
+
+    #[test]
+    fn remove_tween_sets_clears_grouped_tweens_across_layers() {
+        let mut scene = Scene::new();
+        scene.ensure("1");
+        scene.ensure("2");
+        let mut grouped = tween(0.0, 1.0, 1000);
+        grouped.set_id = Some(7);
+        let solo = tween(0.0, 1.0, 1000);
+        scene.get_mut("1").unwrap().tweens.push(grouped.clone());
+        scene.get_mut("2").unwrap().tweens.push(grouped);
+        scene.get_mut("2").unwrap().tweens.push(solo);
+
+        let ids: std::collections::HashSet<u64> = [7].into_iter().collect();
+        remove_tween_sets(&mut scene, &ids);
+        assert!(scene.get("1").unwrap().tweens.is_empty());
+        // 不属于该组的缓动保留。
+        assert_eq!(scene.get("2").unwrap().tweens.len(), 1);
+        assert_eq!(scene.get("2").unwrap().tweens[0].set_id, None);
+    }
+
+    #[test]
+    fn anime_infinite_loop_keeps_cycling_and_state() {
+        let mut scene = Scene::new();
+        scene.ensure("a");
+        let mut states = HashMap::from([("a".to_string(), anime_state(-1))]);
+
+        // 第 6 轮中段（1050ms % 200 = 50ms）→ f0，状态常驻。
+        update_anime_frames(&mut scene, &mut states, 1050);
+        assert_eq!(layer_file(&scene, "a").as_deref(), Some("f0"));
+        assert!(states.contains_key("a"));
     }
 
     // ── easing function accuracy tests ──

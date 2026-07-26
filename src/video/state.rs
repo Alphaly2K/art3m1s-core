@@ -36,6 +36,7 @@ impl VideoBackend for VideoStateBackend {
 
         // 逻辑状态模式：非循环视频立即完成
         if !config.loop_play {
+            // 全屏视频用全局完成处理器（无 id）。
             let handler = self.state.finish_handler.clone();
             self.finish_queue
                 .push_back(VideoFinishEvent { id: None, handler });
@@ -65,9 +66,15 @@ impl VideoBackend for VideoStateBackend {
 
         self.state.video_layers.insert(id.to_string(), channel);
 
-        // 逻辑状态模式：非循环视频立即完成
+        // 逻辑状态模式：非循环视频立即完成。
+        // 优先按图层 ID 取处理器，缺省回退到全局处理器（对齐音频 se_finish_handlers）。
         if !config.loop_play {
-            let handler = self.state.finish_handler.clone();
+            let handler = self
+                .state
+                .layer_finish_handlers
+                .get(id)
+                .or(self.state.finish_handler.as_ref())
+                .cloned();
             self.finish_queue.push_back(VideoFinishEvent {
                 id: Some(id.to_string()),
                 handler,
@@ -88,12 +95,24 @@ impl VideoBackend for VideoStateBackend {
         self.state.video_layers.clear();
     }
 
-    fn set_finish_handler(&mut self, handler: VideoFinishHandler) {
-        self.state.finish_handler = Some(handler);
+    fn set_finish_handler(&mut self, id: Option<&str>, handler: VideoFinishHandler) {
+        match id {
+            Some(layer_id) => {
+                self.state
+                    .layer_finish_handlers
+                    .insert(layer_id.to_string(), handler);
+            }
+            None => self.state.finish_handler = Some(handler),
+        }
     }
 
-    fn remove_finish_handler(&mut self) {
-        self.state.finish_handler = None;
+    fn remove_finish_handler(&mut self, id: Option<&str>) {
+        match id {
+            Some(layer_id) => {
+                self.state.layer_finish_handlers.remove(layer_id);
+            }
+            None => self.state.finish_handler = None,
+        }
     }
 
     fn advance(&mut self, delta_ms: u64) {
@@ -211,10 +230,95 @@ mod tests {
             handler: None,
         };
 
-        backend.set_finish_handler(handler);
+        backend.set_finish_handler(None, handler);
         assert!(backend.video_state().finish_handler.is_some());
 
-        backend.remove_finish_handler();
+        backend.remove_finish_handler(None);
         assert!(backend.video_state().finish_handler.is_none());
+    }
+
+    #[test]
+    fn test_state_layer_finish_handler_per_id() {
+        // setonvideofinish id=层ID 按图层登记；delonvideofinish id=层ID 按图层解除。
+        let mut backend = VideoStateBackend::new();
+
+        let handler = VideoFinishHandler {
+            file: Some("mv.asb".to_string()),
+            label: Some("@done".to_string()),
+            call: false,
+            handler: None,
+        };
+        backend.set_finish_handler(Some("mw.movie"), handler);
+        assert!(
+            backend
+                .video_state()
+                .layer_finish_handlers
+                .contains_key("mw.movie")
+        );
+        // 图层处理器登记不污染全局槽。
+        assert!(backend.video_state().finish_handler.is_none());
+
+        backend.remove_finish_handler(Some("mw.movie"));
+        assert!(
+            !backend
+                .video_state()
+                .layer_finish_handlers
+                .contains_key("mw.movie")
+        );
+    }
+
+    #[test]
+    fn test_state_layer_video_uses_per_id_handler() {
+        // 图层视频完成事件携带其按 ID 登记的处理器。
+        let mut backend = VideoStateBackend::new();
+
+        let handler = VideoFinishHandler {
+            file: Some("mv.asb".to_string()),
+            label: Some("@done".to_string()),
+            call: false,
+            handler: None,
+        };
+        backend.set_finish_handler(Some("1"), handler);
+
+        let config = VideoConfig {
+            file: "test.ogv".to_string(),
+            skippable: true,
+            loop_play: false,
+            delay_margin_ms: None,
+        };
+        backend.play_layer("1", &config);
+
+        let events = backend.poll_finish_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, Some("1".to_string()));
+        let event_handler = events[0].handler.as_ref().expect("图层完成处理器应被派发");
+        assert_eq!(event_handler.file.as_deref(), Some("mv.asb"));
+    }
+
+    #[test]
+    fn test_state_layer_video_falls_back_to_global_handler() {
+        // 图层未单独登记处理器时回退到全局处理器。
+        let mut backend = VideoStateBackend::new();
+
+        let handler = VideoFinishHandler {
+            file: Some("global.asb".to_string()),
+            label: None,
+            call: false,
+            handler: None,
+        };
+        backend.set_finish_handler(None, handler);
+
+        let config = VideoConfig {
+            file: "test.ogv".to_string(),
+            skippable: true,
+            loop_play: false,
+            delay_margin_ms: None,
+        };
+        backend.play_layer("2", &config);
+
+        let events = backend.poll_finish_events();
+        assert_eq!(events.len(), 1);
+        let event_handler = events[0].handler.as_ref().expect("应回退到全局处理器");
+        assert_eq!(event_handler.file.as_deref(), Some("global.asb"));
     }
 }

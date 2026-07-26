@@ -74,6 +74,19 @@ pub enum CompositorEvent<'a> {
         input: i32,
     },
     Flip,
+    /// `[lyedit]` 像素级图像加工。
+    LayerEdit {
+        id: &'a str,
+        mode: &'a str,
+        color: Option<&'a str>,
+        file: Option<&'a str>,
+        left: Option<i32>,
+        top: Option<i32>,
+    },
+    /// `[tweenset]`：开始收集组内 lytween。
+    TweenSetStart,
+    /// `[/tweenset]`：结束收集并按顺序启动组内 lytween。
+    TweenSetEnd,
 }
 
 impl<'a> CompositorEvent<'a> {
@@ -186,6 +199,23 @@ impl<'a> CompositorEvent<'a> {
                 input: *input,
             }),
             Event::Flip => Some(Self::Flip),
+            Event::LayerEdit {
+                id,
+                mode,
+                color,
+                file,
+                left,
+                top,
+            } => Some(Self::LayerEdit {
+                id,
+                mode,
+                color: color.as_deref(),
+                file: file.as_deref(),
+                left: *left,
+                top: *top,
+            }),
+            Event::TweenSetStart => Some(Self::TweenSetStart),
+            Event::TweenSetEnd => Some(Self::TweenSetEnd),
             _ => None,
         }
     }
