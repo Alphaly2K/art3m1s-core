@@ -50,6 +50,7 @@ struct InlineEventFrame {
     script: String,
     line: usize,
     stack: Vec<asb_interpreter::CallFrame>,
+    committed: bool,
 }
 
 pub struct CoreRuntime {

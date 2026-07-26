@@ -229,12 +229,12 @@ impl CoreRuntime {
                 Ok(drain) => drain,
                 Err(e) => {
                     crate::core_error!("解释器错误: {e:?}");
-                    self.finish_inline_event_frame(false);
+                    self.finish_inline_event_frame(false, false);
                     self.wait_reason = Some(stop_reason);
                     return;
                 }
             };
-            self.finish_inline_event_frame(drain.changed_position);
+            self.finish_inline_event_frame(drain.changed_position, drain.wait.is_some());
             should_resume |= drain.saw_return || drain.changed_position;
             if drain.wait.is_some() {
                 self.interpreter.advance_line();
@@ -243,7 +243,9 @@ impl CoreRuntime {
             break;
         }
         if rounds >= MAX_DRAIN_ROUNDS {
-            crate::core_warn!("[runtime] 排队标签单帧排水达到上限 {MAX_DRAIN_ROUNDS}，剩余延后到下一帧");
+            crate::core_warn!(
+                "[runtime] 排队标签单帧排水达到上限 {MAX_DRAIN_ROUNDS}，剩余延后到下一帧"
+            );
         }
 
         if should_resume {
@@ -258,12 +260,12 @@ impl CoreRuntime {
             Ok(drain) => drain,
             Err(e) => {
                 crate::core_error!("解释器错误: {e:?}");
-                self.finish_inline_event_frame(false);
+                self.finish_inline_event_frame(false, false);
                 self.wait_reason = Some(wait_reason);
                 return;
             }
         };
-        self.finish_inline_event_frame(drain.changed_position);
+        self.finish_inline_event_frame(drain.changed_position, drain.wait.is_some());
 
         if drain.saw_return || drain.changed_position {
             self.wait_reason = None;
@@ -279,11 +281,11 @@ impl CoreRuntime {
             Ok(drain) => drain,
             Err(error) => {
                 crate::core_error!("解释器错误: {error:?}");
-                self.finish_inline_event_frame(false);
+                self.finish_inline_event_frame(false, false);
                 return;
             }
         };
-        self.finish_inline_event_frame(drain.changed_position);
+        self.finish_inline_event_frame(drain.changed_position, drain.wait.is_some());
         if let Some(event) = drain.wait {
             self.wait_reason = Some(match event {
                 Event::Wait { reason } => reason,
@@ -292,17 +294,36 @@ impl CoreRuntime {
         }
     }
 
-    fn finish_inline_event_frame(&mut self, changed_position: bool) {
+    fn finish_inline_event_frame(&mut self, changed_position: bool, paused: bool) {
         if changed_position {
-            self.refresh_inline_event_frame();
+            if let Some(frame) = &mut self.active_inline_event_frame {
+                frame.committed = true;
+            }
+        }
+
+        self.refresh_inline_event_frame();
+        if self.active_inline_event_frame.is_none() {
             return;
         }
-        let Some(frame) = self.active_inline_event_frame.take() else {
+        if paused || self.has_queued_tags() {
             return;
+        }
+
+        let frame = self.active_inline_event_frame.take().unwrap();
+        let restore = if frame.committed {
+            let Some(script) = self.interpreter.current_script().map(str::to_string) else {
+                return;
+            };
+            let line = self.interpreter.current_line();
+            let mut stack = self.interpreter.call_stack();
+            super::input::detach_inline_event_marker(&frame, &mut stack);
+            (script, line, stack)
+        } else {
+            (frame.script, frame.line, frame.stack)
         };
-        if let Err(error) =
-            self.interpreter
-                .restore_position(&frame.script, frame.line, frame.stack)
+        if let Err(error) = self
+            .interpreter
+            .restore_position(&restore.0, restore.1, restore.2)
         {
             crate::core_error!("移除未使用的事件返回帧失败: {error:?}");
         }

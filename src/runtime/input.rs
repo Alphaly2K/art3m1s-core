@@ -231,6 +231,7 @@ impl CoreRuntime {
             script,
             line,
             stack,
+            committed: false,
         });
     }
 
@@ -321,13 +322,24 @@ impl CoreRuntime {
     }
 }
 
-fn inline_event_marker_is_active(
+pub(super) fn inline_event_marker_is_active(
     frame: &InlineEventFrame,
     stack: &[asb_interpreter::CallFrame],
 ) -> bool {
     stack
         .get(frame.stack.len())
         .is_some_and(|marker| marker.script == frame.script && marker.return_line == frame.line)
+}
+
+pub(super) fn detach_inline_event_marker(
+    frame: &InlineEventFrame,
+    stack: &mut Vec<asb_interpreter::CallFrame>,
+) -> bool {
+    if !inline_event_marker_is_active(frame, stack) {
+        return false;
+    }
+    stack.remove(frame.stack.len());
+    true
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -385,8 +397,8 @@ fn event_dispatch_layers(
 #[cfg(test)]
 mod tests {
     use super::{
-        InlineEventFrame, event_dispatch_layers, global_push_absorbs_default_click,
-        inline_event_marker_is_active,
+        InlineEventFrame, detach_inline_event_marker, event_dispatch_layers,
+        global_push_absorbs_default_click, inline_event_marker_is_active,
     };
     use crate::compositor::Compositor;
     use asb_interpreter::CallFrame;
@@ -447,6 +459,7 @@ mod tests {
             script: "system/ui.asb".into(),
             line: 80,
             stack: vec![caller.clone()],
+            committed: false,
         };
         let marker = CallFrame {
             script: frame.script.clone(),
@@ -466,6 +479,38 @@ mod tests {
             &[caller.clone(), marker]
         ));
         assert!(!inline_event_marker_is_active(&frame, &[caller]));
+    }
+
+    #[test]
+    fn detaching_committed_marker_preserves_nested_control_flow_frames() {
+        let caller = CallFrame {
+            script: "story.asb".into(),
+            return_line: 12,
+        };
+        let frame = InlineEventFrame {
+            script: "system/ui.asb".into(),
+            line: 80,
+            stack: vec![caller.clone()],
+            committed: true,
+        };
+        let nested_call = CallFrame {
+            script: "system/script.asb".into(),
+            return_line: 21,
+        };
+        let mut stack = vec![
+            caller.clone(),
+            CallFrame {
+                script: frame.script.clone(),
+                return_line: frame.line,
+            },
+            nested_call.clone(),
+        ];
+
+        assert!(detach_inline_event_marker(&frame, &mut stack));
+        assert_eq!(stack.len(), 2);
+        assert_eq!(stack[0].script, caller.script);
+        assert_eq!(stack[1].script, nested_call.script);
+        assert_eq!(stack[1].return_line, nested_call.return_line);
     }
 }
 
@@ -514,7 +559,15 @@ fn dispatch_handler(
     params: &HashMap<String, String>,
     runtime_params: &[(&str, &str)],
 ) -> HandlerDispatch {
-    enqueue_handler_tags(interpreter, handler, file, label, call, params, runtime_params);
+    enqueue_handler_tags(
+        interpreter,
+        handler,
+        file,
+        label,
+        call,
+        params,
+        runtime_params,
+    );
     HandlerDispatch {
         handled: true,
         needs_return_frame: handler.is_some() && file.is_none() && label.is_none(),
