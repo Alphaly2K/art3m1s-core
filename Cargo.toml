@@ -8,7 +8,7 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 art3m1s-emote = { path = "crates/art3m1s-emote" }
-pfs-upk-rust = { git = "https://github.com/Alphaly2K/pfs-upk-rust" }
+pfs-upk-rust = { path = "crates/pfs-upk-rust" }
 encoding_rs = "0.8"
 glam = "0.30"
 serde = { version = "1.0", features = ["derive"] }
@@ -22,10 +22,10 @@ image = { version = "0.25", optional = true, default-features = false, features 
 ab_glyph = "0.2"
 
 [target.'cfg(target_os = "ios")'.dependencies]
-asb-interpreter = { git = "https://github.com/Alphaly2K/art3m1s-interpreter", default-features = false, features = ["backend-luau"] }
+asb-interpreter = { path = "crates/asb-interpreter", default-features = false, features = ["backend-luau"] }
 
 [target.'cfg(not(target_os = "ios"))'.dependencies]
-asb-interpreter = { git = "https://github.com/Alphaly2K/art3m1s-interpreter", default-features = false, features = ["backend-lua51"] }
+asb-interpreter = { path = "crates/asb-interpreter", default-features = false, features = ["backend-lua51"] }
 
 [features]
 default = ["gl-backend"]
