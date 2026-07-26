@@ -47,6 +47,7 @@ impl CoreRuntime {
         self.save_screenshot = None;
         self.loaded_font_face = None;
         self.pending_dialog = None;
+        self.clear_pending_text_translation();
         self.emote.lock().unwrap().clear();
         self.interpreter = project.create_interpreter();
         self.interpreter.register_tag("reset", RuntimeResetHandler);
@@ -202,6 +203,8 @@ impl CoreRuntime {
         // boot.lua 期间 system_dataloading() 能拿到既有的 sys/gscr/conf。
         // 必须在 start_boot 之前，且在 s.savepath 种好之后（save_path_for 依赖它）。
         self.sysload();
+        // 已读记录跨会话恢复，使"已读跳过"有意义。
+        self.load_aread();
     }
 }
 

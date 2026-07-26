@@ -19,6 +19,9 @@ impl CoreRuntime {
         if self.pending_dialog.is_some() {
             return;
         }
+        if self.pending_text_translation.is_some() {
+            return;
+        }
         // onEnterFrame
         if let Err(e) = self.interpreter.fire_enter_frame() {
             crate::core_error!("onEnterFrame 错误: {e:?}");
@@ -31,6 +34,13 @@ impl CoreRuntime {
             if self.http_request_pending() {
                 return;
             }
+        }
+
+        // e:setScriptStatus 强制停止（如状态 4「停止，不接受用户输入」）：脚本被强制
+        // 暂停，剧情不推进；同样放在 onEnterFrame 之后，好让 Lua 每帧处理里
+        // e:setScriptStatus(0) 自我恢复。
+        if self.script_forced_stop {
+            return;
         }
 
         let has_tags = self.has_queued_tags();
@@ -126,6 +136,13 @@ impl CoreRuntime {
         };
         let scripted_decide = self.script_decide_edge();
         let clicked = clicked || scripted_decide;
+        // 自动模式：左键单击（stopbyclick）或进入 [stop]（stopbystop）时停止自动模式。
+        if clicked && self.automode_stops_on_click() {
+            self.set_automode_mode(false);
+        }
+        if matches!(&reason, WaitReason::Stop { .. }) && self.automode_stops_on_stop() {
+            self.set_automode_mode(false);
+        }
         if let WaitReason::Stop {
             reason: Some(stop_reason),
         } = &reason
@@ -274,6 +291,23 @@ impl CoreRuntime {
             self.drain_queued_tags_while_stopped(stop_reason);
         } else {
             self.advance_wait_line();
+        }
+    }
+
+    /// 检测点击等待的进入/退出边沿，触发 onClickWaitIn / onClickWaitOut 处理器
+    /// （e:setEventHandler 注册）。每帧调用一次。
+    pub(super) fn sync_click_wait_handlers(&mut self) {
+        let now = matches!(
+            self.wait_reason,
+            Some(WaitReason::Generic) | Some(WaitReason::Generic0)
+        );
+        if now == self.was_click_wait {
+            return;
+        }
+        self.was_click_wait = now;
+        let handler = if now { "onClickWaitIn" } else { "onClickWaitOut" };
+        if let Err(e) = self.fire_named_event_handler(handler) {
+            crate::core_error!("{handler} 错误: {e:?}");
         }
     }
 

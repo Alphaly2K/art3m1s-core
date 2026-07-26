@@ -35,6 +35,18 @@ pub(super) struct RuntimeControlState {
     automode_allowed: bool,
     automode_active: bool,
     automode_layer: Option<String>,
+    /// 左键单击是否停止自动模式（默认 true）
+    automode_stop_by_click: bool,
+    /// [stop] 标签是否停止自动模式（默认 true）
+    automode_stop_by_stop: bool,
+    /// [automode syncse=]：自动前进前需等播放结束的 SE/语音 ID 列表。
+    /// 空=用"任意语音在播"的通用门控。
+    automode_sync_se: Vec<String>,
+    /// [alreadyread mode]：是否进行已读/未读判定（默认 true）。
+    /// 关闭时已读跳过遇未读剧情不停止。
+    already_read_enabled: bool,
+    /// 已读记录：脚本名 → 已读的剧情文本行集合。跨会话持久化（aread.dat）。
+    read_lines: HashMap<String, HashSet<usize>>,
     auto_wait_elapsed_ms: u64,
     skip_wait_revealed: bool,
     skip_hold_frames: u8,
@@ -111,6 +123,11 @@ impl Default for RuntimeControlState {
             skip_active: false,
             automode_allowed: true,
             automode_active: false,
+            automode_stop_by_click: true,
+            automode_stop_by_stop: true,
+            automode_sync_se: Vec::new(),
+            already_read_enabled: true,
+            read_lines: HashMap::new(),
             automode_layer: None,
             auto_wait_elapsed_ms: 0,
             skip_wait_revealed: false,
@@ -163,6 +180,50 @@ impl RuntimeControlState {
 
     pub(super) fn automode_active(&self) -> bool {
         self.automode_active && self.automode_allowed
+    }
+
+    /// syncse 列表（为空表示用通用"任意语音在播"门控）。
+    pub(super) fn automode_sync_se(&self) -> &[String] {
+        &self.automode_sync_se
+    }
+
+    /// 该剧情文本行是否已读。
+    pub(super) fn is_read(&self, script: &str, line: usize) -> bool {
+        self.read_lines
+            .get(script)
+            .is_some_and(|lines| lines.contains(&line))
+    }
+
+    /// 标记剧情文本行为已读。返回是否是新标记（用于决定是否需要持久化）。
+    pub(super) fn mark_read(&mut self, script: &str, line: usize) -> bool {
+        self.read_lines.entry(script.to_string()).or_default().insert(line)
+    }
+
+    /// 已读跳过遇未读是否应停止：已读判定开启 且 skip 配置为"不跳过未读"。
+    pub(super) fn unread_stops_skip(&self) -> bool {
+        self.already_read_enabled && !self.skip_unread
+    }
+
+    /// 已读记录序列化为 `脚本 → 已读行列表`（持久化用）。
+    pub(super) fn read_lines_export(&self) -> HashMap<String, Vec<usize>> {
+        self.read_lines
+            .iter()
+            .map(|(k, v)| {
+                let mut lines: Vec<usize> = v.iter().copied().collect();
+                lines.sort_unstable();
+                (k.clone(), lines)
+            })
+            .collect()
+    }
+
+    /// 从持久化数据恢复已读记录（合并，不清空现有）。
+    pub(super) fn read_lines_import(&mut self, data: HashMap<String, Vec<usize>>) {
+        for (script, lines) in data {
+            self.read_lines
+                .entry(script)
+                .or_default()
+                .extend(lines);
+        }
     }
 
     pub(super) fn reset_auto_wait(&mut self) {
@@ -278,12 +339,102 @@ impl CoreRuntime {
         }
     }
 
-    pub(super) fn apply_automode_config(&mut self, allow: bool, layer: Option<String>) {
+    pub(super) fn apply_automode_config(
+        &mut self,
+        allow: bool,
+        layer: Option<String>,
+        stop_by_click: Option<bool>,
+        stop_by_stop: Option<bool>,
+        sync_se: Option<Vec<String>>,
+    ) {
         self.control.automode_allowed = allow;
         self.control.automode_layer = layer;
+        // None=保留之前设置（文档语义）。
+        if let Some(v) = stop_by_click {
+            self.control.automode_stop_by_click = v;
+        }
+        if let Some(v) = stop_by_stop {
+            self.control.automode_stop_by_stop = v;
+        }
+        if let Some(se) = sync_se {
+            self.control.automode_sync_se = se;
+        }
         if !allow {
             self.set_automode_mode(false);
         }
+    }
+
+    /// [alreadyread mode]：0=不做「未读停跳」判定；非 0=做（默认）。
+    ///
+    /// 注意此开关**只**门控「已读跳过遇未读是否停跳」这一判定行为；已读记录的
+    /// **写入**与 `s.status.alreadyread` 的**暴露**始终进行（见
+    /// [`track_read_and_stop_skip_on_unread`](Self::track_read_and_stop_skip_on_unread)），
+    /// 以便自绘「既読」标记的游戏在 mode=0 下仍能读到可靠的已读状态。
+    pub(super) fn apply_alreadyread(&mut self, mode: i32) {
+        self.control.already_read_enabled = mode != 0;
+    }
+
+    /// 已读跟踪 + 未读停跳 + `s.status.alreadyread` 暴露。
+    ///
+    /// 已读键 = (脚本文件, 该段之后的等待行号)，按**脚本执行位置**隔离——这天然
+    /// 免疫 chgmsg 多消息层：每段文本(主层/tips/子层)都落在各自唯一的脚本行，
+    /// 判定的永远是「当前执行行」是否已读，与它进的是哪个消息层无关。故不再依赖
+    /// 「一屏至多一段 ScenarioText」这一（被 chgmsg 推翻的）前提。
+    ///
+    /// 语义分层（与 alreadyread.md 一致，两件事解耦）：
+    /// - **记录已读 + 暴露 `s.status.alreadyread`**：始终进行。真实 Artemis 里
+    ///   带 Lua 的游戏并不自己从零记已读，而是读引擎暴露的 `s.status.alreadyread`
+    ///   来画「既読」标记 / 做跳过决策，故此值必须可靠反映「当前行此前是否已读」。
+    /// - **「未读停跳」判定**：仅在 `[alreadyread mode!=0]`（默认）时生效。mode=0
+    ///   关掉判定后，即便已读跳过遇未读也不停跳（alreadyread.md 明示的唯一具体效果）。
+    ///
+    /// 每帧调用一次。
+    pub(super) fn track_read_and_stop_skip_on_unread(&mut self) {
+        // 消费本帧"是否展示了剧情文本"的标志。
+        let shown = std::mem::take(&mut self.scenario_text_shown);
+        if !shown {
+            return;
+        }
+        // 只在文本后确实建立了等待（停止/点击/计时）时判定这一段剧情。
+        if self.wait_reason.is_none() {
+            return;
+        }
+        let Some(script) = self.interpreter.current_script().map(str::to_string) else {
+            return;
+        };
+        let line = self.interpreter.current_line();
+
+        // 本行在「此前的访问/会话」是否已读 —— 必须在本次标记之前取值。
+        let was_read = self.control.is_read(&script, line);
+        // 暴露给脚本：s.status.alreadyread（当前执行行此前是否已读，1/0）。
+        self.interpreter.set_variable(
+            "s.status.alreadyread",
+            Value::Int(if was_read { 1 } else { 0 }),
+        );
+
+        // 已读跳过遇未读剧情：仅在启用判定(mode!=0)时停跳（[skip unread=0] 即不跳未读）。
+        if self.control.already_read_enabled
+            && self.skip_active()
+            && self.control.unread_stops_skip()
+            && !was_read
+        {
+            self.set_skip_mode(false);
+        }
+        // 标记本段剧情已读（始终维护，使 s.status.alreadyread 跨访问准确）；
+        // 有新增则置脏，供 syssave 落 aread.dat。
+        if self.control.mark_read(&script, line) {
+            self.read_dirty = true;
+        }
+    }
+
+    /// 自动模式下左键单击是否应停止自动模式。
+    pub(super) fn automode_stops_on_click(&self) -> bool {
+        self.control.automode_active() && self.control.automode_stop_by_click
+    }
+
+    /// 自动模式下 [stop] 是否应停止自动模式。
+    pub(super) fn automode_stops_on_stop(&self) -> bool {
+        self.control.automode_active() && self.control.automode_stop_by_stop
     }
 
     pub(super) fn disable_auto_skip(&mut self) {
@@ -378,7 +529,8 @@ impl CoreRuntime {
 
     pub(super) fn should_auto_advance(&mut self, delta_ms: u64) -> bool {
         let text_ready = self.is_text_reveal_complete();
-        let voice_ready = !self.is_voice_playing();
+        // syncse：等指定 SE/语音播完（空列表退化为等任意语音播完）。
+        let voice_ready = self.automode_sync_ready();
         let wait_ms = self
             .interpreter
             .get_variable("s.automodewait")
@@ -853,6 +1005,48 @@ mod tests {
         assert_eq!(control.roles_for_key(17), vec![ROLE_CONTROL_SKIP]);
         // 未分配的键无 role
         assert!(control.roles_for_key(999).is_empty());
+    }
+
+    #[test]
+    fn automode_stop_flags_default_on_and_gate_by_active() {
+        // stopbyclick/stopbystop 默认开；仅在自动模式激活时门控生效。
+        let mut control = RuntimeControlState::default();
+        assert!(control.automode_stop_by_click);
+        assert!(control.automode_stop_by_stop);
+        // 未激活自动模式：不停止。
+        assert!(!control.automode_active());
+        // 激活后（allow+active）门控为真。
+        control.automode_active = true;
+        assert!(control.automode_active());
+        assert!(control.automode_stop_by_click && control.automode_active());
+    }
+
+    #[test]
+    fn already_read_tracking_and_unread_stop_gate() {
+        let mut control = RuntimeControlState::default();
+        // 默认：已读判定开、skip_unread=true（可跳未读）→ 未读不停跳。
+        assert!(!control.unread_stops_skip());
+        // [skip unread=0]（不跳未读）+ 已读判定开 → 未读应停跳。
+        control.skip_unread = false;
+        assert!(control.unread_stops_skip());
+        // [alreadyread mode=0] 关掉已读判定 → 不停跳（Lua 游戏走这条）。
+        control.already_read_enabled = false;
+        assert!(!control.unread_stops_skip());
+
+        // 标记/查询已读，按脚本隔离。
+        assert!(!control.is_read("scene01.asb", 100));
+        assert!(control.mark_read("scene01.asb", 100)); // 新标记返回 true
+        assert!(!control.mark_read("scene01.asb", 100)); // 重复返回 false
+        assert!(control.is_read("scene01.asb", 100));
+        assert!(!control.is_read("tips.asb", 100)); // 不同脚本互不影响
+
+        // 导出/导入往返。
+        control.mark_read("scene01.asb", 101);
+        let export = control.read_lines_export();
+        assert_eq!(export.get("scene01.asb"), Some(&vec![100, 101]));
+        let mut fresh = RuntimeControlState::default();
+        fresh.read_lines_import(export);
+        assert!(fresh.is_read("scene01.asb", 100) && fresh.is_read("scene01.asb", 101));
     }
 
     #[test]

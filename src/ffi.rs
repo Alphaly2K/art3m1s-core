@@ -215,7 +215,9 @@ macro_rules! core_error {
 //
 // 汉化/本地化补丁入口：宿主注册回调后，每段剧本文本在光栅化前都会先经过它。
 // 协议：`text` 为原文（UTF-8，NUL 结尾）；替换文本写入 `buf`（UTF-8，不含
-// NUL，最多 `buf_cap` 字节），返回写入的字节数；返回 <0 表示不替换。
+// NUL，最多 `buf_cap` 字节），返回写入的字节数；-1 表示不替换，-2 表示
+// 宿主需要异步翻译。异步请求随后经 ui_command 的 `text_translate` 下发，
+// 完成后由 `art3m1s_runtime_submit_text_translation` 回填。
 
 type TextInjectCallback =
     unsafe extern "C" fn(text: *const c_char, buf: *mut u8, buf_cap: c_int) -> c_int;
@@ -225,27 +227,53 @@ static TEXT_INJECT_CB: Mutex<Option<TextInjectCallback>> = Mutex::new(None);
 /// 替换文本的最大字节数。单段剧本文本远小于此值。
 const TEXT_INJECT_CAP: usize = 8192;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextInjectResult {
+    Unchanged,
+    Replaced(String),
+    Pending,
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_register_text_inject_callback(cb: TextInjectCallback) {
     *TEXT_INJECT_CB.lock().unwrap() = Some(cb);
 }
 
-/// 把一段文本交给宿主注入回调。未注册回调或宿主不替换时返回 `None`。
-pub fn inject_text(text: &str) -> Option<String> {
-    let cb = (*TEXT_INJECT_CB.lock().unwrap())?;
-    let c_text = CString::new(text).ok()?;
+/// 把一段文本交给宿主注入回调，并保留异步 pending 状态。
+pub fn request_text_injection(text: &str) -> TextInjectResult {
+    let Some(cb) = *TEXT_INJECT_CB.lock().unwrap() else {
+        return TextInjectResult::Unchanged;
+    };
+    let Ok(c_text) = CString::new(text) else {
+        return TextInjectResult::Unchanged;
+    };
     let mut buf = vec![0u8; TEXT_INJECT_CAP];
     let n = unsafe { cb(c_text.as_ptr(), buf.as_mut_ptr(), buf.len() as c_int) };
+    if n == -2 {
+        if ui_command_callback_registered() {
+            return TextInjectResult::Pending;
+        }
+        core_warn!("text inject 请求异步翻译，但宿主未注册 UI 回调，保持原文");
+        return TextInjectResult::Unchanged;
+    }
     if n < 0 || n as usize > buf.len() {
-        return None;
+        return TextInjectResult::Unchanged;
     }
     buf.truncate(n as usize);
     match String::from_utf8(buf) {
-        Ok(s) => Some(s),
+        Ok(s) => TextInjectResult::Replaced(s),
         Err(_) => {
             core_warn!("text inject 回调返回了非 UTF-8 内容，忽略替换");
-            None
+            TextInjectResult::Unchanged
         }
+    }
+}
+
+/// 旧同步接口：异步 pending 对旧调用方表现为不替换。
+pub fn inject_text(text: &str) -> Option<String> {
+    match request_text_injection(text) {
+        TextInjectResult::Replaced(text) => Some(text),
+        TextInjectResult::Unchanged | TextInjectResult::Pending => None,
     }
 }
 
@@ -774,6 +802,26 @@ pub unsafe extern "C" fn art3m1s_runtime_submit_dialog(
     };
     let rt = unsafe { &mut *rt };
     i32::from(rt.submit_dialog_response(accepted != 0, text))
+}
+
+/// 回填宿主异步翻译结果。`text == NULL` 表示翻译失败，按原文继续。
+#[cfg(feature = "gl-backend")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_submit_text_translation(
+    rt: *mut CoreRuntime,
+    serial: u64,
+    text: *const c_char,
+) -> i32 {
+    if rt.is_null() {
+        return 0;
+    }
+    let text = if text.is_null() {
+        None
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(text).to_str().ok() }
+    };
+    let rt = unsafe { &mut *rt };
+    i32::from(rt.submit_text_translation(serial, text))
 }
 
 #[cfg(feature = "gl-backend")]

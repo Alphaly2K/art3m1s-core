@@ -12,6 +12,7 @@ Flutter app
     ├─ 输入：鼠标、键盘、滚轮 → FFI
     ├─ 文件：PFS/目录/沙箱存档 → FileProvider callbacks
     ├─ 音频/视频：MediaBridge + audioplayers/media_kit
+    ├─ 翻译：对照补丁 / 在线 API → text inject callback
     └─ 显示：RGBA buffer → ui.Image → RawImage
 
 art3m1s-core
@@ -76,6 +77,14 @@ Core 维护音视频逻辑状态、finish handler 和脚本同步点，但不包
 
 编号存档 snapshot 不保存 `g.*` 和 `s.*` 持久域，读档也不覆盖当前持久域。`sys.saveslot` 这类 Lua table 由脚本通过 `pluto.persist` 存入 `g.system`，再由 `syssave()` 落盘。
 
+### 文本翻译由宿主注入
+
+剧本文本在送入字形渲染器前调用 `art3m1s_register_text_inject_callback` 注册的宿主回调。回调返回非负字节数时同步替换文本，返回 `-1` 保持原文，返回 `-2` 则暂停脚本并通过 `text_translate` UI 命令请求异步翻译。宿主完成后调用 `art3m1s_runtime_submit_text_translation`；传空指针会按原文恢复，过期 serial 会被拒绝。
+
+Flutter 宿主支持 JSON 字符串映射、`source`/`translation` 条目组成的 JSON 或 JSONL，以及“原文 TAB 译文”的 TSV。对照文件会优先于在线 API，在线结果按项目缓存；在线服务可选 OpenAI、Anthropic、DeepL、Google 翻译、百度翻译和有道翻译，各服务分别保存 endpoint、模型与凭据。全局设置选择翻译模式和 API 参数，每个项目另有独立启用开关。旧项目缺少该开关字段时默认关闭，第一版在线翻译配置会迁移为 OpenAI Chat Completions 配置。
+
+Ruby 由解释器按 `RubyStart(reading) -> ScenarioText(base) -> RubyEnd` 三个事件渲染。翻译链只替换中间的 base 文本，并把 reading 作为可选上下文交给支持提示词的服务；`RubyStart` / `RubyEnd` 保持原顺序，字形渲染器会基于译文范围重新计算注音位置。
+
 ## 关键 FFI
 
 | 函数 | 说明 |
@@ -89,6 +98,8 @@ Core 维护音视频逻辑状态、finish handler 和脚本同步点，但不包
 | `art3m1s_runtime_notify_video_finished(rt, id)` | 宿主视频播放完成 |
 | `art3m1s_runtime_upload_video_layer_frame(rt, id, w, h, rgba, len)` | 同步上传宿主解码的图层视频 RGBA8 帧 |
 | `art3m1s_runtime_notify_sound_finished(rt, id)` | 宿主音频播放完成 |
+| `art3m1s_register_text_inject_callback(callback)` | 注册同步文本替换或异步翻译请求回调 |
+| `art3m1s_runtime_submit_text_translation(rt, serial, text)` | 回填异步译文；空指针表示使用原文 |
 | `art3m1s_runtime_destroy(rt)` | 销毁 runtime |
 
 ## 输入模型

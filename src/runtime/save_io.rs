@@ -11,6 +11,8 @@ const SAVEG_FILE: &str = "saveg.dat";
 const SYSTEM_FILE: &str = "system.dat";
 /// [autosave] 自动保存的存档文件名。
 const AUTOSAVE_FILE: &str = "__Autosave.dat";
+/// 已读记录（alreadyread）持久化文件名。跨会话保留，使"已读跳过"有意义。
+const AREAD_FILE: &str = "aread.dat";
 
 #[derive(Clone)]
 pub(super) struct ScreenshotBuffer {
@@ -107,7 +109,43 @@ impl CoreRuntime {
             crate::ffi::request_write(&path, json.as_bytes())?;
             crate::core_info!("[runtime] syssave 已保存 {} ({} 项)", path, map.len());
         }
+        // 已读记录随 syssave 落盘（仅在有新增时写，减少 IO）。
+        self.save_aread()?;
         Ok(())
+    }
+
+    /// 把已读记录写入 `aread.dat`（脏时才写）。
+    fn save_aread(&mut self) -> Result<(), String> {
+        if !self.read_dirty {
+            return Ok(());
+        }
+        let data = self.control.read_lines_export();
+        let json = serde_json::to_string(&data).map_err(|e| e.to_string())?;
+        let path = self.save_path_for(AREAD_FILE)?;
+        crate::ffi::request_write(&path, json.as_bytes())?;
+        self.read_dirty = false;
+        crate::core_info!("[runtime] 已读记录已保存 {} ({} 脚本)", path, data.len());
+        Ok(())
+    }
+
+    /// 启动时读回已读记录（缺文件属首次运行，静默跳过）。
+    pub(super) fn load_aread(&mut self) {
+        let Ok(path) = self.save_path_for(AREAD_FILE) else {
+            return;
+        };
+        let Ok(bytes) = crate::ffi::request_file(&path) else {
+            return;
+        };
+        match serde_json::from_slice::<std::collections::HashMap<String, Vec<usize>>>(&bytes) {
+            Ok(data) => {
+                let n = data.len();
+                self.control.read_lines_import(data);
+                crate::core_info!("[runtime] 已读记录已载入 {} ({} 脚本)", path, n);
+            }
+            Err(e) => {
+                crate::core_warn!("[runtime] aread.dat 解析失败: {}", e);
+            }
+        }
     }
 
     /// 启动时读回 `syssave()` 落下的全局/系统域。缺文件（首次启动）静默跳过。
@@ -158,6 +196,7 @@ impl CoreRuntime {
         self.compositor.reset_for_load();
         self.stop_all_media();
         self.reset_control_modes_for_load();
+        self.clear_pending_text_translation();
         self.hovered_layers.clear();
         if let Some(scene) = data.scene.clone() {
             self.compositor.restore_scene(scene);
@@ -248,6 +287,7 @@ impl CoreRuntime {
         self.compositor.reset_for_load();
         self.sync_layer_info_all();
         self.stop_all_media();
+        self.clear_pending_text_translation();
         self.hovered_layers.clear();
         self.save_screenshot = None;
         self.timed_remaining_ms = 0;

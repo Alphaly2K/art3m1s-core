@@ -752,6 +752,24 @@ fn dispatch_handler(
     params: &HashMap<String, String>,
     runtime_params: &[(&str, &str)],
 ) -> HandlerDispatch {
+    // e:setEventFilter 拦截：把设置参数 + 运行期参数（含 type）交给过滤器；
+    // 返回 1 表示脚本已自行处理，引擎不再派发（handled 但不排队处理器标签）。
+    // 事件名取运行期 type（点击/滚动等），无则退回 "event"。
+    let event_name = runtime_params
+        .iter()
+        .find(|(k, _)| *k == "type")
+        .map(|(_, v)| *v)
+        .unwrap_or("event");
+    let mut filter_params = params.clone();
+    for (k, v) in runtime_params {
+        filter_params.insert(k.to_string(), v.to_string());
+    }
+    if interpreter.run_event_filter(event_name, &filter_params) == Some(1) {
+        return HandlerDispatch {
+            handled: true,
+            needs_return_frame: false,
+        };
+    }
     enqueue_handler_tags(
         interpreter,
         handler,

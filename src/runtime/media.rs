@@ -252,6 +252,26 @@ impl CoreRuntime {
                 .any(|ch| ch.playing && ch.file.contains(":vo/"))
     }
 
+    /// 指定 ID 的声音（语音或 SE）是否在播放。automode syncse 门控用。
+    pub(super) fn is_sound_playing(&self, id: &str) -> bool {
+        let state = self.audio.audio_state();
+        state
+            .voice_channels
+            .get(id)
+            .or_else(|| state.se_channels.get(id))
+            .is_some_and(|ch| ch.playing)
+    }
+
+    /// automode 自动前进前，syncse 列出的声音是否都已播完（空列表退化为
+    /// "任意语音在播"的通用门控）。
+    pub(super) fn automode_sync_ready(&self) -> bool {
+        let sync = self.control.automode_sync_se();
+        if sync.is_empty() {
+            return !self.is_voice_playing();
+        }
+        !sync.iter().any(|id| self.is_sound_playing(id))
+    }
+
     pub fn notify_video_finished(&mut self, id: Option<&str>) {
         // 图层视频优先取按 ID 登记的处理器，缺省回退到全局；全屏视频用全局。
         let handler = match id {

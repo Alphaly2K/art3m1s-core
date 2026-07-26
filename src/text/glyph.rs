@@ -387,14 +387,17 @@ impl TextRenderer for GlyphTextRenderer<'_> {
     fn font_default(&mut self, s: &HashMap<String, String>) {
         self.state.default_font.merge_raw(s);
     }
-    fn switch_message_layer(&mut self, id: Option<&str>) {
+    fn switch_message_layer(&mut self, id: Option<&str>, stack: bool) {
         let prev_state = self.state.active_layer.as_ref().and_then(|aid| {
             self.state
                 .layers
                 .get(aid)
                 .map(|l| (l.left, l.top, l.width, l.height, l.font.clone()))
         });
-        if let Some(ref prev_id) = self.state.active_layer {
+        // stack=0（chgmsg）不压栈，避免存档中消息层堆栈膨胀。
+        if stack
+            && let Some(ref prev_id) = self.state.active_layer
+        {
             self.state.layer_stack.push(prev_id.clone());
         }
         self.state.active_layer = id.map(|s| s.to_string());
@@ -685,6 +688,38 @@ impl TextRenderer for GlyphTextRenderer<'_> {
             }
         }
         changed
+    }
+
+    fn active_layer_text_metrics(&self) -> Option<(f32, f32, f32)> {
+        let id = self.state.active_layer.as_deref()?;
+        let ly = self.state.layers.get(id)?;
+        if ly.text_buffer.is_empty() {
+            return Some((0.0, 0.0, 0.0));
+        }
+        let sz = ly.font.size.unwrap_or(DEFAULT_FONT_SIZE);
+        let lh = scaled(&self.font, PxScale::from(sz))
+            .map(|sf| sf.height())
+            .unwrap_or(sz);
+        let lw = if ly.width > 0.0 { ly.width } else { f32::MAX };
+        let laid = layout_glyphs(&ly.text_buffer, lw, &self.state.layout, &ly.keep_ranges());
+
+        let mut overall_width = 0.0f32;
+        let mut last_line = 0usize;
+        let mut last_line_width = 0.0f32;
+        for (i, pos) in laid.iter().enumerate() {
+            // 字形右边缘（换行符 advance 为 0，不影响宽度）。
+            let right = pos.x + ly.text_buffer[i].advance_x;
+            overall_width = overall_width.max(right);
+            if pos.line > last_line {
+                last_line = pos.line;
+                last_line_width = 0.0;
+            }
+            if pos.line == last_line {
+                last_line_width = last_line_width.max(right);
+            }
+        }
+        let total_height = (last_line as f32 + 1.0) * lh;
+        Some((overall_width, total_height, last_line_width))
     }
 
     fn build_text_commands(
@@ -1207,12 +1242,12 @@ mod tests {
     #[test]
     fn popping_message_layer_restores_its_logical_font_face() {
         let mut renderer = GlyphTextRenderer::new();
-        renderer.switch_message_layer(Some("adv"));
+        renderer.switch_message_layer(Some("adv"), true);
         renderer.apply_font_settings(&HashMap::from([(
             "face".to_string(),
             "font/story.ttf".to_string(),
         )]));
-        renderer.switch_message_layer(Some("save_slot"));
+        renderer.switch_message_layer(Some("save_slot"), true);
         renderer.apply_font_settings(&HashMap::from([(
             "face".to_string(),
             "font/ui.ttf".to_string(),
@@ -1221,6 +1256,18 @@ mod tests {
 
         renderer.pop_message_layer();
         assert_eq!(renderer.active_font_face(), Some("font/story.ttf"));
+    }
+
+    #[test]
+    fn chgmsg_stack_zero_does_not_push_layer_stack() {
+        // stack=1 压栈，stack=0 不压（chgmsg stack=0 防存档膨胀）。
+        let mut r = GlyphTextRenderer::new();
+        r.switch_message_layer(Some("a"), true);
+        r.switch_message_layer(Some("b"), true); // 压入 a
+        r.switch_message_layer(Some("c"), false); // 不压入 b
+        // 弹栈应回到 a（b 未入栈），而不是 b。
+        r.pop_message_layer();
+        assert_eq!(r.state.active_layer.as_deref(), Some("a"));
     }
 
     // ── 禁则处理（prohibit） ──
@@ -1678,7 +1725,7 @@ mod tests {
             ("size".to_string(), "22".to_string()),
             ("color".to_string(), "AABBCC".to_string()),
         ]));
-        r.switch_message_layer(Some("fresh"));
+        r.switch_message_layer(Some("fresh"), true);
         let l = r.font_state_mut().active_layer_mut();
         assert_eq!(l.font.size, Some(22.0), "首次使用的消息层应用默认字号");
         assert_eq!(l.font.color.as_deref(), Some("AABBCC"));

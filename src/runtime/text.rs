@@ -5,6 +5,27 @@ use asb_interpreter::Event;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
+#[derive(Debug, Clone)]
+pub(super) struct PendingTextTranslation {
+    pub serial: u64,
+    source: String,
+    inline: bool,
+    resolution: Option<TextTranslationResolution>,
+}
+
+#[derive(Debug, Clone)]
+enum TextTranslationResolution {
+    Translated(String),
+    UseOriginal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PendingScenarioText {
+    source: String,
+    inline: bool,
+    ruby: Option<String>,
+}
+
 /// backlog / message-tags 的进程级镜像，供解释器 `var system=get_backlog_size /
 /// get_backlog_tags / get_message_tags` 的宿主查询钩子读取。
 ///
@@ -50,6 +71,17 @@ impl BacklogSnapshot {
 // 故用 LazyLock 首次访问时构造缺省快照。
 static BACKLOG_SNAPSHOT: LazyLock<Mutex<BacklogSnapshot>> =
     LazyLock::new(|| Mutex::new(BacklogSnapshot::default()));
+
+/// 当前消息层文本度量的进程级镜像：`(整体宽度, 总高度, 最后一行宽度)`。
+/// 供 var system=get_message_layer_width/height/line_width 的宿主查询钩子读取，
+/// 由 runtime 每帧从 text_renderer 刷新（同 backlog 快照，text_renderer 非
+/// Send+Sync 不能直接借入进程级钩子）。
+static TEXT_METRICS: Mutex<(f32, f32, f32)> = Mutex::new((0.0, 0.0, 0.0));
+
+/// 读取当前文本度量快照。消费方是解释器宿主查询钩子。
+pub(crate) fn text_metrics_snapshot() -> (f32, f32, f32) {
+    *TEXT_METRICS.lock().unwrap()
+}
 
 /// 读取当前 backlog 快照（get_backlog_* / get_message_tags 钩子入口）。
 ///
@@ -116,6 +148,9 @@ impl CoreRuntime {
             return;
         };
         *BACKLOG_SNAPSHOT.lock().unwrap() = build_backlog_snapshot(renderer.font_state());
+        // 顺带刷新文本度量（get_message_layer_width/height/line_width）。
+        *TEXT_METRICS.lock().unwrap() =
+            renderer.active_layer_text_metrics().unwrap_or((0.0, 0.0, 0.0));
     }
 
     pub(super) fn advance_text(&mut self, delta_ms: u64) {
@@ -158,7 +193,7 @@ impl CoreRuntime {
         renderer.build_text_commands(&mut self.texture_provider)
     }
 
-    pub(super) fn apply_text_event(&mut self, event: &Event) {
+    pub(super) fn apply_text_event(&mut self, event: &Event) -> Option<PendingScenarioText> {
         if let Event::FontSettings(settings) | Event::FontDefault(settings) = event
             && let Some(face) = settings.get("face").filter(|face| !face.is_empty())
         {
@@ -167,13 +202,38 @@ impl CoreRuntime {
 
         // 剧本文本在光栅化前先过注入链（汉化补丁等），需在借用 renderer 前算好。
         let injected = match event {
-            Event::ScenarioText { content, .. } => Some(self.text_inject.run(content)),
+            Event::ScenarioText { content, inline } => {
+                let host_text = match crate::ffi::request_text_injection(content) {
+                    crate::ffi::TextInjectResult::Unchanged => content.clone(),
+                    crate::ffi::TextInjectResult::Replaced(text) => text,
+                    crate::ffi::TextInjectResult::Pending => {
+                        let ruby = self.text_renderer.as_ref().and_then(|renderer| {
+                            let state = renderer.font_state();
+                            let active = state
+                                .active_layer
+                                .as_deref()
+                                .unwrap_or(crate::text::glyph::DEFAULT_MESSAGE_LAYER);
+                            state
+                                .layers
+                                .get(active)
+                                .and_then(|layer| layer.open_ruby.as_ref())
+                                .map(|(_, text)| text.clone())
+                        });
+                        return Some(PendingScenarioText {
+                            source: content.clone(),
+                            inline: *inline,
+                            ruby,
+                        });
+                    }
+                };
+                Some(self.text_inject.run(&host_text))
+            }
             _ => None,
         };
 
         let restored_face = {
             let Some(renderer) = self.text_renderer.as_mut() else {
-                return;
+                return None;
             };
             match event {
                 Event::ScenarioText { content, inline } => {
@@ -184,20 +244,42 @@ impl CoreRuntime {
                 Event::FontClose => renderer.font_pop(),
                 Event::FontDefault(settings) => renderer.font_default(settings),
                 // TODO(chgmsg): stack=0 时不应把前一设置压入消息层堆栈；
-                // layered 的分层消息层语义也未实现（字段已随事件透传）。
-                Event::MessageLayerSwitch { id, .. } => {
+                // stack=0 不压消息层堆栈（防存档膨胀）；layered 分层语义暂未实现。
+                Event::MessageLayerSwitch { id, stack, .. } => {
                     if let Some(layer_id) = id {
                         self.compositor.ensure_layer(layer_id);
                     }
-                    renderer.switch_message_layer(id.as_deref());
+                    renderer.switch_message_layer(id.as_deref(), *stack);
                     // 消息层切换后的 lyprop `~` 绑定在 renderer 借用结束后统一处理
                     // （见函数末尾 sync_message_layer_binding）。
                 }
                 Event::MessageLayerPop => renderer.pop_message_layer(),
-                // TODO(rt): omitblankline=1 时若末行为空行应跳过换行（布局在 glyph.rs）。
-                Event::LineBreak { .. } => renderer.push_line_break(),
+                // [rt omitblankline=]：换行前按标签值更新"末行为空则不换行"，
+                // 再执行换行（配置在 layout 上，push_line_break 会读取）。
+                Event::LineBreak { omitblankline } => {
+                    renderer.font_state_mut().set_rt_omit_blank_line(*omitblankline);
+                    renderer.push_line_break();
+                }
                 Event::PageBreak { backlog } => renderer.push_page_break(*backlog),
                 Event::GlyphConfig(config) => renderer.set_glyph_config(config),
+                // [indent]：对话缩进的字符对/识别范围/嵌套（空 pair 即禁用缩进）。
+                Event::IndentConfig { pair, range, nest } => {
+                    renderer.font_state_mut().set_indent(
+                        Some(pair.as_str()),
+                        *range,
+                        Some(*nest),
+                    );
+                }
+                // [prohibit]：自定义行首/行尾禁则字符集，覆盖内置默认表。
+                Event::ProhibitConfig { head, foot } => {
+                    renderer
+                        .font_state_mut()
+                        .set_prohibit(Some(head.as_str()), Some(foot.as_str()));
+                }
+                // [wordparts]：视为单词组成部分的字符集（避免英文单词被拦腰换行）。
+                Event::WordpartsConfig { parts } => {
+                    renderer.font_state_mut().set_wordparts(parts);
+                }
                 Event::TextAnimation(params) => {
                     renderer.set_scetween(ScetweenConfig::from_params(params));
                 }
@@ -283,6 +365,83 @@ impl CoreRuntime {
             }
             _ => {}
         }
+        None
+    }
+
+    pub(super) fn begin_text_translation(
+        &mut self,
+        pending: PendingScenarioText,
+        deferred: &[Event],
+    ) {
+        self.text_translation_serial = self.text_translation_serial.wrapping_add(1);
+        let serial = self.text_translation_serial;
+        self.pending_text_translation = Some(PendingTextTranslation {
+            serial,
+            source: pending.source.clone(),
+            inline: pending.inline,
+            resolution: None,
+        });
+        self.deferred_translation_events
+            .extend(deferred.iter().cloned());
+        crate::ffi::emit_ui_command(
+            "text_translate",
+            serde_json::json!({
+                "serial": serial,
+                "text": pending.source,
+                "ruby": pending.ruby,
+            }),
+        );
+    }
+
+    pub fn submit_text_translation(&mut self, serial: u64, translated: Option<&str>) -> bool {
+        let Some(pending) = self.pending_text_translation.as_mut() else {
+            crate::core_warn!("[translation] 收到结果时没有挂起文本 serial={serial}");
+            return false;
+        };
+        if pending.serial != serial {
+            crate::core_warn!(
+                "[translation] 忽略过期结果 serial={} current={}",
+                serial,
+                pending.serial
+            );
+            return false;
+        }
+        pending.resolution = Some(match translated {
+            Some(text) => TextTranslationResolution::Translated(text.to_string()),
+            None => TextTranslationResolution::UseOriginal,
+        });
+        true
+    }
+
+    pub(super) fn resume_pending_text_translation(&mut self) {
+        let Some(resolution) = self
+            .pending_text_translation
+            .as_mut()
+            .and_then(|pending| pending.resolution.take())
+        else {
+            return;
+        };
+        let Some(pending) = self.pending_text_translation.take() else {
+            return;
+        };
+        let text = match resolution {
+            TextTranslationResolution::Translated(text) => text,
+            TextTranslationResolution::UseOriginal => pending.source,
+        };
+        if let Some(renderer) = self.text_renderer.as_mut() {
+            renderer.push_text(&self.text_inject.run(&text), pending.inline);
+        }
+        self.scenario_text_shown = true;
+
+        let deferred = std::mem::take(&mut self.deferred_translation_events);
+        if !deferred.is_empty() {
+            self.dispatch_events(&deferred);
+        }
+    }
+
+    pub(super) fn clear_pending_text_translation(&mut self) {
+        self.pending_text_translation = None;
+        self.deferred_translation_events.clear();
     }
 
     /// 把当前活动消息层登记为合成器的默认消息层，并建立「消息层 ID → 场景图层
@@ -505,7 +664,7 @@ mod tests {
     fn switch_message_layer_exposes_active_id_for_binding() {
         // 验证接线依赖的数据流：switch 后 font_state().active_layer 即目标消息层 ID。
         let mut r = GlyphTextRenderer::new();
-        r.switch_message_layer(Some("mw"));
+        r.switch_message_layer(Some("mw"), true);
         assert_eq!(r.font_state().active_layer.as_deref(), Some("mw"));
     }
 

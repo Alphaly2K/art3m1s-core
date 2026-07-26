@@ -199,6 +199,16 @@ impl InputSnapshot {
             .unwrap_or((0, 0))
     }
 
+    /// getTouchPoint() 无参表形态：返回全部触摸点 (id, x, y)，按 id 升序。
+    /// 文档要求以「触摸唯一标识符」为键返回 {[id]={x,y}}，故这里带上真实 id。
+    pub(super) fn touch_points(&self) -> Vec<(u32, i32, i32)> {
+        let mut ids: Vec<u32> = self.touches.keys().copied().collect();
+        ids.sort_unstable();
+        ids.into_iter()
+            .filter_map(|id| self.touches.get(&id).map(|p| (id, p.x, p.y)))
+            .collect()
+    }
+
     /// 每帧记录新按下按键的时间戳，并清理已松开的键（isPush 数据源）。
     pub fn note_frame_for_push(&mut self, now: std::time::Instant) {
         for key in &self.keys_down_edge {
@@ -330,6 +340,10 @@ impl EngineCallbacks for FfiCallbacks {
         self.input.lock().unwrap().touch_point(index)
     }
 
+    fn get_touch_points(&self) -> Vec<(u32, i32, i32)> {
+        self.input.lock().unwrap().touch_points()
+    }
+
     fn is_file_exists(&self, path: &str) -> bool {
         let resolved = magic_path::resolve_path(&self.magic_paths, path);
         ffi::query_asset_size(&resolved).is_some()
@@ -436,6 +450,21 @@ impl EngineCallbacks for FfiCallbacks {
     fn get_window_state(&self) -> (bool, bool) {
         // (全屏, 最小化)。宿主经 art3m1s_register_window_state_query 回答。
         ffi::query_window_state()
+    }
+
+    fn write_clipboard(&self, text: &str) {
+        // e:writeClipboard → 经 ui_command 转发宿主（Flutter Clipboard.setData）。
+        ffi::write_clipboard(text);
+    }
+
+    fn call_shell_execute(&self, file: &str, params: HashMap<String, String>) -> i32 {
+        // e:callShellExecute → 经 ui_command 转发宿主执行（打开 URL/文件/应用）。
+        // 宿主异步执行，这里同步返回 0（成功受理）；失败与否由宿主自处理。
+        ffi::emit_ui_command(
+            "shell_execute",
+            serde_json::json!({ "file": file, "params": params }),
+        );
+        0
     }
 
     // ── surface 绑定族（bindSurface / unbindSurface / …）───────────────

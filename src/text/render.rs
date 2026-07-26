@@ -1002,7 +1002,9 @@ pub trait TextRenderer {
     fn font_default(&mut self, settings: &HashMap<String, String>);
 
     /// 切换活动消息层。
-    fn switch_message_layer(&mut self, id: Option<&str>);
+    /// 切换当前消息层。`stack=false`（chgmsg stack=0）时不把前一层压入堆栈，
+    /// 用于防止存档中消息层堆栈无限膨胀。
+    fn switch_message_layer(&mut self, id: Option<&str>, stack: bool);
 
     /// 弹出消息层。
     fn pop_message_layer(&mut self);
@@ -1082,6 +1084,13 @@ pub trait TextRenderer {
     /// （runtime 据此决定是否需要重绘）。
     fn update_link_hover(&mut self, _x: f32, _y: f32) -> bool {
         false
+    }
+
+    /// 当前消息层已存文本的度量：`(整体宽度, 总高度, 最后一行宽度)`。
+    /// 供 var system=get_message_layer_width/height/line_width 查询。
+    /// 无文本/无渲染器时返回 `None`（查询落 0）。
+    fn active_layer_text_metrics(&self) -> Option<(f32, f32, f32)> {
+        None
     }
 
     /// 获取字形绘制命令，按层 ID 分组。

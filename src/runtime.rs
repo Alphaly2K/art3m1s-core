@@ -63,8 +63,11 @@ pub struct CoreRuntime {
     texture_provider: GlTextureProvider,
     compositor: Compositor,
     text_renderer: Option<Box<dyn TextRenderer>>,
-    /// 文本注入链（汉化补丁等）。默认挂一个 FFI 注入器，宿主注册回调后生效。
+    /// core 内部文本注入链。宿主 FFI 注入在该链之前执行。
     text_inject: crate::text::InjectionChain,
+    pending_text_translation: Option<text::PendingTextTranslation>,
+    deferred_translation_events: Vec<Event>,
+    text_translation_serial: u64,
     audio: Box<dyn AudioBackend>,
     video: Box<dyn VideoBackend>,
     interpreter: asb_interpreter::Interpreter,
@@ -103,6 +106,15 @@ pub struct CoreRuntime {
     /// 引擎侧最近一次写入 `script_status` 的值。用于区分「引擎状态迁移」与
     /// 「脚本经 e:setScriptStatus 强制改写」：原子量与该值不一致即为脚本改写。
     last_engine_status: u8,
+    /// 脚本经 e:setScriptStatus 强制设了非 0 停止码（如 4「停止，不接受用户输入」）。
+    /// 置位期间剧情不推进（onEnterFrame 仍每帧运行以便自我恢复），直到 setScriptStatus(0)。
+    script_forced_stop: bool,
+    /// 上一帧是否处于点击等待，用于检测 onClickWaitIn/Out 边沿。
+    was_click_wait: bool,
+    /// 本帧是否派发了剧情文本（用于已读判定：只在文本展示后的点击等待处标记已读）。
+    scenario_text_shown: bool,
+    /// 已读记录自上次持久化后是否有新增（syssave 时落 aread.dat）。
+    read_dirty: bool,
 }
 
 impl CoreRuntime {
@@ -155,11 +167,10 @@ impl CoreRuntime {
             texture_provider,
             compositor,
             text_renderer: None,
-            text_inject: {
-                let mut chain = crate::text::InjectionChain::new();
-                chain.push(Box::new(crate::text::FfiTextInject));
-                chain
-            },
+            text_inject: crate::text::InjectionChain::new(),
+            pending_text_translation: None,
+            deferred_translation_events: Vec::new(),
+            text_translation_serial: 0,
             audio,
             video,
             interpreter,
@@ -190,6 +201,10 @@ impl CoreRuntime {
             pending_dialog: None,
             active_inline_event_frame: None,
             last_engine_status: 0,
+            script_forced_stop: false,
+            was_click_wait: false,
+            scenario_text_shown: false,
+            read_dirty: false,
         })
     }
 
@@ -221,12 +236,18 @@ impl CoreRuntime {
             .note_frame_for_push(std::time::Instant::now());
         // getScriptStatus 的引擎状态自动迁移 + setScriptStatus(0) 的唤醒语义。
         self.sync_script_status();
+        self.resume_pending_text_translation();
 
         let clicked = self.process_pointer_handlers();
         self.advance_script(clicked, delta_ms);
 
         let collected = self.drain_events();
         self.dispatch_events(&collected);
+        // 已读跟踪 + 未读停跳：在文本展示后的点击等待处标记已读，
+        // 已读跳过遇未读剧情时停止跳过（[alreadyread]/[skip unread=] 语义）。
+        self.track_read_and_stop_skip_on_unread();
+        // 点击等待进入/退出边沿：触发 e:setEventHandler{onClickWaitIn/Out}。
+        self.sync_click_wait_handlers();
         self.sync_emote_scene();
 
         self.apply_system_audio_volume();
@@ -274,16 +295,24 @@ impl CoreRuntime {
         if current != self.last_engine_status {
             // 原子量与引擎上次写入不一致 ⇒ 脚本经 e:setScriptStatus 改写过。
             if current == 0 {
-                // 设 0 唤醒：清除当前等待并越过触发等待的指令。
+                // 设 0 唤醒：清除当前等待并越过触发等待的指令，解除强制停止。
                 if self.wait_reason.is_some() {
                     self.advance_wait_line();
                 }
+                self.script_forced_stop = false;
                 self.last_engine_status = 0;
             } else {
-                // 非零强制值：本帧保持，引擎状态迁移时再覆盖。
+                // 非零强制值：脚本强制停止执行（如 setScriptStatus(4)「停止，不接受
+                // 用户输入」）。置位后剧情暂停，直到脚本 setScriptStatus(0) 自我恢复。
+                self.script_forced_stop = true;
                 self.last_engine_status = current;
                 return;
             }
+        }
+
+        // 强制停止期间不做引擎态自动迁移：保持脚本设定的停止码，直到 setScriptStatus(0)。
+        if self.script_forced_stop {
+            return;
         }
 
         let computed = engine_status_for(

@@ -12,7 +12,13 @@ impl CoreRuntime {
     }
 
     pub(super) fn dispatch_events(&mut self, events: &[Event]) {
-        for event in events {
+        if self.pending_text_translation.is_some() {
+            self.deferred_translation_events
+                .extend(events.iter().cloned());
+            return;
+        }
+
+        for (index, event) in events.iter().enumerate() {
             if matches!(event, Event::Exit) {
                 crate::core_info!("[runtime] Event::Exit received");
                 self.exit_requested.store(true, Ordering::SeqCst);
@@ -97,17 +103,46 @@ impl CoreRuntime {
                     crate::core_info!("[runtime] FileOperation clear_cache → 转发宿主");
                     crate::ffi::emit_ui_command("file_clear_cache", serde_json::json!({}));
                 }
+                Event::FileOperation {
+                    command,
+                    url,
+                    baseurl,
+                    list,
+                    ..
+                } if command == "wasm_sync" => {
+                    // [file command=wasm_sync]：仅 WebAssembly 平台需要同步远端文件到
+                    // 本地持久存储（IndexedDB）。桌面/移动宿主收到后可忽略。
+                    crate::core_info!("[runtime] FileOperation wasm_sync → 转发宿主");
+                    crate::ffi::emit_ui_command(
+                        "file_wasm_sync",
+                        serde_json::json!({ "url": url, "baseurl": baseurl, "list": list }),
+                    );
+                }
                 Event::FileOperation { command, .. } => {
                     crate::core_warn!("[runtime] 未实现的 FileOperation 命令被忽略: {}", command);
                 }
                 Event::TakeScreenshot => {
                     self.capture_save_screenshot();
                 }
-                // TODO(automode): stopbyclick/stopbystop/syncse 已随事件透传，
-                // 点击/stop 停止门控与 SE 同步等待的消费逻辑尚未实现。
-                Event::AutoModeConfig { allow, layer, .. } => {
-                    self.apply_automode_config(*allow, layer.clone());
+                // stopbyclick/stopbystop 消费见 advance_wait_state；syncse（等 SE
+                // 播完再自动前进）依赖 SE 完成时序，暂随事件透传未消费。
+                Event::AutoModeConfig {
+                    allow,
+                    layer,
+                    stopbyclick,
+                    stopbystop,
+                    syncse,
+                } => {
+                    self.apply_automode_config(
+                        *allow,
+                        layer.clone(),
+                        *stopbyclick,
+                        *stopbystop,
+                        syncse.clone(),
+                    );
                 }
+                // [alreadyread]：已读/未读判定开关（已读记录由引擎跟踪剧情文本行）。
+                Event::AlreadyReadConfig { mode } => self.apply_alreadyread(*mode),
                 Event::SkipConfig { allow, skip_unread } => {
                     self.apply_skip_config(*allow, *skip_unread);
                 }
@@ -241,14 +276,24 @@ impl CoreRuntime {
                 Event::KeyConfig(params) => {
                     self.apply_keyconfig(params);
                 }
-                // 跟踪活动消息层：hide 模式据此确定要隐藏的消息窗图层。
+                // 跟踪活动消息层：hide 模式据此确定要隐藏的消息窗图层；同时
+                // 暴露 s.current_message_layer 供脚本查询（system_variables.md）。
                 Event::MessageLayerSwitch { id: Some(id), .. } => {
                     self.control.active_message_layer = Some(id.clone());
+                    self.interpreter.set_variable(
+                        "s.current_message_layer",
+                        asb_interpreter::Value::String(id.clone()),
+                    );
                 }
                 Event::MessageLayerPop => {
                     // 回退后活动层不可知（消息层堆栈在文本子系统内部），置空即可：
-                    // hide 只会少隐藏一层，不会误藏。
+                    // hide 只会少隐藏一层，不会误藏。s.current_message_layer 同样
+                    // 无从得知精确 id，清空为空串（脚本读到空串即"回到未知/默认层"）。
                     self.control.active_message_layer = None;
+                    self.interpreter.set_variable(
+                        "s.current_message_layer",
+                        asb_interpreter::Value::String(String::new()),
+                    );
                 }
                 // ── 宿主转发族 ──
                 Event::AvoidConfig { file, windowbutton } => {
@@ -339,7 +384,14 @@ impl CoreRuntime {
             }
 
             self.apply_media_event(event);
-            self.apply_text_event(event);
+            if let Some(pending) = self.apply_text_event(event) {
+                self.begin_text_translation(pending, &events[index + 1..]);
+                break;
+            }
+            // 只有真正送入文本渲染器后才算本帧展示过剧情文本。
+            if matches!(event, Event::ScenarioText { .. }) {
+                self.scenario_text_shown = true;
+            }
             if let Some(event) = CompositorEvent::from_interpreter(event) {
                 self.compositor.apply_event(event);
                 self.sync_layer_info_all();
@@ -668,6 +720,7 @@ impl CoreRuntime {
         self.pointer_drag = super::PointerDragState::default();
         self.save_screenshot = None;
         self.pending_dialog = None;
+        self.clear_pending_text_translation();
         self.active_inline_event_frame = None;
         self.timed_remaining_ms = 0;
         self.wait_reason = None;
@@ -804,6 +857,7 @@ impl CoreRuntime {
                 message_tags: Box::new(|id, allfont| {
                     super::text::backlog_snapshot().message_tags(id, allfont)
                 }),
+                message_layer_metrics: Box::new(super::text::text_metrics_snapshot),
             },
         );
     }
