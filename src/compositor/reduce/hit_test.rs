@@ -64,7 +64,7 @@ impl Compositor {
         }
 
         // 再检测本层：注册了任意事件处理器。
-        if !layer.event_handlers.is_empty() {
+        if layer.event_handlers.values().any(|handler| handler.enabled) {
             // 宽高优先级：
             // 1. props.width/height（显式设置的逻辑尺寸）
             // 2. clip 的宽高（精灵表裁剪区域，已经是逻辑坐标）
@@ -160,14 +160,5 @@ impl Compositor {
 }
 
 fn local_transform(props: &LayerProps) -> Affine2 {
-    let (left, top) = props.offset();
-    let (sx, sy) = props.scale();
-    let (ax, ay) = props.anchor();
-    let rot = props.rotation_radians();
-
-    Affine2::from_translation(Vec2::new(left, top))
-        * Affine2::from_translation(Vec2::new(ax, ay))
-        * Affine2::from_angle(rot)
-        * Affine2::from_scale(Vec2::new(sx, sy))
-        * Affine2::from_translation(Vec2::new(-ax, -ay))
+    props.local_transform()
 }

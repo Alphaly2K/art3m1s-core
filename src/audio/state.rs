@@ -50,6 +50,50 @@ impl AudioStateBackend {
     }
 }
 
+
+/// 按统一规则构建一个就绪声道：raw 增益/声像换算 + 可选淡入。
+/// play_bgm / crossfade_bgm / play_se / play_voice 共用，防止四处分叉。
+fn build_channel(
+    id: &str,
+    file: &str,
+    category: SoundCategory,
+    loop_play: bool,
+    skippable: bool,
+    gain: Option<i32>,
+    pan: Option<i32>,
+    fade_in_ms: u64,
+    clock_ms: u64,
+) -> SoundChannel {
+    let mut channel = SoundChannel::new(id, file, category);
+    channel.playing = true;
+    channel.loop_play = loop_play;
+    channel.skippable = skippable;
+
+    if let Some(gain) = gain {
+        channel.raw_gain = gain;
+        channel.current_gain = SoundChannel::gain_to_linear(gain);
+    }
+    if let Some(pan) = pan {
+        channel.raw_pan = pan;
+        channel.current_pan = SoundChannel::pan_to_linear(pan);
+    }
+
+    if fade_in_ms > 0 {
+        let target_gain = channel.current_gain;
+        channel.current_gain = 0.0;
+        channel.fade = Some(FadeState {
+            target_gain,
+            target_pan: channel.current_pan,
+            from_gain: 0.0,
+            from_pan: channel.current_pan,
+            start_ms: clock_ms,
+            duration_ms: fade_in_ms,
+            stop_on_complete: false,
+        });
+    }
+    channel
+}
+
 impl AudioBackend for AudioStateBackend {
     // -------------------------------------------------------------------
     // BGM
@@ -58,36 +102,17 @@ impl AudioBackend for AudioStateBackend {
     fn play_bgm(&mut self, file: &str, config: &BgmConfig) {
         // 停止旧 BGM（不触发完成事件，因为是被替换而非自然结束）
         self.state.bgm_channel = None;
-
-        let mut channel = SoundChannel::new("bgm", file, SoundCategory::Bgm);
-        channel.playing = true;
-        channel.loop_play = config.loop_play;
-
-        if let Some(gain) = config.gain {
-            channel.raw_gain = gain;
-            channel.current_gain = SoundChannel::gain_to_linear(gain);
-        }
-        if let Some(pan) = config.pan {
-            channel.raw_pan = pan;
-            channel.current_pan = SoundChannel::pan_to_linear(pan);
-        }
-
-        // 淡入
-        if config.fade_in_ms > 0 {
-            let target_gain = channel.current_gain;
-            channel.current_gain = 0.0;
-            channel.fade = Some(FadeState {
-                target_gain,
-                target_pan: channel.current_pan,
-                from_gain: 0.0,
-                from_pan: channel.current_pan,
-                start_ms: self.state.clock_ms,
-                duration_ms: config.fade_in_ms,
-                stop_on_complete: false,
-            });
-        }
-
-        self.state.bgm_channel = Some(channel);
+        self.state.bgm_channel = Some(build_channel(
+            "bgm",
+            file,
+            SoundCategory::Bgm,
+            config.loop_play,
+            false,
+            config.gain,
+            config.pan,
+            config.fade_in_ms,
+            self.state.clock_ms,
+        ));
     }
 
     fn stop_bgm(&mut self, fade_time_ms: u64) -> bool {
@@ -118,36 +143,18 @@ impl AudioBackend for AudioStateBackend {
             }
         }
 
-        // 启动新 BGM
-        let mut channel = SoundChannel::new("bgm", file, SoundCategory::Bgm);
-        channel.playing = true;
-        channel.loop_play = config.loop_play;
-
-        if let Some(gain) = config.gain {
-            channel.raw_gain = gain;
-            channel.current_gain = SoundChannel::gain_to_linear(gain);
-        }
-        if let Some(pan) = config.pan {
-            channel.raw_pan = pan;
-            channel.current_pan = SoundChannel::pan_to_linear(pan);
-        }
-
-        // 新 BGM 从 0 淡入
-        if fade_time > 0 {
-            let target_gain = channel.current_gain;
-            channel.current_gain = 0.0;
-            channel.fade = Some(FadeState {
-                target_gain,
-                target_pan: channel.current_pan,
-                from_gain: 0.0,
-                from_pan: channel.current_pan,
-                start_ms: self.state.clock_ms,
-                duration_ms: fade_time,
-                stop_on_complete: false,
-            });
-        }
-
-        self.state.bgm_channel = Some(channel);
+        // 启动新 BGM（从 0 淡入）
+        self.state.bgm_channel = Some(build_channel(
+            "bgm",
+            file,
+            SoundCategory::Bgm,
+            config.loop_play,
+            false,
+            config.gain,
+            config.pan,
+            fade_time,
+            self.state.clock_ms,
+        ));
     }
 
     fn fade_bgm_gain(&mut self, target_gain_raw: i32, time_ms: u64) {
@@ -178,35 +185,17 @@ impl AudioBackend for AudioStateBackend {
 
         // 覆盖同 ID 的旧 SE
         self.state.se_channels.remove(id);
-
-        let mut channel = SoundChannel::new(id, file, SoundCategory::Se);
-        channel.playing = true;
-        channel.loop_play = config.loop_play;
-        channel.skippable = config.skippable;
-
-        if let Some(gain) = config.gain {
-            channel.raw_gain = gain;
-            channel.current_gain = SoundChannel::gain_to_linear(gain);
-        }
-        if let Some(pan) = config.pan {
-            channel.raw_pan = pan;
-            channel.current_pan = SoundChannel::pan_to_linear(pan);
-        }
-
-        if config.fade_in_ms > 0 {
-            let target_gain = channel.current_gain;
-            channel.current_gain = 0.0;
-            channel.fade = Some(FadeState {
-                target_gain,
-                target_pan: channel.current_pan,
-                from_gain: 0.0,
-                from_pan: channel.current_pan,
-                start_ms: self.state.clock_ms,
-                duration_ms: config.fade_in_ms,
-                stop_on_complete: false,
-            });
-        }
-
+        let channel = build_channel(
+            id,
+            file,
+            SoundCategory::Se,
+            config.loop_play,
+            config.skippable,
+            config.gain,
+            config.pan,
+            config.fade_in_ms,
+            self.state.clock_ms,
+        );
         self.state.se_channels.insert(id.to_string(), channel);
     }
 
@@ -251,35 +240,17 @@ impl AudioBackend for AudioStateBackend {
     fn play_voice(&mut self, id: &str, file: &str, config: &SeConfig) {
         // Voice 与 SE 共用配置类型
         self.state.voice_channels.remove(id);
-
-        let mut channel = SoundChannel::new(id, file, SoundCategory::Voice);
-        channel.playing = true;
-        channel.loop_play = config.loop_play;
-        channel.skippable = config.skippable;
-
-        if let Some(gain) = config.gain {
-            channel.raw_gain = gain;
-            channel.current_gain = SoundChannel::gain_to_linear(gain);
-        }
-        if let Some(pan) = config.pan {
-            channel.raw_pan = pan;
-            channel.current_pan = SoundChannel::pan_to_linear(pan);
-        }
-
-        if config.fade_in_ms > 0 {
-            let target_gain = channel.current_gain;
-            channel.current_gain = 0.0;
-            channel.fade = Some(FadeState {
-                target_gain,
-                target_pan: channel.current_pan,
-                from_gain: 0.0,
-                from_pan: channel.current_pan,
-                start_ms: self.state.clock_ms,
-                duration_ms: config.fade_in_ms,
-                stop_on_complete: false,
-            });
-        }
-
+        let channel = build_channel(
+            id,
+            file,
+            SoundCategory::Voice,
+            config.loop_play,
+            config.skippable,
+            config.gain,
+            config.pan,
+            config.fade_in_ms,
+            self.state.clock_ms,
+        );
         self.state.voice_channels.insert(id.to_string(), channel);
     }
 

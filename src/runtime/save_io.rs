@@ -29,17 +29,33 @@ impl CoreRuntime {
         qualify_save_path(file, &self.savepath)
     }
 
-    /// 处理 [save]：触发 onSave 序列化 `sys` 等 Lua 表 → 抽干 [var] 队列 →
+    /// 存档目录内的文件复制/移动（fileio 的 copy/move 命令）。
+    /// 全部经宿主读写回调完成，core 不直接碰文件系统。
+    pub(super) fn copy_save_file(
+        &self,
+        src: &str,
+        dst: &str,
+        delete_src: bool,
+    ) -> Result<(), String> {
+        let src_path = self.save_path_for(src)?;
+        let dst_path = self.save_path_for(dst)?;
+        let data = crate::ffi::request_file(&src_path)?;
+        crate::ffi::request_write(&dst_path, &data)?;
+        if delete_src {
+            crate::ffi::request_delete(&src_path)?;
+        }
+        Ok(())
+    }
+
+    /// 处理 [save]：触发 onSave 序列化 `sys` 等 Lua 表 → 抽干其 [var] 队列 →
     /// 快照解释器状态 → JSON → 经宿主写回调落盘。
     pub(super) fn handle_save_game(&mut self, file: &str) -> Result<(), String> {
         // onSave（store）把 sys/gscr/conf 经 pluto 序列化进 Artemis 变量，
-        // 这些 [var] 标签排入队列后必须抽干，快照才能包含它们。
+        // 这些 [var] 标签必须在快照前执行，但保存 UI 当时已有的返回/跳转队列
+        // 必须原样保留，否则会在 Event::SaveGame 回调中重入并破坏剧情恢复位置。
         self.interpreter
-            .fire_save_handler()
+            .fire_save_handler_and_flush()
             .map_err(|e| format!("onSave 处理器失败: {e:?}"))?;
-        self.interpreter
-            .flush_pending_tags()
-            .map_err(|e| format!("抽干存档标签失败: {e:?}"))?;
 
         let mut data = crate::save::SaveData::from_interpreter(&self.interpreter);
         if let Some(snapshot) = &self.save_screenshot {
@@ -132,6 +148,7 @@ impl CoreRuntime {
             serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         self.compositor.reset_for_load();
         self.stop_all_media();
+        self.reset_control_modes_for_load();
         self.hovered_layers.clear();
         if let Some(scene) = data.scene.clone() {
             self.compositor.restore_scene(scene);
@@ -145,6 +162,7 @@ impl CoreRuntime {
         self.interpreter
             .fire_load_handler()
             .map_err(|e| format!("onLoad 处理器失败: {e:?}"))?;
+        self.sync_control_status_variables();
         self.interpreter
             .flush_pending_tags()
             .map_err(|e| format!("抽干读档标签失败: {e:?}"))?;
@@ -178,6 +196,10 @@ impl CoreRuntime {
     }
 
     pub(super) fn handle_go_title(&mut self) -> Result<(), String> {
+        /// 多数 Artemis 项目的标题入口脚本；BOOT 配置缺失或启动失败时回退。
+        const FALLBACK_TITLE_SCRIPT: &str = "system/first.iet";
+        const TITLE_LABEL: &str = "title";
+
         self.compositor.reset_for_load();
         self.sync_layer_info_all();
         self.stop_all_media();
@@ -185,8 +207,22 @@ impl CoreRuntime {
         self.save_screenshot = None;
         self.timed_remaining_ms = 0;
         self.wait_reason = None;
+
+        // 优先用 system.ini 的 BOOT 脚本（标题界面通常就在 boot 脚本的 title 标签），
+        // 不再无条件硬编码单一路径。
+        let boot = self.boot_script.clone();
+        if let Some(boot) = boot.filter(|b| b != FALLBACK_TITLE_SCRIPT) {
+            match self.interpreter.start(&boot, TITLE_LABEL) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    crate::core_warn!(
+                        "[runtime] gotitle: BOOT 脚本 {boot} 无 {TITLE_LABEL} 入口 ({e:?})，回退 {FALLBACK_TITLE_SCRIPT}"
+                    );
+                }
+            }
+        }
         self.interpreter
-            .start("system/first.iet", "title")
+            .start(FALLBACK_TITLE_SCRIPT, TITLE_LABEL)
             .map_err(|e| format!("{e:?}"))?;
         Ok(())
     }
@@ -233,7 +269,8 @@ impl CoreRuntime {
         let (resource_name, path) = self.screenshot_paths_for(file)?;
 
         crate::ffi::request_write(&path, &png)?;
-        self.texture_provider
+        let _ = self
+            .texture_provider
             .upload_rgba(&resource_name, target_width, target_height, &rgba);
         crate::core_info!(
             "[runtime] 已保存缩略图: {} (resource={}, {}x{})",

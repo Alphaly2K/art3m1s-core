@@ -16,6 +16,9 @@ impl CoreRuntime {
             .map(|value| value.as_string())
             .unwrap_or_default();
 
+        if self.pending_dialog.is_some() {
+            crate::core_warn!("[dialog] 上一个 dialog 尚未响应就收到新请求，旧请求被覆盖");
+        }
         self.pending_dialog = Some(PendingDialog {
             varname: varname.map(String::from),
             textfield: textfield.map(String::from),

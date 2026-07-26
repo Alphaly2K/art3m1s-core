@@ -56,31 +56,53 @@ impl CoreRuntime {
             self.load_script_font(face);
         }
 
-        let Some(renderer) = self.text_renderer.as_mut() else {
-            return;
+        // 剧本文本在光栅化前先过注入链（汉化补丁等），需在借用 renderer 前算好。
+        let injected = match event {
+            Event::ScenarioText { content, .. } => Some(self.text_inject.run(content)),
+            _ => None,
         };
-        match event {
-            Event::ScenarioText { content, inline } => renderer.push_text(content, *inline),
-            Event::FontSettings(settings) => renderer.apply_font_settings(settings),
-            Event::FontInit => renderer.font_init(),
-            Event::FontClose => renderer.font_pop(),
-            Event::FontDefault(settings) => renderer.font_default(settings),
-            Event::MessageLayerSwitch { id, .. } => {
-                if let Some(layer_id) = id {
-                    self.compositor.ensure_layer(layer_id);
+
+        let restored_face = {
+            let Some(renderer) = self.text_renderer.as_mut() else {
+                return;
+            };
+            match event {
+                Event::ScenarioText { content, inline } => {
+                    renderer.push_text(injected.as_deref().unwrap_or(content), *inline)
                 }
-                renderer.switch_message_layer(id.as_deref());
+                Event::FontSettings(settings) => renderer.apply_font_settings(settings),
+                Event::FontInit => renderer.font_init(),
+                Event::FontClose => renderer.font_pop(),
+                Event::FontDefault(settings) => renderer.font_default(settings),
+                Event::MessageLayerSwitch { id, .. } => {
+                    if let Some(layer_id) = id {
+                        self.compositor.ensure_layer(layer_id);
+                    }
+                    renderer.switch_message_layer(id.as_deref());
+                }
+                Event::MessageLayerPop => renderer.pop_message_layer(),
+                Event::LineBreak => renderer.push_line_break(),
+                Event::PageBreak { backlog } => renderer.push_page_break(*backlog),
+                Event::GlyphConfig(config) => renderer.set_glyph_config(config),
+                Event::TextAnimation(params) => {
+                    renderer.set_scetween(ScetweenConfig::from_params(params));
+                }
+                Event::SceneIn => renderer.show_text(),
+                Event::SceneOut => renderer.hide_text(),
+                _ => {}
             }
-            Event::MessageLayerPop => renderer.pop_message_layer(),
-            Event::LineBreak => renderer.push_line_break(),
-            Event::PageBreak { backlog } => renderer.push_page_break(*backlog),
-            Event::GlyphConfig(config) => renderer.set_glyph_config(config),
-            Event::TextAnimation(params) => {
-                renderer.set_scetween(ScetweenConfig::from_params(params));
+            match event {
+                Event::FontInit
+                | Event::FontClose
+                | Event::FontDefault(_)
+                | Event::FontSettings(_)
+                | Event::MessageLayerSwitch { .. }
+                | Event::MessageLayerPop => renderer.active_font_face().map(str::to_string),
+                _ => None,
             }
-            Event::SceneIn => renderer.show_text(),
-            Event::SceneOut => renderer.hide_text(),
-            _ => {}
+        };
+        if let Some(face) = restored_face {
+            self.load_script_font(&face);
         }
     }
 

@@ -1,0 +1,10 @@
+[package]
+name = "art3m1s-emote"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+

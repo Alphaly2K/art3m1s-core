@@ -81,34 +81,21 @@ impl GlTextureProvider {
     }
 
     /// 直接用一块 RGBA 像素登记一张命名纹理（测试或预置素材用）。
-    /// 返回其句柄与尺寸。
+    /// 返回其句柄与尺寸；GL 纹理创建失败时返回 `None`。
+    ///
+    /// [`TextureProvider::upload_rgba`] 的 trait 实现直接转发到这里。
     pub fn upload_rgba(
         &mut self,
         name: &str,
         width: u32,
         height: u32,
         rgba: &[u8],
-    ) -> (TextureId, TextureInfo) {
+    ) -> Option<(TextureId, TextureInfo)> {
         self.remove_if_cached(name);
-        let entry = unsafe { self.create_texture(width, height, rgba) };
-        // mpv's stable zero-copy software output is `rgb0`: the fourth byte is
-        // padding, not alpha. Keep the four-byte upload alignment but force the
-        // sampled alpha channel to one in GL, avoiding a per-pixel CPU pass.
-        if let Some(raw) = NonZeroU32::new(entry.0.0 as u32) {
-            unsafe {
-                self.gl
-                    .bind_texture(glow::TEXTURE_2D, Some(glow::NativeTexture(raw)));
-                self.gl.tex_parameter_i32(
-                    glow::TEXTURE_2D,
-                    glow::TEXTURE_SWIZZLE_A,
-                    glow::ONE as i32,
-                );
-                self.gl.bind_texture(glow::TEXTURE_2D, None);
-            }
-        }
+        let entry = unsafe { self.try_create_texture(width, height, rgba) }?;
         self.cache.insert(name.to_string(), entry);
         self.pixels.insert(entry.0, (width, height, rgba.to_vec()));
-        entry
+        Some(entry)
     }
 
     /// Upload one host-decoded RGBA video frame without retaining a CPU copy.
@@ -151,7 +138,24 @@ impl GlTextureProvider {
         }
 
         self.remove_if_cached(name);
-        let entry = unsafe { self.create_texture(width, height, rgba) };
+        let Some(entry) = (unsafe { self.try_create_texture(width, height, rgba) }) else {
+            return false;
+        };
+        // mpv's software renderer supplies `rgb0`: byte four is padding, not
+        // alpha. Limit this swizzle to video textures so ordinary RGBA assets
+        // keep their authored alpha channel.
+        if let Some(raw) = NonZeroU32::new(entry.0.0 as u32) {
+            unsafe {
+                self.gl
+                    .bind_texture(glow::TEXTURE_2D, Some(glow::NativeTexture(raw)));
+                self.gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_SWIZZLE_A,
+                    glow::ONE as i32,
+                );
+                self.gl.bind_texture(glow::TEXTURE_2D, None);
+            }
+        }
         self.cache.insert(name.to_string(), entry);
         self.pixels.remove(&entry.0);
         true
@@ -168,19 +172,26 @@ impl GlTextureProvider {
         }
     }
 
-    /// 在 GL 上创建一张 RGBA8 纹理并上传像素。
+    /// 在 GL 上创建一张 RGBA8 纹理并上传像素。创建失败（如上下文丢失）时
+    /// 记日志并返回 `None`，不 panic——本函数在生产渲染路径上。
     ///
     /// # Safety
     /// 需在当前 GL 上下文下调用。
-    unsafe fn create_texture(
+    unsafe fn try_create_texture(
         &self,
         width: u32,
         height: u32,
         rgba: &[u8],
-    ) -> (TextureId, TextureInfo) {
+    ) -> Option<(TextureId, TextureInfo)> {
         let gl = &self.gl;
         unsafe {
-            let tex = gl.create_texture().expect("create_texture");
+            let tex = match gl.create_texture() {
+                Ok(tex) => tex,
+                Err(e) => {
+                    crate::core_warn!("create_texture 失败 ({width}x{height}): {e}");
+                    return None;
+                }
+            };
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
             gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
@@ -217,7 +228,7 @@ impl GlTextureProvider {
 
             // glow 的 NativeTexture 内部是 NonZeroU32；取出原始 id 存进句柄。
             let raw = tex.0.get();
-            (TextureId(raw as u64), TextureInfo { width, height })
+            Some((TextureId(raw as u64), TextureInfo { width, height }))
         }
     }
 
@@ -263,19 +274,29 @@ impl TextureProvider for GlTextureProvider {
         }
 
         // 1) 有字节源且能取到字节并解码成功 → 上传真实纹理。
-        if let Some(source) = &self.source
-            && let Some(bytes) = source(name)
-            && let Some((w, h, rgba)) = decode_rgba(&bytes)
-        {
-            let entry = unsafe { self.create_texture(w, h, &rgba) };
-            self.cache.insert(name.to_string(), entry);
-            self.pixels.insert(entry.0, (w, h, rgba));
-            return Some(entry);
+        if let Some(source) = &self.source {
+            match source(name) {
+                Some(bytes) => match decode_rgba(&bytes) {
+                    Some((w, h, rgba)) => {
+                        let entry = unsafe { self.try_create_texture(w, h, &rgba) }?;
+                        self.cache.insert(name.to_string(), entry);
+                        self.pixels.insert(entry.0, (w, h, rgba));
+                        return Some(entry);
+                    }
+                    // 只在首次失败时到达（结果按名缓存），不会刷屏。
+                    None => {
+                        crate::core_warn!("纹理解码失败，回退占位: {name}");
+                    }
+                },
+                None => {
+                    crate::core_warn!("素材不存在，回退占位: {name}");
+                }
+            }
         }
 
         // 2) 取不到或解码失败 → 回退占位纹理（按名缓存，保证句柄稳定）。
         let (size, pixels) = self.placeholder_pixels();
-        let entry = unsafe { self.create_texture(size, size, &pixels) };
+        let entry = unsafe { self.try_create_texture(size, size, &pixels) }?;
         self.cache.insert(name.to_string(), entry);
         self.pixels.insert(entry.0, (size, size, pixels));
         Some(entry)
@@ -288,11 +309,7 @@ impl TextureProvider for GlTextureProvider {
         height: u32,
         data: &[u8],
     ) -> Option<(TextureId, TextureInfo)> {
-        self.remove_if_cached(name);
-        let entry = unsafe { self.create_texture(width, height, data) };
-        self.cache.insert(name.to_string(), entry);
-        self.pixels.insert(entry.0, (width, height, data.to_vec()));
-        Some(entry)
+        GlTextureProvider::upload_rgba(self, name, width, height, data)
     }
 
     fn pixel_alpha(&self, texture: TextureId, x: u32, y: u32) -> Option<u8> {

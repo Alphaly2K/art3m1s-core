@@ -3,7 +3,7 @@
 //! This module is runtime plumbing: it adapts script-engine callbacks to host
 //! FFI services for input, file access, magic paths, and volume changes.
 
-use asb_interpreter::lua_engine::EngineCallbacks;
+use asb_interpreter::lua_engine::{EmoteLayerCommand, EngineCallbacks};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -22,6 +22,7 @@ pub(super) struct FfiCallbacks {
     pub volumes: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, f32>>>,
     pub debug_skip_active: Arc<AtomicBool>,
     pub script_status: Arc<AtomicU8>,
+    pub emote: super::emote::SharedEmoteState,
 }
 
 /// Minimal input state snapshot mirrored from the host event loop.
@@ -54,6 +55,12 @@ impl InputSnapshot {
             .get(&vk)
             .copied()
             .unwrap_or_else(|| self.keys_down.contains(&vk))
+    }
+
+    pub(super) fn scripted_down_edge(&self) -> bool {
+        self.key_overrides
+            .iter()
+            .any(|(key, pressed)| *pressed && self.keys_down_edge.contains(key))
     }
 }
 
@@ -201,6 +208,48 @@ impl EngineCallbacks for FfiCallbacks {
             Some(comments)
         }
     }
+
+    fn create_emote_layer(
+        &self,
+        id: &str,
+        files: &[String],
+        width: u32,
+        height: u32,
+    ) -> asb_interpreter::Result<bool> {
+        let mut loaded = Vec::with_capacity(files.len());
+        for file in files {
+            let resolved = magic_path::resolve_path(&self.magic_paths, file);
+            let bytes = ffi::request_file(&resolved).map_err(|message| {
+                asb_interpreter::Error::IoError(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    message,
+                ))
+            })?;
+            loaded.push((resolved, bytes));
+        }
+        self.emote
+            .lock()
+            .unwrap()
+            .create_layer(id, loaded, width, height)
+            .map_err(|message| asb_interpreter::Error::RuntimeError { line: 0, message })
+    }
+
+    fn get_emote_layer(&self, id: &str, next: bool) -> Option<bool> {
+        self.emote.lock().unwrap().get_layer(id, next)
+    }
+
+    fn command_emote_layer(
+        &self,
+        id: &str,
+        next: bool,
+        command: EmoteLayerCommand,
+    ) -> asb_interpreter::Result<()> {
+        self.emote
+            .lock()
+            .unwrap()
+            .command(id, next, command)
+            .map_err(|message| asb_interpreter::Error::RuntimeError { line: 0, message })
+    }
 }
 
 #[cfg(test)]
@@ -221,6 +270,15 @@ mod tests {
 
         input.clear_edges();
         assert!(input.key_down(1));
+    }
+
+    #[test]
+    fn key_override_status_32_creates_a_scripted_edge() {
+        let mut input = InputSnapshot::default();
+        input.key_overrides.insert(124, true);
+        input.keys_down_edge.insert(124);
+
+        assert!(input.scripted_down_edge());
     }
 }
 

@@ -23,7 +23,7 @@ pub mod inject;
 pub mod render;
 
 pub use glyph::GlyphTextRenderer;
-pub use inject::TextInject;
+pub use inject::{FfiTextInject, InjectionChain, TextInject};
 pub use render::{
     FontDesc, FontMetrics, FontState, GlyphInfo, MessageLayer, ScetweenConfig, ScetweenMode,
     ScetweenSetMode, TextAlignment, TextRenderer,

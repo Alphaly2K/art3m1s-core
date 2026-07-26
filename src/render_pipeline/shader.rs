@@ -47,12 +47,18 @@ impl ShaderManager for BuiltinShaderManager {
                 vertex_body: SPRITE_VERTEX_BODY,
                 fragment_body: SPRITE_FRAGMENT_BODY,
             }),
+            ALPHA_MASK_SHADER => Some(ShaderProgramSource {
+                name: ALPHA_MASK_SHADER,
+                vertex_body: SPRITE_VERTEX_BODY,
+                fragment_body: ALPHA_MASK_FRAGMENT_BODY,
+            }),
             _ => None,
         }
     }
 }
 
 pub const SPRITE_SHADER: &str = "sprite";
+pub const ALPHA_MASK_SHADER: &str = "alpha-mask";
 
 const SPRITE_VERTEX_BODY: &str = r#"
 layout(location = 0) in vec2 a_pos;   // unit quad 0..1
@@ -96,6 +102,26 @@ void main() {
         c.rgb = vec3(1.0) - c.rgb;
     }
     c.a *= u_opacity;
+    frag_color = c;
+}
+"#;
+
+const ALPHA_MASK_FRAGMENT_BODY: &str = r#"
+in vec2 v_uv;
+out vec4 frag_color;
+
+uniform sampler2D u_texture_fore;
+uniform sampler2D u_texture_mask;
+uniform float alpha;
+uniform vec3 colorMultiply;
+
+void main() {
+    vec4 c = texture(u_texture_fore, v_uv);
+    float mask_alpha = alpha * texture(u_texture_mask, v_uv).a;
+    // Group targets store premultiplied RGB. A mask must scale RGB and alpha
+    // together so the result stays premultiplied for the final group blend.
+    c.rgb *= colorMultiply * mask_alpha;
+    c.a *= mask_alpha;
     frag_color = c;
 }
 "#;

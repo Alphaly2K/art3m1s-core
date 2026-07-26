@@ -125,7 +125,8 @@ pub struct SoundFinishHandler {
 /// 然后把它们交还给解释器执行（类似输入事件的 handler 体系）。
 #[derive(Debug, Clone)]
 pub struct SoundFinishEvent {
-    /// 触发完成的 SE 的 ID（BGM 完成时为 None）
+    /// 触发完成的声道 ID（SE/Voice 为其注册 id，BGM 固定为 "bgm"）。
+    /// 目前消费方只依赖 `handler`，此字段仅供日志/调试。
     pub id: Option<String>,
     /// 声音类别
     pub category: SoundCategory,

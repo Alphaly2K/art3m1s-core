@@ -9,7 +9,12 @@ use glam::{Affine2, Vec2};
 use std::collections::HashMap;
 
 const ATLAS_SZ: u32 = 1024;
-const ATLAS_NAME: &str = ":text/atlas";
+/// 文本 atlas 的保留纹理名。runtime 的纹理保活名单也引用它，防止被 retain 驱逐。
+pub const ATLAS_NAME: &str = ":text/atlas";
+/// Artemis 消息层的缺省 id（脚本未显式切层时使用）。
+pub(crate) const DEFAULT_MESSAGE_LAYER: &str = "adv01";
+/// 未提供字号时的缺省字号（Artemis 默认值）。
+const DEFAULT_FONT_SIZE: f32 = 40.0;
 const OUTLINE_OFFSETS: [(f32, f32); 4] = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)];
 
 struct Atlas {
@@ -54,14 +59,14 @@ impl Atlas {
             self.px[doff..doff + len].copy_from_slice(&rgba[soff..soff + len]);
         }
     }
-    fn flush(&mut self, p: &mut dyn TextureProvider) -> (TextureId, TextureInfo) {
+    fn flush(&mut self, p: &mut dyn TextureProvider) -> Option<(TextureId, TextureInfo)> {
         if self.dirty {
             if let Some(r) = p.upload_rgba(ATLAS_NAME, ATLAS_SZ, ATLAS_SZ, &self.px) {
                 self.dirty = false;
-                return r;
+                return Some(r);
             }
         }
-        p.resolve(ATLAS_NAME).unwrap()
+        p.resolve(ATLAS_NAME)
     }
 }
 
@@ -111,6 +116,15 @@ impl<'font> GlyphTextRenderer<'font> {
 impl TextRenderer for GlyphTextRenderer<'_> {
     fn set_font_bytes(&mut self, bytes: &'static [u8]) -> Result<(), String> {
         self.set_font(bytes)
+    }
+
+    fn active_font_face(&self) -> Option<&str> {
+        let id = self.state.active_layer.as_deref().unwrap_or(DEFAULT_MESSAGE_LAYER);
+        self.state
+            .layers
+            .get(id)
+            .and_then(|layer| layer.font.face.as_deref())
+            .or(self.state.default_font.face.as_deref())
     }
 
     fn apply_font_settings(&mut self, s: &HashMap<String, String>) {
@@ -189,7 +203,7 @@ impl TextRenderer for GlyphTextRenderer<'_> {
 
     fn push_text(&mut self, content: &str, _inline: bool) {
         let layer = self.state.active_layer_mut();
-        let sz = layer.font.size.unwrap_or(40.0);
+        let sz = layer.font.size.unwrap_or(DEFAULT_FONT_SIZE);
         let scale = PxScale::from(sz);
         let sf = scaled(&self.font, scale);
         let sf = match sf {
@@ -225,6 +239,8 @@ impl TextRenderer for GlyphTextRenderer<'_> {
                             self.atlas.write(x, y, w, h, &rgba);
                             (x, y, w, h)
                         } else {
+                            // atlas 满：该字形本次以零尺寸落缓存（不再重试）。
+                            crate::core_warn!("字形 atlas 已满，字符 {c:?} 无法光栅化");
                             (0, 0, 0, 0)
                         }
                     })
@@ -250,7 +266,7 @@ impl TextRenderer for GlyphTextRenderer<'_> {
 
     fn push_line_break(&mut self) {
         let layer = self.state.active_layer_mut();
-        let sz = layer.font.size.unwrap_or(40.0);
+        let sz = layer.font.size.unwrap_or(DEFAULT_FONT_SIZE);
         let scale = PxScale::from(sz);
         let sf = scaled(&self.font, scale);
         let sf = match sf {
@@ -286,7 +302,10 @@ impl TextRenderer for GlyphTextRenderer<'_> {
         &mut self,
         p: &mut dyn TextureProvider,
     ) -> HashMap<String, Vec<DrawCommand>> {
-        let (tex, _) = self.atlas.flush(p);
+        let Some((tex, _)) = self.atlas.flush(p) else {
+            crate::core_warn!("文本 atlas 纹理不可用，本帧文本不绘制");
+            return HashMap::new();
+        };
         let mut out: HashMap<String, Vec<DrawCommand>> = HashMap::new();
 
         let lids: Vec<String> = self.state.layers.keys().cloned().collect();
@@ -308,7 +327,7 @@ impl TextRenderer for GlyphTextRenderer<'_> {
             let scethweens = &ly.scetween;
             let text_hidden = ly.text_hidden;
 
-            let sz = ly.font.size.unwrap_or(40.0);
+            let sz = ly.font.size.unwrap_or(DEFAULT_FONT_SIZE);
             let scale = PxScale::from(sz);
             let sf = scaled(&self.font, scale);
             let sf = match sf {
@@ -412,6 +431,8 @@ impl TextRenderer for GlyphTextRenderer<'_> {
                         clip: clip.clone(),
                         clip_bounds: None,
                         shader: None,
+                        mesh: None,
+                        stencil: None,
                     };
                     if has_shadow {
                         let mut sc = base.clone();
@@ -608,6 +629,32 @@ impl TextRenderer for GlyphTextRenderer<'_> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::GlyphTextRenderer;
+    use crate::text::render::TextRenderer;
+    use std::collections::HashMap;
+
+    #[test]
+    fn popping_message_layer_restores_its_logical_font_face() {
+        let mut renderer = GlyphTextRenderer::new();
+        renderer.switch_message_layer(Some("adv"));
+        renderer.apply_font_settings(&HashMap::from([(
+            "face".to_string(),
+            "font/story.ttf".to_string(),
+        )]));
+        renderer.switch_message_layer(Some("save_slot"));
+        renderer.apply_font_settings(&HashMap::from([(
+            "face".to_string(),
+            "font/ui.ttf".to_string(),
+        )]));
+        assert_eq!(renderer.active_font_face(), Some("font/ui.ttf"));
+
+        renderer.pop_message_layer();
+        assert_eq!(renderer.active_font_face(), Some("font/story.ttf"));
+    }
+}
+
 /// 计算单个字符在所有 scetween 配置共同作用下的动画偏移量。
 ///
 /// 根据 `text_hidden` 选取相关配置（入场 or 退场），把各配置的贡献叠加。
@@ -703,15 +750,11 @@ fn scetween_start_value(cfg: &ScetweenConfig) -> (f32, f32, f32, f32, f32, f32) 
         Some("left") => (diff, 0.0, 1.0, 1.0, 0.0, 1.0),
         Some("top") => (0.0, diff, 1.0, 1.0, 0.0, 1.0),
         Some("alpha") => {
-            // Artemis 用 0-255 的 diff；转换到 0-1
-            let start_a = if cfg.mode.is_entrance() {
-                // 入场：alpha 从 0 渐入到 1（或从 (255+diff)/255 开始）
-                (255.0 + diff).clamp(0.0, 255.0) / 255.0
-            } else {
-                // 退场：alpha 从 1 渐出到 0（或从 (255+diff)/255 开始）
-                (255.0 + diff).clamp(0.0, 255.0) / 255.0
-            };
-            (0.0, 0.0, 1.0, 1.0, 0.0, start_a)
+            // Artemis 用 0-255 的 diff；转换到 0-1。这里只计算"淡出端"的
+            // alpha（如 diff=-255 → 0.0）；入场从这端渐入、退场向这端渐出，
+            // 方向由调用方交换起终点实现，因此两种模式取值相同。
+            let faded_a = (255.0 + diff).clamp(0.0, 255.0) / 255.0;
+            (0.0, 0.0, 1.0, 1.0, 0.0, faded_a)
         }
         Some("xscale") => {
             let start_s = 1.0 + diff / 100.0;

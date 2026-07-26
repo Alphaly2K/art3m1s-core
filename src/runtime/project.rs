@@ -43,9 +43,11 @@ impl CoreRuntime {
         }
 
         self.project_savepath = project.config().savepath.clone();
+        self.boot_script = Some(project.config().boot_script.clone());
         self.save_screenshot = None;
         self.loaded_font_face = None;
         self.pending_dialog = None;
+        self.emote.lock().unwrap().clear();
         self.interpreter = project.create_interpreter();
         self.interpreter.register_tag("reset", RuntimeResetHandler);
 
@@ -75,6 +77,7 @@ impl CoreRuntime {
                 volumes: Arc::clone(&self.volumes),
                 debug_skip_active: Arc::clone(&self.debug_skip_active),
                 script_status: Arc::clone(&self.script_status),
+                emote: Arc::clone(&self.emote),
             }));
     }
 
@@ -150,12 +153,16 @@ impl CoreRuntime {
         });
     }
 
+    /// 脚本尚未指定字体前尝试加载的缺省字体（项目常见随包字体）。
+    /// 不存在也无妨：等脚本 [font face=..] 到来再加载。
+    const DEFAULT_FONT_PATH: &'static str = "font/sourcehansans-medium.otf";
+
     fn load_default_font(&mut self) {
         let mut text = GlyphTextRenderer::new();
-        match crate::load_font_ffi("font/sourcehansans-medium.otf") {
+        match crate::load_font_ffi(Self::DEFAULT_FONT_PATH) {
             Ok(font) => {
                 if text.set_font(font).is_ok() {
-                    self.loaded_font_face = Some("font/sourcehansans-medium.otf".to_string());
+                    self.loaded_font_face = Some(Self::DEFAULT_FONT_PATH.to_string());
                 }
             }
             Err(e) => {
@@ -166,9 +173,11 @@ impl CoreRuntime {
     }
 
     fn register_builtin_textures(&mut self) {
-        self.texture_provider
+        let _ = self
+            .texture_provider
             .upload_rgba(":bg/black", 2, 2, &[0, 0, 0, 255].repeat(4));
-        self.texture_provider
+        let _ = self
+            .texture_provider
             .upload_rgba(":bg/white", 2, 2, &[255, 255, 255, 255].repeat(4));
     }
 

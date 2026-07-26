@@ -6,7 +6,7 @@
 //! selection.  Concrete backends compile the selected shaders and execute the
 //! passes.
 
-use crate::compositor::build::build_frame;
+use crate::compositor::build::{build_frame, build_frame_with_content};
 use crate::compositor::reduce::Compositor;
 pub mod draw;
 pub mod hlsl;
@@ -14,29 +14,10 @@ pub mod shader;
 pub mod transition;
 
 pub use draw::{
-    BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, Renderer, ShaderEffect, ShaderGroup,
-    TextureId, TextureInfo, TextureProvider,
+    BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, DrawMesh, LayerDrawSource, Renderer,
+    ShaderEffect, ShaderGroup, StencilMetadata, TextureId, TextureInfo, TextureProvider,
 };
 pub use shader::{BuiltinShaderManager, ShaderManager, ShaderProfile, ShaderProgramSource};
-
-/// A pipeline pass selected by the render pipeline.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RenderPass {
-    pub name: &'static str,
-    pub shader: &'static str,
-}
-
-/// A postprocess pass selected after the main scene pass.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PostprocessPass {
-    pub name: &'static str,
-    pub shader: &'static str,
-}
-
-pub const SPRITE_PASS: RenderPass = RenderPass {
-    name: "sprite",
-    shader: shader::SPRITE_SHADER,
-};
 
 /// Stateless rendering pipeline view over a [`Compositor`].
 pub struct RenderPipeline<'a> {
@@ -46,14 +27,6 @@ pub struct RenderPipeline<'a> {
 impl<'a> RenderPipeline<'a> {
     pub fn new(compositor: &'a Compositor) -> Self {
         Self { compositor }
-    }
-
-    pub fn scene_passes(&self) -> &'static [RenderPass] {
-        std::slice::from_ref(&SPRITE_PASS)
-    }
-
-    pub fn postprocess_passes(&self) -> &'static [PostprocessPass] {
-        &[]
     }
 
     /// Builds the final draw list and submits it to the backend.
@@ -72,10 +45,26 @@ impl<'a> RenderPipeline<'a> {
     pub fn build_composited_with_text(
         &self,
         provider: &mut dyn TextureProvider,
-        text_for: Option<&dyn Fn(&str) -> Vec<DrawCommand>>,
+        text_for: Option<&LayerDrawSource<'_>>,
+    ) -> DrawList {
+        self.build_composited_with_content(provider, None, text_for)
+    }
+
+    /// Builds the final draw list with host-owned layer content and text.
+    pub fn build_composited_with_content(
+        &self,
+        provider: &mut dyn TextureProvider,
+        content_for: Option<&LayerDrawSource<'_>>,
+        text_for: Option<&LayerDrawSource<'_>>,
     ) -> DrawList {
         let compositor = self.compositor;
-        let mut frame = self.build_with_text(provider, text_for);
+        let mut frame = build_frame_with_content(
+            &compositor.scene,
+            compositor.clock_ms,
+            provider,
+            content_for,
+            text_for,
+        );
 
         transition::overlay_old_frame(&compositor.trans_state, compositor.clock_ms, &mut frame);
         frame
@@ -120,7 +109,7 @@ impl<'a> RenderPipeline<'a> {
     pub fn build_with_text(
         &self,
         provider: &mut dyn TextureProvider,
-        text_for: Option<&dyn Fn(&str) -> Vec<DrawCommand>>,
+        text_for: Option<&LayerDrawSource<'_>>,
     ) -> DrawList {
         let compositor = self.compositor;
         build_frame(&compositor.scene, compositor.clock_ms, provider, text_for)

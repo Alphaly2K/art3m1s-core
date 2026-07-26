@@ -23,6 +23,18 @@ pub unsafe fn build_program(
     }
 }
 
+pub unsafe fn build_builtin_program(
+    gl: &glow::Context,
+    profile: ShaderProfile,
+    name: &str,
+) -> Result<glow::Program, String> {
+    let manager = BuiltinShaderManager;
+    let source = manager
+        .program(name)
+        .ok_or_else(|| format!("built-in shader asset missing: {name}"))?;
+    unsafe { build_program_from_bodies(gl, profile, source.vertex_body, source.fragment_body) }
+}
+
 pub unsafe fn build_effect_program(
     gl: &glow::Context,
     profile: ShaderProfile,
@@ -53,6 +65,13 @@ unsafe fn build_program_from_bodies(
             (glow::FRAGMENT_SHADER, frag_src),
         ];
         let mut compiled = Vec::with_capacity(2);
+        let cleanup = |gl: &glow::Context, compiled: &[glow::Shader]| {
+            for &shader in compiled {
+                gl.detach_shader(program, shader);
+                gl.delete_shader(shader);
+            }
+            gl.delete_program(program);
+        };
         for (kind, src) in shaders {
             let shader = gl.create_shader(kind)?;
             gl.shader_source(shader, &src);
@@ -60,7 +79,7 @@ unsafe fn build_program_from_bodies(
             if !gl.get_shader_compile_status(shader) {
                 let log = gl.get_shader_info_log(shader);
                 gl.delete_shader(shader);
-                gl.delete_program(program);
+                cleanup(gl, &compiled);
                 return Err(format!("着色器编译失败: {log}"));
             }
             gl.attach_shader(program, shader);
@@ -70,6 +89,7 @@ unsafe fn build_program_from_bodies(
         gl.link_program(program);
         if !gl.get_program_link_status(program) {
             let log = gl.get_program_info_log(program);
+            cleanup(gl, &compiled);
             return Err(format!("着色器程序链接失败: {log}"));
         }
 

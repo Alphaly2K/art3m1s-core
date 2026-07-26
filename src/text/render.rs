@@ -445,7 +445,7 @@ impl FontState {
     pub fn active_layer_mut(&mut self) -> &mut MessageLayer {
         let id = self
             .active_layer
-            .get_or_insert_with(|| "adv01".to_string())
+            .get_or_insert_with(|| crate::text::glyph::DEFAULT_MESSAGE_LAYER.to_string())
             .clone();
         self.layers
             .entry(id.clone())
@@ -486,6 +486,9 @@ impl From<&str> for TextAlignment {
 pub trait TextRenderer {
     /// 切换当前用于光栅化的字体文件。
     fn set_font_bytes(&mut self, bytes: &'static [u8]) -> Result<(), String>;
+
+    /// 当前消息层的逻辑字体文件，用于消息层/字体栈恢复后同步光栅化字体。
+    fn active_font_face(&self) -> Option<&str>;
 
     /// 应用字体属性。
     fn apply_font_settings(&mut self, settings: &HashMap<String, String>);

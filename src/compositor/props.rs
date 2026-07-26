@@ -19,6 +19,7 @@ use std::collections::HashMap;
 /// - `anchorx` / `anchory`：变换锚点（缩放/旋转的中心），像素。
 /// - `rotate`：角度，单位度。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LayerProps {
     pub left: Option<f32>,
     pub top: Option<f32>,
@@ -72,7 +73,9 @@ impl LayerProps {
         }
     }
 
-    /// 设置单个原始属性。无法解析为目标类型时回退到 `custom`，避免静默丢弃。
+    /// 设置单个原始属性。已识别的键解析失败时保持原值（不写入 `custom`，
+    /// 以免同一属性在 typed 字段与 `custom` 各存一份互相矛盾）；未识别的键
+    /// 原样进 `custom`。
     pub fn set_raw(&mut self, key: &str, value: &str) {
         let v = value.trim();
         match key {
@@ -121,6 +124,20 @@ impl LayerProps {
         }
     }
 
+    /// 把缓动求得的数值格式化回属性字符串，交给 [`Self::set_raw`] 解析。
+    ///
+    /// alpha/visible 等整数属性按整数格式化，避免 "128.0" 落入浮点回退路径。
+    /// build（每帧求值）与 anim（终值固化）共用这一份白名单，防止分叉。
+    pub(crate) fn format_value(param: &str, value: f32) -> String {
+        match param {
+            "alpha" | "visible" | "reversex" | "reversey" | "grayscale" | "negative" | "delete"
+            | "stack" | "vertical" | "hung" | "anchorcenter" | "overflow" => {
+                (value.round() as i64).to_string()
+            }
+            _ => value.to_string(),
+        }
+    }
+
     // ── 带默认值的取值器，供帧构建使用 ──────────────────────────────
 
     pub fn offset(&self) -> (f32, f32) {
@@ -146,6 +163,23 @@ impl LayerProps {
 
     pub fn rotation_radians(&self) -> f32 {
         self.rotate.unwrap_or(0.0).to_radians()
+    }
+
+    /// 图层相对其父的本地仿射变换。
+    ///
+    /// 按 Artemis 语义，缩放与旋转都绕锚点进行，最终再平移到 (left, top)。
+    /// 渲染（build）与命中检测（hit_test）共用这一份实现，保证两侧几何一致。
+    pub fn local_transform(&self) -> glam::Affine2 {
+        let (left, top) = self.offset();
+        let (sx, sy) = self.scale();
+        let (ax, ay) = self.anchor();
+        let rot = self.rotation_radians();
+
+        glam::Affine2::from_translation(glam::Vec2::new(left, top))
+            * glam::Affine2::from_translation(glam::Vec2::new(ax, ay))
+            * glam::Affine2::from_angle(rot)
+            * glam::Affine2::from_scale(glam::Vec2::new(sx, sy))
+            * glam::Affine2::from_translation(glam::Vec2::new(-ax, -ay))
     }
 
     /// 精灵裁剪矩形 `[x, y, w, h]`（纹理像素），未设置时返回 `None`（画整张）。
@@ -220,6 +254,16 @@ fn parse_name_list(value: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deserializes_legacy_props_without_shader_fields() {
+        let props: LayerProps = serde_json::from_str(r#"{"left":12.0,"visible":true}"#).unwrap();
+
+        assert_eq!(props.left, Some(12.0));
+        assert_eq!(props.visible, Some(true));
+        assert!(props.shader_constants.is_empty());
+        assert!(props.shader_textures.is_empty());
+    }
 
     fn raw(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs

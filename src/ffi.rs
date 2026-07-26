@@ -4,11 +4,13 @@
 //! filesystem operation inside the core is routed through those callbacks,
 //! keeping the core entirely free of direct I/O.
 use std::ffi::{CString, c_char, c_int, c_longlong};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // ── Global debug flag ──────────────────────────────────────────
 
-static DEBUG: OnceLock<bool> = OnceLock::new();
+static DEBUG: AtomicBool = AtomicBool::new(false);
 
 /// 从 catch_unwind 的 payload 提取 panic message。
 fn panic_msg(payload: &Box<dyn std::any::Any + Send>) -> String {
@@ -23,42 +25,63 @@ fn panic_msg(payload: &Box<dyn std::any::Any + Send>) -> String {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_set_debug(enabled: c_int) {
-    let _ = DEBUG.set(enabled != 0);
+    DEBUG.store(enabled != 0, Ordering::Relaxed);
 }
 
 pub fn debug_enabled() -> bool {
-    DEBUG.get().copied().unwrap_or(false)
+    DEBUG.load(Ordering::Relaxed)
 }
 
 // ── Log callback ───────────────────────────────────────────────
+//
+// 回调指针一律用 Mutex<Option<..>> 而非 OnceLock：Flutter 热重启后会用新的
+// trampoline 地址重新注册，旧指针必须允许被覆盖，否则调用悬垂指针。
 
 type LogCallback = unsafe extern "C" fn(level: *const c_char, msg: *const c_char);
 
-static LOG_CB: OnceLock<LogCallback> = OnceLock::new();
+static LOG_CB: Mutex<Option<LogCallback>> = Mutex::new(None);
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_register_log_callback(cb: LogCallback) {
-    let _ = LOG_CB.set(cb);
+    *LOG_CB.lock().unwrap() = Some(cb);
 }
 
 pub fn log(level: &str, msg: &str) {
-    if let Some(cb) = LOG_CB.get() {
-        if let (Ok(l), Ok(m)) = (CString::new(level), CString::new(msg)) {
-            unsafe {
-                cb(l.as_ptr(), m.as_ptr());
-            }
+    let Some(cb) = *LOG_CB.lock().unwrap() else {
+        return;
+    };
+    if let (Ok(l), Ok(m)) = (CString::new(level), CString::new(msg)) {
+        unsafe {
+            cb(l.as_ptr(), m.as_ptr());
         }
     }
 }
 
-// ── Media command callback ─────────────────────────────────────
+// ── Media / UI command callbacks ───────────────────────────────
 
-type MediaCommandCallback = unsafe extern "C" fn(kind: *const c_char, payload_json: *const c_char);
+/// `(kind, payload_json)` 形式的宿主命令回调，media 与 ui 通道共用同一签名。
+type JsonCommandCallback = unsafe extern "C" fn(kind: *const c_char, payload_json: *const c_char);
 
-static MEDIA_COMMAND_CB: Mutex<Option<MediaCommandCallback>> = Mutex::new(None);
+static MEDIA_COMMAND_CB: Mutex<Option<JsonCommandCallback>> = Mutex::new(None);
+static UI_COMMAND_CB: Mutex<Option<JsonCommandCallback>> = Mutex::new(None);
+
+fn emit_json_command(slot: &Mutex<Option<JsonCommandCallback>>, kind: &str, payload: serde_json::Value) {
+    let Some(cb) = *slot.lock().unwrap() else {
+        return;
+    };
+    let Ok(kind) = CString::new(kind) else {
+        return;
+    };
+    let Ok(payload) = CString::new(payload.to_string()) else {
+        return;
+    };
+    unsafe {
+        cb(kind.as_ptr(), payload.as_ptr());
+    }
+}
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn art3m1s_register_media_command_callback(cb: MediaCommandCallback) {
+pub unsafe extern "C" fn art3m1s_register_media_command_callback(cb: JsonCommandCallback) {
     *MEDIA_COMMAND_CB.lock().unwrap() = Some(cb);
 }
 
@@ -67,28 +90,11 @@ pub fn media_command_callback_registered() -> bool {
 }
 
 pub fn emit_media_command(kind: &str, payload: serde_json::Value) {
-    let Some(cb) = *MEDIA_COMMAND_CB.lock().unwrap() else {
-        return;
-    };
-    let Ok(kind) = CString::new(kind) else {
-        return;
-    };
-    let Ok(payload) = CString::new(payload.to_string()) else {
-        return;
-    };
-    unsafe {
-        cb(kind.as_ptr(), payload.as_ptr());
-    }
+    emit_json_command(&MEDIA_COMMAND_CB, kind, payload);
 }
 
-// ── UI command callback ────────────────────────────────────────
-
-type UiCommandCallback = unsafe extern "C" fn(kind: *const c_char, payload_json: *const c_char);
-
-static UI_COMMAND_CB: Mutex<Option<UiCommandCallback>> = Mutex::new(None);
-
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn art3m1s_register_ui_command_callback(cb: UiCommandCallback) {
+pub unsafe extern "C" fn art3m1s_register_ui_command_callback(cb: JsonCommandCallback) {
     *UI_COMMAND_CB.lock().unwrap() = Some(cb);
 }
 
@@ -97,18 +103,7 @@ pub fn ui_command_callback_registered() -> bool {
 }
 
 pub fn emit_ui_command(kind: &str, payload: serde_json::Value) {
-    let Some(cb) = *UI_COMMAND_CB.lock().unwrap() else {
-        return;
-    };
-    let Ok(kind) = CString::new(kind) else {
-        return;
-    };
-    let Ok(payload) = CString::new(payload.to_string()) else {
-        return;
-    };
-    unsafe {
-        cb(kind.as_ptr(), payload.as_ptr());
-    }
+    emit_json_command(&UI_COMMAND_CB, kind, payload);
 }
 
 #[macro_export]
@@ -130,6 +125,44 @@ macro_rules! core_debug {
 #[macro_export]
 macro_rules! core_error {
     ($($arg:tt)*) => { $crate::ffi::log("E", &format!($($arg)*)); };
+}
+
+// ── Text inject callback ───────────────────────────────────────
+//
+// 汉化/本地化补丁入口：宿主注册回调后，每段剧本文本在光栅化前都会先经过它。
+// 协议：`text` 为原文（UTF-8，NUL 结尾）；替换文本写入 `buf`（UTF-8，不含
+// NUL，最多 `buf_cap` 字节），返回写入的字节数；返回 <0 表示不替换。
+
+type TextInjectCallback =
+    unsafe extern "C" fn(text: *const c_char, buf: *mut u8, buf_cap: c_int) -> c_int;
+
+static TEXT_INJECT_CB: Mutex<Option<TextInjectCallback>> = Mutex::new(None);
+
+/// 替换文本的最大字节数。单段剧本文本远小于此值。
+const TEXT_INJECT_CAP: usize = 8192;
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_register_text_inject_callback(cb: TextInjectCallback) {
+    *TEXT_INJECT_CB.lock().unwrap() = Some(cb);
+}
+
+/// 把一段文本交给宿主注入回调。未注册回调或宿主不替换时返回 `None`。
+pub fn inject_text(text: &str) -> Option<String> {
+    let cb = (*TEXT_INJECT_CB.lock().unwrap())?;
+    let c_text = CString::new(text).ok()?;
+    let mut buf = vec![0u8; TEXT_INJECT_CAP];
+    let n = unsafe { cb(c_text.as_ptr(), buf.as_mut_ptr(), buf.len() as c_int) };
+    if n < 0 || n as usize > buf.len() {
+        return None;
+    }
+    buf.truncate(n as usize);
+    match String::from_utf8(buf) {
+        Ok(s) => Some(s),
+        Err(_) => {
+            core_warn!("text inject 回调返回了非 UTF-8 内容，忽略替换");
+            None
+        }
+    }
 }
 
 // ── ANGLE library search path ──────────────────────────────────
@@ -197,6 +230,8 @@ pub unsafe extern "C" fn art3m1s_register_file_delete(cb: FileDeleteCallback) {
 }
 
 /// 通过宿主回调写入文件。`path` 为相对路径。
+///
+/// 回调没有 offset 参数、无法续写，所以部分写入视为失败。
 pub fn request_write(path: &str, data: &[u8]) -> Result<(), String> {
     let cb = FILE_WRITER
         .lock()
@@ -206,6 +241,12 @@ pub fn request_write(path: &str, data: &[u8]) -> Result<(), String> {
     let n = unsafe { cb(c_path.as_ptr(), data.as_ptr(), data.len() as c_int) };
     if n < 0 {
         return Err(format!("write failed: {path}"));
+    }
+    if n as usize != data.len() {
+        return Err(format!(
+            "partial write: {path} ({n} of {} bytes)",
+            data.len()
+        ));
     }
     Ok(())
 }
@@ -273,7 +314,9 @@ pub fn request_file(path: &str) -> Result<Vec<u8>, String> {
     if total <= MAX_SINGLE {
         let mut buf = vec![0u8; total as usize];
         let n = read_chunk(path, 0, &mut buf).unwrap_or(0);
-        buf.truncate(n);
+        if n as u64 != total {
+            return Err(format!("short read: {path} ({n} of {total} bytes)"));
+        }
         return Ok(buf);
     }
     let mut buf = Vec::with_capacity(total as usize);
@@ -287,6 +330,9 @@ pub fn request_file(path: &str) -> Result<Vec<u8>, String> {
         }
         buf.extend_from_slice(&chunk[..n]);
         off += n as u64;
+    }
+    if off != total {
+        return Err(format!("short read: {path} ({off} of {total} bytes)"));
     }
     Ok(buf)
 }
@@ -329,14 +375,23 @@ pub unsafe extern "C" fn art3m1s_copy_file(src: *const c_char, dst: *const c_cha
     let Ok(s) = (unsafe { std::ffi::CStr::from_ptr(src).to_str() }) else {
         return -1;
     };
-    let Ok(_d) = (unsafe { std::ffi::CStr::from_ptr(dst).to_str() }) else {
+    let Ok(d) = (unsafe { std::ffi::CStr::from_ptr(dst).to_str() }) else {
         return -1;
     };
-    let _data = match request_file(s) {
+    let data = match request_file(s) {
         Ok(v) => v,
-        Err(_) => return -1,
+        Err(e) => {
+            core_warn!("art3m1s_copy_file: read {s}: {e}");
+            return -1;
+        }
     };
-    0
+    match request_write(d, &data) {
+        Ok(()) => 0,
+        Err(e) => {
+            core_warn!("art3m1s_copy_file: write {d}: {e}");
+            -1
+        }
+    }
 }
 
 #[unsafe(no_mangle)]

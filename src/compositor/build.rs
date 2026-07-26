@@ -8,8 +8,8 @@
 use crate::compositor::props::LayerProps;
 use crate::compositor::scene::Scene;
 use crate::render_pipeline::draw::{
-    BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, ShaderEffect, ShaderGroup,
-    TextureProvider,
+    BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, LayerDrawSource, ShaderEffect,
+    ShaderGroup, TextureProvider,
 };
 use glam::{Affine2, Vec2};
 use std::collections::BTreeMap;
@@ -26,7 +26,19 @@ pub fn build_frame(
     scene: &Scene,
     now_ms: u64,
     provider: &mut dyn TextureProvider,
-    text_for: Option<&dyn Fn(&str) -> Vec<DrawCommand>>,
+    text_for: Option<&LayerDrawSource<'_>>,
+) -> DrawList {
+    build_frame_with_content(scene, now_ms, provider, None, text_for)
+}
+
+/// Builds a frame with optional host-owned visual content injected before a
+/// layer's children, plus text injected after its children.
+pub fn build_frame_with_content(
+    scene: &Scene,
+    now_ms: u64,
+    provider: &mut dyn TextureProvider,
+    content_for: Option<&LayerDrawSource<'_>>,
+    text_for: Option<&LayerDrawSource<'_>>,
 ) -> DrawList {
     let mut frame = DrawList::new();
     for root in scene.roots() {
@@ -40,6 +52,7 @@ pub fn build_frame(
             None,
             provider,
             &mut frame,
+            content_for,
             text_for,
         );
     }
@@ -57,7 +70,8 @@ fn visit(
     inherited_shader: Option<ShaderEffect>,
     provider: &mut dyn TextureProvider,
     frame: &mut DrawList,
-    text_for: Option<&dyn Fn(&str) -> Vec<DrawCommand>>,
+    content_for: Option<&LayerDrawSource<'_>>,
+    text_for: Option<&LayerDrawSource<'_>>,
 ) {
     let Some(layer) = scene.get(id) else {
         return;
@@ -120,7 +134,24 @@ fn visit(
             clip,
             clip_bounds,
             shader: command_shader.clone(),
+            mesh: None,
+            stencil: None,
         });
+    }
+
+    // Host-owned layer content is local to this scene node and therefore
+    // belongs before its child layers.
+    if let Some(content) = content_for {
+        for mut cmd in content(id) {
+            cmd.transform = world * cmd.transform;
+            cmd.opacity *= opacity;
+            let content_clip = cmd.clip_bounds.map(|bounds| transform_rect(world, bounds));
+            cmd.clip_bounds = intersect_clip_bounds(content_clip, clip_bounds);
+            if cmd.shader.is_none() {
+                cmd.shader = command_shader.clone();
+            }
+            frame.push(cmd);
+        }
     }
 
     // 按 Artemis 图层顺序遍历子图层（数字优先，数字按值，字符串按字典序）。
@@ -135,6 +166,7 @@ fn visit(
             command_shader.clone(),
             provider,
             frame,
+            content_for,
             text_for,
         );
     }
@@ -157,6 +189,7 @@ fn visit(
                 end,
                 effect,
                 clip_bounds,
+                mask_range: None,
             });
         }
     }
@@ -245,40 +278,13 @@ fn resolved_props(layer: &crate::compositor::scene::Layer, now_ms: u64) -> Layer
     let mut props = layer.props.clone();
     for tween in &layer.tweens {
         let value = tween.value_at(now_ms);
-        props.set_raw(&tween.param, &format_value(&tween.param, value));
+        props.set_raw(&tween.param, &LayerProps::format_value(&tween.param, value));
     }
     props
 }
 
-/// 把缓动求得的数值格式化回属性字符串，交给 `set_raw` 解析。
-/// alpha/visible 等整数属性按整数格式化，避免 "128.0" 落入浮点回退路径。
-fn format_value(param: &str, value: f32) -> String {
-    match param {
-        "alpha" | "visible" | "reversex" | "reversey" | "grayscale" | "negative" | "delete"
-        | "stack" | "vertical" | "hung" | "anchorcenter" | "overflow" => {
-            (value.round() as i64).to_string()
-        }
-        _ => value.to_string(),
-    }
-}
-
-/// 计算单个图层相对其父的本地仿射变换。
-///
-/// 按 Artemis 语义，缩放与旋转都绕锚点进行，最终再平移到 (left, top)：
-/// `T(left,top) · T(anchor) · R(rotate) · S(scale) · T(-anchor)`
 fn local_transform(props: &LayerProps) -> Affine2 {
-    let (left, top) = props.offset();
-    let (sx, sy) = props.scale();
-    let (ax, ay) = props.anchor();
-    let rot = props.rotation_radians();
-
-    let translate = Affine2::from_translation(Vec2::new(left, top));
-    let to_anchor = Affine2::from_translation(Vec2::new(ax, ay));
-    let rotate = Affine2::from_angle(rot);
-    let scale = Affine2::from_scale(Vec2::new(sx, sy));
-    let from_anchor = Affine2::from_translation(Vec2::new(-ax, -ay));
-
-    translate * to_anchor * rotate * scale * from_anchor
+    props.local_transform()
 }
 
 fn subtree_clip_bounds(
@@ -355,6 +361,7 @@ mod tests {
     use super::*;
     use crate::compositor::anim::{Easing, Tween};
     use crate::compositor::mock::{MockProvider, TEXTURE_SIZE};
+    use crate::render_pipeline::draw::{TextureId, TextureInfo};
     use std::collections::HashMap;
 
     fn raw(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -391,6 +398,52 @@ mod tests {
         let cmd = &frame.commands[0];
         let origin = cmd.transform.transform_point2(Vec2::ZERO);
         assert_eq!(origin.x, 100.0);
+    }
+
+    #[test]
+    fn host_content_inherits_parent_transform_and_precedes_children() {
+        let mut scene = Scene::new();
+        scene.set_props("1", &raw(&[("left", "100"), ("top", "50")]));
+        scene.create("1.0", Some("child".into()));
+
+        let info = TextureInfo {
+            width: 16,
+            height: 16,
+        };
+        let injected = DrawCommand {
+            texture: TextureId(999),
+            size: info,
+            transform: Affine2::IDENTITY,
+            opacity: 1.0,
+            blend: BlendMode::Alpha,
+            color: ColorFilter::default(),
+            clip: ClipRect::full(info),
+            clip_bounds: Some([0.0, 0.0, 16.0, 16.0]),
+            shader: None,
+            mesh: None,
+            stencil: None,
+        };
+        let content_for = |id: &str| {
+            if id == "1" {
+                vec![injected.clone()]
+            } else {
+                Vec::new()
+            }
+        };
+
+        let mut provider = MockProvider::new();
+        let frame = build_frame_with_content(&scene, 0, &mut provider, Some(&content_for), None);
+        assert_eq!(frame.commands.len(), 2);
+        assert_eq!(frame.commands[0].texture, TextureId(999));
+        assert_eq!(provider.name_of(frame.commands[1].texture), "child");
+        assert_eq!(
+            frame.commands[0].transform.transform_point2(Vec2::ZERO),
+            Vec2::new(100.0, 50.0)
+        );
+        assert_eq!(
+            frame.commands[0].clip_bounds,
+            Some([100.0, 50.0, 16.0, 16.0])
+        );
     }
 
     #[test]

@@ -50,7 +50,13 @@ impl HostMediaCommandKind {
 }
 
 pub fn emit<T: Serialize>(kind: HostMediaCommandKind, payload: T) {
-    let payload = serde_json::to_value(payload).unwrap_or_else(|_| json!({}));
+    let payload = serde_json::to_value(payload).unwrap_or_else(|e| {
+        crate::core_warn!(
+            "[host-media] {} payload 序列化失败，降级为空对象: {e}",
+            kind.as_str()
+        );
+        json!({})
+    });
     crate::ffi::emit_media_command(kind.as_str(), payload);
 }
 

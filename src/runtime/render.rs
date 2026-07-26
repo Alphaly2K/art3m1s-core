@@ -8,17 +8,16 @@ impl CoreRuntime {
     /// 重新创建 FBO 并更新渲染器的 viewport/projection。
     /// 当舞台尺寸改变时调用（例如加载不同分辨率的项目）。
     pub(super) fn resize_stage(&mut self, new_width: u32, new_height: u32) -> Result<(), String> {
-        // 删除旧的 FBO 和纹理
-        unsafe {
-            self.gl.delete_framebuffer(self.fbo);
-            self.gl.delete_texture(self.fbo_tex);
-        }
-
-        // 创建新的 FBO
+        // 先建新 FBO 再删旧的：创建失败时保留可用的旧目标，不留悬空句柄。
         let (new_fbo, new_fbo_tex) = unsafe {
             platform::create_fbo_target(&self.gl, new_width as i32, new_height as i32)
                 .map_err(|e| format!("重新创建 FBO 失败: {e}"))?
         };
+
+        unsafe {
+            self.gl.delete_framebuffer(self.fbo);
+            self.gl.delete_texture(self.fbo_tex);
+        }
 
         self.fbo = new_fbo;
         self.fbo_tex = new_fbo_tex;
@@ -53,18 +52,31 @@ impl CoreRuntime {
         }
 
         let text_map = self.build_text_commands();
-        let text_for: Option<&dyn Fn(&str) -> Vec<crate::render_pipeline::draw::DrawCommand>> =
-            if text_map.is_empty() {
+        let (emote_map, emote_files) = self.build_emote_commands();
+        let content_for: Option<&crate::render_pipeline::LayerDrawSource<'_>> =
+            if emote_map.is_empty() {
                 None
             } else {
-                Some(&|layer_id: &str| text_map.get(layer_id).cloned().unwrap_or_default())
+                Some(&|layer_id: &str| emote_map.get(layer_id).cloned().unwrap_or_default())
             };
-        let frame = RenderPipeline::new(&self.compositor)
-            .build_composited_with_text(&mut self.texture_provider, text_for);
+        let text_for: Option<&crate::render_pipeline::LayerDrawSource<'_>> = if text_map.is_empty()
+        {
+            None
+        } else {
+            Some(&|layer_id: &str| text_map.get(layer_id).cloned().unwrap_or_default())
+        };
+        let mut frame = RenderPipeline::new(&self.compositor).build_composited_with_content(
+            &mut self.texture_provider,
+            content_for,
+            text_for,
+        );
+        frame.materialize_stencil_groups(crate::render_pipeline::shader::ALPHA_MASK_SHADER);
         self.renderer.render(&frame);
         let mut used_files = self.compositor.scene().collect_files();
-        used_files.insert(":text/atlas".to_string());
-        used_files.insert("__video_fullscreen__".to_string());
+        // 文本 atlas 不在场景树里，显式保活防止被 retain 驱逐。
+        // 视频图层纹理无需保活：播放期间 set_layer_file 把它挂在场景树上。
+        used_files.insert(crate::text::glyph::ATLAS_NAME.to_string());
+        used_files.extend(emote_files);
         for f in RenderPipeline::new(&self.compositor).retained_files() {
             used_files.insert(f);
         }

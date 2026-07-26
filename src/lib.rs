@@ -22,6 +22,7 @@ pub mod save;
 pub mod text;
 pub mod video;
 
+pub use art3m1s_emote as emote;
 pub use asb_interpreter as script;
 pub use pfs_upk as archive;
 

@@ -96,6 +96,28 @@ impl std::fmt::Debug for InjectionChain {
 }
 
 // ---------------------------------------------------------------------------
+// FFI 注入器
+// ---------------------------------------------------------------------------
+
+/// 经 FFI 回调实现的注入器。
+///
+/// 宿主（Flutter 或汉化补丁动态库）通过
+/// `art3m1s_register_text_inject_callback` 注册回调后即生效；
+/// 未注册时 [`TextInject::inject`] 恒返回 `None`（保持原文）。
+/// runtime 默认把它挂在注入链首位。
+pub struct FfiTextInject;
+
+impl TextInject for FfiTextInject {
+    fn inject(&self, text: &str) -> Option<String> {
+        crate::ffi::inject_text(text)
+    }
+
+    fn name(&self) -> &str {
+        "ffi"
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 内置注入器示例
 // ---------------------------------------------------------------------------
 

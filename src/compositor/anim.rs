@@ -733,12 +733,9 @@ fn default_param_value(param: &str) -> f32 {
 }
 
 /// 把缓动终值格式化回属性字符串（整数属性按整数）。
+/// 白名单唯一副本在 [`LayerProps::format_value`]，与 build 侧保持一致。
 fn format_param(param: &str, value: f32) -> String {
-    match param {
-        "alpha" | "visible" | "reversex" | "reversey" | "grayscale" | "negative" | "delete"
-        | "vertical" | "hung" | "anchorcenter" | "overflow" => (value.round() as i64).to_string(),
-        _ => value.to_string(),
-    }
+    crate::compositor::props::LayerProps::format_value(param, value)
 }
 
 #[cfg(test)]

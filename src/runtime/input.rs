@@ -1,4 +1,4 @@
-use super::CoreRuntime;
+use super::{CoreRuntime, InlineEventFrame};
 use crate::compositor::Compositor;
 use asb_interpreter::event::WaitReason;
 use std::collections::{HashMap, HashSet};
@@ -50,6 +50,7 @@ impl CoreRuntime {
     }
 
     pub(super) fn process_pointer_handlers(&mut self) -> bool {
+        self.refresh_inline_event_frame();
         let (
             legacy_clicked,
             mouse_x,
@@ -76,12 +77,14 @@ impl CoreRuntime {
         let left_down_edge = legacy_clicked || mouse_down_edges.contains(&1);
         let left_up_edge = mouse_up_edges.contains(&1);
         let left_down = mouse_buttons.contains(&1);
+        let mut needs_inline_event_frame = false;
 
         let hit_layers = self
             .compositor
             .hit_test_all(mouse_x, mouse_y, &mut self.texture_provider);
         let top_hover = hit_layers.first().cloned();
-        let new_hovered: HashSet<String> = hit_layers.into_iter().collect();
+        let hover_dispatch = event_dispatch_layers(&self.compositor, &hit_layers, "rollover");
+        let new_hovered: HashSet<String> = hover_dispatch.iter().cloned().collect();
         if new_hovered != self.hovered_layers {
             let mut old_only: Vec<String> = self
                 .hovered_layers
@@ -90,16 +93,27 @@ impl CoreRuntime {
                 .collect();
             old_only.sort();
             for old in old_only {
-                enqueue_layer_handler(&self.interpreter, &self.compositor, &old, "rollout", &[]);
+                let dispatch = enqueue_layer_handler(
+                    &self.interpreter,
+                    &self.compositor,
+                    &old,
+                    "rollout",
+                    &[],
+                );
+                needs_inline_event_frame |= dispatch.needs_return_frame;
             }
 
-            let mut new_only: Vec<String> = new_hovered
-                .difference(&self.hovered_layers)
-                .cloned()
-                .collect();
-            new_only.sort();
-            for new in new_only {
-                enqueue_layer_handler(&self.interpreter, &self.compositor, &new, "rollover", &[]);
+            for new in hover_dispatch {
+                if !self.hovered_layers.contains(&new) {
+                    let dispatch = enqueue_layer_handler(
+                        &self.interpreter,
+                        &self.compositor,
+                        &new,
+                        "rollover",
+                        &[],
+                    );
+                    needs_inline_event_frame |= dispatch.needs_return_frame;
+                }
             }
             self.hovered_layers = new_hovered;
         }
@@ -107,43 +121,61 @@ impl CoreRuntime {
         let mut handled_by_layer = false;
         let mut handled_by_left_push = false;
         let mut handled_by_drag = false;
+        let click_dispatch = if left_down_edge {
+            event_dispatch_layers(&self.compositor, &hit_layers, "click")
+        } else {
+            Vec::new()
+        };
         if left_down_edge {
             if let Some(ref id) = top_hover {
-                handled_by_drag = self.start_pointer_drag(id, mouse_x, mouse_y);
+                let dispatch = self.start_pointer_drag(id, mouse_x, mouse_y);
+                handled_by_drag = dispatch.handled;
+                needs_inline_event_frame |= dispatch.needs_return_frame;
             }
-            if let Some(ref id) = top_hover {
-                if !handled_by_drag {
-                    handled_by_layer = enqueue_layer_handler(
+            if !handled_by_drag {
+                for id in &click_dispatch {
+                    let dispatch = enqueue_layer_handler(
                         &self.interpreter,
                         &self.compositor,
                         id,
                         "click",
                         &[("click", "1")],
                     );
+                    handled_by_layer |= dispatch.handled;
+                    needs_inline_event_frame |= dispatch.needs_return_frame;
                 }
             }
         }
 
         if left_down {
-            handled_by_drag |= self.continue_pointer_drag(mouse_x, mouse_y);
+            let dispatch = self.continue_pointer_drag(mouse_x, mouse_y);
+            handled_by_drag |= dispatch.handled;
+            needs_inline_event_frame |= dispatch.needs_return_frame;
         }
         if left_up_edge {
-            handled_by_drag |= self.finish_pointer_drag();
+            let dispatch = self.finish_pointer_drag();
+            handled_by_drag |= dispatch.handled;
+            needs_inline_event_frame |= dispatch.needs_return_frame;
         }
 
         for key in key_down_edges {
             let key_string = key.to_string();
             let event_type = if is_mouse_button(key) { "click" } else { "key" };
-            let handled = enqueue_input_handler(
+            let dispatch = enqueue_input_handler(
                 &self.interpreter,
                 &self.compositor,
                 "push",
                 &key_string,
                 &[("key", &key_string), ("type", event_type)],
             );
-            if key == 1 && handled {
+            needs_inline_event_frame |= dispatch.needs_return_frame;
+            if key == 1 && dispatch.handled {
                 handled_by_left_push = true;
             }
+        }
+
+        if needs_inline_event_frame {
+            self.begin_inline_event_frame();
         }
 
         let push_absorbs_default_click =
@@ -152,8 +184,10 @@ impl CoreRuntime {
             left_down_edge && !handled_by_layer && !push_absorbs_default_click && !handled_by_drag;
         if left_down_edge {
             crate::core_debug!(
-                "[input] left-down wait={:?} layer={} push={} drag={} advance={}",
+                "[input] left-down wait={:?} top={:?} click_layers={:?} layer={} push={} drag={} advance={}",
                 self.wait_reason,
+                top_hover,
+                click_dispatch,
                 handled_by_layer,
                 handled_by_left_push,
                 handled_by_drag,
@@ -168,36 +202,83 @@ impl CoreRuntime {
     }
 
     pub(super) fn script_decide_edge(&self) -> bool {
-        self.input.lock().unwrap().keys_down_edge.contains(&124)
+        self.input.lock().unwrap().scripted_down_edge()
     }
 
-    fn start_pointer_drag(&mut self, layer_id: &str, mouse_x: f32, mouse_y: f32) -> bool {
+    fn begin_inline_event_frame(&mut self) {
+        self.refresh_inline_event_frame();
+        if self.active_inline_event_frame.is_some() {
+            return;
+        }
+        let Some(script) = self.interpreter.current_script().map(str::to_string) else {
+            return;
+        };
+        let line = self.interpreter.current_line();
+        let stack = self.interpreter.call_stack();
+        let mut event_stack = stack.clone();
+        event_stack.push(asb_interpreter::CallFrame {
+            script: script.clone(),
+            return_line: line,
+        });
+        if let Err(error) = self
+            .interpreter
+            .restore_position(&script, line, event_stack)
+        {
+            crate::core_error!("建立事件返回帧失败: {error:?}");
+            return;
+        }
+        self.active_inline_event_frame = Some(InlineEventFrame {
+            script,
+            line,
+            stack,
+        });
+    }
+
+    pub(super) fn refresh_inline_event_frame(&mut self) {
+        let Some(frame) = &self.active_inline_event_frame else {
+            return;
+        };
+        let stack = self.interpreter.call_stack();
+        if !inline_event_marker_is_active(frame, &stack) {
+            self.active_inline_event_frame = None;
+        }
+    }
+
+    fn start_pointer_drag(
+        &mut self,
+        layer_id: &str,
+        mouse_x: f32,
+        mouse_y: f32,
+    ) -> HandlerDispatch {
         if !self.compositor.is_layer_draggable(layer_id)
             || !has_drag_handler(&self.compositor, layer_id)
         {
-            return false;
+            return HandlerDispatch::default();
         }
         let Some((left, top)) = self.compositor.layer_offset(layer_id) else {
-            return false;
+            return HandlerDispatch::default();
         };
         self.pointer_drag.layer_id = Some(layer_id.to_string());
         self.pointer_drag.start_mouse_x = mouse_x;
         self.pointer_drag.start_mouse_y = mouse_y;
         self.pointer_drag.start_left = left;
         self.pointer_drag.start_top = top;
-        let _ = enqueue_layer_handler(
+        let dispatch = enqueue_layer_handler(
             &self.interpreter,
             &self.compositor,
             layer_id,
             "dragin",
             &[("drag", "1"), ("id", layer_id)],
         );
-        true
+        HandlerDispatch {
+            handled: true,
+            needs_return_frame: dispatch.needs_return_frame,
+        }
     }
 
-    fn continue_pointer_drag(&mut self, mouse_x: f32, mouse_y: f32) -> bool {
+    fn continue_pointer_drag(&mut self, mouse_x: f32, mouse_y: f32) -> HandlerDispatch {
         let Some(layer_id) = self.pointer_drag.layer_id.clone() else {
-            return false;
+            return HandlerDispatch::default();
         };
         let dx = mouse_x - self.pointer_drag.start_mouse_x;
         let dy = mouse_y - self.pointer_drag.start_mouse_y;
@@ -209,29 +290,50 @@ impl CoreRuntime {
             dy,
         );
         self.sync_layer_info(&layer_id);
-        let _ = enqueue_layer_handler(
+        let dispatch = enqueue_layer_handler(
             &self.interpreter,
             &self.compositor,
             &layer_id,
             "drag",
             &[("drag", "1"), ("id", &layer_id)],
         );
-        true
+        HandlerDispatch {
+            handled: true,
+            needs_return_frame: dispatch.needs_return_frame,
+        }
     }
 
-    fn finish_pointer_drag(&mut self) -> bool {
+    fn finish_pointer_drag(&mut self) -> HandlerDispatch {
         let Some(layer_id) = self.pointer_drag.layer_id.take() else {
-            return false;
+            return HandlerDispatch::default();
         };
-        let _ = enqueue_layer_handler(
+        let dispatch = enqueue_layer_handler(
             &self.interpreter,
             &self.compositor,
             &layer_id,
             "dragout",
             &[("drag", "0"), ("id", &layer_id)],
         );
-        true
+        HandlerDispatch {
+            handled: true,
+            needs_return_frame: dispatch.needs_return_frame,
+        }
     }
+}
+
+fn inline_event_marker_is_active(
+    frame: &InlineEventFrame,
+    stack: &[asb_interpreter::CallFrame],
+) -> bool {
+    stack
+        .get(frame.stack.len())
+        .is_some_and(|marker| marker.script == frame.script && marker.return_line == frame.line)
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct HandlerDispatch {
+    handled: bool,
+    needs_return_frame: bool,
 }
 
 fn is_mouse_button(key: u32) -> bool {
@@ -250,17 +352,46 @@ fn has_drag_handler(compositor: &Compositor, layer_id: &str) -> bool {
         .scene()
         .get(layer_id)
         .map(|layer| {
-            layer.event_handlers.contains_key("drag")
-                || layer.event_handlers.contains_key("dragin")
-                || layer.event_handlers.contains_key("dragout")
+            ["drag", "dragin", "dragout"].iter().any(|event_type| {
+                layer
+                    .event_handlers
+                    .get(*event_type)
+                    .is_some_and(|handler| handler.enabled)
+            })
         })
         .unwrap_or(false)
 }
 
+/// Artemis only dispatches an overlapping pointer event to the top hit layer
+/// and lower handlers that explicitly opt into `penetration`. Penetrating
+/// handlers run from bottom to top.
+fn event_dispatch_layers(
+    compositor: &Compositor,
+    hit_layers: &[String],
+    event_type: &str,
+) -> Vec<String> {
+    let mut layers = hit_layers
+        .iter()
+        .enumerate()
+        .filter_map(|(index, id)| {
+            let handler = compositor.scene().get(id)?.event_handlers.get(event_type)?;
+            (handler.enabled && (index == 0 || handler.penetration)).then(|| id.clone())
+        })
+        .collect::<Vec<_>>();
+    layers.reverse();
+    layers
+}
+
 #[cfg(test)]
 mod tests {
-    use super::global_push_absorbs_default_click;
-    use asb_interpreter::event::WaitReason;
+    use super::{
+        InlineEventFrame, event_dispatch_layers, global_push_absorbs_default_click,
+        inline_event_marker_is_active,
+    };
+    use crate::compositor::Compositor;
+    use asb_interpreter::CallFrame;
+    use asb_interpreter::event::{Event, WaitReason};
+    use std::collections::HashMap;
 
     #[test]
     fn input_enabled_timed_wait_keeps_default_click_despite_global_push() {
@@ -280,6 +411,61 @@ mod tests {
         ));
         assert!(global_push_absorbs_default_click(None, true));
         assert!(!global_push_absorbs_default_click(None, false));
+    }
+
+    #[test]
+    fn overlapping_events_only_include_penetrating_lower_layers_bottom_to_top() {
+        let mut compositor = Compositor::new();
+        for (id, penetration) in [("lower", true), ("middle", false), ("top", false)] {
+            compositor.apply_event(&Event::LayerEventHandler {
+                id: id.into(),
+                event_type: "click".into(),
+                mode: "init".into(),
+                file: None,
+                label: None,
+                call: false,
+                handler: Some("calllua".into()),
+                penetration,
+                extra_params: HashMap::new(),
+            });
+        }
+
+        let hits = vec!["top".into(), "middle".into(), "lower".into()];
+        assert_eq!(
+            event_dispatch_layers(&compositor, &hits, "click"),
+            vec!["lower".to_string(), "top".to_string()]
+        );
+    }
+
+    #[test]
+    fn nested_ui_events_reuse_the_existing_inline_return_frame() {
+        let caller = CallFrame {
+            script: "story.asb".into(),
+            return_line: 12,
+        };
+        let frame = InlineEventFrame {
+            script: "system/ui.asb".into(),
+            line: 80,
+            stack: vec![caller.clone()],
+        };
+        let marker = CallFrame {
+            script: frame.script.clone(),
+            return_line: frame.line,
+        };
+        let nested_call = CallFrame {
+            script: "system/script.asb".into(),
+            return_line: 21,
+        };
+
+        assert!(inline_event_marker_is_active(
+            &frame,
+            &[caller.clone(), marker.clone(), nested_call]
+        ));
+        assert!(inline_event_marker_is_active(
+            &frame,
+            &[caller.clone(), marker]
+        ));
+        assert!(!inline_event_marker_is_active(&frame, &[caller]));
     }
 }
 
@@ -315,20 +501,43 @@ pub(super) fn enqueue_handler_tags(
     }
 }
 
+/// 把一个已命中的处理器排队并给出派发结论。
+///
+/// `needs_return_frame`：只有"纯 handler（无 file/label 跳转）"需要伪造
+/// 返回帧——这是层事件与全局输入事件共用的派发策略，改动请保持两侧一致。
+fn dispatch_handler(
+    interpreter: &asb_interpreter::Interpreter,
+    handler: Option<&str>,
+    file: Option<&str>,
+    label: Option<&str>,
+    call: bool,
+    params: &HashMap<String, String>,
+    runtime_params: &[(&str, &str)],
+) -> HandlerDispatch {
+    enqueue_handler_tags(interpreter, handler, file, label, call, params, runtime_params);
+    HandlerDispatch {
+        handled: true,
+        needs_return_frame: handler.is_some() && file.is_none() && label.is_none(),
+    }
+}
+
 fn enqueue_layer_handler(
     interpreter: &asb_interpreter::Interpreter,
     compositor: &Compositor,
     layer_id: &str,
     event_type: &str,
     runtime_params: &[(&str, &str)],
-) -> bool {
+) -> HandlerDispatch {
     let Some(layer) = compositor.scene().get(layer_id) else {
-        return false;
+        return HandlerDispatch::default();
     };
     let Some(h) = layer.event_handlers.get(event_type) else {
-        return false;
+        return HandlerDispatch::default();
     };
-    enqueue_handler_tags(
+    if !h.enabled {
+        return HandlerDispatch::default();
+    }
+    dispatch_handler(
         interpreter,
         h.handler.as_deref(),
         h.file.as_deref(),
@@ -336,8 +545,7 @@ fn enqueue_layer_handler(
         h.call,
         &h.params,
         runtime_params,
-    );
-    true
+    )
 }
 
 fn enqueue_input_handler(
@@ -346,11 +554,11 @@ fn enqueue_input_handler(
     event_name: &str,
     key: &str,
     runtime_params: &[(&str, &str)],
-) -> bool {
+) -> HandlerDispatch {
     let Some(h) = compositor.get_input_handler(event_name, key) else {
-        return false;
+        return HandlerDispatch::default();
     };
-    enqueue_handler_tags(
+    dispatch_handler(
         interpreter,
         h.handler.as_deref(),
         h.file.as_deref(),
@@ -358,6 +566,5 @@ fn enqueue_input_handler(
         h.call,
         &h.params,
         runtime_params,
-    );
-    true
+    )
 }

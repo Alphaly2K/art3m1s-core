@@ -68,16 +68,6 @@ impl std::fmt::Debug for Compositor {
 
 impl Default for Compositor {
     fn default() -> Self {
-        Self::new_with_stage_size(1280, 720)
-    }
-}
-
-impl Compositor {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn new_with_stage_size(_stage_width: u32, _stage_height: u32) -> Self {
         Self {
             scene: Scene::new(),
             clock_ms: 0,
@@ -87,6 +77,12 @@ impl Compositor {
             trans_state: RefCell::new(None),
             anime_states: HashMap::new(),
         }
+    }
+}
+
+impl Compositor {
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
@@ -268,22 +264,43 @@ impl Compositor {
                 penetration,
                 extra_params,
             } => {
-                // mode 语义见 lyevent spec：
-                //   init    -> 注册/覆盖该事件类型的处理器
-                //   reset   -> 移除该事件类型的处理器
-                //   disable -> 保留信息但暂停执行（这里以移除近似；脚本随后会 enable 重设）
-                //   enable  -> 重新启用（脚本通常配合 init 重新注册，无需特殊处理）
+                // disable/enable 只切换已有处理器，不能丢掉 init 时注册的
+                // key/function 等参数。HENPRI 会在 enable 时省略 key，依赖引擎
+                // 恢复原处理器。
                 self.scene.ensure(id);
                 if let Some(layer) = self.scene.get_mut(id) {
                     match mode {
-                        "reset" | "disable" => {
+                        "reset" => {
                             layer.event_handlers.remove(event_type);
                         }
-                        // "init"、"enable" 以及未指定都视为注册。
+                        "disable" => {
+                            if let Some(existing) = layer.event_handlers.get_mut(event_type) {
+                                existing.enabled = false;
+                            }
+                        }
+                        "enable" => {
+                            if let Some(existing) = layer.event_handlers.get_mut(event_type) {
+                                existing.enabled = true;
+                            } else {
+                                layer.event_handlers.insert(
+                                    event_type.to_string(),
+                                    LayerEventHandler {
+                                        enabled: true,
+                                        handler: handler.map(str::to_string),
+                                        file: file.map(str::to_string),
+                                        label: label.map(str::to_string),
+                                        call,
+                                        penetration,
+                                        params: extra_params.clone(),
+                                    },
+                                );
+                            }
+                        }
                         _ => {
                             layer.event_handlers.insert(
                                 event_type.to_string(),
                                 LayerEventHandler {
+                                    enabled: true,
                                     handler: handler.map(str::to_string),
                                     file: file.map(str::to_string),
                                     label: label.map(str::to_string),
@@ -586,6 +603,72 @@ mod tests {
 
         assert!(c.scene().is_empty());
         assert!(c.get_input_handler("push", "1").is_none());
+    }
+
+    #[test]
+    fn lyevent_disable_enable_preserves_registered_handler_params() {
+        let mut c = Compositor::new();
+        c.apply_event(&create("slot", "slot_button"));
+        c.apply_event(&Event::Layer(LayerEvent::SetProperties {
+            id: "slot".into(),
+            properties: HashMap::from([
+                ("width".into(), "100".into()),
+                ("height".into(), "100".into()),
+            ]),
+        }));
+        c.apply_event(&Event::LayerEventHandler {
+            id: "slot".into(),
+            event_type: "rollover".into(),
+            mode: "init".into(),
+            file: None,
+            label: None,
+            call: false,
+            handler: Some("calllua".into()),
+            penetration: false,
+            extra_params: HashMap::from([
+                ("function".into(), "btn_over".into()),
+                ("key".into(), "bt_save10".into()),
+            ]),
+        });
+
+        c.apply_event(&Event::LayerEventHandler {
+            id: "slot".into(),
+            event_type: "rollover".into(),
+            mode: "disable".into(),
+            file: None,
+            label: None,
+            call: false,
+            handler: Some("calllua".into()),
+            penetration: false,
+            extra_params: HashMap::new(),
+        });
+        let mut provider = MockProvider::new();
+        assert_eq!(c.hit_test(10.0, 10.0, &mut provider), None);
+
+        c.apply_event(&Event::LayerEventHandler {
+            id: "slot".into(),
+            event_type: "rollover".into(),
+            mode: "enable".into(),
+            file: None,
+            label: None,
+            call: false,
+            handler: Some("calllua".into()),
+            penetration: false,
+            extra_params: HashMap::new(),
+        });
+
+        let handler = &c.scene().get("slot").unwrap().event_handlers["rollover"];
+        assert!(handler.enabled);
+        assert_eq!(
+            handler.params.get("key").map(String::as_str),
+            Some("bt_save10")
+        );
+        assert_eq!(
+            handler.params.get("function").map(String::as_str),
+            Some("btn_over")
+        );
+        let mut provider = MockProvider::new();
+        assert_eq!(c.hit_test(10.0, 10.0, &mut provider), Some("slot".into()));
     }
 
     #[test]

@@ -17,14 +17,16 @@
 pub mod anim;
 pub mod build;
 pub mod events;
+/// 测试用假后端；不参与生产 cdylib 编译。
+#[cfg(test)]
 pub mod mock;
 pub mod props;
 pub mod reduce;
 pub mod scene;
 
 pub use crate::render_pipeline::draw::{
-    BlendMode, ColorFilter, DrawCommand, DrawList, Renderer, ShaderEffect, ShaderGroup, TextureId,
-    TextureInfo, TextureProvider,
+    BlendMode, ColorFilter, DrawCommand, DrawList, DrawMesh, Renderer, ShaderEffect, ShaderGroup,
+    TextureId, TextureInfo, TextureProvider,
 };
 pub use anim::{Easing, Tween, TweenHandler};
 pub use events::{CompositorEvent, IntoCompositorEvent};

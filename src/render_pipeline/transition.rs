@@ -150,6 +150,8 @@ pub(crate) fn overlay_old_frame(
                 clip: ClipRect::full(info),
                 clip_bounds: None,
                 shader: None,
+                mesh: None,
+                stencil: None,
             });
         }
         2 => {

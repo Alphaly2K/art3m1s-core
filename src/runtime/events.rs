@@ -12,33 +12,6 @@ impl CoreRuntime {
     }
 
     pub(super) fn dispatch_events(&mut self, events: &[Event]) {
-        // 输出视频相关事件日志（始终输出）
-        for event in events {
-            match event {
-                Event::VideoPlay { id, file, .. } => {
-                    crate::core_debug!("[runtime] VideoPlay: file={}, id={:?}", file, id);
-                }
-                Event::VideoFinishHandler {
-                    file,
-                    label,
-                    call,
-                    handler,
-                } => {
-                    crate::core_info!(
-                        "[runtime] VideoFinishHandler: file={:?}, label={:?}, call={}, handler={:?}",
-                        file,
-                        label,
-                        call,
-                        handler
-                    );
-                }
-                Event::VideoFinishHandlerDel => {
-                    crate::core_info!("[runtime] VideoFinishHandlerDel");
-                }
-                _ => {}
-            }
-        }
-
         for event in events {
             if matches!(event, Event::Exit) {
                 crate::core_info!("[runtime] Event::Exit received");
@@ -93,6 +66,30 @@ impl CoreRuntime {
                         }
                     }
                 }
+                Event::FileOperation {
+                    command, src, dst, ..
+                } if command == "copy" || command == "move" => {
+                    crate::core_info!(
+                        "[runtime] Event::FileOperation {} src={:?} dst={:?}",
+                        command,
+                        src,
+                        dst
+                    );
+                    if let (Some(src), Some(dst)) = (src, dst) {
+                        if let Err(e) = self.copy_save_file(src, dst, command == "move") {
+                            crate::core_warn!(
+                                "[runtime] 文件{}失败 {} -> {}: {}",
+                                if command == "move" { "移动" } else { "复制" },
+                                src,
+                                dst,
+                                e
+                            );
+                        }
+                    }
+                }
+                Event::FileOperation { command, .. } => {
+                    crate::core_warn!("[runtime] 未实现的 FileOperation 命令被忽略: {}", command);
+                }
                 Event::TakeScreenshot => {
                     self.capture_save_screenshot();
                 }
@@ -141,8 +138,15 @@ impl CoreRuntime {
                 Event::Custom { tag, params } if tag == "lyshader" => {
                     self.handle_shader_load(params);
                 }
+                Event::Custom { tag, .. } => {
+                    crate::core_debug!("[runtime] 未处理的自定义标签: {tag}");
+                }
                 Event::ShaderLoad { id, file } => {
                     self.load_shader(id, file);
+                }
+                // 视频完成处理器登记很少发生且直接影响脚本能否继续，保持 info 级。
+                Event::VideoFinishHandler { .. } | Event::VideoFinishHandlerDel => {
+                    crate::core_info!("[runtime] {}", event_summary(event));
                 }
                 _ => {}
             }
@@ -153,7 +157,7 @@ impl CoreRuntime {
                 self.compositor.apply_event(event);
                 self.sync_layer_info_all();
             }
-            crate::core_debug!("[event] {}", event_name(event));
+            crate::core_debug!("[event] {}", event_summary(event));
         }
     }
 
@@ -188,27 +192,30 @@ impl CoreRuntime {
         }
     }
 
+    /// 缓动完成回调派发：把合成器攒下的 [`TweenHandler`] 转成排队标签，
+    /// 下一次 `advance_script` 时由解释器执行（enqueue-and-run 模型）。
+    pub(super) fn dispatch_tween_handlers(&mut self) {
+        for h in self.compositor.poll_tween_events() {
+            if h.handler.is_none() && h.file.is_none() && h.label.is_none() {
+                // 纯 sync/delete 标记，无回调可派发。
+                continue;
+            }
+            super::input::enqueue_handler_tags(
+                &self.interpreter,
+                h.handler.as_deref(),
+                h.file.as_deref(),
+                h.label.as_deref(),
+                h.call,
+                &HashMap::new(),
+                &[],
+            );
+        }
+    }
+
     pub(super) fn sync_layer_info_all(&self) {
         let mut out = HashMap::new();
         for layer in self.compositor.scene().all_layers() {
-            let (left, top) = layer.props.offset();
-            let (width, height) =
-                if let (Some(width), Some(height)) = (layer.props.width, layer.props.height) {
-                    (width, height)
-                } else if let Some([_, _, width, height]) = layer.props.clip_rect() {
-                    (width, height)
-                } else {
-                    (0.0, 0.0)
-                };
-            out.insert(
-                layer.id.clone(),
-                HashMap::from([
-                    ("left".to_string(), trim_layer_float(left)),
-                    ("top".to_string(), trim_layer_float(top)),
-                    ("width".to_string(), trim_layer_float(width)),
-                    ("height".to_string(), trim_layer_float(height)),
-                ]),
-            );
+            out.insert(layer.id.clone(), layer_info_entry(layer));
         }
         *self.layer_info.lock().unwrap() = out;
     }
@@ -219,25 +226,27 @@ impl CoreRuntime {
             table.remove(id);
             return;
         };
-        let (left, top) = layer.props.offset();
-        let (width, height) =
-            if let (Some(width), Some(height)) = (layer.props.width, layer.props.height) {
-                (width, height)
-            } else if let Some([_, _, width, height]) = layer.props.clip_rect() {
-                (width, height)
-            } else {
-                (0.0, 0.0)
-            };
-        table.insert(
-            id.to_string(),
-            HashMap::from([
-                ("left".to_string(), trim_layer_float(left)),
-                ("top".to_string(), trim_layer_float(top)),
-                ("width".to_string(), trim_layer_float(width)),
-                ("height".to_string(), trim_layer_float(height)),
-            ]),
-        );
+        table.insert(id.to_string(), layer_info_entry(layer));
     }
+}
+
+/// 单个图层暴露给脚本层的几何信息（left/top/width/height 字符串表）。
+fn layer_info_entry(layer: &crate::compositor::Layer) -> HashMap<String, String> {
+    let (left, top) = layer.props.offset();
+    let (width, height) =
+        if let (Some(width), Some(height)) = (layer.props.width, layer.props.height) {
+            (width, height)
+        } else if let Some([_, _, width, height]) = layer.props.clip_rect() {
+            (width, height)
+        } else {
+            (0.0, 0.0)
+        };
+    HashMap::from([
+        ("left".to_string(), trim_layer_float(left)),
+        ("top".to_string(), trim_layer_float(top)),
+        ("width".to_string(), trim_layer_float(width)),
+        ("height".to_string(), trim_layer_float(height)),
+    ])
 }
 
 fn trim_layer_float(value: f32) -> String {
@@ -248,12 +257,15 @@ fn trim_layer_float(value: f32) -> String {
     }
 }
 
-/// 事件摘要：名称 + 关键参数，供 `[event]` 调试日志使用。
+/// `[event]` 调试日志的单行摘要：`名称 key=value ...`，长度有上限。
 ///
-/// 返回拥有所有权的 `String`（不再用 `Box::leak`——旧实现对每个 `Wait(Stop)`
-/// 事件泄漏一段堆内存）。仅展开常用事件的关键字段，其余只给变体名。
-fn event_name(e: &Event) -> String {
-    match e {
+/// 高频事件（图层/文本/缓动）用手写的紧凑格式；其余一律回退到截断的
+/// Debug 输出——保证每种事件都能看到字段内容，而不是一个裸变体名。
+fn event_summary(e: &Event) -> String {
+    /// 单行摘要长度上限（字符）。ScenarioText/FontSettings 等可能很长。
+    const MAX_CHARS: usize = 200;
+
+    let s = match e {
         Event::Layer(layer_event) => match layer_event {
             LayerEvent::Create { id, file } => format!("LayerCreate id={id} file={file}"),
             LayerEvent::Create2 { id, file, alpha } => {
@@ -268,17 +280,18 @@ fn event_name(e: &Event) -> String {
                 format!("LayerSetProp id={id} {property}={value}")
             }
             LayerEvent::SetProperties { id, properties } => {
-                format!(
-                    "LayerSetProps id={id} keys={:?}",
-                    properties.keys().collect::<Vec<_>>()
-                )
+                let mut kv: Vec<String> =
+                    properties.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                kv.sort();
+                format!("LayerSetProps id={id} {}", kv.join(" "))
             }
         },
-        Event::LayerTween { id, param, .. } => format!("LayerTween id={id} param={param}"),
-        Event::LayerTweenDelete { .. } => "LayerTweenDel".to_string(),
+        Event::LayerTween {
+            id, param, to, time, ..
+        } => {
+            format!("LayerTween id={id} {param}->{to:?} time={time:?}")
+        }
         Event::LayerRename { id, to } => format!("LayerRename id={id} -> {to}"),
-        Event::LayerEventHandler { .. } => "LayerEvtHandler".to_string(),
-        Event::UiTransition(_) => "UiTrans".to_string(),
         Event::Trans {
             trans_type,
             time,
@@ -287,7 +300,6 @@ fn event_name(e: &Event) -> String {
         } => {
             format!("Trans type={trans_type} time={time:?} rule={rule:?}")
         }
-        Event::Flip => "Flip".to_string(),
         Event::BgmPlay {
             file,
             loop_play,
@@ -296,31 +308,15 @@ fn event_name(e: &Event) -> String {
         } => {
             format!("BgmPlay file={file} loop={loop_play} gain={gain:?}")
         }
-        Event::BgmStop { .. } => "BgmStop".to_string(),
-        Event::BgmFade { .. } => "BgmFade".to_string(),
-        Event::BgmCrossFade { .. } => "BgmCrossFade".to_string(),
         Event::SePlay { id, file, .. } => format!("SePlay id={id} file={file}"),
-        Event::SeStop { .. } => "SeStop".to_string(),
-        Event::SeFade { .. } => "SeFade".to_string(),
-        Event::VoicePlay { file, .. } => format!("VoicePlay file={file}"),
-        Event::StopAllSounds { .. } => "StopAllSounds".to_string(),
-        Event::SoundFinishHandler { .. } => "SoundFinishHandler".to_string(),
-        Event::SoundFinishHandlerDel { .. } => "SoundFinishHandlerDel".to_string(),
+        Event::VoicePlay { file, gain, .. } => format!("VoicePlay file={file} gain={gain:?}"),
         Event::VideoPlay { id, file, .. } => format!("VideoPlay id={id:?} file={file}"),
-        Event::VideoFinishHandler { .. } => "VideoFinishHandler".to_string(),
-        Event::VideoFinishHandlerDel => "VideoFinishHandlerDel".to_string(),
         Event::Text { content } => format!("Text {content:?}"),
         Event::ScenarioText { content, inline } => {
             format!("ScenarioText inline={inline} {content:?}")
         }
-        Event::LineBreak => "LineBreak".to_string(),
-        Event::PageBreak { .. } => "PageBreak".to_string(),
-        Event::FontSettings(_) => "FontSettings".to_string(),
-        Event::FontClose => "FontClose".to_string(),
-        Event::FontDefault(_) => "FontDefault".to_string(),
-        Event::FontInit => "FontInit".to_string(),
-        Event::MessageLayerSwitch { .. } => "MsgLayerSwitch".to_string(),
-        Event::MessageLayerPop => "MsgLayerPop".to_string(),
+        Event::FontSettings(s) => format!("FontSettings {}", format_map(s)),
+        Event::FontDefault(s) => format!("FontDefault {}", format_map(s)),
         Event::Wait { reason } => match reason {
             WaitReason::Generic => "Wait(Generic)".to_string(),
             WaitReason::Stop { reason } => match reason.as_deref() {
@@ -333,59 +329,22 @@ fn event_name(e: &Event) -> String {
             } => {
                 format!("Wait(Timed time={milliseconds} input={input})")
             }
-            WaitReason::KeyWait { .. } => "Wait(KeyWait)".to_string(),
-            _ => "Wait".to_string(),
+            reason => format!("Wait({reason:?})"),
         },
-        Event::SaveGame { file } => format!("Save file={file:?}"),
-        Event::LoadGame { file, trans_type } => {
-            format!("Load file={file:?} type={trans_type:?}")
-        }
-        Event::FileOperation {
-            command,
-            src,
-            dst,
-            target,
-        } => {
-            format!("FileOp {command} src={src:?} dst={dst:?} target={target:?}")
-        }
-        Event::SaveScreenshot {
-            file,
-            width,
-            height,
-        } => {
-            format!("SaveScreenshot file={file:?} {width:?}x{height:?}")
-        }
-        Event::Exit => "Exit".to_string(),
-        Event::GoTitle => "GoTitle".to_string(),
-        Event::ShowDialog {
-            title,
-            varname,
-            textfield,
-            textfield_size,
-            ..
-        } => format!(
-            "ShowDialog title={title:?} var={varname:?} textfield={textfield:?} size={textfield_size:?}"
-        ),
-        Event::YesNo { .. } => "YesNo".to_string(),
-        Event::SceneIn => "SceneIn".to_string(),
-        Event::SceneOut => "SceneOut".to_string(),
-        Event::AutoModeConfig { allow, layer } => {
-            format!("AutoMode allow={allow} layer={layer:?}")
-        }
-        Event::SkipConfig { allow, skip_unread } => {
-            format!("Skip allow={allow} unread={skip_unread}")
-        }
-        Event::AutoSkipDisable => "AutoSkipDisable".to_string(),
-        Event::Exec { command, mode } => format!("Exec command={command} mode={mode:?}"),
-        Event::Custom { tag, params } if tag == "lyshader" => format!(
-            "ShaderLoad id={:?} file={:?}",
-            params.get("id"),
-            params.get("file")
-        ),
-        Event::ShaderLoad { id, file } => format!("ShaderLoad id={id} file={file}"),
-        e => {
-            crate::core_debug!("[event] {:?}", e);
-            "Not implemented event".to_string()
-        }
+        Event::Custom { tag, params } => format!("Custom [{tag}] {}", format_map(params)),
+        // 其余低频事件：Debug 输出已含全部字段，直接用（超长由下方统一截断）。
+        e => format!("{e:?}"),
+    };
+
+    match s.char_indices().nth(MAX_CHARS) {
+        Some((byte_idx, _)) => format!("{}…", &s[..byte_idx]),
+        None => s,
     }
+}
+
+/// 把参数表格式化为稳定有序的 `k=v k=v`（HashMap 迭代序随机，排序保证日志可对比）。
+fn format_map(map: &HashMap<String, String>) -> String {
+    let mut kv: Vec<String> = map.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    kv.sort();
+    kv.join(" ")
 }

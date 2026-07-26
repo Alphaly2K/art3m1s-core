@@ -554,19 +554,26 @@ impl CoreRuntime {
     }
 
     pub(super) fn apply_system_audio_volume(&mut self) {
+        /// Artemis 音量变量是 0-1000 的整数刻度。
+        const VOLUME_SCALE: f32 = 1000.0;
+
         let vars = self.interpreter.variables_handle();
         let vars = vars.lock().unwrap();
-        let bgm_volume = vars.get("s.bgmvol").and_then(|value| match value {
-            asb_interpreter::Value::Int(v) => Some((*v as f32 / 1000.0).clamp(0.0, 1.0)),
-            _ => None,
-        });
-        let se_volume = vars.get("s.sevol").and_then(|value| match value {
-            asb_interpreter::Value::Int(v) => Some((*v as f32 / 1000.0).clamp(0.0, 1.0)),
-            _ => None,
-        });
+        let read_volume = |key: &str| {
+            vars.get(key).and_then(|value| match value {
+                asb_interpreter::Value::Int(v) => Some((*v as f32 / VOLUME_SCALE).clamp(0.0, 1.0)),
+                _ => None,
+            })
+        };
+        let bgm_volume = read_volume("s.bgmvol");
+        let se_volume = read_volume("s.sevol");
         drop(vars);
 
-        if let Some(v) = bgm_volume {
+        // 只在值变化时下发，避免每帧向宿主重发相同命令。
+        if let Some(v) = bgm_volume
+            && self.last_system_volume.0 != Some(v)
+        {
+            self.last_system_volume.0 = Some(v);
             self.audio.set_bgm_volume(v);
             hm::emit(
                 Kind::AudioSetVolume,
@@ -576,7 +583,10 @@ impl CoreRuntime {
                 },
             );
         }
-        if let Some(v) = se_volume {
+        if let Some(v) = se_volume
+            && self.last_system_volume.1 != Some(v)
+        {
+            self.last_system_volume.1 = Some(v);
             self.audio.set_se_volume(v);
             hm::emit(
                 Kind::AudioSetVolume,

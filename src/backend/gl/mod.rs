@@ -48,9 +48,12 @@ pub struct GlRenderer {
     white_texture: glow::Texture,
     transparent_texture: glow::Texture,
     group_targets: Vec<GroupTarget>,
+    mask_group_targets: Vec<GroupTarget>,
     vao: glow::VertexArray,
     #[allow(dead_code)]
     vbo: glow::Buffer,
+    mesh_vao: glow::VertexArray,
+    mesh_vbo: glow::Buffer,
     stage_width: f32,
     stage_height: f32,
     /// GL 视口的物理像素尺寸。
@@ -79,6 +82,19 @@ impl GlRenderer {
             let program_bindings = ProgramBindings::new(&gl, program);
             let white_texture = create_solid_texture(&gl, [255, 255, 255, 255])?;
             let transparent_texture = create_solid_texture(&gl, [0, 0, 0, 0])?;
+            let alpha_mask_program = shader::build_builtin_program(
+                &gl,
+                profile,
+                crate::render_pipeline::shader::ALPHA_MASK_SHADER,
+            )?;
+            let mut custom_programs = HashMap::new();
+            custom_programs.insert(
+                crate::render_pipeline::shader::ALPHA_MASK_SHADER.to_owned(),
+                CustomProgram {
+                    program: alpha_mask_program,
+                    bindings: ProgramBindings::new(&gl, alpha_mask_program),
+                },
+            );
 
             // 单位四边形，两个三角形，含纹理坐标。布局：x, y, u, v。
             // 顶点位置是 0..1 的单位方块，顶点着色器再乘以 size 与 transform。
@@ -115,17 +131,38 @@ impl GlRenderer {
             );
             gl.bind_vertex_array(None);
 
+            let mesh_vao = gl.create_vertex_array()?;
+            let mesh_vbo = gl.create_buffer()?;
+            gl.bind_vertex_array(Some(mesh_vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(mesh_vbo));
+            gl.buffer_data_size(glow::ARRAY_BUFFER, 0, glow::DYNAMIC_DRAW);
+            gl.enable_vertex_attrib_array(0);
+            gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, stride, 0);
+            gl.enable_vertex_attrib_array(1);
+            gl.vertex_attrib_pointer_f32(
+                1,
+                2,
+                glow::FLOAT,
+                false,
+                stride,
+                2 * std::mem::size_of::<f32>() as i32,
+            );
+            gl.bind_vertex_array(None);
+
             let renderer = GlRenderer {
                 gl: gl.clone(),
                 program,
                 program_bindings,
-                custom_programs: HashMap::new(),
+                custom_programs,
                 profile,
                 white_texture,
                 transparent_texture,
                 group_targets: Vec::new(),
+                mask_group_targets: Vec::new(),
                 vao,
                 vbo,
+                mesh_vao,
+                mesh_vbo,
                 stage_width: stage_width as f32,
                 stage_height: stage_height as f32,
                 // 默认视口等于舞台尺寸；HiDPI 宿主应在拿到可绘制表面后调用
@@ -179,16 +216,18 @@ impl GlRenderer {
         Ok(())
     }
 
-    unsafe fn ensure_group_target(
-        &mut self,
+    /// 确保 `targets[depth]` 存在且尺寸匹配，返回其 FBO 与颜色纹理。
+    /// 尺寸变化时销毁重建。
+    unsafe fn ensure_target_at(
+        gl: &glow::Context,
+        targets: &mut Vec<GroupTarget>,
         depth: usize,
+        width: i32,
+        height: i32,
     ) -> Result<(glow::Framebuffer, glow::Texture), String> {
-        let width = self.stage_width as i32;
-        let height = self.stage_height as i32;
-        while self.group_targets.len() <= depth {
-            let (framebuffer, texture) =
-                unsafe { platform::create_fbo_target(&self.gl, width, height)? };
-            self.group_targets.push(GroupTarget {
+        while targets.len() <= depth {
+            let (framebuffer, texture) = unsafe { platform::create_fbo_target(gl, width, height)? };
+            targets.push(GroupTarget {
                 framebuffer,
                 texture,
                 width,
@@ -196,28 +235,60 @@ impl GlRenderer {
             });
         }
 
-        if self.group_targets[depth].width != width || self.group_targets[depth].height != height {
-            let old = self.group_targets[depth];
+        if targets[depth].width != width || targets[depth].height != height {
+            let old = targets[depth];
             unsafe {
-                self.gl.delete_framebuffer(old.framebuffer);
-                self.gl.delete_texture(old.texture);
+                gl.delete_framebuffer(old.framebuffer);
+                gl.delete_texture(old.texture);
             }
-            let (framebuffer, texture) =
-                unsafe { platform::create_fbo_target(&self.gl, width, height)? };
-            self.group_targets[depth] = GroupTarget {
+            let (framebuffer, texture) = unsafe { platform::create_fbo_target(gl, width, height)? };
+            targets[depth] = GroupTarget {
                 framebuffer,
                 texture,
                 width,
                 height,
             };
         }
-        let target = self.group_targets[depth];
+        let target = targets[depth];
         Ok((target.framebuffer, target.texture))
     }
 
+    unsafe fn ensure_group_target(
+        &mut self,
+        depth: usize,
+    ) -> Result<(glow::Framebuffer, glow::Texture), String> {
+        unsafe {
+            Self::ensure_target_at(
+                &self.gl,
+                &mut self.group_targets,
+                depth,
+                self.stage_width as i32,
+                self.stage_height as i32,
+            )
+        }
+    }
+
+    unsafe fn ensure_mask_group_target(
+        &mut self,
+        depth: usize,
+    ) -> Result<(glow::Framebuffer, glow::Texture), String> {
+        unsafe {
+            Self::ensure_target_at(
+                &self.gl,
+                &mut self.mask_group_targets,
+                depth,
+                self.stage_width as i32,
+                self.stage_height as i32,
+            )
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     unsafe fn render_range(
         &mut self,
         frame: &DrawList,
+        mesh_ranges: &[Option<(i32, i32)>],
+        mask_mesh_ranges: &[Option<(i32, i32)>],
         start: usize,
         end: usize,
         excluded_group: Option<usize>,
@@ -239,7 +310,12 @@ impl GlRenderer {
 
             let Some((group_index, group)) = group else {
                 unsafe {
-                    self.draw_one(&frame.commands[index], top_left_target, viewport);
+                    self.draw_one(
+                        &frame.commands[index],
+                        mesh_ranges[index],
+                        top_left_target,
+                        viewport,
+                    );
                 }
                 index += 1;
                 continue;
@@ -248,12 +324,17 @@ impl GlRenderer {
             let parent_framebuffer = framebuffer_from_raw(unsafe {
                 self.gl.get_parameter_i32(glow::FRAMEBUFFER_BINDING)
             });
-            let Ok((group_framebuffer, group_texture)) =
-                (unsafe { self.ensure_group_target(depth) })
-            else {
+            let group_target = unsafe { self.ensure_group_target(depth) };
+            let Ok((group_framebuffer, group_texture)) = group_target else {
+                crate::core_warn!(
+                    "shader 组 FBO 分配失败，整组按无效果直绘: {}",
+                    group_target.unwrap_err()
+                );
                 unsafe {
                     self.render_range(
                         frame,
+                        mesh_ranges,
+                        mask_mesh_ranges,
                         group.start,
                         group.end,
                         Some(group_index),
@@ -274,6 +355,8 @@ impl GlRenderer {
                 self.gl.clear(glow::COLOR_BUFFER_BIT);
                 self.render_range(
                     frame,
+                    mesh_ranges,
+                    mask_mesh_ranges,
                     group.start,
                     group.end,
                     Some(group_index),
@@ -281,6 +364,32 @@ impl GlRenderer {
                     (self.stage_width as i32, self.stage_height as i32),
                     false,
                 );
+
+                let mut effect = group.effect.clone();
+                if let Some([mask_start, mask_end]) = group.mask_range
+                    && let Some((mask_framebuffer, mask_texture)) = self
+                        .ensure_mask_group_target(depth)
+                        .map_err(|e| {
+                            crate::core_warn!("mask FBO 分配失败，该组遮罩不生效: {e}");
+                        })
+                        .ok()
+                {
+                    self.gl
+                        .bind_framebuffer(glow::FRAMEBUFFER, Some(mask_framebuffer));
+                    self.gl
+                        .viewport(0, 0, self.stage_width as i32, self.stage_height as i32);
+                    self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
+                    self.gl.clear(glow::COLOR_BUFFER_BIT);
+                    for mask_index in mask_start..mask_end {
+                        self.draw_one(
+                            &frame.mask_commands[mask_index],
+                            mask_mesh_ranges[mask_index],
+                            false,
+                            (self.stage_width as i32, self.stage_height as i32),
+                        );
+                    }
+                    effect.mask_texture = Some(TextureId(mask_texture.0.get() as u64));
+                }
 
                 self.gl
                     .bind_framebuffer(glow::FRAMEBUFFER, parent_framebuffer);
@@ -294,7 +403,10 @@ impl GlRenderer {
                         },
                         transform: glam::Affine2::IDENTITY,
                         opacity: 1.0,
-                        blend: BlendMode::Alpha,
+                        // Rendering into a transparent group target produces
+                        // premultiplied RGB. Composite that target without
+                        // multiplying its alpha a second time.
+                        blend: BlendMode::PremultipliedAlpha,
                         color: ColorFilter::default(),
                         clip: ClipRect {
                             uv_offset: [0.0, 0.0],
@@ -302,8 +414,11 @@ impl GlRenderer {
                             quad_size: [self.stage_width, self.stage_height],
                         },
                         clip_bounds: group.clip_bounds,
-                        shader: Some(group.effect),
+                        shader: Some(effect),
+                        mesh: None,
+                        stencil: None,
                     },
+                    None,
                     top_left_target,
                     viewport,
                 );
@@ -356,7 +471,20 @@ impl GlRenderer {
             gl.enable(glow::BLEND);
             match blend {
                 BlendMode::Alpha => {
-                    gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+                    gl.blend_func_separate(
+                        glow::SRC_ALPHA,
+                        glow::ONE_MINUS_SRC_ALPHA,
+                        glow::ONE,
+                        glow::ONE_MINUS_SRC_ALPHA,
+                    );
+                }
+                BlendMode::PremultipliedAlpha => {
+                    gl.blend_func_separate(
+                        glow::ONE,
+                        glow::ONE_MINUS_SRC_ALPHA,
+                        glow::ONE,
+                        glow::ONE_MINUS_SRC_ALPHA,
+                    );
                 }
                 BlendMode::Add => {
                     gl.blend_func(glow::SRC_ALPHA, glow::ONE);
@@ -372,7 +500,13 @@ impl GlRenderer {
     }
 
     /// 画单条命令。调用方需已 use program / bind vao / 设好投影。
-    unsafe fn draw_one(&self, cmd: &DrawCommand, top_left_target: bool, viewport: (i32, i32)) {
+    unsafe fn draw_one(
+        &self,
+        cmd: &DrawCommand,
+        mesh_range: Option<(i32, i32)>,
+        top_left_target: bool,
+        viewport: (i32, i32),
+    ) {
         let gl = &self.gl;
         unsafe {
             let custom_program = cmd
@@ -424,11 +558,13 @@ impl GlRenderer {
                 t.x, t.y, 1.0, // col 2
             ];
             gl.uniform_matrix_3_f32_slice(bindings.transform.as_ref(), false, &transform3);
-            // 用裁剪后的 quad 尺寸（而不是整张纹理尺寸）展开单位方块。
+            let has_mesh = mesh_range.is_some();
+            // Mesh positions are already in local pixels. The quad path keeps
+            // using unit vertices expanded by the clipped sprite dimensions.
             gl.uniform_2_f32(
                 bindings.size.as_ref(),
-                cmd.clip.quad_size[0],
-                cmd.clip.quad_size[1],
+                if has_mesh { 1.0 } else { cmd.clip.quad_size[0] },
+                if has_mesh { 1.0 } else { cmd.clip.quad_size[1] },
             );
             // UV 重映射：把 0..1 的顶点 UV 映射到裁剪子区域。
             gl.uniform_2_f32(
@@ -496,7 +632,13 @@ impl GlRenderer {
                 gl.uniform_1_i32(bindings.sampler.as_ref(), 0);
             }
 
-            gl.draw_arrays(glow::TRIANGLES, 0, 6);
+            if let Some((first, count)) = mesh_range {
+                gl.bind_vertex_array(Some(self.mesh_vao));
+                gl.draw_arrays(glow::TRIANGLES, first, count);
+                gl.bind_vertex_array(Some(self.vao));
+            } else {
+                gl.draw_arrays(glow::TRIANGLES, 0, 6);
+            }
         }
     }
 }
@@ -509,10 +651,56 @@ impl Renderer for GlRenderer {
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
 
+            let mut mesh_vertices = Vec::new();
+            let mesh_ranges = frame
+                .commands
+                .iter()
+                .map(|command| {
+                    command
+                        .mesh
+                        .as_ref()
+                        .filter(|mesh| !mesh.vertices.is_empty())
+                        .map(|mesh| {
+                            let first = mesh_vertices.len() as i32;
+                            mesh_vertices.extend_from_slice(&mesh.vertices);
+                            (first, mesh.vertices.len() as i32)
+                        })
+                })
+                .collect::<Vec<_>>();
+            let mask_mesh_ranges = frame
+                .mask_commands
+                .iter()
+                .map(|command| {
+                    command
+                        .mesh
+                        .as_ref()
+                        .filter(|mesh| !mesh.vertices.is_empty())
+                        .map(|mesh| {
+                            let first = mesh_vertices.len() as i32;
+                            mesh_vertices.extend_from_slice(&mesh.vertices);
+                            (first, mesh.vertices.len() as i32)
+                        })
+                })
+                .collect::<Vec<_>>();
+            if !mesh_vertices.is_empty() {
+                let floats = std::slice::from_raw_parts(
+                    mesh_vertices.as_ptr() as *const f32,
+                    mesh_vertices.len() * 4,
+                );
+                gl.bind_vertex_array(Some(self.mesh_vao));
+                gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.mesh_vbo));
+                gl.buffer_data_u8_slice(
+                    glow::ARRAY_BUFFER,
+                    bytemuck_cast(floats),
+                    glow::DYNAMIC_DRAW,
+                );
+            }
             gl.bind_vertex_array(Some(self.vao));
 
             self.render_range(
                 frame,
+                &mesh_ranges,
+                &mask_mesh_ranges,
                 0,
                 frame.commands.len(),
                 None,
@@ -542,8 +730,14 @@ impl Drop for GlRenderer {
                 gl.delete_framebuffer(target.framebuffer);
                 gl.delete_texture(target.texture);
             }
+            for target in &self.mask_group_targets {
+                gl.delete_framebuffer(target.framebuffer);
+                gl.delete_texture(target.texture);
+            }
             gl.delete_vertex_array(self.vao);
             gl.delete_buffer(self.vbo);
+            gl.delete_vertex_array(self.mesh_vao);
+            gl.delete_buffer(self.mesh_vbo);
         }
     }
 }

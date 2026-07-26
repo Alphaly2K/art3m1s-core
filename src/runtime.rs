@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 mod callbacks;
 mod control;
 mod dialog;
+mod emote;
 mod events;
 mod input;
 mod magic_path;
@@ -44,6 +45,13 @@ struct PendingDialog {
     textfield_size: Option<usize>,
 }
 
+#[derive(Debug, Clone)]
+struct InlineEventFrame {
+    script: String,
+    line: usize,
+    stack: Vec<asb_interpreter::CallFrame>,
+}
+
 pub struct CoreRuntime {
     gl: Rc<glow::Context>,
     gl_ctx: Box<dyn platform::GLPlatformContext>,
@@ -54,6 +62,8 @@ pub struct CoreRuntime {
     texture_provider: GlTextureProvider,
     compositor: Compositor,
     text_renderer: Option<Box<dyn TextRenderer>>,
+    /// 文本注入链（汉化补丁等）。默认挂一个 FFI 注入器，宿主注册回调后生效。
+    text_inject: crate::text::InjectionChain,
     audio: Box<dyn AudioBackend>,
     video: Box<dyn VideoBackend>,
     interpreter: asb_interpreter::Interpreter,
@@ -64,9 +74,12 @@ pub struct CoreRuntime {
     script_status: Arc<AtomicU8>,
     magic_paths: Arc<magic_path::MagicPathTable>,
     layer_info: callbacks::LayerInfoTable,
+    emote: emote::SharedEmoteState,
 
     stage_w: u32,
     stage_h: u32,
+    /// 上次下发的系统音量 (bgm, se)，用于跳过重复下发。
+    last_system_volume: (Option<f32>, Option<f32>),
     wait_reason: Option<WaitReason>,
     timed_remaining_ms: u64,
     control: control::RuntimeControlState,
@@ -77,12 +90,15 @@ pub struct CoreRuntime {
     exit_requested: Arc<AtomicBool>,
     /// system.ini 的 SAVEPATH 原值（可能含反斜杠/CSIDL），由 load_project 捕获。
     project_savepath: Option<String>,
+    /// system.ini 的 BOOT 脚本，由 load_project 捕获；gotitle 回标题时优先用它。
+    boot_script: Option<String>,
     /// 规范化后的存档逻辑相对前缀（如 `save`/`savedata`），种入 `s.savepath`。
     savepath: String,
     /// `[takess]` 缓存的游戏画面。`[savess]` 后续从这里缩放/编码，不能重新截保存 UI。
     save_screenshot: Option<save_io::ScreenshotBuffer>,
     loaded_font_face: Option<String>,
     pending_dialog: Option<PendingDialog>,
+    active_inline_event_frame: Option<InlineEventFrame>,
 }
 
 impl CoreRuntime {
@@ -107,9 +123,11 @@ impl CoreRuntime {
         let renderer = GlRenderer::new(gl.clone(), stage_width, stage_height, profile)
             .map_err(|e| format!("创建渲染器失败: {e}"))?;
 
-        let texture_provider = GlTextureProvider::new(gl.clone()).with_ffi_source();
+        // load_project 时会带 magic-path 解析重建 provider；这里先建一个
+        // 无字节源的裸 provider 占位即可，不必接 FFI 源。
+        let texture_provider = GlTextureProvider::new(gl.clone());
 
-        let compositor = Compositor::new_with_stage_size(stage_width, stage_height);
+        let compositor = Compositor::new();
         let audio = Box::new(crate::audio::AudioStateBackend::new()) as Box<dyn AudioBackend>;
         let video = Box::new(crate::video::VideoStateBackend::new()) as Box<dyn VideoBackend>;
         let interpreter =
@@ -122,6 +140,7 @@ impl CoreRuntime {
         let script_status = Arc::new(AtomicU8::new(0));
         let magic_paths: Arc<magic_path::MagicPathTable> = Arc::new(Mutex::new(HashMap::new()));
         let layer_info = Arc::new(Mutex::new(HashMap::new()));
+        let emote = Arc::new(Mutex::new(emote::EmoteState::default()));
 
         Ok(Self {
             gl,
@@ -132,6 +151,11 @@ impl CoreRuntime {
             texture_provider,
             compositor,
             text_renderer: None,
+            text_inject: {
+                let mut chain = crate::text::InjectionChain::new();
+                chain.push(Box::new(crate::text::FfiTextInject));
+                chain
+            },
             audio,
             video,
             interpreter,
@@ -142,8 +166,10 @@ impl CoreRuntime {
             script_status,
             magic_paths: Arc::clone(&magic_paths),
             layer_info: Arc::clone(&layer_info),
+            emote,
             stage_w: stage_width,
             stage_h: stage_height,
+            last_system_volume: (None, None),
             wait_reason: None,
             timed_remaining_ms: 0,
             control: control::RuntimeControlState::default(),
@@ -153,10 +179,12 @@ impl CoreRuntime {
             volumes: Arc::new(Mutex::new(HashMap::new())),
             exit_requested: Arc::new(AtomicBool::new(false)),
             project_savepath: None,
+            boot_script: None,
             savepath: "save".to_string(),
             save_screenshot: None,
             loaded_font_face: None,
             pending_dialog: None,
+            active_inline_event_frame: None,
         })
     }
 
@@ -186,6 +214,7 @@ impl CoreRuntime {
 
         let collected = self.drain_events();
         self.dispatch_events(&collected);
+        self.sync_emote_scene();
 
         self.apply_system_audio_volume();
         let pending_volumes: Vec<(String, f32)> = {
@@ -200,6 +229,8 @@ impl CoreRuntime {
         }
 
         self.compositor.advance(delta_ms);
+        self.dispatch_tween_handlers();
+        self.emote.lock().unwrap().advance(delta_ms);
         self.advance_text(delta_ms);
         self.advance_media_and_enqueue_finish_handlers(delta_ms);
 

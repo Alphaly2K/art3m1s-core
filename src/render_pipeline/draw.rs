@@ -43,6 +43,9 @@ pub trait TextureProvider {
 pub enum BlendMode {
     #[default]
     Alpha,
+    /// Source pixels already have RGB multiplied by alpha (for example an
+    /// offscreen group texture).
+    PremultipliedAlpha,
     Add,
     Screen,
     Multiply,
@@ -85,6 +88,14 @@ pub struct ShaderGroup {
     pub end: usize,
     pub effect: ShaderEffect,
     pub clip_bounds: Option<[f32; 4]>,
+    pub mask_range: Option<[usize; 2]>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StencilMetadata {
+    pub namespace: u64,
+    pub source_label: String,
+    pub mask_labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -98,6 +109,19 @@ pub struct DrawCommand {
     pub clip: ClipRect,
     pub clip_bounds: Option<[f32; 4]>,
     pub shader: Option<ShaderEffect>,
+    pub mesh: Option<DrawMesh>,
+    pub stencil: Option<StencilMetadata>,
+}
+
+/// Host-owned draw commands attached to a compositor layer.
+pub type LayerDrawSource<'a> = dyn Fn(&str) -> Vec<DrawCommand> + 'a;
+
+/// Expanded triangle-list geometry for deformed sprites.
+///
+/// Positions are local pixels and UVs are normalized within `DrawCommand::clip`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DrawMesh {
+    pub vertices: Vec<[f32; 4]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -120,6 +144,7 @@ impl ClipRect {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DrawList {
     pub commands: Vec<DrawCommand>,
+    pub mask_commands: Vec<DrawCommand>,
     pub shader_groups: Vec<ShaderGroup>,
 }
 
@@ -136,6 +161,65 @@ impl DrawList {
         self.shader_groups.push(group);
     }
 
+    pub fn materialize_stencil_groups(&mut self, effect_name: &str) {
+        let masked = self
+            .commands
+            .iter()
+            .enumerate()
+            .filter_map(|(index, command)| {
+                command
+                    .stencil
+                    .as_ref()
+                    .filter(|stencil| !stencil.mask_labels.is_empty())
+                    .map(|stencil| (index, stencil.clone()))
+            })
+            .collect::<Vec<_>>();
+
+        for (index, stencil) in masked {
+            let content_center = command_center(&self.commands[index]);
+            let mask_start = self.mask_commands.len();
+            for label in &stencil.mask_labels {
+                let closest = self
+                    .commands
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.stencil.as_ref().is_some_and(|metadata| {
+                            metadata.namespace == stencil.namespace
+                                && metadata.source_label == *label
+                        })
+                    })
+                    .min_by(|left, right| {
+                        center_distance_squared(left, content_center)
+                            .total_cmp(&center_distance_squared(right, content_center))
+                    });
+                if let Some(mask) = closest {
+                    let mut mask = mask.clone();
+                    mask.blend = BlendMode::Alpha;
+                    mask.color = ColorFilter::default();
+                    mask.shader = None;
+                    mask.stencil = None;
+                    self.mask_commands.push(mask);
+                }
+            }
+            let mask_end = self.mask_commands.len();
+            if mask_end == mask_start {
+                continue;
+            }
+            self.shader_groups.push(ShaderGroup {
+                start: index,
+                end: index + 1,
+                effect: ShaderEffect {
+                    name: effect_name.to_owned(),
+                    uniforms: BTreeMap::new(),
+                    mask_texture: None,
+                    user_texture: None,
+                },
+                clip_bounds: self.commands[index].clip_bounds,
+                mask_range: Some([mask_start, mask_end]),
+            });
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.commands.len()
     }
@@ -143,6 +227,17 @@ impl DrawList {
     pub fn is_empty(&self) -> bool {
         self.commands.is_empty()
     }
+}
+
+fn command_center(command: &DrawCommand) -> glam::Vec2 {
+    command.transform.transform_point2(glam::Vec2::new(
+        command.clip.quad_size[0] * 0.5,
+        command.clip.quad_size[1] * 0.5,
+    ))
+}
+
+fn center_distance_squared(command: &DrawCommand, point: glam::Vec2) -> f32 {
+    command_center(command).distance_squared(point)
 }
 
 /// Backend renderer: consumes one frame of draw commands.

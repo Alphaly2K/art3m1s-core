@@ -6,7 +6,6 @@
 use asb_interpreter::CallFrame;
 use asb_interpreter::variable::VariableStore;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 /// 存档中的音频重放快照。只记录当前应播放的音频，不记录播放进度；
 /// 读档时所有音频都从头重放。
@@ -113,9 +112,16 @@ impl AudioSnapshot {
     }
 }
 
+/// 当前写出的存档格式版本。读档兼容所有 `<= SAVE_FORMAT_VERSION` 的存档；
+/// 旧存档缺失该字段时按 0 处理。将来格式不兼容变更时递增并在读档处分支。
+pub const SAVE_FORMAT_VERSION: u32 = 1;
+
 /// 一个完整的存档。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SaveData {
+    /// 存档格式版本，见 [`SAVE_FORMAT_VERSION`]。
+    #[serde(default)]
+    pub version: u32,
     /// 变量存储（local / global / system）
     pub variables: VariableStore,
     /// 当前脚本文件名
@@ -157,81 +163,11 @@ impl From<CallFrameSnapshot> for CallFrame {
     }
 }
 
-/// 存档管理器。
-pub struct SaveManager {
-    /// 存档目录（通常为项目根下的 `save/`）
-    save_dir: PathBuf,
-}
-
-impl SaveManager {
-    /// 创建存档管理器。
-    ///
-    /// `save_dir` 是存档文件所在的目录，不存在时自动创建。
-    pub fn new(save_dir: PathBuf) -> std::io::Result<Self> {
-        std::fs::create_dir_all(&save_dir)?;
-        Ok(Self { save_dir })
-    }
-
-    /// 保存一个存档到指定文件名。
-    pub fn save(&self, file: &str, data: &SaveData) -> std::io::Result<()> {
-        let path = self.resolve(file);
-        let json = serde_json::to_string_pretty(data)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(&path, json)
-    }
-
-    /// 从指定文件名读取一个存档。
-    pub fn load(&self, file: &str) -> std::io::Result<SaveData> {
-        let path = self.resolve(file);
-        let json = std::fs::read_to_string(&path)?;
-        serde_json::from_str(&json)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-    }
-
-    /// 列出存档目录下所有存档文件。
-    pub fn list(&self) -> std::io::Result<Vec<PathBuf>> {
-        let mut entries: Vec<_> = std::fs::read_dir(&self.save_dir)?
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .map(|ext| ext == "dat")
-                    .unwrap_or(false)
-            })
-            .map(|e| e.path())
-            .collect();
-        entries.sort();
-        Ok(entries)
-    }
-
-    /// 检查存档文件是否存在。
-    pub fn exists(&self, file: &str) -> bool {
-        self.resolve(file).exists()
-    }
-
-    /// 删除存档文件。
-    pub fn delete(&self, file: &str) -> std::io::Result<()> {
-        let path = self.resolve(file);
-        if path.exists() {
-            std::fs::remove_file(path)?;
-        }
-        Ok(())
-    }
-
-    fn resolve(&self, file: &str) -> PathBuf {
-        let name = if file.ends_with(".dat") {
-            file.to_string()
-        } else {
-            format!("{}.dat", file)
-        };
-        self.save_dir.join(name)
-    }
-}
-
 impl SaveData {
     /// 从解释器当前状态构建存档数据。
     pub fn from_interpreter(interpreter: &asb_interpreter::Interpreter) -> Self {
         Self {
+            version: SAVE_FORMAT_VERSION,
             variables: local_variable_snapshot(interpreter),
             current_script: interpreter.current_script().unwrap_or("").to_string(),
             current_line: interpreter.current_line(),
@@ -301,6 +237,7 @@ mod tests {
         );
 
         let data = SaveData {
+            version: SAVE_FORMAT_VERSION,
             variables: VariableStore::new(),
             current_script: "system/script.asb".to_string(),
             current_line: 38,
@@ -375,6 +312,7 @@ mod tests {
         legacy_variables.set("g.system", Value::String("stale-saveg".into()));
         legacy_variables.set("s.savepath", Value::String("stale-path".into()));
         let data = SaveData {
+            version: SAVE_FORMAT_VERSION,
             variables: legacy_variables,
             current_script: "dummy.ast".to_string(),
             current_line: 0,

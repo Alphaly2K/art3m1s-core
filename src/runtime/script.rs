@@ -8,6 +8,7 @@ use std::sync::atomic::Ordering;
 
 impl CoreRuntime {
     pub(super) fn advance_script(&mut self, clicked: bool, delta_ms: u64) {
+        self.refresh_inline_event_frame();
         // Native dialogs are modal from the scenario script's point of view. The dialog event can
         // be emitted from an estag queue that already contains its continuation; draining that
         // queue before the host responds runs stop/wait tags behind the dialog and corrupts the
@@ -27,6 +28,8 @@ impl CoreRuntime {
                 self.drain_queued_tags_while_stopped(reason);
             } else if let Some(reason) = self.wait_reason.clone() {
                 self.drain_queued_tags_while_waiting(reason);
+            } else if self.active_inline_event_frame.is_some() {
+                self.drain_inline_event_tags_without_wait();
             } else {
                 self.wait_reason = None;
             }
@@ -81,7 +84,19 @@ impl CoreRuntime {
                     self.reset_control_wait_flags();
                     break;
                 }
-                Ok(ExecutionResult::Completed) | Ok(_) => break,
+                Ok(ExecutionResult::Completed) => {
+                    crate::core_debug!(
+                        "[runtime] script completed at {:?}:{} stack_depth={}",
+                        self.interpreter.current_script(),
+                        self.interpreter.current_line(),
+                        self.interpreter.call_stack().len()
+                    );
+                    break;
+                }
+                Ok(other) => {
+                    crate::core_debug!("[runtime] 未处理的 ExecutionResult，按停帧处理: {other:?}");
+                    break;
+                }
                 Err(e) => {
                     crate::core_error!("解释器错误: {e:?}");
                     break;
@@ -94,7 +109,8 @@ impl CoreRuntime {
         let Some(reason) = self.wait_reason.clone() else {
             return;
         };
-        let clicked = clicked || self.script_decide_edge();
+        let scripted_decide = self.script_decide_edge();
+        let clicked = clicked || scripted_decide;
         if let WaitReason::Stop {
             reason: Some(stop_reason),
         } = &reason
@@ -140,7 +156,10 @@ impl CoreRuntime {
                     false
                 }
             }
-            WaitReason::Stop { .. } => false,
+            // A physical click must not skip [stop]. Artemis scripts can,
+            // however, explicitly wake it by injecting a key edge with
+            // e:overrideKey(..., status=32), as UI return paths commonly do.
+            WaitReason::Stop { .. } => stop_wait_accepts_scripted_decide(scripted_decide),
             _ => {
                 if clicked {
                     if !self.is_text_reveal_complete() {
@@ -200,22 +219,31 @@ impl CoreRuntime {
     }
 
     fn drain_queued_tags_while_stopped(&mut self, stop_reason: WaitReason) {
+        /// 单帧排水上限：防止排队标签互相续接造成死循环。正常脚本远达不到。
+        const MAX_DRAIN_ROUNDS: usize = 64;
         let mut should_resume = false;
-        for _ in 0..64 {
+        let mut rounds = 0;
+        for _ in 0..MAX_DRAIN_ROUNDS {
+            rounds += 1;
             let drain = match self.interpreter.drain_queued_tags_only() {
                 Ok(drain) => drain,
                 Err(e) => {
                     crate::core_error!("解释器错误: {e:?}");
+                    self.finish_inline_event_frame(false);
                     self.wait_reason = Some(stop_reason);
                     return;
                 }
             };
+            self.finish_inline_event_frame(drain.changed_position);
             should_resume |= drain.saw_return || drain.changed_position;
             if drain.wait.is_some() {
                 self.interpreter.advance_line();
                 continue;
             }
             break;
+        }
+        if rounds >= MAX_DRAIN_ROUNDS {
+            crate::core_warn!("[runtime] 排队标签单帧排水达到上限 {MAX_DRAIN_ROUNDS}，剩余延后到下一帧");
         }
 
         if should_resume {
@@ -230,10 +258,12 @@ impl CoreRuntime {
             Ok(drain) => drain,
             Err(e) => {
                 crate::core_error!("解释器错误: {e:?}");
+                self.finish_inline_event_frame(false);
                 self.wait_reason = Some(wait_reason);
                 return;
             }
         };
+        self.finish_inline_event_frame(drain.changed_position);
 
         if drain.saw_return || drain.changed_position {
             self.wait_reason = None;
@@ -243,15 +273,53 @@ impl CoreRuntime {
             self.wait_reason = Some(wait_reason);
         }
     }
+
+    fn drain_inline_event_tags_without_wait(&mut self) {
+        let drain = match self.interpreter.drain_queued_tags_only() {
+            Ok(drain) => drain,
+            Err(error) => {
+                crate::core_error!("解释器错误: {error:?}");
+                self.finish_inline_event_frame(false);
+                return;
+            }
+        };
+        self.finish_inline_event_frame(drain.changed_position);
+        if let Some(event) = drain.wait {
+            self.wait_reason = Some(match event {
+                Event::Wait { reason } => reason,
+                _ => WaitReason::Generic,
+            });
+        }
+    }
+
+    fn finish_inline_event_frame(&mut self, changed_position: bool) {
+        if changed_position {
+            self.refresh_inline_event_frame();
+            return;
+        }
+        let Some(frame) = self.active_inline_event_frame.take() else {
+            return;
+        };
+        if let Err(error) =
+            self.interpreter
+                .restore_position(&frame.script, frame.line, frame.stack)
+        {
+            crate::core_error!("移除未使用的事件返回帧失败: {error:?}");
+        }
+    }
 }
 
 fn timed_wait_accepts_click(input: i32, clicked: bool) -> bool {
     input == 1 && clicked
 }
 
+fn stop_wait_accepts_scripted_decide(scripted_decide: bool) -> bool {
+    scripted_decide
+}
+
 #[cfg(test)]
 mod tests {
-    use super::timed_wait_accepts_click;
+    use super::{stop_wait_accepts_scripted_decide, timed_wait_accepts_click};
 
     #[test]
     fn timed_wait_only_accepts_click_for_input_one() {
@@ -259,5 +327,11 @@ mod tests {
         assert!(timed_wait_accepts_click(1, true));
         assert!(!timed_wait_accepts_click(2, true));
         assert!(!timed_wait_accepts_click(1, false));
+    }
+
+    #[test]
+    fn stop_wait_only_accepts_a_scripted_decide_edge() {
+        assert!(stop_wait_accepts_scripted_decide(true));
+        assert!(!stop_wait_accepts_scripted_decide(false));
     }
 }

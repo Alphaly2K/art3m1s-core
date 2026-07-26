@@ -54,6 +54,13 @@ impl RuntimeControlState {
         self.skip_hold_frames = 0;
     }
 
+    fn reset_modes_for_load(&mut self) {
+        self.skip_active = false;
+        self.automode_active = false;
+        self.was_skipping = false;
+        self.reset_wait_flags();
+    }
+
     pub(super) fn mark_skip_wait_revealed(&mut self) {
         self.skip_wait_revealed = true;
     }
@@ -151,6 +158,15 @@ impl CoreRuntime {
         self.set_skip_mode(false);
     }
 
+    /// Loading a slot always leaves transient playback controls disabled.
+    /// These flags belong to the live runtime, not to the serialized script
+    /// state, and carrying them through a load makes the restored script race
+    /// through waits before its own UI cleanup can run.
+    pub(super) fn reset_control_modes_for_load(&mut self) {
+        self.control.reset_modes_for_load();
+        self.audio.set_skipping(false);
+    }
+
     pub(super) fn apply_exec_command(&mut self, command: &str, mode: Option<i32>) {
         match command {
             "automode" => {
@@ -236,5 +252,32 @@ impl CoreRuntime {
         );
         self.interpreter
             .set_variable("s.status.controlskip", Value::Int(0));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RuntimeControlState;
+
+    #[test]
+    fn load_reset_disables_transient_advance_modes() {
+        let mut control = RuntimeControlState {
+            skip_active: true,
+            automode_active: true,
+            auto_wait_elapsed_ms: 500,
+            skip_wait_revealed: true,
+            skip_hold_frames: 3,
+            was_skipping: true,
+            ..RuntimeControlState::default()
+        };
+
+        control.reset_modes_for_load();
+
+        assert!(!control.skip_active());
+        assert!(!control.automode_active());
+        assert_eq!(control.auto_wait_elapsed_ms, 0);
+        assert!(!control.skip_wait_revealed);
+        assert_eq!(control.skip_hold_frames, 0);
+        assert!(!control.was_skipping);
     }
 }

@@ -38,6 +38,10 @@ pub struct Layer {
 /// 游戏函数名或参数含义。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LayerEventHandler {
+    /// `mode=disable` only suspends dispatch; Artemis keeps the registered
+    /// callback and its parameters so a later `mode=enable` can restore it.
+    #[serde(default = "event_handler_enabled_by_default")]
+    pub enabled: bool,
     /// 命中时先就地执行的标签名（如 `"calllua"`）；`None` 表示不执行内联标签。
     pub handler: Option<String>,
     /// 跳转/调用目标脚本文件；与 jump/call 标签的 file 参数同义。
@@ -51,6 +55,10 @@ pub struct LayerEventHandler {
     /// lyevent 标签里除已知字段外的所有参数（function、name、key、se 等），
     /// 触发时原样塞进 handler 标签的参数表。
     pub params: HashMap<String, String>,
+}
+
+fn event_handler_enabled_by_default() -> bool {
+    true
 }
 
 impl Layer {
