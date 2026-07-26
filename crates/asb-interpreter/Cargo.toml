@@ -10,3 +10,9 @@ backend-luau = ["mlua/luau"]
 
 [dependencies]
 mlua = { version = "0.10", default-features = false, features = ["send", "serialize", "vendored"] }
+asb-decrypt = { git = "https://github.com/Alphaly2K/asb-decrypt" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+encoding_rs = "0.8"
+thiserror = "2.0"
+libc = "0.2"
