@@ -64,6 +64,10 @@ pub struct CallFrame {
 pub struct QueuedTagDrain {
     pub wait: Option<Event>,
     pub saw_return: bool,
+    /// 排队标签是否执行过 `[call]` 并建立了自己的返回帧。
+    pub saw_call: bool,
+    /// 排队标签是否执行过 `[jump]` 并把当前返回帧交给跳转目标。
+    pub saw_jump: bool,
     pub changed_position: bool,
 }
 
@@ -234,6 +238,8 @@ pub struct Interpreter {
     /// 让 `advance_line()` 对排队来源的 Wait 退化为空操作。
     last_wait_from_queue: bool,
     last_flush_saw_return: bool,
+    last_flush_saw_call: bool,
+    last_flush_saw_jump: bool,
     last_flush_changed_position: bool,
     /// 当前指令是否经由 `TagResult::Jump` **跳转到达**（而非顺序执行到达）。
     ///
@@ -300,8 +306,8 @@ fn json_to_lua_value(lua: &Lua, value: serde_json::Value) -> mlua::Result<mlua::
 fn lua_integer_value(value: i64) -> mlua::Value {
     #[cfg(feature = "backend-luau")]
     {
-        if let Ok(value) = mlua::Integer::try_from(value) {
-            mlua::Value::Integer(value)
+        if (i32::MIN as i64..=i32::MAX as i64).contains(&value) {
+            mlua::Value::Integer(value as mlua::Integer)
         } else {
             mlua::Value::Number(value as f64)
         }
@@ -501,6 +507,8 @@ impl Interpreter {
             engine_ctx,
             last_wait_from_queue: false,
             last_flush_saw_return: false,
+            last_flush_saw_call: false,
+            last_flush_saw_jump: false,
             last_flush_changed_position: false,
             arrived_by_jump: false,
             executed_lua_blocks: std::collections::HashSet::new(),
@@ -1139,6 +1147,7 @@ impl Interpreter {
                 // 改动 current_script/current_line 后继续抽干队列；flush 返回后
                 // step 主循环会从新位置读取指令。
                 TagResult::Jump(line) => {
+                    self.last_flush_saw_jump = true;
                     self.last_flush_changed_position = true;
                     self.arrived_by_jump = true;
                     self.current_line = line;
@@ -1149,6 +1158,7 @@ impl Interpreter {
                     continue;
                 }
                 TagResult::JumpExternal { file, label } => {
+                    self.last_flush_saw_jump = true;
                     self.last_flush_changed_position = true;
                     self.jump_to_external_script(&file, &label)?;
                     continue;
@@ -1159,6 +1169,7 @@ impl Interpreter {
                     return_line: _,
                     return_script,
                 } => {
+                    self.last_flush_saw_call = true;
                     self.last_flush_changed_position = true;
                     // 排队 call 与内联 call 的返回语义不同：
                     // 内联 call 时 `self.current_line` 指向 call 指令本身，handler
@@ -1804,6 +1815,8 @@ impl Interpreter {
     /// 只抽干 Lua/事件排入的标签队列，不在队列清空后继续执行主脚本。
     pub fn drain_queued_tags_only(&mut self) -> Result<QueuedTagDrain> {
         self.last_flush_saw_return = false;
+        self.last_flush_saw_call = false;
+        self.last_flush_saw_jump = false;
         self.last_flush_changed_position = false;
         let wait = match self.flush_tag_queue()? {
             Some(ExecutionResult::Wait(event)) => Some(event),
@@ -1817,6 +1830,8 @@ impl Interpreter {
         Ok(QueuedTagDrain {
             wait,
             saw_return: self.last_flush_saw_return,
+            saw_call: self.last_flush_saw_call,
+            saw_jump: self.last_flush_saw_jump,
             changed_position: self.last_flush_changed_position,
         })
     }

@@ -136,10 +136,10 @@ Flutter app 使用本地 dylib 时，修改 core 后需要重新复制并重启 
 
 ## 相关仓库
 
-| 仓库 | 职责 |
-|------|------|
-| `https://github.com/Alphaly2K/art3m1s-interpreter` | ASB/AST/IET 解释器、Lua bridge、tag/event 层 |
-| `https://github.com/Alphaly2K/pfs-upk-rust` | Flutter 宿主、UI、媒体播放、PFS/目录资源、沙箱存档 |
+| 仓库                                                         | 职责                                                          |
+|------------------------------------------------------------|-------------------------------------------------------------|
+| <s> `https://github.com/Alphaly2K/art3m1s-interpreter`</s> | <s>ASB/AST/IET 解释器、Lua bridge、tag/event 层</s> <br/>主线已并入此仓库 |
+| `https://github.com/Alphaly2K/pfs-upk-rust`                | Flutter 宿主、UI、媒体播放、PFS/目录资源、沙箱存档                            |
 
 ## 许可证
 [AGPLv3.0](LICENSE)

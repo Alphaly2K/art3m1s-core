@@ -269,7 +269,7 @@ impl CoreRuntime {
             script,
             line,
             stack,
-            committed: false,
+            claimed_by_jump: false,
         });
     }
 
@@ -542,8 +542,9 @@ fn event_dispatch_layers(
 #[cfg(test)]
 mod tests {
     use super::{
-        InlineEventFrame, detach_inline_event_marker, event_dispatch_layers, forced_drag_state,
-        global_push_absorbs_default_click, inline_event_marker_is_active, link_area_has_jump_target,
+        InlineEventFrame, event_dispatch_layers, forced_drag_state,
+        global_push_absorbs_default_click, inline_event_marker_is_active,
+        link_area_has_jump_target,
     };
     use crate::compositor::Compositor;
     use crate::text::render::LinkHitArea;
@@ -605,7 +606,7 @@ mod tests {
             script: "system/ui.asb".into(),
             line: 80,
             stack: vec![caller.clone()],
-            committed: false,
+            claimed_by_jump: false,
         };
         let marker = CallFrame {
             script: frame.script.clone(),
@@ -672,38 +673,6 @@ mod tests {
             label: Some("branch_a".into()),
             ..base
         }));
-    }
-
-    #[test]
-    fn detaching_committed_marker_preserves_nested_control_flow_frames() {
-        let caller = CallFrame {
-            script: "story.asb".into(),
-            return_line: 12,
-        };
-        let frame = InlineEventFrame {
-            script: "system/ui.asb".into(),
-            line: 80,
-            stack: vec![caller.clone()],
-            committed: true,
-        };
-        let nested_call = CallFrame {
-            script: "system/script.asb".into(),
-            return_line: 21,
-        };
-        let mut stack = vec![
-            caller.clone(),
-            CallFrame {
-                script: frame.script.clone(),
-                return_line: frame.line,
-            },
-            nested_call.clone(),
-        ];
-
-        assert!(detach_inline_event_marker(&frame, &mut stack));
-        assert_eq!(stack.len(), 2);
-        assert_eq!(stack[0].script, caller.script);
-        assert_eq!(stack[1].script, nested_call.script);
-        assert_eq!(stack[1].return_line, nested_call.return_line);
     }
 }
 

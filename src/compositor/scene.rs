@@ -272,6 +272,7 @@ impl Scene {
     /// 除图层直接绑定的 `file` 外，还包括：
     /// - file+mask 双图合成纹理的缓存名（否则每帧被 retain 驱逐重建）；
     /// - 单色图层的 1x1 纯色纹理缓存名。
+    /// - 中间渲染遮罩与 shader 附加纹理等仅由属性引用的资源。
     pub fn collect_files(&self) -> std::collections::HashSet<String> {
         let mut files = std::collections::HashSet::new();
         for layer in self.nodes.values() {
@@ -287,6 +288,28 @@ impl Scene {
                 }
             } else if let Some(rgba) = layer.solid_color {
                 files.insert(crate::render_pipeline::draw::solid_texture_name(rgba));
+            }
+
+            if let Some(mask) = layer.props.custom.get("intermediate_render_mask")
+                && !mask.is_empty()
+            {
+                files.insert(mask.clone());
+            }
+
+            if layer
+                .props
+                .shader
+                .as_deref()
+                .is_some_and(|shader| !shader.is_empty())
+            {
+                if let Some(reference) = layer.props.custom.get("mask") {
+                    collect_texture_reference(self, reference, &mut files);
+                }
+                for slot in &layer.props.shader_textures {
+                    if let Some(reference) = layer.props.custom.get(slot) {
+                        collect_texture_reference(self, reference, &mut files);
+                    }
+                }
             }
         }
         files
@@ -461,6 +484,23 @@ impl Scene {
     }
 }
 
+fn collect_texture_reference(
+    scene: &Scene,
+    reference: &str,
+    files: &mut std::collections::HashSet<String>,
+) {
+    if reference.is_empty() {
+        return;
+    }
+    let file = scene
+        .get(reference)
+        .and_then(|layer| layer.file.as_deref())
+        .unwrap_or(reference);
+    if !file.is_empty() {
+        files.insert(file.to_string());
+    }
+}
+
 /// 求点分 ID 的父 ID：`"1.0.-1"` → `"1.0"`，`"1"` → `None`。
 fn parent_id(id: &str) -> Option<&str> {
     id.rfind('.').map(|pos| &id[..pos])
@@ -549,18 +589,32 @@ mod tests {
     }
 
     #[test]
-    fn collect_files_includes_masked_and_solid_cache_names() {
+    fn collect_files_includes_render_only_texture_references() {
         let mut scene = Scene::new();
         scene.create("1", Some("fg".into()));
         scene.set_mask("1", Some("m".into()));
         scene.ensure("2");
         scene.set_solid_color("2", Some([1, 2, 3, 4]));
+        scene.ensure("3");
+        scene.set_props(
+            "3",
+            &HashMap::from([
+                ("intermediate_render_mask".into(), "face-mask".into()),
+                ("shader".into(), "effect".into()),
+                ("shadertexture".into(), "textureUser".into()),
+                ("textureUser".into(), "shader-user".into()),
+                ("mask".into(), "shader-mask".into()),
+            ]),
+        );
 
         let files = scene.collect_files();
         assert!(files.contains("fg"));
         assert!(files.contains("m"));
         assert!(files.contains(&crate::render_pipeline::draw::masked_texture_name("fg", "m")));
         assert!(files.contains(&crate::render_pipeline::draw::solid_texture_name([1, 2, 3, 4])));
+        assert!(files.contains("face-mask"));
+        assert!(files.contains("shader-user"));
+        assert!(files.contains("shader-mask"));
     }
 
     #[test]

@@ -330,12 +330,16 @@ impl CoreRuntime {
                 Ok(drain) => drain,
                 Err(e) => {
                     crate::core_error!("解释器错误: {e:?}");
-                    self.finish_inline_event_frame(false, false);
+                    self.finish_inline_event_frame(false, false, false);
                     self.wait_reason = Some(stop_reason);
                     return;
                 }
             };
-            self.finish_inline_event_frame(drain.changed_position, drain.wait.is_some());
+            self.finish_inline_event_frame(
+                drain.wait.is_some(),
+                drain.saw_call,
+                drain.saw_jump,
+            );
             should_resume |= drain.saw_return || drain.changed_position;
             if drain.wait.is_some() {
                 self.interpreter.advance_line();
@@ -361,12 +365,16 @@ impl CoreRuntime {
             Ok(drain) => drain,
             Err(e) => {
                 crate::core_error!("解释器错误: {e:?}");
-                self.finish_inline_event_frame(false, false);
+                self.finish_inline_event_frame(false, false, false);
                 self.wait_reason = Some(wait_reason);
                 return;
             }
         };
-        self.finish_inline_event_frame(drain.changed_position, drain.wait.is_some());
+        self.finish_inline_event_frame(
+            drain.wait.is_some(),
+            drain.saw_call,
+            drain.saw_jump,
+        );
 
         if drain.saw_return || drain.changed_position {
             self.wait_reason = None;
@@ -382,11 +390,15 @@ impl CoreRuntime {
             Ok(drain) => drain,
             Err(error) => {
                 crate::core_error!("解释器错误: {error:?}");
-                self.finish_inline_event_frame(false, false);
+                self.finish_inline_event_frame(false, false, false);
                 return;
             }
         };
-        self.finish_inline_event_frame(drain.changed_position, drain.wait.is_some());
+        self.finish_inline_event_frame(
+            drain.wait.is_some(),
+            drain.saw_call,
+            drain.saw_jump,
+        );
         if let Some(event) = drain.wait {
             self.wait_reason = Some(match event {
                 Event::Wait { reason } => reason,
@@ -395,40 +407,77 @@ impl CoreRuntime {
         }
     }
 
-    fn finish_inline_event_frame(&mut self, changed_position: bool, paused: bool) {
-        if changed_position {
-            if let Some(frame) = &mut self.active_inline_event_frame {
-                frame.committed = true;
-            }
-        }
-
-        self.refresh_inline_event_frame();
-        if self.active_inline_event_frame.is_none() {
-            return;
-        }
-        if paused || self.has_queued_tags() {
-            return;
-        }
-
-        let frame = self.active_inline_event_frame.take().unwrap();
-        let restore = if frame.committed {
-            let Some(script) = self.interpreter.current_script().map(str::to_string) else {
-                return;
-            };
-            let line = self.interpreter.current_line();
-            let mut stack = self.interpreter.call_stack();
-            super::input::detach_inline_event_marker(&frame, &mut stack);
-            (script, line, stack)
-        } else {
-            (frame.script, frame.line, frame.stack)
-        };
-        if let Err(error) = self
-            .interpreter
-            .restore_position(&restore.0, restore.1, restore.2)
-        {
+    fn finish_inline_event_frame(
+        &mut self,
+        paused: bool,
+        saw_queued_call: bool,
+        saw_queued_jump: bool,
+    ) {
+        let has_queued_tags = self.has_queued_tags();
+        if let Err(error) = settle_inline_event_frame(
+            &mut self.interpreter,
+            &mut self.active_inline_event_frame,
+            paused,
+            has_queued_tags,
+            saw_queued_call,
+            saw_queued_jump,
+        ) {
             crate::core_error!("移除未使用的事件返回帧失败: {error:?}");
         }
     }
+}
+
+fn settle_inline_event_frame(
+    interpreter: &mut asb_interpreter::Interpreter,
+    active_frame: &mut Option<super::InlineEventFrame>,
+    paused: bool,
+    has_queued_tags: bool,
+    saw_queued_call: bool,
+    saw_queued_jump: bool,
+) -> asb_interpreter::Result<()> {
+    let marker_active = active_frame.as_ref().is_some_and(|frame| {
+        super::input::inline_event_marker_is_active(frame, &interpreter.call_stack())
+    });
+    if !marker_active {
+        *active_frame = None;
+        return Ok(());
+    }
+
+    // A queued [call] from the original event has established a real return
+    // frame above the synthetic marker. Remove only the marker and leave that
+    // call frame intact. Once a queued [jump] has claimed the marker, however,
+    // calls made inside that helper are nested and must not remove it.
+    let claimed_by_jump = active_frame
+        .as_ref()
+        .is_some_and(|frame| frame.claimed_by_jump);
+    if saw_queued_call && !claimed_by_jump {
+        let frame = active_frame.take().unwrap();
+        let Some(script) = interpreter.current_script().map(str::to_string) else {
+            return Ok(());
+        };
+        let line = interpreter.current_line();
+        let mut stack = interpreter.call_stack();
+        super::input::detach_inline_event_marker(&frame, &mut stack);
+        return interpreter.restore_position(&script, line, stack);
+    }
+
+    // Lua UI helpers commonly enqueue a jump to system/script.asb
+    // (fn.push/popfuncXX). Remember that ownership across waits and queue
+    // drains: the helper may pause midway before its trailing [return].
+    if saw_queued_jump {
+        active_frame.as_mut().unwrap().claimed_by_jump = true;
+    }
+    if active_frame
+        .as_ref()
+        .is_some_and(|frame| frame.claimed_by_jump)
+        || paused
+        || has_queued_tags
+    {
+        return Ok(());
+    }
+
+    let frame = active_frame.take().unwrap();
+    interpreter.restore_position(&frame.script, frame.line, frame.stack)
 }
 
 fn timed_wait_accepts_click(input: i32, clicked: bool) -> bool {
@@ -467,10 +516,13 @@ fn wait_reason_is_input_wait(reason: Option<&WaitReason>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        stop_wait_accepts_scripted_decide, timed_wait_accepts_click, trans_input_skip_requested,
-        wait_reason_is_input_wait,
+        settle_inline_event_frame, stop_wait_accepts_scripted_decide, timed_wait_accepts_click,
+        trans_input_skip_requested, wait_reason_is_input_wait,
     };
+    use crate::runtime::InlineEventFrame;
     use asb_interpreter::event::WaitReason;
+    use asb_interpreter::{CallFrame, CallbackResult, Event, ExecutionResult, InterpreterConfig};
+    use std::collections::HashMap;
 
     #[test]
     fn timed_wait_only_accepts_click_for_input_one() {
@@ -484,6 +536,155 @@ mod tests {
     fn stop_wait_only_accepts_a_scripted_decide_edge() {
         assert!(stop_wait_accepts_scripted_decide(true));
         assert!(!stop_wait_accepts_scripted_decide(false));
+    }
+
+    #[test]
+    fn queued_jump_returns_from_helper_to_waiting_story() {
+        let mut interpreter = asb_interpreter::Interpreter::new(InterpreterConfig::default());
+        interpreter
+            .load_script("story", "*main\n[wait]\n")
+            .unwrap();
+        interpreter
+            .load_script("system/script.asb", "*popfunc01\n[return]\n")
+            .unwrap();
+        interpreter.set_callback(|event| match event {
+            Event::Wait { .. } => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        interpreter.start("story", "main").unwrap();
+        assert!(matches!(
+            interpreter.run().unwrap(),
+            ExecutionResult::Wait(_)
+        ));
+
+        let line = interpreter.current_line();
+        let mut stack = interpreter.call_stack();
+        stack.push(CallFrame {
+            script: "story".into(),
+            return_line: line,
+        });
+        interpreter
+            .restore_position("story", line, stack)
+            .unwrap();
+        let mut frame = Some(InlineEventFrame {
+            script: "story".into(),
+            line,
+            stack: Vec::new(),
+            claimed_by_jump: false,
+        });
+        interpreter.engine_context().lock().unwrap().tag_queue.push((
+            "jump".into(),
+            HashMap::from([
+                ("file".into(), "system/script.asb".into()),
+                ("label".into(), "popfunc01".into()),
+            ]),
+        ));
+
+        let drain = interpreter.drain_queued_tags_only().unwrap();
+        assert!(drain.changed_position);
+        assert!(drain.saw_jump);
+        assert!(!drain.saw_call);
+        settle_inline_event_frame(
+            &mut interpreter,
+            &mut frame,
+            drain.wait.is_some(),
+            false,
+            drain.saw_call,
+            drain.saw_jump,
+        )
+        .unwrap();
+        assert!(frame.is_some(), "helper jump must retain the return marker");
+        assert!(
+            frame.as_ref().unwrap().claimed_by_jump,
+            "helper jump must claim the marker across later queue drains"
+        );
+
+        settle_inline_event_frame(
+            &mut interpreter,
+            &mut frame,
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(
+            frame.is_some(),
+            "a paused helper must retain its marker after the queue empties"
+        );
+
+        assert!(matches!(
+            interpreter.run().unwrap(),
+            ExecutionResult::Wait(_)
+        ));
+        assert_eq!(interpreter.current_script(), Some("story"));
+        assert_eq!(interpreter.current_line(), line);
+        assert!(interpreter.call_stack().is_empty());
+    }
+
+    #[test]
+    fn queued_call_replaces_the_synthetic_event_return_frame() {
+        let mut interpreter = asb_interpreter::Interpreter::new(InterpreterConfig::default());
+        interpreter
+            .load_script("title", "*main\n[stop]\n")
+            .unwrap();
+        interpreter
+            .load_script("system/script.asb", "*estag01\n[return]\n")
+            .unwrap();
+        interpreter.set_callback(|event| match event {
+            Event::Wait { .. } => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        interpreter.start("title", "main").unwrap();
+        assert!(matches!(
+            interpreter.run().unwrap(),
+            ExecutionResult::Wait(_)
+        ));
+
+        let line = interpreter.current_line();
+        let mut stack = interpreter.call_stack();
+        stack.push(CallFrame {
+            script: "title".into(),
+            return_line: line,
+        });
+        interpreter
+            .restore_position("title", line, stack)
+            .unwrap();
+        let mut frame = Some(InlineEventFrame {
+            script: "title".into(),
+            line,
+            stack: Vec::new(),
+            claimed_by_jump: false,
+        });
+        interpreter.engine_context().lock().unwrap().tag_queue.push((
+            "call".into(),
+            HashMap::from([
+                ("file".into(), "system/script.asb".into()),
+                ("label".into(), "estag01".into()),
+            ]),
+        ));
+
+        let drain = interpreter.drain_queued_tags_only().unwrap();
+        assert!(drain.saw_call);
+        settle_inline_event_frame(
+            &mut interpreter,
+            &mut frame,
+            drain.wait.is_some(),
+            false,
+            drain.saw_call,
+            drain.saw_jump,
+        )
+        .unwrap();
+
+        assert!(frame.is_none());
+        assert_eq!(interpreter.call_stack().len(), 1);
+        assert!(matches!(
+            interpreter.run().unwrap(),
+            ExecutionResult::Wait(_)
+        ));
+        assert_eq!(interpreter.current_script(), Some("title"));
+        assert_eq!(interpreter.current_line(), line);
+        assert!(interpreter.call_stack().is_empty());
     }
 
     #[test]

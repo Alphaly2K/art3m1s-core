@@ -1381,8 +1381,8 @@ fn lua_value_to_key(v: &mlua::Value) -> String {
 fn lua_integer_value(value: i64) -> mlua::Value {
     #[cfg(feature = "backend-luau")]
     {
-        if let Ok(value) = mlua::Integer::try_from(value) {
-            mlua::Value::Integer(value)
+        if (i32::MIN as i64..=i32::MAX as i64).contains(&value) {
+            mlua::Value::Integer(value as mlua::Integer)
         } else {
             mlua::Value::Number(value as f64)
         }

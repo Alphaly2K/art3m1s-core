@@ -50,7 +50,7 @@ struct InlineEventFrame {
     script: String,
     line: usize,
     stack: Vec<asb_interpreter::CallFrame>,
-    committed: bool,
+    claimed_by_jump: bool,
 }
 
 pub struct CoreRuntime {
