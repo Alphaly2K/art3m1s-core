@@ -55,6 +55,7 @@ dependencies = [
 [[package]]
 name = "asb-interpreter"
 version = "0.1.0"
+source = "git+https://github.com/Alphaly2K/art3m1s-interpreter#4db12f9837d68082e161438198765740580cd53f"
 dependencies = [
  "asb-decrypt",
  "encoding_rs",
