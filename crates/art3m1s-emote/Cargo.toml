@@ -1,6 +1,6 @@
 [package]
 name = "art3m1s-emote"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2024"
 
 [lib]
@@ -9,5 +9,5 @@ path = "src/lib.rs"
 [dependencies]
 
 [dev-dependencies]
-image = { version = "0.25.10", default-features = false, features = ["png"] }
+
 

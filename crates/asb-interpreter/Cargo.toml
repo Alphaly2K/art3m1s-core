@@ -1,6 +1,6 @@
 [package]
 name = "asb-interpreter"
-version = "0.1.0-alpha"
+version = "0.2.0"
 edition = "2024"
 
 [features]
@@ -9,10 +9,4 @@ backend-lua51 = ["mlua/lua51"]
 backend-luau = ["mlua/luau"]
 
 [dependencies]
-asb-decrypt = { git = "https://github.com/Alphaly2K/asb-decrypt" }
 mlua = { version = "0.10", default-features = false, features = ["send", "serialize", "vendored"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-encoding_rs = "0.8"
-thiserror = "2.0"
-libc = "0.2"
