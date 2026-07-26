@@ -12,13 +12,7 @@ impl CoreRuntime {
     }
 
     pub(super) fn dispatch_events(&mut self, events: &[Event]) {
-        if self.pending_text_translation.is_some() {
-            self.deferred_translation_events
-                .extend(events.iter().cloned());
-            return;
-        }
-
-        for (index, event) in events.iter().enumerate() {
+        for event in events {
             if matches!(event, Event::Exit) {
                 crate::core_info!("[runtime] Event::Exit received");
                 self.exit_requested.store(true, Ordering::SeqCst);
@@ -385,8 +379,7 @@ impl CoreRuntime {
 
             self.apply_media_event(event);
             if let Some(pending) = self.apply_text_event(event) {
-                self.begin_text_translation(pending, &events[index + 1..]);
-                break;
+                self.begin_text_translation(pending);
             }
             // 只有真正送入文本渲染器后才算本帧展示过剧情文本。
             if matches!(event, Event::ScenarioText { .. }) {

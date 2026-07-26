@@ -19,9 +19,6 @@ impl CoreRuntime {
         if self.pending_dialog.is_some() {
             return;
         }
-        if self.pending_text_translation.is_some() {
-            return;
-        }
         // onEnterFrame
         if let Err(e) = self.interpreter.fire_enter_frame() {
             crate::core_error!("onEnterFrame 错误: {e:?}");

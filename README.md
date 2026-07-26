@@ -79,9 +79,9 @@ Core 维护音视频逻辑状态、finish handler 和脚本同步点，但不包
 
 ### 文本翻译由宿主注入
 
-剧本文本在送入字形渲染器前调用 `art3m1s_register_text_inject_callback` 注册的宿主回调。回调返回非负字节数时同步替换文本，返回 `-1` 保持原文，返回 `-2` 则暂停脚本并通过 `text_translate` UI 命令请求异步翻译。宿主完成后调用 `art3m1s_runtime_submit_text_translation`；传空指针会按原文恢复，过期 serial 会被拒绝。
+剧本文本在送入字形渲染器前调用 `art3m1s_register_text_inject_callback` 注册的宿主回调。回调返回非负字节数时同步替换文本，返回 `-1` 保持原文，返回 `-2` 则立即显示原文并通过 `text_translate` UI 命令排入后台翻译，剧情事件、输入和动画不会等待网络。宿主完成后调用 `art3m1s_runtime_submit_text_translation`：core 会等目标层的逐字显示完成，再热替换仍位于同一页面的文本片段；换页后的迟到结果只进入宿主缓存，不会污染新页面。
 
-Flutter 宿主支持 JSON 字符串映射、`source`/`translation` 条目组成的 JSON 或 JSONL，以及“原文 TAB 译文”的 TSV。对照文件会优先于在线 API，在线结果按项目缓存；在线服务可选 OpenAI、Anthropic、DeepL、Google 翻译、百度翻译和有道翻译，各服务分别保存 endpoint、模型与凭据。全局设置选择翻译模式和 API 参数，每个项目另有独立启用开关。旧项目缺少该开关字段时默认关闭，第一版在线翻译配置会迁移为 OpenAI Chat Completions 配置。
+Flutter 宿主支持 JSON 字符串映射、`source`/`translation` 条目组成的 JSON 或 JSONL，以及“原文 TAB 译文”的 TSV。对照文件会优先于在线 API，在线结果按项目缓存；后台队列会合并重复文本，并按服务限制为 2 至 4 个并发异步 HTTP 请求。在线服务可选 OpenAI、Anthropic、DeepL、Google 翻译、百度翻译和有道翻译，各服务分别保存 endpoint、模型与凭据。全局设置选择翻译模式和 API 参数，每个项目另有独立启用开关。旧项目缺少该开关字段时默认关闭，第一版在线翻译配置会迁移为 OpenAI Chat Completions 配置。
 
 Ruby 由解释器按 `RubyStart(reading) -> ScenarioText(base) -> RubyEnd` 三个事件渲染。翻译链只替换中间的 base 文本，并把 reading 作为可选上下文交给支持提示词的服务；`RubyStart` / `RubyEnd` 保持原顺序，字形渲染器会基于译文范围重新计算注音位置。
 

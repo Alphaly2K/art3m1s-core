@@ -1,29 +1,29 @@
 use super::CoreRuntime;
 use crate::render_pipeline::draw::DrawCommand;
-use crate::text::render::{ScetweenConfig, TextRenderer};
+use crate::text::render::{ScetweenConfig, TextRenderer, TextSpanToken};
 use asb_interpreter::Event;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
+fn text_span_ready(
+    state: &crate::text::render::FontState,
+    span: &TextSpanToken,
+) -> Option<bool> {
+    let layer = state.layers.get(&span.layer_id)?;
+    (layer.generation == span.generation).then_some(!layer.reveal_pending)
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct PendingTextTranslation {
-    pub serial: u64,
-    source: String,
-    inline: bool,
-    resolution: Option<TextTranslationResolution>,
+    span: Option<TextSpanToken>,
+    translated: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-enum TextTranslationResolution {
-    Translated(String),
-    UseOriginal,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(super) struct PendingScenarioText {
     source: String,
-    inline: bool,
     ruby: Option<String>,
+    span: Option<TextSpanToken>,
 }
 
 /// backlog / message-tags 的进程级镜像，供解释器 `var system=get_backlog_size /
@@ -201,8 +201,9 @@ impl CoreRuntime {
         }
 
         // 剧本文本在光栅化前先过注入链（汉化补丁等），需在借用 renderer 前算好。
+        let mut background_request = None;
         let injected = match event {
-            Event::ScenarioText { content, inline } => {
+            Event::ScenarioText { content, .. } => {
                 let host_text = match crate::ffi::request_text_injection(content) {
                     crate::ffi::TextInjectResult::Unchanged => content.clone(),
                     crate::ffi::TextInjectResult::Replaced(text) => text,
@@ -219,11 +220,12 @@ impl CoreRuntime {
                                 .and_then(|layer| layer.open_ruby.as_ref())
                                 .map(|(_, text)| text.clone())
                         });
-                        return Some(PendingScenarioText {
+                        background_request = Some(PendingScenarioText {
                             source: content.clone(),
-                            inline: *inline,
                             ruby,
+                            span: None,
                         });
+                        content.clone()
                     }
                 };
                 Some(self.text_inject.run(&host_text))
@@ -231,13 +233,19 @@ impl CoreRuntime {
             _ => None,
         };
 
+        let mut tracked_span = None;
         let restored_face = {
             let Some(renderer) = self.text_renderer.as_mut() else {
                 return None;
             };
             match event {
                 Event::ScenarioText { content, inline } => {
-                    renderer.push_text(injected.as_deref().unwrap_or(content), *inline)
+                    let content = injected.as_deref().unwrap_or(content);
+                    if background_request.is_some() {
+                        tracked_span = renderer.push_text_tracked(content, *inline);
+                    } else {
+                        renderer.push_text(content, *inline);
+                    }
                 }
                 Event::FontSettings(settings) => renderer.apply_font_settings(settings),
                 Event::FontInit => renderer.font_init(),
@@ -365,83 +373,114 @@ impl CoreRuntime {
             }
             _ => {}
         }
-        None
+        if let Some(request) = background_request.as_mut() {
+            request.span = tracked_span;
+        }
+        background_request
     }
 
-    pub(super) fn begin_text_translation(
-        &mut self,
-        pending: PendingScenarioText,
-        deferred: &[Event],
-    ) {
+    pub(super) fn begin_text_translation(&mut self, pending: PendingScenarioText) {
         self.text_translation_serial = self.text_translation_serial.wrapping_add(1);
         let serial = self.text_translation_serial;
-        self.pending_text_translation = Some(PendingTextTranslation {
+        self.pending_text_translations.insert(
             serial,
-            source: pending.source.clone(),
-            inline: pending.inline,
-            resolution: None,
-        });
-        self.deferred_translation_events
-            .extend(deferred.iter().cloned());
+            PendingTextTranslation {
+                span: pending.span,
+                translated: None,
+            },
+        );
         crate::ffi::emit_ui_command(
             "text_translate",
             serde_json::json!({
                 "serial": serial,
                 "text": pending.source,
                 "ruby": pending.ruby,
+                "blocking": false,
             }),
         );
     }
 
     pub fn submit_text_translation(&mut self, serial: u64, translated: Option<&str>) -> bool {
-        let Some(pending) = self.pending_text_translation.as_mut() else {
-            crate::core_warn!("[translation] 收到结果时没有挂起文本 serial={serial}");
+        let Some(pending) = self.pending_text_translations.get_mut(&serial) else {
+            crate::core_debug!("[translation] 忽略过期结果 serial={serial}");
             return false;
         };
-        if pending.serial != serial {
-            crate::core_warn!(
-                "[translation] 忽略过期结果 serial={} current={}",
-                serial,
-                pending.serial
-            );
-            return false;
-        }
-        pending.resolution = Some(match translated {
-            Some(text) => TextTranslationResolution::Translated(text.to_string()),
-            None => TextTranslationResolution::UseOriginal,
-        });
+        let Some(translated) = translated else {
+            self.pending_text_translations.remove(&serial);
+            return true;
+        };
+        pending.translated = Some(translated.to_string());
         true
     }
 
-    pub(super) fn resume_pending_text_translation(&mut self) {
-        let Some(resolution) = self
-            .pending_text_translation
-            .as_mut()
-            .and_then(|pending| pending.resolution.take())
-        else {
+    /// 网络结果只在目标层逐字显示结束后落入字形缓冲，避免替换长度变化使
+    /// reveal_index 跳跃。页面已切换的结果直接丢弃视觉更新，宿主缓存仍保留。
+    pub(super) fn apply_ready_text_translations(&mut self) {
+        let Some(renderer) = self.text_renderer.as_ref() else {
+            self.pending_text_translations.clear();
             return;
         };
-        let Some(pending) = self.pending_text_translation.take() else {
-            return;
-        };
-        let text = match resolution {
-            TextTranslationResolution::Translated(text) => text,
-            TextTranslationResolution::UseOriginal => pending.source,
-        };
-        if let Some(renderer) = self.text_renderer.as_mut() {
-            renderer.push_text(&self.text_inject.run(&text), pending.inline);
+        let state = renderer.font_state();
+        let mut expired = Vec::new();
+        let mut ready = Vec::new();
+        for (&serial, pending) in &self.pending_text_translations {
+            if pending.translated.is_none() {
+                continue;
+            }
+            let Some(span) = pending.span.as_ref() else {
+                expired.push(serial);
+                continue;
+            };
+            match text_span_ready(state, span) {
+                Some(true) => ready.push(serial),
+                Some(false) => {}
+                None => expired.push(serial),
+            }
         }
-        self.scenario_text_shown = true;
+        for serial in expired {
+            self.pending_text_translations.remove(&serial);
+        }
+        for serial in ready {
+            self.apply_ready_text_translation(serial);
+        }
+    }
 
-        let deferred = std::mem::take(&mut self.deferred_translation_events);
-        if !deferred.is_empty() {
-            self.dispatch_events(&deferred);
+    fn apply_ready_text_translation(&mut self, serial: u64) {
+        let Some(pending) = self.pending_text_translations.remove(&serial) else {
+            return;
+        };
+        let (Some(text), Some(span), Some(renderer)) = (
+            pending.translated,
+            pending.span,
+            self.text_renderer.as_mut(),
+        ) else {
+            return;
+        };
+        let old_end = span.end;
+        let layer_id = span.layer_id.clone();
+        let generation = span.generation;
+        let Some(delta) = renderer.replace_text_span(&span, &self.text_inject.run(&text)) else {
+            crate::core_debug!("[translation] 页面已变化，译文仅保留在宿主缓存 serial={serial}");
+            return;
+        };
+        if delta != 0 {
+            for pending in self.pending_text_translations.values_mut() {
+                let Some(other) = pending.span.as_mut() else {
+                    continue;
+                };
+                if other.layer_id == layer_id
+                    && other.generation == generation
+                    && other.start >= old_end
+                {
+                    other.start = other.start.saturating_add_signed(delta);
+                    other.end = other.end.saturating_add_signed(delta);
+                }
+            }
         }
     }
 
     pub(super) fn clear_pending_text_translation(&mut self) {
-        self.pending_text_translation = None;
-        self.deferred_translation_events.clear();
+        self.pending_text_translations.clear();
     }
 
     /// 把当前活动消息层登记为合成器的默认消息层，并建立「消息层 ID → 场景图层
@@ -502,10 +541,35 @@ impl CoreRuntime {
 
 #[cfg(test)]
 mod tests {
-    use super::{BacklogSnapshot, BACKLOG_SNAPSHOT, backlog_snapshot, build_backlog_snapshot};
+    use super::{
+        BACKLOG_SNAPSHOT, BacklogSnapshot, backlog_snapshot, build_backlog_snapshot,
+        text_span_ready,
+    };
     use crate::text::GlyphTextRenderer;
-    use crate::text::render::TextRenderer;
+    use crate::text::render::{FontState, TextRenderer, TextSpanToken};
     use std::collections::HashMap;
+
+    #[test]
+    fn async_translation_waits_for_reveal_and_expires_after_page_change() {
+        let mut state = FontState::new();
+        let layer = state.active_layer_mut();
+        layer.reveal_pending = true;
+        let span = TextSpanToken {
+            layer_id: layer.id.clone(),
+            generation: layer.generation,
+            start: 0,
+            end: 0,
+            page_tag_index: 0,
+            font_size: 40.0,
+            font_face: None,
+        };
+
+        assert_eq!(text_span_ready(&state, &span), Some(false));
+        state.active_layer_mut().reveal_pending = false;
+        assert_eq!(text_span_ready(&state, &span), Some(true));
+        state.active_layer_mut().clear_page();
+        assert_eq!(text_span_ready(&state, &span), None);
+    }
 
     #[test]
     fn snapshot_accessors_follow_pseudo_array_conventions() {

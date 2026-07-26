@@ -65,8 +65,7 @@ pub struct CoreRuntime {
     text_renderer: Option<Box<dyn TextRenderer>>,
     /// core 内部文本注入链。宿主 FFI 注入在该链之前执行。
     text_inject: crate::text::InjectionChain,
-    pending_text_translation: Option<text::PendingTextTranslation>,
-    deferred_translation_events: Vec<Event>,
+    pending_text_translations: HashMap<u64, text::PendingTextTranslation>,
     text_translation_serial: u64,
     audio: Box<dyn AudioBackend>,
     video: Box<dyn VideoBackend>,
@@ -168,8 +167,7 @@ impl CoreRuntime {
             compositor,
             text_renderer: None,
             text_inject: crate::text::InjectionChain::new(),
-            pending_text_translation: None,
-            deferred_translation_events: Vec::new(),
+            pending_text_translations: HashMap::new(),
             text_translation_serial: 0,
             audio,
             video,
@@ -236,8 +234,6 @@ impl CoreRuntime {
             .note_frame_for_push(std::time::Instant::now());
         // getScriptStatus 的引擎状态自动迁移 + setScriptStatus(0) 的唤醒语义。
         self.sync_script_status();
-        self.resume_pending_text_translation();
-
         let clicked = self.process_pointer_handlers();
         self.advance_script(clicked, delta_ms);
 
@@ -266,6 +262,7 @@ impl CoreRuntime {
         self.dispatch_tween_handlers();
         self.emote.lock().unwrap().advance(delta_ms);
         self.advance_text(delta_ms);
+        self.apply_ready_text_translations();
         self.advance_media_and_enqueue_finish_handlers(delta_ms);
 
         let pixels = self.render_current_frame();

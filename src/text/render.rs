@@ -470,6 +470,20 @@ pub struct GlyphInfo {
     pub advance_x: f32,
 }
 
+/// 一段已经写入消息层的文本位置，用于后台翻译完成后的非阻塞替换。
+///
+/// `generation` 随消息层清页递增，因此网络请求迟到时不会把译文写入下一页。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextSpanToken {
+    pub layer_id: String,
+    pub generation: u64,
+    pub start: usize,
+    pub end: usize,
+    pub page_tag_index: usize,
+    pub font_size: f32,
+    pub font_face: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // 字体度量
 // ---------------------------------------------------------------------------
@@ -593,6 +607,8 @@ pub struct MessageLayer {
     pub font_stack: Vec<FontDesc>,
     /// 该层的文本缓存
     pub text_buffer: Vec<GlyphInfo>,
+    /// 当前页面代次；每次清页递增，用于拒绝迟到的异步文本更新。
+    pub generation: u64,
     /// 逐字显示：当前已揭示的字符数
     pub reveal_index: usize,
     /// 逐字显示：本层的新文本是否正在等待揭示
@@ -634,6 +650,7 @@ impl MessageLayer {
             font: FontDesc::default(),
             font_stack: Vec::new(),
             text_buffer: Vec::new(),
+            generation: 0,
             reveal_index: 0,
             reveal_pending: false,
             scetween: Vec::new(),
@@ -650,6 +667,7 @@ impl MessageLayer {
     /// 清空本页的文本与页内标记（换页/切层清缓冲时同步调用，
     /// 否则 link/ruby 区间与再现标签会指向已清空的缓冲）。
     pub fn clear_page(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
         self.text_buffer.clear();
         self.links.clear();
         self.rubies.clear();
@@ -1024,6 +1042,17 @@ pub trait TextRenderer {
 
     /// 追加一段剧情文本。
     fn push_text(&mut self, content: &str, inline: bool);
+
+    /// 追加文本并返回可供异步替换的稳定位置。非字形后端可只追加并返回 None。
+    fn push_text_tracked(&mut self, content: &str, inline: bool) -> Option<TextSpanToken> {
+        self.push_text(content, inline);
+        None
+    }
+
+    /// 替换仍位于当前页面的文本片段，返回字形数量变化量。
+    fn replace_text_span(&mut self, _span: &TextSpanToken, _content: &str) -> Option<isize> {
+        None
+    }
 
     /// 文本换行。
     fn push_line_break(&mut self);

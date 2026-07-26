@@ -216,8 +216,9 @@ macro_rules! core_error {
 // 汉化/本地化补丁入口：宿主注册回调后，每段剧本文本在光栅化前都会先经过它。
 // 协议：`text` 为原文（UTF-8，NUL 结尾）；替换文本写入 `buf`（UTF-8，不含
 // NUL，最多 `buf_cap` 字节），返回写入的字节数；-1 表示不替换，-2 表示
-// 宿主需要异步翻译。异步请求随后经 ui_command 的 `text_translate` 下发，
-// 完成后由 `art3m1s_runtime_submit_text_translation` 回填。
+// 宿主需要后台翻译。core 会立即显示原文并继续派发事件，再经 ui_command 的
+// `text_translate` 下发请求；完成后由 `art3m1s_runtime_submit_text_translation`
+// 尝试热替换仍位于当前页面、且已完成逐字显示的文本片段。
 
 type TextInjectCallback =
     unsafe extern "C" fn(text: *const c_char, buf: *mut u8, buf_cap: c_int) -> c_int;
@@ -239,7 +240,7 @@ pub unsafe extern "C" fn art3m1s_register_text_inject_callback(cb: TextInjectCal
     *TEXT_INJECT_CB.lock().unwrap() = Some(cb);
 }
 
-/// 把一段文本交给宿主注入回调，并保留异步 pending 状态。
+/// 把一段文本交给宿主注入回调；Pending 只表示排队，不阻塞 runtime。
 pub fn request_text_injection(text: &str) -> TextInjectResult {
     let Some(cb) = *TEXT_INJECT_CB.lock().unwrap() else {
         return TextInjectResult::Unchanged;
@@ -717,6 +718,46 @@ pub unsafe extern "C" fn art3m1s_runtime_load_project_bytes(
             -1
         }
     }
+}
+
+/// Headless 探测游戏 caption（导入时用；见 [`crate::probe_caption_from_bytes`]）。
+/// 只跑解释器到发出第一个 `[caption]` 即停，不建 GL/compositor，近乎瞬时。把 caption 的
+/// UTF-8 写入 `out_buf`（≤`out_cap`），返回写入字节数；无 caption / 缓冲不足 / 出错返回 0。
+/// 宿主须在调用前把文件供给（目录/pfs）指向该游戏，否则 boot 脚本读不到直接返回 0。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_probe_caption(
+    ini_content: *const u8,
+    ini_len: usize,
+    platform: *const c_char,
+    out_buf: *mut u8,
+    out_cap: c_int,
+) -> c_int {
+    if ini_content.is_null() || platform.is_null() || out_buf.is_null() || out_cap <= 0 {
+        return 0;
+    }
+    let ini = unsafe { std::slice::from_raw_parts(ini_content, ini_len) };
+    let Ok(plat) = (unsafe { std::ffi::CStr::from_ptr(platform).to_str() }) else {
+        return 0;
+    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::probe_caption_from_bytes(ini, plat)
+    }));
+    let caption = match result {
+        Ok(Some(c)) => c,
+        Ok(None) => return 0,
+        Err(panic_info) => {
+            core_error!("art3m1s_probe_caption panicked: {}", panic_msg(&panic_info));
+            return 0;
+        }
+    };
+    let bytes = caption.as_bytes();
+    if bytes.is_empty() || bytes.len() > out_cap as usize {
+        return 0;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
+    }
+    bytes.len() as c_int
 }
 
 #[cfg(feature = "gl-backend")]

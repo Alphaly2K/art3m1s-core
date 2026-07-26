@@ -6,7 +6,7 @@ use crate::render_pipeline::draw::{
 use crate::text::backlog::{BacklogPage, BacklogTag};
 use crate::text::render::{
     ClickWaitIconPlacement, FontState, GlyphIconConfig, GlyphInfo, LinkHitArea, LinkRange,
-    RubyRange, ScetweenConfig, TextLayoutConfig, TextRenderer,
+    RubyRange, ScetweenConfig, TextLayoutConfig, TextRenderer, TextSpanToken,
 };
 use ab_glyph::{Font, FontRef, PxScale, PxScaleFont, ScaleFont};
 use glam::{Affine2, Vec2};
@@ -81,6 +81,53 @@ pub struct GlyphTextRenderer<'font> {
     cache: HashMap<(u16, u32), (u32, u32, u32, u32)>,
     /// atlas 里的纯白小块（link type=0 hover 强调的白色方形板用），惰性分配
     white_patch: Option<(u32, u32)>,
+}
+
+fn replace_layer_span(
+    layer: &mut crate::text::render::MessageLayer,
+    span: &TextSpanToken,
+    glyphs: Vec<GlyphInfo>,
+    content: &str,
+) -> Option<isize> {
+    if layer.generation != span.generation
+        || span.start > span.end
+        || span.end > layer.text_buffer.len()
+        || layer.font.face != span.font_face
+    {
+        return None;
+    }
+
+    let new_end = span.start + glyphs.len();
+    let delta = glyphs.len() as isize - (span.end - span.start) as isize;
+    let shift = |index: usize| -> usize {
+        if index <= span.start {
+            index
+        } else if index >= span.end {
+            index.saturating_add_signed(delta)
+        } else {
+            new_end
+        }
+    };
+
+    layer.text_buffer.splice(span.start..span.end, glyphs);
+    if let Some(tag) = layer.page_tags.get_mut(span.page_tag_index) {
+        *tag = BacklogTag::Text(content.to_string());
+    }
+    layer.reveal_index = shift(layer.reveal_index).min(layer.text_buffer.len());
+    if let Some((start, _)) = layer.open_ruby.as_mut() {
+        *start = shift(*start);
+    }
+    for ruby in &mut layer.rubies {
+        ruby.start = shift(ruby.start);
+        ruby.end = shift(ruby.end);
+    }
+    for link in &mut layer.links {
+        link.start = shift(link.start);
+        if let Some(end) = link.end.as_mut() {
+            *end = shift(*end);
+        }
+    }
+    Some(delta)
 }
 
 fn scaled<'a>(
@@ -502,6 +549,54 @@ impl TextRenderer for GlyphTextRenderer<'_> {
             layer.reveal_index = 0;
         }
         layer.text_buffer.extend(glyphs);
+    }
+
+    fn push_text_tracked(&mut self, content: &str, inline: bool) -> Option<TextSpanToken> {
+        let (layer_id, generation, start, page_tag_index, font_size, font_face) = {
+            let layer = self.state.active_layer_mut();
+            (
+                layer.id.clone(),
+                layer.generation,
+                layer.text_buffer.len(),
+                layer.page_tags.len(),
+                layer.font.size.unwrap_or(DEFAULT_FONT_SIZE),
+                layer.font.face.clone(),
+            )
+        };
+        self.push_text(content, inline);
+        let end = self.state.layers.get(&layer_id)?.text_buffer.len();
+        Some(TextSpanToken {
+            layer_id,
+            generation,
+            start,
+            end,
+            page_tag_index,
+            font_size,
+            font_face,
+        })
+    }
+
+    fn replace_text_span(&mut self, span: &TextSpanToken, content: &str) -> Option<isize> {
+        let valid = self
+            .state
+            .layers
+            .get(&span.layer_id)
+            .is_some_and(|layer| {
+                layer.generation == span.generation
+                    && span.start <= span.end
+                    && span.end <= layer.text_buffer.len()
+                    && layer.font.face == span.font_face
+            });
+        if !valid {
+            return None;
+        }
+
+        let glyphs: Vec<GlyphInfo> = content
+            .chars()
+            .filter_map(|c| self.rasterize_glyph(c, span.font_size))
+            .collect();
+        let layer = self.state.layers.get_mut(&span.layer_id)?;
+        replace_layer_span(layer, span, glyphs, content)
     }
 
     fn push_line_break(&mut self) {
@@ -1201,12 +1296,15 @@ impl TextRenderer for GlyphTextRenderer<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        layout_glyphs, link_line_rects, ruby_positions, scetween_char_offset, shuffled_order,
-        GlyphTextRenderer,
+        GlyphTextRenderer, layout_glyphs, link_line_rects, replace_layer_span, ruby_positions,
+        scetween_char_offset, shuffled_order,
     };
     use crate::render_pipeline::draw::TextureId;
     use crate::text::backlog::BacklogTag;
-    use crate::text::render::{GlyphInfo, ScetweenConfig, TextLayoutConfig, TextRenderer};
+    use crate::text::render::{
+        GlyphInfo, LinkRange, MessageLayer, RubyRange, ScetweenConfig, TextLayoutConfig,
+        TextRenderer, TextSpanToken,
+    };
     use std::collections::HashMap;
 
     /// 构造一个测试字形：宽度与步进均可指定。
@@ -1237,6 +1335,86 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn async_replacement_shifts_reveal_ruby_and_link_ranges() {
+        let mut layer = MessageLayer::new("adv".into());
+        layer.text_buffer = glyphs("abcde");
+        layer.reveal_index = layer.text_buffer.len();
+        layer.reveal_pending = false;
+        layer.page_tags.push(BacklogTag::Text("bc".into()));
+        layer.rubies.push(RubyRange {
+            start: 1,
+            end: 4,
+            text: "ruby".into(),
+            size: 10.0,
+            glyphs: Vec::new(),
+        });
+        layer.links.push(LinkRange {
+            start: 3,
+            end: Some(5),
+            file: None,
+            label: Some("next".into()),
+            link_type: 0,
+            color: None,
+            shadow_color: None,
+            outline_color: None,
+            hovered: false,
+        });
+        let span = TextSpanToken {
+            layer_id: "adv".into(),
+            generation: layer.generation,
+            start: 1,
+            end: 3,
+            page_tag_index: 0,
+            font_size: 40.0,
+            font_face: None,
+        };
+
+        assert_eq!(
+            replace_layer_span(&mut layer, &span, glyphs("WXYZ"), "WXYZ"),
+            Some(2)
+        );
+        let text: String = layer
+            .text_buffer
+            .iter()
+            .map(|glyph| glyph.character.as_str())
+            .collect();
+        assert_eq!(text, "aWXYZde");
+        assert_eq!(layer.reveal_index, layer.text_buffer.len());
+        assert!(!layer.reveal_pending, "完成后的逐字状态不得重新开始");
+        assert_eq!((layer.rubies[0].start, layer.rubies[0].end), (1, 6));
+        assert_eq!((layer.links[0].start, layer.links[0].end), (5, Some(7)));
+        assert_eq!(layer.page_tags, vec![BacklogTag::Text("WXYZ".into())]);
+    }
+
+    #[test]
+    fn async_replacement_rejects_a_previous_page_generation() {
+        let mut layer = MessageLayer::new("adv".into());
+        layer.text_buffer = glyphs("old");
+        let span = TextSpanToken {
+            layer_id: "adv".into(),
+            generation: layer.generation,
+            start: 0,
+            end: 3,
+            page_tag_index: 0,
+            font_size: 40.0,
+            font_face: None,
+        };
+        layer.clear_page();
+        layer.text_buffer = glyphs("new");
+
+        assert_eq!(
+            replace_layer_span(&mut layer, &span, glyphs("late"), "late"),
+            None
+        );
+        let text: String = layer
+            .text_buffer
+            .iter()
+            .map(|glyph| glyph.character.as_str())
+            .collect();
+        assert_eq!(text, "new");
     }
 
     #[test]
