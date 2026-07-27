@@ -597,6 +597,8 @@ impl LinkHitArea {
 #[derive(Debug, Clone)]
 pub struct MessageLayer {
     pub id: String,
+    /// `chgmsg layered=1` 时作为图像层参与场景树；缺省及 `layered=0` 时为独立消息层。
+    pub layered: bool,
     pub left: f32,
     pub top: f32,
     pub width: f32,
@@ -643,6 +645,7 @@ impl MessageLayer {
     pub fn new(id: String) -> Self {
         Self {
             id,
+            layered: false,
             left: 0.0,
             top: 0.0,
             width: 0.0,
@@ -1008,6 +1011,11 @@ pub trait TextRenderer {
 
     /// 当前消息层的逻辑字体文件，用于消息层/字体栈恢复后同步光栅化字体。
     fn active_font_face(&self) -> Option<&str>;
+
+    /// 文本渲染器当前持有、需要跨帧保活的纹理名。
+    fn retained_texture_names(&self) -> Vec<String> {
+        Vec::new()
+    }
 
     /// 应用字体属性。
     fn apply_font_settings(&mut self, settings: &HashMap<String, String>);

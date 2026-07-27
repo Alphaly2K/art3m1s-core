@@ -116,16 +116,33 @@ fn build_backlog_snapshot(state: &crate::text::render::FontState) -> BacklogSnap
 /// 时清默认消息层。拆成自由函数便于用 Compositor 直接单测。
 fn apply_message_layer_binding(
     compositor: &mut crate::compositor::Compositor,
-    active: Option<String>,
+    active: Option<(String, bool)>,
 ) {
     match active {
-        Some(message_id) => {
-            compositor.set_message_layer_binding(&message_id, &message_id);
+        Some((message_id, layered)) => {
+            let scene_id = message_layer_scene_id(&message_id, layered);
+            compositor.ensure_layer(&scene_id);
+            compositor.set_message_layer_binding(&message_id, &scene_id);
             compositor.set_default_message_layer(Some(message_id));
         }
         // 后续 [lyprop id="~"] 找不到默认层时按合成器约定忽略该操作。
         None => compositor.set_default_message_layer(None),
     }
+}
+
+fn message_layer_scene_id(message_id: &str, layered: bool) -> String {
+    if layered {
+        return message_id.to_string();
+    }
+    let mut encoded = String::with_capacity(
+        crate::compositor::scene::MESSAGE_LAYER_OVERLAY_PREFIX.len() + message_id.len() * 2,
+    );
+    encoded.push_str(crate::compositor::scene::MESSAGE_LAYER_OVERLAY_PREFIX);
+    for byte in message_id.as_bytes() {
+        use std::fmt::Write;
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
 }
 
 impl CoreRuntime {
@@ -183,12 +200,36 @@ impl CoreRuntime {
     }
 
     pub(super) fn build_text_commands(&mut self) -> HashMap<String, Vec<DrawCommand>> {
-        let Some(renderer) = self.text_renderer.as_mut() else {
-            return HashMap::new();
+        let (commands, layered) = {
+            let Some(renderer) = self.text_renderer.as_mut() else {
+                return HashMap::new();
+            };
+            // 不再在这里调 advance_reveal(0)——那会把 reveal_index 重置为 1。
+            // advance_reveal 只在 advance_text 里每帧调一次。
+            let commands = renderer.build_text_commands(&mut self.texture_provider);
+            let layered = commands
+                .keys()
+                .map(|id| {
+                    let is_layered = renderer
+                        .font_state()
+                        .layers
+                        .get(id)
+                        .is_some_and(|layer| layer.layered);
+                    (id.clone(), is_layered)
+                })
+                .collect::<HashMap<_, _>>();
+            (commands, layered)
         };
-        // 不再在这里调 advance_reveal(0)——那会把 reveal_index 重置为 1。
-        // advance_reveal 只在 advance_text 里每帧调一次。
-        renderer.build_text_commands(&mut self.texture_provider)
+
+        let mut remapped = HashMap::<String, Vec<DrawCommand>>::new();
+        for (message_id, layer_commands) in commands {
+            let scene_id = message_layer_scene_id(
+                &message_id,
+                layered.get(&message_id).copied().unwrap_or(false),
+            );
+            remapped.entry(scene_id).or_default().extend(layer_commands);
+        }
+        remapped
     }
 
     pub(super) fn apply_text_event(&mut self, event: &Event) -> Option<PendingScenarioText> {
@@ -249,13 +290,9 @@ impl CoreRuntime {
                 Event::FontInit => renderer.font_init(),
                 Event::FontClose => renderer.font_pop(),
                 Event::FontDefault(settings) => renderer.font_default(settings),
-                // TODO(chgmsg): stack=0 时不应把前一设置压入消息层堆栈；
-                // stack=0 不压消息层堆栈（防存档膨胀）；layered 分层语义暂未实现。
-                Event::MessageLayerSwitch { id, stack, .. } => {
-                    if let Some(layer_id) = id {
-                        self.compositor.ensure_layer(layer_id);
-                    }
+                Event::MessageLayerSwitch { id, stack, layered } => {
                     renderer.switch_message_layer(id.as_deref(), *stack);
+                    renderer.font_state_mut().active_layer_mut().layered = *layered == Some(1);
                     // 消息层切换后的 lyprop `~` 绑定在 renderer 借用结束后统一处理
                     // （见函数末尾 sync_message_layer_binding）。
                 }
@@ -482,13 +519,16 @@ impl CoreRuntime {
     }
 
     /// 把当前活动消息层登记为合成器的默认消息层，并建立「消息层 ID → 场景图层
-    /// ID」映射。消息层与场景图层此处同名（MessageLayerSwitch 分支已 ensure_layer
-    /// 出同名场景层），故绑定为 id→id；将来若解耦可在此改写映射目标。
+    /// ID」映射。分层消息层绑定同名图像层；独立消息层绑定到内部顶层节点。
     pub(super) fn sync_message_layer_binding(&mut self) {
         let Some(renderer) = self.text_renderer.as_ref() else {
             return;
         };
-        let active = renderer.font_state().active_layer.clone();
+        let state = renderer.font_state();
+        let active = state.active_layer.as_ref().map(|id| {
+            let layered = state.layers.get(id).is_some_and(|layer| layer.layered);
+            (id.clone(), layered)
+        });
         apply_message_layer_binding(&mut self.compositor, active);
     }
 
@@ -525,27 +565,73 @@ impl CoreRuntime {
         let Some(renderer) = self.text_renderer.as_mut() else {
             return;
         };
-        match crate::load_font_ffi(face).and_then(|bytes| renderer.set_font_bytes(bytes)) {
-            Ok(()) => {
-                crate::core_info!("[text] 已加载脚本字体: {face}");
-                self.loaded_font_face = Some(face.to_string());
-            }
-            Err(error) => {
-                crate::core_warn!("[text] 脚本字体加载失败 {face}: {error}");
+        let mut errors = Vec::new();
+        for candidate in std::iter::once(face.to_string()).chain(font_fallback_candidates(face)) {
+            match crate::load_font_ffi(&candidate).and_then(|bytes| renderer.set_font_bytes(bytes))
+            {
+                Ok(()) => {
+                    if candidate == face {
+                        crate::core_info!("[text] 已加载脚本字体: {face}");
+                    } else {
+                        crate::core_info!("[text] 字体回退: {face} -> {candidate}");
+                    }
+                    // 记录脚本请求的逻辑字体名，避免每次 [font] 都重复探测缺失实体。
+                    self.loaded_font_face = Some(face.to_string());
+                    return;
+                }
+                Err(error) => errors.push(format!("{candidate}: {error}")),
             }
         }
+        crate::core_warn!("[text] 脚本字体加载失败 {face}: {}", errors.join("; "));
     }
+}
+
+pub(super) fn font_fallback_candidates(face: &str) -> Vec<String> {
+    let (stem, extension) = face.rsplit_once('.').unwrap_or((face, ""));
+    let lower = stem.to_ascii_lowercase();
+    for separator in ['-', '_'] {
+        let suffix = format!("{separator}medium");
+        if lower.ends_with(&suffix) {
+            let family = &stem[..stem.len() - suffix.len()];
+            let extension = if extension.is_empty() {
+                String::new()
+            } else {
+                format!(".{extension}")
+            };
+            return ["regular", "bold"]
+                .into_iter()
+                .map(|weight| format!("{family}{separator}{weight}{extension}"))
+                .collect();
+        }
+    }
+    Vec::new()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         BACKLOG_SNAPSHOT, BacklogSnapshot, backlog_snapshot, build_backlog_snapshot,
-        text_span_ready,
+        font_fallback_candidates, text_span_ready,
     };
     use crate::text::GlyphTextRenderer;
     use crate::text::render::{FontState, TextRenderer, TextSpanToken};
     use std::collections::HashMap;
+
+    #[test]
+    fn medium_font_fallbacks_stay_in_the_same_family() {
+        assert_eq!(
+            font_fallback_candidates("font/sourcehansans-medium.otf"),
+            vec![
+                "font/sourcehansans-regular.otf",
+                "font/sourcehansans-bold.otf"
+            ]
+        );
+        assert_eq!(
+            font_fallback_candidates("font/ui_medium.ttf"),
+            vec!["font/ui_regular.ttf", "font/ui_bold.ttf"]
+        );
+        assert!(font_fallback_candidates("font/story.otf").is_empty());
+    }
 
     #[test]
     fn async_translation_waits_for_reveal_and_expires_after_page_change() {
@@ -687,7 +773,7 @@ mod tests {
         }));
 
         // 切到消息层 mw 后接线绑定（等价 sync_message_layer_binding 读到 active="mw"）
-        apply_message_layer_binding(&mut c, Some("mw".to_string()));
+        apply_message_layer_binding(&mut c, Some(("mw".to_string(), true)));
 
         // `~mw` 应解析到场景图层 mw
         c.apply_event(&Event::Layer(LayerEvent::SetProperty {
@@ -706,6 +792,28 @@ mod tests {
     }
 
     #[test]
+    fn independent_message_layer_uses_overlay_scene_node() {
+        use super::{apply_message_layer_binding, message_layer_scene_id};
+        use crate::compositor::Compositor;
+        use asb_interpreter::Event;
+        use asb_interpreter::event::LayerEvent;
+
+        let mut c = Compositor::new();
+        apply_message_layer_binding(&mut c, Some(("1.80.mw.adv".to_string(), false)));
+        let overlay = message_layer_scene_id("1.80.mw.adv", false);
+
+        assert!(c.scene().get(&overlay).is_some());
+        assert!(c.scene().get("1.80").is_none());
+
+        c.apply_event(&Event::Layer(LayerEvent::SetProperty {
+            id: "~".into(),
+            property: "visible".into(),
+            value: "0".into(),
+        }));
+        assert_eq!(c.scene().get(&overlay).unwrap().props.visible, Some(false));
+    }
+
+    #[test]
     fn message_layer_binding_none_clears_default() {
         use super::apply_message_layer_binding;
         use crate::compositor::Compositor;
@@ -717,7 +825,7 @@ mod tests {
             id: "mw".into(),
             file: "mw_bg".into(),
         }));
-        apply_message_layer_binding(&mut c, Some("mw".to_string()));
+        apply_message_layer_binding(&mut c, Some(("mw".to_string(), true)));
         // 弹空活动消息层：清默认消息层，`~` 此后无目标（合成器忽略该操作）
         apply_message_layer_binding(&mut c, None);
         c.apply_event(&Event::Layer(LayerEvent::SetProperty {

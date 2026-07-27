@@ -22,14 +22,20 @@ const DEFAULT_FONT_SIZE: f32 = 40.0;
 const OUTLINE_OFFSETS: [(f32, f32); 4] = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)];
 
 struct Atlas {
+    name: String,
     rows: Vec<(u32, u32)>,
     cur: Vec<u32>,
     px: Vec<u8>,
     dirty: bool,
 }
 impl Atlas {
-    fn new() -> Self {
+    fn new(index: usize) -> Self {
         Self {
+            name: if index == 0 {
+                ATLAS_NAME.to_string()
+            } else {
+                format!("{ATLAS_NAME}/{index}")
+            },
             rows: vec![],
             cur: vec![],
             px: vec![0; (ATLAS_SZ * ATLAS_SZ * 4) as usize],
@@ -65,22 +71,23 @@ impl Atlas {
     }
     fn flush(&mut self, p: &mut dyn TextureProvider) -> Option<(TextureId, TextureInfo)> {
         if self.dirty {
-            if let Some(r) = p.upload_rgba(ATLAS_NAME, ATLAS_SZ, ATLAS_SZ, &self.px) {
+            if let Some(r) = p.upload_rgba(&self.name, ATLAS_SZ, ATLAS_SZ, &self.px) {
                 self.dirty = false;
                 return Some(r);
             }
         }
-        p.resolve(ATLAS_NAME)
+        p.resolve(&self.name)
     }
 }
 
 pub struct GlyphTextRenderer<'font> {
     state: FontState,
     font: Option<FontRef<'font>>,
-    atlas: Atlas,
-    cache: HashMap<(u16, u32), (u32, u32, u32, u32)>,
+    font_key: (usize, usize),
+    atlases: Vec<Atlas>,
+    cache: HashMap<(usize, usize, u16, u32), (usize, u32, u32, u32, u32)>,
     /// atlas 里的纯白小块（link type=0 hover 强调的白色方形板用），惰性分配
-    white_patch: Option<(u32, u32)>,
+    white_patch: Option<(usize, u32, u32)>,
 }
 
 fn replace_layer_span(
@@ -293,15 +300,32 @@ impl<'font> GlyphTextRenderer<'font> {
         Self {
             state: FontState::new(),
             font: None,
-            atlas: Atlas::new(),
+            font_key: (0, 0),
+            atlases: vec![Atlas::new(0)],
             cache: HashMap::new(),
             white_patch: None,
         }
     }
     pub fn set_font(&mut self, bytes: &'font [u8]) -> Result<(), String> {
         self.font = Some(FontRef::try_from_slice(bytes).map_err(|e| format!("{e}"))?);
-        self.cache.clear();
+        self.font_key = (bytes.as_ptr() as usize, bytes.len());
         Ok(())
+    }
+
+    fn alloc_atlas_region(&mut self, w: u32, h: u32) -> (usize, u32, u32) {
+        for (index, atlas) in self.atlases.iter_mut().enumerate() {
+            if let Some((x, y)) = atlas.alloc(w, h) {
+                return (index, x, y);
+            }
+        }
+        let index = self.atlases.len();
+        let mut atlas = Atlas::new(index);
+        let (x, y) = atlas
+            .alloc(w, h)
+            .expect("单个字形尺寸已在分配 atlas 前校验");
+        self.atlases.push(atlas);
+        crate::core_info!("[text] 字形 atlas 已扩展至 {} 页", self.atlases.len());
+        (index, x, y)
     }
 
     /// 光栅化单个字符（按字号 `sz`），写入 atlas 并返回字形信息。
@@ -310,58 +334,60 @@ impl<'font> GlyphTextRenderer<'font> {
     /// 未加载字体或字体不含该字形时返回 None。
     fn rasterize_glyph(&mut self, c: char, sz: f32) -> Option<GlyphInfo> {
         let sf = scaled(&self.font, PxScale::from(sz))?;
-        let q = sf.outline_glyph(sf.glyph_id(c).with_scale(sz))?;
+        let glyph_id = sf.glyph_id(c);
+        let q = sf.outline_glyph(glyph_id.with_scale(sz))?;
         let b = q.px_bounds();
         let w = b.width().ceil() as u32;
         let h = b.height().ceil() as u32;
-        let (ax, ay, aw, ah) = if w > 0 && h > 0 && w < ATLAS_SZ && h < ATLAS_SZ {
-            let k = (sf.glyph_id(c).0, sz as u32);
-            *self.cache.entry(k).or_insert_with(|| {
-                if let Some((x, y)) = self.atlas.alloc(w + 1, h + 1) {
-                    let mut g = vec![0u8; (w * h) as usize];
-                    q.draw(|px, py, v| {
-                        let ix = py as usize * w as usize + px as usize;
-                        if ix < g.len() {
-                            g[ix] = (v * 255.0) as u8;
-                        }
-                    });
-                    let rgba: Vec<u8> = g.iter().flat_map(|&a| [255u8, 255, 255, a]).collect();
-                    self.atlas.write(x, y, w, h, &rgba);
-                    (x, y, w, h)
-                } else {
-                    // atlas 满：该字形本次以零尺寸落缓存（不再重试）。
-                    crate::core_warn!("字形 atlas 已满，字符 {c:?} 无法光栅化");
-                    (0, 0, 0, 0)
-                }
-            })
+        let offset_y = sf.ascent() + b.min.y;
+        let advance_x = sf.h_advance(glyph_id.with_scale(sz).id);
+        let (page, ax, ay, aw, ah) = if w > 0 && h > 0 && w < ATLAS_SZ && h < ATLAS_SZ {
+            let k = (self.font_key.0, self.font_key.1, glyph_id.0, sz.to_bits());
+            if let Some(cached) = self.cache.get(&k).copied() {
+                cached
+            } else {
+                let (page, x, y) = self.alloc_atlas_region(w + 1, h + 1);
+                let mut g = vec![0u8; (w * h) as usize];
+                q.draw(|px, py, v| {
+                    let ix = py as usize * w as usize + px as usize;
+                    if ix < g.len() {
+                        g[ix] = (v * 255.0) as u8;
+                    }
+                });
+                let rgba: Vec<u8> = g.iter().flat_map(|&a| [255u8, 255, 255, a]).collect();
+                self.atlases[page].write(x, y, w, h, &rgba);
+                let cached = (page, x, y, w, h);
+                self.cache.insert(k, cached);
+                cached
+            }
         } else {
-            (0, 0, 0, 0)
+            (0, 0, 0, 0, 0)
         };
         Some(GlyphInfo {
             character: c.to_string(),
-            texture_id: TextureId(0),
+            texture_id: TextureId(page as u64),
             atlas_x: ax as f32,
             atlas_y: ay as f32,
             atlas_w: aw as f32,
             atlas_h: ah as f32,
             offset_x: b.min.x,
-            offset_y: sf.ascent() + b.min.y,
+            offset_y,
             width: w as f32,
             height: h as f32,
-            advance_x: sf.h_advance(sf.glyph_id(c).with_scale(sz).id),
+            advance_x,
         })
     }
 
     /// 确保 atlas 里有一块纯白像素（返回其中心坐标），
     /// 供 link type=0 的白色方形板加法合成强调使用。
-    fn ensure_white_patch(&mut self) -> Option<(u32, u32)> {
+    fn ensure_white_patch(&mut self) -> Option<(usize, u32, u32)> {
         if let Some(p) = self.white_patch {
             return Some(p);
         }
-        let (x, y) = self.atlas.alloc(4, 4)?;
-        self.atlas.write(x, y, 4, 4, &[255u8; 4 * 4 * 4]);
+        let (page, x, y) = self.alloc_atlas_region(4, 4);
+        self.atlases[page].write(x, y, 4, 4, &[255u8; 4 * 4 * 4]);
         // 取内缩 1px 的中心点，避免采样到邻近字形
-        let p = (x + 1, y + 1);
+        let p = (page, x + 1, y + 1);
         self.white_patch = Some(p);
         Some(p)
     }
@@ -383,6 +409,13 @@ impl TextRenderer for GlyphTextRenderer<'_> {
             .get(id)
             .and_then(|layer| layer.font.face.as_deref())
             .or(self.state.default_font.face.as_deref())
+    }
+
+    fn retained_texture_names(&self) -> Vec<String> {
+        self.atlases
+            .iter()
+            .map(|atlas| atlas.name.clone())
+            .collect()
     }
 
     fn apply_font_settings(&mut self, s: &HashMap<String, String>) {
@@ -831,10 +864,15 @@ impl TextRenderer for GlyphTextRenderer<'_> {
         if any_type0_hover {
             self.ensure_white_patch();
         }
-        let Some((tex, _)) = self.atlas.flush(p) else {
+        let textures: Vec<Option<(TextureId, TextureInfo)>> = self
+            .atlases
+            .iter_mut()
+            .map(|atlas| atlas.flush(p))
+            .collect();
+        if textures.iter().all(Option::is_none) {
             crate::core_warn!("文本 atlas 纹理不可用，本帧文本不绘制");
             return HashMap::new();
-        };
+        }
         let mut out: HashMap<String, Vec<DrawCommand>> = HashMap::new();
 
         let lids: Vec<String> = self.state.layers.keys().cloned().collect();
@@ -924,6 +962,10 @@ impl TextRenderer for GlyphTextRenderer<'_> {
                 }
 
                 if g.atlas_w > 0.0 && g.atlas_h > 0.0 {
+                    let Some((tex, _)) = textures.get(g.texture_id.0 as usize).copied().flatten()
+                    else {
+                        continue;
+                    };
                     let clip = ClipRect {
                         uv_offset: [g.atlas_x / ATLAS_SZ as f32, g.atlas_y / ATLAS_SZ as f32],
                         uv_scale: [g.atlas_w / ATLAS_SZ as f32, g.atlas_h / ATLAS_SZ as f32],
@@ -1033,6 +1075,10 @@ impl TextRenderer for GlyphTextRenderer<'_> {
                     if g.atlas_w <= 0.0 || g.atlas_h <= 0.0 {
                         continue;
                     }
+                    let Some((tex, _)) = textures.get(g.texture_id.0 as usize).copied().flatten()
+                    else {
+                        continue;
+                    };
                     v.push(DrawCommand {
                         texture: tex,
                         size: TextureInfo {
@@ -1064,7 +1110,10 @@ impl TextRenderer for GlyphTextRenderer<'_> {
             }
 
             // ── link type=0 hover 强调：白色方形板加法合成叠加 ──
-            if links_enabled && let Some((wx, wy)) = self.white_patch {
+            if links_enabled
+                && let Some((page, wx, wy)) = self.white_patch
+                && let Some((tex, _)) = textures.get(page).copied().flatten()
+            {
                 for link in ly.links.iter().filter(|k| k.hovered && k.link_type == 0) {
                     let end = link.end_or(ly.text_buffer.len());
                     for (x, y, w, h) in link_line_rects(&ly.text_buffer, &laid, link.start, end, lh)
@@ -1294,8 +1343,8 @@ impl TextRenderer for GlyphTextRenderer<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        GlyphTextRenderer, layout_glyphs, link_line_rects, replace_layer_span, ruby_positions,
-        scetween_char_offset, shuffled_order,
+        ATLAS_NAME, ATLAS_SZ, GlyphTextRenderer, layout_glyphs, link_line_rects,
+        replace_layer_span, ruby_positions, scetween_char_offset, shuffled_order,
     };
     use crate::render_pipeline::draw::TextureId;
     use crate::text::backlog::BacklogTag;
@@ -1333,6 +1382,21 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn full_glyph_atlas_allocates_and_retains_another_page() {
+        let mut renderer = GlyphTextRenderer::new();
+        renderer.atlases[0].rows.push((0, ATLAS_SZ));
+        renderer.atlases[0].cur.push(ATLAS_SZ);
+
+        let (page, x, y) = renderer.alloc_atlas_region(4, 4);
+
+        assert_eq!((page, x, y), (1, 0, 0));
+        assert_eq!(
+            renderer.retained_texture_names(),
+            vec![ATLAS_NAME.to_string(), format!("{ATLAS_NAME}/1")]
+        );
     }
 
     #[test]

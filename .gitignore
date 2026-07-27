@@ -1,1 +1,5 @@
-/target
+/target/
+/.cargo/
+/.idea/
+**/.DS_Store
+/output.json

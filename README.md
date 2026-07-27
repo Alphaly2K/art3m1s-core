@@ -4,7 +4,7 @@
 脚本、维护游戏状态和图层树、渲染文本与特效，并通过稳定的 C FFI 向宿主输出离屏
 RGBA 帧。
 
-当前版本为 **0.2.0**。生产宿主是 Flutter 项目
+当前版本为 **0.2.1**。生产宿主是 Flutter 项目
 [Art3m1s](https://github.com/Alphaly2K/art3m1s)；core 本身不创建窗口，也不直接
 访问用户文件系统或承担音视频解码。
 
@@ -18,6 +18,7 @@ RGBA 帧。
 - BGM、SE、Voice、全屏视频和图层视频的逻辑状态与完成事件
 - 编号存档、系统存档、场景/音频/解释器状态恢复
 - Shift_JIS 与 UTF-8 项目、PFS/目录资源和多平台启动分支
+- 大型加密 PFS 的分块读取与随机访问
 - 鼠标、键盘、触摸、悬停、右键、拖动和脚本事件处理器
 - 面向 Flutter、原生应用和无界面工具的 C ABI
 
@@ -46,8 +47,14 @@ art3m1s-core
       └─ pfs-upk-rust/      PFS reader 与流式 FFI
 ```
 
-三个支持 crate 都是仓库中的普通源码目录。完整 checkout 不需要初始化 Git submodule，
-也不依赖单独的解释器仓库。
+`asb-interpreter` 和 `art3m1s-emote` 作为普通源码目录随仓库提供；
+`pfs-upk-rust` 是显式固定版本的 Git submodule。首次 checkout 后需要执行：
+
+```bash
+git submodule update --init --recursive
+```
+
+core 不依赖 sibling interpreter 仓库。
 
 ## 运行时边界
 
@@ -94,7 +101,7 @@ Ruby 始终保持 `RubyStart(reading) -> ScenarioText(base) -> RubyEnd` 的事�
 
 ## ASB/IET 兼容层
 
-0.2.0 开发周期包含 Fable 对解释器、运行时、合成器和文本系统进行的大规模兼容性
+0.2 开发周期包含 Fable 对解释器、运行时、合成器和文本系统进行的大规模兼容性
 补全，扩展的 Artemis 功能包括：
 
 - 队列标签、跳转/调用/返回、等待、停止/恢复和内联事件栈帧；

@@ -85,7 +85,9 @@ impl CoreRuntime {
         let mut used_files = self.compositor.scene().collect_files();
         // 文本 atlas 不在场景树里，显式保活防止被 retain 驱逐。
         // 视频图层纹理无需保活：播放期间 set_layer_file 把它挂在场景树上。
-        used_files.insert(crate::text::glyph::ATLAS_NAME.to_string());
+        if let Some(renderer) = self.text_renderer.as_ref() {
+            used_files.extend(renderer.retained_texture_names());
+        }
         used_files.extend(emote_files);
         for f in RenderPipeline::new(&self.compositor).retained_files() {
             used_files.insert(f);

@@ -11,6 +11,12 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
+/// 独立消息层使用的内部根节点前缀。
+///
+/// Artemis 规定未指定 `chgmsg layered`（或指定 `layered=0`）的消息层显示在所有
+/// 图像层之上。运行时把这类消息层映射到此前缀下；排序时显式置于普通图层之后。
+pub const MESSAGE_LAYER_OVERLAY_PREFIX: &str = "@art3m1s-message-";
+
 /// 一个图层节点。
 ///
 /// 节点既可能绑定了纹理资源（`file`），也可能只是一个用于分组/变换的空容器
@@ -82,6 +88,15 @@ impl Layer {
 /// Artemis 图层 ID 排序：按点号分割，数字部分按数值比较，字符串部分按字典序。
 /// 数字部分优先于字符串部分（数字在前）。
 fn compare_layer_id(a: &str, b: &str) -> Ordering {
+    match (
+        a.starts_with(MESSAGE_LAYER_OVERLAY_PREFIX),
+        b.starts_with(MESSAGE_LAYER_OVERLAY_PREFIX),
+    ) {
+        (true, false) => return Ordering::Greater,
+        (false, true) => return Ordering::Less,
+        _ => {}
+    }
+
     let parts_a: Vec<&str> = a.split('.').collect();
     let parts_b: Vec<&str> = b.split('.').collect();
 
@@ -691,5 +706,22 @@ mod tests {
         // 不存在的图层视为不可见。
         scene.set_root_props(&HashMap::from([("visible".into(), "1".into())]));
         assert!(!scene.is_effectively_visible("9.9.9"));
+    }
+
+    #[test]
+    fn independent_message_layers_sort_after_image_layers() {
+        let mut scene = Scene::new();
+        scene.ensure("@art3m1s-message-616476");
+        scene.ensure("zzzz");
+        scene.ensure("999");
+
+        assert_eq!(
+            scene.roots(),
+            vec![
+                "999".to_string(),
+                "zzzz".to_string(),
+                "@art3m1s-message-616476".to_string()
+            ]
+        );
     }
 }

@@ -160,15 +160,29 @@ impl CoreRuntime {
 
     fn load_default_font(&mut self) {
         let mut text = GlyphTextRenderer::new();
-        match crate::load_font_ffi(Self::DEFAULT_FONT_PATH) {
-            Ok(font) => {
-                if text.set_font(font).is_ok() {
+        let mut errors = Vec::new();
+        for candidate in std::iter::once(Self::DEFAULT_FONT_PATH.to_string()).chain(
+            super::text::font_fallback_candidates(Self::DEFAULT_FONT_PATH),
+        ) {
+            match crate::load_font_ffi(&candidate).and_then(|font| text.set_font(font)) {
+                Ok(()) => {
+                    if candidate != Self::DEFAULT_FONT_PATH {
+                        crate::core_info!(
+                            "[CoreRuntime] 默认字体回退: {} -> {candidate}",
+                            Self::DEFAULT_FONT_PATH
+                        );
+                    }
                     self.loaded_font_face = Some(Self::DEFAULT_FONT_PATH.to_string());
+                    break;
                 }
+                Err(error) => errors.push(format!("{candidate}: {error}")),
             }
-            Err(e) => {
-                crate::core_debug!("[CoreRuntime] 默认字体不可用，等待脚本指定字体: {e}");
-            }
+        }
+        if self.loaded_font_face.is_none() {
+            crate::core_debug!(
+                "[CoreRuntime] 默认字体不可用，等待脚本指定字体: {}",
+                errors.join("; ")
+            );
         }
         self.set_text_renderer(Box::new(text));
     }

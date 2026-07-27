@@ -20,7 +20,8 @@
 //! 仿射变换使用。
 
 use crate::render_pipeline::draw::{
-    BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, Renderer, TextureId, TextureInfo,
+    BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, Renderer, ShaderGroup, TextureId,
+    TextureInfo,
 };
 use glow::HasContext;
 use std::collections::HashMap;
@@ -33,6 +34,22 @@ mod shader;
 
 pub use crate::render_pipeline::ShaderProfile;
 pub use provider::{AssetSource, GlTextureProvider, PlaceholderKind};
+
+fn next_shader_group(
+    frame: &DrawList,
+    start: usize,
+    end: usize,
+    group_limit: usize,
+) -> Option<(usize, ShaderGroup)> {
+    frame
+        .shader_groups
+        .iter()
+        .enumerate()
+        .take(group_limit)
+        .filter(|(_, group)| group.start == start && group.end > start && group.end <= end)
+        .max_by_key(|(group_index, group)| (group.end, *group_index))
+        .map(|(group_index, group)| (group_index, group.clone()))
+}
 
 /// GLES 渲染器：持有 GL 程序、四边形几何与舞台尺寸。
 ///
@@ -305,22 +322,14 @@ impl GlRenderer {
         mask_mesh_ranges: &[Option<(i32, i32)>],
         start: usize,
         end: usize,
-        excluded_group: Option<usize>,
+        group_limit: usize,
         depth: usize,
         viewport: (i32, i32),
         top_left_target: bool,
     ) {
         let mut index = start;
         while index < end {
-            let group = frame
-                .shader_groups
-                .iter()
-                .enumerate()
-                .filter(|(group_index, group)| {
-                    Some(*group_index) != excluded_group && group.start == index && group.end <= end
-                })
-                .max_by_key(|(group_index, group)| (group.end, *group_index))
-                .map(|(group_index, group)| (group_index, group.clone()));
+            let group = next_shader_group(frame, index, end, group_limit);
 
             let Some((group_index, group)) = group else {
                 unsafe {
@@ -351,7 +360,7 @@ impl GlRenderer {
                         mask_mesh_ranges,
                         group.start,
                         group.end,
-                        Some(group_index),
+                        group_index,
                         depth,
                         viewport,
                         top_left_target,
@@ -373,7 +382,7 @@ impl GlRenderer {
                     mask_mesh_ranges,
                     group.start,
                     group.end,
-                    Some(group_index),
+                    group_index,
                     depth + 1,
                     (self.stage_width as i32, self.stage_height as i32),
                     false,
@@ -717,7 +726,7 @@ impl Renderer for GlRenderer {
                 &mask_mesh_ranges,
                 0,
                 frame.commands.len(),
-                None,
+                frame.shader_groups.len(),
                 0,
                 (self.viewport_width, self.viewport_height),
                 true,
@@ -870,4 +879,45 @@ unsafe fn create_solid_texture(gl: &glow::Context, rgba: [u8; 4]) -> Result<glow
 /// 把 `&[f32]` 当作字节切片传给 GL，避免引入 bytemuck 依赖。
 fn bytemuck_cast(data: &[f32]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data)) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render_pipeline::draw::ShaderEffect;
+    use std::collections::BTreeMap;
+
+    fn shader_group(start: usize, end: usize, name: &str) -> ShaderGroup {
+        ShaderGroup {
+            start,
+            end,
+            effect: ShaderEffect {
+                name: name.to_owned(),
+                uniforms: BTreeMap::new(),
+                mask_texture: None,
+                user_texture: None,
+            },
+            clip_bounds: None,
+            mask_range: None,
+        }
+    }
+
+    #[test]
+    fn identical_shader_ranges_descend_in_build_order() {
+        let mut frame = DrawList::new();
+        frame.push_shader_group(shader_group(0, 1, "inner"));
+        frame.push_shader_group(shader_group(0, 1, "middle"));
+        frame.push_shader_group(shader_group(0, 1, "outer"));
+
+        let (outer_index, outer) =
+            next_shader_group(&frame, 0, 1, frame.shader_groups.len()).unwrap();
+        let (middle_index, middle) = next_shader_group(&frame, 0, 1, outer_index).unwrap();
+        let (inner_index, inner) = next_shader_group(&frame, 0, 1, middle_index).unwrap();
+
+        assert_eq!(outer.effect.name, "outer");
+        assert_eq!(middle.effect.name, "middle");
+        assert_eq!(inner.effect.name, "inner");
+        assert_eq!(inner_index, 0);
+        assert!(next_shader_group(&frame, 0, 1, inner_index).is_none());
+    }
 }
