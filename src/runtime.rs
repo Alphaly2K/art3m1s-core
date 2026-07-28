@@ -62,6 +62,10 @@ pub struct CoreRuntime {
     renderer: GlRenderer,
     texture_provider: GlTextureProvider,
     compositor: Compositor,
+    /// 上一帧已经提交的逻辑场景。转场源帧需保留旧图像层，同时按当前状态
+    /// 剔除刚隐藏或删除的消息文字，不能直接复用已经烘入文字的 FBO。
+    last_rendered_scene: Option<crate::compositor::Scene>,
+    last_rendered_clock_ms: u64,
     text_renderer: Option<Box<dyn TextRenderer>>,
     /// core 内部文本注入链。宿主 FFI 注入在该链之前执行。
     text_inject: crate::text::InjectionChain,
@@ -165,6 +169,8 @@ impl CoreRuntime {
             renderer,
             texture_provider,
             compositor,
+            last_rendered_scene: None,
+            last_rendered_clock_ms: 0,
             text_renderer: None,
             text_inject: crate::text::InjectionChain::new(),
             pending_text_translations: HashMap::new(),
@@ -259,6 +265,9 @@ impl CoreRuntime {
         }
 
         self.compositor.advance(delta_ms);
+        // get_layer_info 必须反映本帧缓动后的实际位置，而不是缓动开始前的
+        // 静态 LayerProps。下一帧输入回调执行 Lua 前会读取这份快照。
+        self.sync_layer_info_all();
         self.dispatch_tween_handlers();
         self.emote.lock().unwrap().advance(delta_ms);
         self.advance_text(delta_ms);

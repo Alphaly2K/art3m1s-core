@@ -28,7 +28,12 @@ fn main() {
         }
         // 打 alpha 覆盖率
         let cover = out.chunks(4).filter(|p| p[3] > 8).count();
-        eprintln!("{name}: alpha>8 {}/{} ({}%)", cover, (w * h), cover * 100 / (*w as usize * *h as usize));
+        eprintln!(
+            "{name}: alpha>8 {}/{} ({}%)",
+            cover,
+            (w * h),
+            cover * 100 / (*w as usize * *h as usize)
+        );
         image::save_buffer(
             format!("/tmp/icon_{name}.png"),
             &out,

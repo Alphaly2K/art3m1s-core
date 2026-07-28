@@ -87,6 +87,8 @@ pub enum BlendMode {
     /// Source pixels already have RGB multiplied by alpha (for example an
     /// offscreen group texture).
     PremultipliedAlpha,
+    /// Premultiplied-alpha source with additive composition.
+    PremultipliedAdd,
     Add,
     Screen,
     Multiply,

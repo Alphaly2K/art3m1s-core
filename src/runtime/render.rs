@@ -28,6 +28,7 @@ impl CoreRuntime {
         // 更新渲染器的 viewport 和 projection
         self.renderer.set_viewport_size(new_width, new_height);
         self.renderer.set_stage_size(new_width, new_height);
+        self.last_rendered_scene = None;
 
         Ok(())
     }
@@ -61,7 +62,54 @@ impl CoreRuntime {
         // script.rs 的 wait 建立/退出路径（那不在本任务白名单内）。
         self.drive_click_wait_icon();
 
+        self.render_bound_scene(true, None);
+        self.last_rendered_scene = Some(self.compositor.scene_snapshot());
+        self.last_rendered_clock_ms = self.compositor.clock_ms();
+
+        // 从 FBO 读取像素（使用 glReadPixels，对所有后端都可靠）
+        let pixels =
+            unsafe { platform::read_pixels(&self.gl, self.stage_w as i32, self.stage_h as i32) };
+
+        // 解绑 FBO
+        unsafe {
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        }
+
+        pixels
+    }
+
+    /// 用上一帧场景重建转场源画面。
+    ///
+    /// 图像层来自上一帧，因此仍能正常淡出；文本命令则按当前合成器状态生成，
+    /// 这样脚本在 `[trans]` 前隐藏/删除消息层时，旧剧情文字不会被烘进源纹理。
+    pub(super) fn refresh_transition_source_frame(&mut self) {
+        let Some(scene) = self.last_rendered_scene.clone() else {
+            // 首帧尚无场景快照时保留 FBO 原内容，沿用原有捕获行为。
+            return;
+        };
+        unsafe {
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
+        }
+        let (text_layers, text_commands) =
+            self.render_bound_scene(false, Some((&scene, self.last_rendered_clock_ms)));
+        crate::core_debug!(
+            "[runtime] transition source snapshot text_layers={} text_commands={}",
+            text_layers,
+            text_commands
+        );
+        unsafe {
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        }
+    }
+
+    fn render_bound_scene(
+        &mut self,
+        include_transition: bool,
+        scene_snapshot: Option<(&crate::compositor::Scene, u64)>,
+    ) -> (usize, usize) {
         let text_map = self.build_text_commands();
+        let text_layer_count = text_map.len();
+        let text_command_count = text_map.values().map(Vec::len).sum();
         let (emote_map, emote_files) = self.build_emote_commands();
         let content_for: Option<&crate::render_pipeline::LayerDrawSource<'_>> =
             if emote_map.is_empty() {
@@ -75,14 +123,29 @@ impl CoreRuntime {
         } else {
             Some(&|layer_id: &str| text_map.get(layer_id).cloned().unwrap_or_default())
         };
-        let mut frame = RenderPipeline::new(&self.compositor).build_composited_with_content(
-            &mut self.texture_provider,
-            content_for,
-            text_for,
-        );
+        let pipeline = RenderPipeline::new(&self.compositor);
+        let mut frame = if let Some((scene, clock_ms)) = scene_snapshot {
+            pipeline.build_scene_with_content(
+                scene,
+                clock_ms,
+                &mut self.texture_provider,
+                content_for,
+                text_for,
+            )
+        } else if include_transition {
+            pipeline.build_composited_with_content(
+                &mut self.texture_provider,
+                content_for,
+                text_for,
+            )
+        } else {
+            pipeline.build_with_content(&mut self.texture_provider, content_for, text_for)
+        };
         frame.materialize_stencil_groups(crate::render_pipeline::shader::ALPHA_MASK_SHADER);
         self.renderer.render(&frame);
-        let mut used_files = self.compositor.scene().collect_files();
+        let mut used_files = scene_snapshot
+            .map(|(scene, _)| scene.collect_files())
+            .unwrap_or_else(|| self.compositor.scene().collect_files());
         // 文本 atlas 不在场景树里，显式保活防止被 retain 驱逐。
         // 视频图层纹理无需保活：播放期间 set_layer_file 把它挂在场景树上。
         if let Some(renderer) = self.text_renderer.as_ref() {
@@ -96,17 +159,7 @@ impl CoreRuntime {
         unsafe {
             self.gl.finish();
         }
-
-        // 从 FBO 读取像素（使用 glReadPixels，对所有后端都可靠）
-        let pixels =
-            unsafe { platform::read_pixels(&self.gl, self.stage_w as i32, self.stage_h as i32) };
-
-        // 解绑 FBO
-        unsafe {
-            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-        }
-
-        pixels
+        (text_layer_count, text_command_count)
     }
 
     /// 每帧驱动 glyph 点击等待图标的显隐。

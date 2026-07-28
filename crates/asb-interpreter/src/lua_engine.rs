@@ -948,7 +948,10 @@ impl UserData for EngineApi {
         methods.add_method("getScriptBlock", |lua, this, args: mlua::MultiValue| {
             let (file, index) = match args.into_iter().next() {
                 Some(Value::Table(t)) => (
-                    t.get::<Option<String>>("file").ok().flatten().unwrap_or_default(),
+                    t.get::<Option<String>>("file")
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default(),
                     t.get::<Option<i64>>("index").ok().flatten().unwrap_or(-1),
                 ),
                 _ => (String::new(), -1),
@@ -1036,8 +1039,10 @@ impl UserData for EngineApi {
                 frames.push((order, file, index));
             }
             frames.sort_by_key(|(order, _, _)| *order);
-            let stack: Vec<(String, usize)> =
-                frames.into_iter().map(|(_, file, index)| (file, index)).collect();
+            let stack: Vec<(String, usize)> = frames
+                .into_iter()
+                .map(|(_, file, index)| (file, index))
+                .collect();
             let mut ctx = this.ctx.lock().unwrap();
             ctx.pending_stack_override = Some(stack);
             Ok(())
@@ -1222,9 +1227,7 @@ impl UserData for EngineApi {
             let from: String = t.get("from").unwrap_or_default();
             let to: String = t.get("to").unwrap_or_default();
             let source: Option<mlua::String> = t.get("source").ok();
-            let source_bytes: Vec<u8> = source
-                .map(|s| s.as_bytes().to_vec())
-                .unwrap_or_default();
+            let source_bytes: Vec<u8> = source.map(|s| s.as_bytes().to_vec()).unwrap_or_default();
             let converted = {
                 let ctx = this.ctx.lock().unwrap();
                 ctx.callbacks.convert_encoding(&from, &to, &source_bytes)
@@ -1488,21 +1491,14 @@ pub(crate) fn apply_system_var_query(
                     // 伪关联数组：result.<id>.<prop>。
                     for (layer_id, info) in &all {
                         for (key, value) in info {
-                            set_var_auto(
-                                store,
-                                &format!("{name}.{layer_id}.{key}"),
-                                value.clone(),
-                            );
+                            set_var_auto(store, &format!("{name}.{layer_id}.{key}"), value.clone());
                         }
                     }
                 } else {
                     // 伪数组：result.N.id / result.N.<prop> + result.size。
                     // id 保持字符串形态（"1.80" 之类不得丢尾零）。
                     for (index, (layer_id, info)) in all.iter().enumerate() {
-                        store.set(
-                            &format!("{name}.{index}.id"),
-                            V::String(layer_id.clone()),
-                        );
+                        store.set(&format!("{name}.{index}.id"), V::String(layer_id.clone()));
                         for (key, value) in info {
                             set_var_auto(store, &format!("{name}.{index}.{key}"), value.clone());
                         }
@@ -1910,7 +1906,10 @@ mod tests {
             store.get("r.0.id"),
             Some(&crate::variable::Value::String("1.80".to_string()))
         );
-        assert_eq!(store.get("r.0.left"), Some(&crate::variable::Value::Float(10.0)));
+        assert_eq!(
+            store.get("r.0.left"),
+            Some(&crate::variable::Value::Float(10.0))
+        );
         assert_eq!(store.get("r.size"), Some(&crate::variable::Value::Int(1)));
     }
 
@@ -2141,10 +2140,17 @@ mod tests {
 
         // 函数已存入 log_filter 字段
         assert!(ctx.lock().unwrap().log_filter.is_some(), "应存过滤函数");
-        assert_eq!(*observed.log_filter_set.lock().unwrap(), 1, "应通知回调一次");
+        assert_eq!(
+            *observed.log_filter_set.lock().unwrap(),
+            1,
+            "应通知回调一次"
+        );
 
         // 传 nil 清除
         lua.load("__engine:setLogFilter(nil)").exec().unwrap();
-        assert!(ctx.lock().unwrap().log_filter.is_none(), "nil 应清除过滤函数");
+        assert!(
+            ctx.lock().unwrap().log_filter.is_none(),
+            "nil 应清除过滤函数"
+        );
     }
 }

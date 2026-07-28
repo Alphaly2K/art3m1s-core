@@ -537,7 +537,7 @@ impl Interpreter {
     /// label 等，均为字符串）。返回值：
     /// - `None`：未设置过滤器，或过滤器返回 0/出错 —— 引擎按默认方式派发。
     /// - `Some(1)`：脚本已自行处理，引擎**不**再派发。
-    /// - `Some(2)`：过滤器指示派发失败，引擎执行默认行为（与 None 同等对待）。
+    /// - `Some(2)`：过滤器指示假装派发失败，宿主不得执行原处理器。
     ///
     /// 未设置过滤器时零开销（不加载 Lua 值）。
     pub fn run_event_filter(
@@ -1252,7 +1252,12 @@ impl Interpreter {
     /// 数组末帧成为当前执行位置，其余帧成为调用栈——与 getScriptStack 的
     /// 返回形态互逆。典型用法是把栈截到 1 帧，效果等同连续执行多次 [return]。
     fn apply_pending_stack_override(&mut self) -> Result<()> {
-        let pending = self.engine_ctx.lock().unwrap().pending_stack_override.take();
+        let pending = self
+            .engine_ctx
+            .lock()
+            .unwrap()
+            .pending_stack_override
+            .take();
         let Some(frames) = pending else {
             return Ok(());
         };
@@ -2681,7 +2686,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            interpreter.lua().globals().get::<i64>("step_count").unwrap(),
+            interpreter
+                .lua()
+                .globals()
+                .get::<i64>("step_count")
+                .unwrap(),
             1
         );
 
@@ -2689,7 +2698,11 @@ mod tests {
         let _ = interpreter.run().unwrap();
 
         assert_eq!(
-            interpreter.lua().globals().get::<i64>("step_count").unwrap(),
+            interpreter
+                .lua()
+                .globals()
+                .get::<i64>("step_count")
+                .unwrap(),
             1,
             "行指针越过 __lua_block 时不得重复执行"
         );
@@ -2851,7 +2864,10 @@ mod tests {
             .load_script("main", "*main\n[call file=\"sub\" label=\"s\"]\n[stop]\n")
             .unwrap();
         interpreter
-            .load_script("sub", "*s\n[calllua function=\"capture_stack\"]\n[return]\n")
+            .load_script(
+                "sub",
+                "*s\n[calllua function=\"capture_stack\"]\n[return]\n",
+            )
             .unwrap();
         interpreter.start("main", "main").unwrap();
 

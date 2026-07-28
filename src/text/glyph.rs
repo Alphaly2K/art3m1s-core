@@ -5,8 +5,9 @@ use crate::render_pipeline::draw::{
 };
 use crate::text::backlog::{BacklogPage, BacklogTag};
 use crate::text::render::{
-    ClickWaitIconPlacement, FontState, GlyphIconConfig, GlyphInfo, LinkHitArea, LinkRange,
-    RubyRange, ScetweenConfig, TextLayoutConfig, TextRenderer, TextSpanToken,
+    ClickWaitIconPlacement, FontDesc, FontState, GlyphIconConfig, GlyphInfo, LinkHitArea,
+    LinkRange, RubyRange, ScetweenConfig, TextAlignment, TextLayoutConfig, TextRenderer,
+    TextSpanToken,
 };
 use ab_glyph::{Font, FontRef, PxScale, PxScaleFont, ScaleFont};
 use glam::{Affine2, Vec2};
@@ -165,6 +166,89 @@ fn parse(s: &str) -> [f32; 3] {
 pub(crate) struct LaidGlyph {
     pub x: f32,
     pub line: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TextLineMetrics {
+    line_height: f32,
+    ruby_top: f32,
+}
+
+/// Artemis 的一行由「行顶间距 + 注音 + 中间距 + 正文 + 行底间距」组成。
+///
+/// 旧实现直接用字体的 typographic height 作为行高，导致脚本为字体差异设置的
+/// spacetop/spacemiddle/spacebottom 完全失效，正文和姓名层都会出现稳定的纵向偏移。
+fn text_line_metrics(font: &FontDesc, body_height: f32) -> TextLineMetrics {
+    let spacetop = font.spacetop.unwrap_or(0.0);
+    let ruby_height = font.ruby_size.unwrap_or(0.0).max(0.0);
+    let spacemiddle = font.spacemiddle.unwrap_or(0.0);
+    let spacebottom = font.spacebottom.unwrap_or(0.0);
+    TextLineMetrics {
+        line_height: (spacetop + ruby_height + spacemiddle + body_height + spacebottom).max(1.0),
+        // font.top 是首个正文字符的顶部；ruby 位于正文上方，spacetop 只参与整行高度。
+        ruby_top: -(ruby_height + spacemiddle),
+    }
+}
+
+fn align_layout(
+    glyphs: &[GlyphInfo],
+    laid: &mut [LaidGlyph],
+    line_width: f32,
+    alignment: TextAlignment,
+) {
+    if matches!(alignment, TextAlignment::Left) || !line_width.is_finite() || line_width <= 0.0 {
+        return;
+    }
+    let max_line = laid.iter().map(|p| p.line).max().unwrap_or(0);
+    for line in 0..=max_line {
+        let indices: Vec<usize> = laid
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| (p.line == line && glyphs[i].character != "\n").then_some(i))
+            .collect();
+        let Some(&first) = indices.first() else {
+            continue;
+        };
+        let last = *indices.last().unwrap();
+        let left = laid[first].x;
+        let right = laid[last].x + glyphs[last].advance_x;
+        let content_width = (right - left).max(0.0);
+        let spare = (line_width - content_width).max(0.0);
+        match alignment {
+            TextAlignment::Left => {}
+            TextAlignment::Center | TextAlignment::Right => {
+                let offset = if matches!(alignment, TextAlignment::Center) {
+                    spare * 0.5
+                } else {
+                    spare
+                } - left;
+                for i in indices {
+                    laid[i].x += offset;
+                }
+            }
+            TextAlignment::Equalize if indices.len() > 1 => {
+                let step = spare / (indices.len() - 1) as f32;
+                for (slot, i) in indices.into_iter().enumerate() {
+                    laid[i].x += step * slot as f32 - left;
+                }
+            }
+            TextAlignment::Equalize => {
+                laid[first].x -= left;
+            }
+        }
+    }
+}
+
+fn layout_message_layer(
+    glyphs: &[GlyphInfo],
+    line_width: f32,
+    cfg: &TextLayoutConfig,
+    keep_ranges: &[(usize, usize)],
+    alignment: TextAlignment,
+) -> Vec<LaidGlyph> {
+    let mut laid = layout_glyphs(glyphs, line_width, cfg, keep_ranges);
+    align_layout(glyphs, &mut laid, line_width, alignment);
+    laid
 }
 
 /// 取字形的首个字符（GlyphInfo.character 是 UTF-8 字符串，正常只含一个字符）。
@@ -394,6 +478,22 @@ impl<'font> GlyphTextRenderer<'font> {
 }
 
 impl TextRenderer for GlyphTextRenderer<'_> {
+    fn clear_scene_text(&mut self) {
+        self.state.layers_dirtied_this_frame.clear();
+        for (id, layer) in &mut self.state.layers {
+            layer.clear_page();
+            layer.reveal_index = 0;
+            layer.reveal_pending = false;
+            layer.reveal_clock_ms = 0;
+            layer.text_hidden = false;
+            layer.font_stack.clear();
+            self.state.layers_dirtied_this_frame.push(id.clone());
+        }
+        self.state.layer_stack.clear();
+        self.state.inside_ruby = false;
+        self.state.reveal_clock_ms = 0;
+    }
+
     fn set_font_bytes(&mut self, bytes: &'static [u8]) -> Result<(), String> {
         self.set_font(bytes)
     }
@@ -539,17 +639,24 @@ impl TextRenderer for GlyphTextRenderer<'_> {
             .find(|(_, g)| g.character != "\n")?;
 
         let sz = ly.font.size.unwrap_or(DEFAULT_FONT_SIZE);
-        let line_height = scaled(&self.font, PxScale::from(sz))
+        let body_height = scaled(&self.font, PxScale::from(sz))
             .map(|sf| sf.height())
             .unwrap_or(sz);
+        let metrics = text_line_metrics(&ly.font, body_height);
         let lw = if ly.width > 0.0 { ly.width } else { f32::MAX };
         // 与 build_text_commands 走同一套排版，保证图标位置与实际换行一致
-        let laid = layout_glyphs(&ly.text_buffer, lw, &self.state.layout, &ly.keep_ranges());
+        let laid = layout_message_layer(
+            &ly.text_buffer,
+            lw,
+            &self.state.layout,
+            &ly.keep_ranges(),
+            TextAlignment::from(ly.font.align.as_deref().unwrap_or("left")),
+        );
         let pos = laid[idx];
         Some(ClickWaitIconPlacement {
             layer_id,
             left: ly.left + pos.x + last.advance_x + dx,
-            top: ly.top + pos.line as f32 * line_height + dy,
+            top: ly.top + pos.line as f32 * metrics.line_height + dy,
             homing: cfg.homing,
         })
     }
@@ -775,14 +882,23 @@ impl TextRenderer for GlyphTextRenderer<'_> {
             }
             let sz = ly.font.size.unwrap_or(DEFAULT_FONT_SIZE);
             // 未加载字体时以字号近似行高（与 push_line_break 的近似一致）
-            let lh = scaled(&self.font, PxScale::from(sz))
+            let body_height = scaled(&self.font, PxScale::from(sz))
                 .map(|sf| sf.height())
                 .unwrap_or(sz);
+            let metrics = text_line_metrics(&ly.font, body_height);
             let lw = if ly.width > 0.0 { ly.width } else { f32::MAX };
-            let laid = layout_glyphs(&ly.text_buffer, lw, &self.state.layout, &ly.keep_ranges());
+            let laid = layout_message_layer(
+                &ly.text_buffer,
+                lw,
+                &self.state.layout,
+                &ly.keep_ranges(),
+                TextAlignment::from(ly.font.align.as_deref().unwrap_or("left")),
+            );
             for (idx, link) in ly.links.iter().enumerate() {
                 let end = link.end_or(ly.text_buffer.len());
-                for (x, y, w, h) in link_line_rects(&ly.text_buffer, &laid, link.start, end, lh) {
+                for (x, y, w, h) in
+                    link_line_rects(&ly.text_buffer, &laid, link.start, end, metrics.line_height)
+                {
                     out.push(LinkHitArea {
                         layer_id: lid.clone(),
                         link_index: idx,
@@ -823,11 +939,18 @@ impl TextRenderer for GlyphTextRenderer<'_> {
             return Some((0.0, 0.0, 0.0));
         }
         let sz = ly.font.size.unwrap_or(DEFAULT_FONT_SIZE);
-        let lh = scaled(&self.font, PxScale::from(sz))
+        let body_height = scaled(&self.font, PxScale::from(sz))
             .map(|sf| sf.height())
             .unwrap_or(sz);
+        let metrics = text_line_metrics(&ly.font, body_height);
         let lw = if ly.width > 0.0 { ly.width } else { f32::MAX };
-        let laid = layout_glyphs(&ly.text_buffer, lw, &self.state.layout, &ly.keep_ranges());
+        let laid = layout_message_layer(
+            &ly.text_buffer,
+            lw,
+            &self.state.layout,
+            &ly.keep_ranges(),
+            TextAlignment::from(ly.font.align.as_deref().unwrap_or("left")),
+        );
 
         let mut overall_width = 0.0f32;
         let mut last_line = 0usize;
@@ -844,7 +967,7 @@ impl TextRenderer for GlyphTextRenderer<'_> {
                 last_line_width = last_line_width.max(right);
             }
         }
-        let total_height = (last_line as f32 + 1.0) * lh;
+        let total_height = (last_line as f32 + 1.0) * metrics.line_height;
         Some((overall_width, total_height, last_line_width))
     }
 
@@ -901,7 +1024,7 @@ impl TextRenderer for GlyphTextRenderer<'_> {
                 Some(s) => s,
                 None => continue,
             };
-            let lh = sf.height();
+            let metrics = text_line_metrics(&ly.font, sf.height());
             let lw = if ly.width > 0.0 { ly.width } else { f32::MAX };
 
             let color = ly.font.color.as_deref().map(parse).unwrap_or([1.0; 3]);
@@ -916,7 +1039,13 @@ impl TextRenderer for GlyphTextRenderer<'_> {
             let has_shadow = st.contains("shadow");
 
             // 统一走排版函数：禁则 / wordparts / 缩进 / 注音不可拆行都在这里生效
-            let laid = layout_glyphs(&ly.text_buffer, lw, &self.state.layout, &ly.keep_ranges());
+            let laid = layout_message_layer(
+                &ly.text_buffer,
+                lw,
+                &self.state.layout,
+                &ly.keep_ranges(),
+                TextAlignment::from(ly.font.align.as_deref().unwrap_or("left")),
+            );
             // randomdelay：字符按随机顺序揭示。取相关配置里的随机顺序表，
             // 字符 i 可见当且仅当它的随机槽位 < 已揭示数量
             let random_order = scethweens
@@ -939,7 +1068,7 @@ impl TextRenderer for GlyphTextRenderer<'_> {
                 }
 
                 let fx = ly.left + laid[i].x + g.offset_x;
-                let fy = ly.top + g.offset_y + laid[i].line as f32 * lh;
+                let fy = ly.top + g.offset_y + laid[i].line as f32 * metrics.line_height;
 
                 // 计算每字符的 scetween 动画偏移
                 let anim_offset =
@@ -1065,12 +1194,7 @@ impl TextRenderer for GlyphTextRenderer<'_> {
                 let advances: Vec<f32> = r.glyphs.iter().map(|g| g.advance_x).collect();
                 let rk = ly.font.ruby_kerning.unwrap_or(0.0);
                 let xs = ruby_positions(base_x0, base_x1, &advances, rk);
-                // 垂直位置：注音底部贴正文行顶再按 spacetop（行顶到注音）与
-                // spacemiddle（注音到正文）微调。当前行高固定为正文行高，
-                // 注音画在行框上沿之上（Artemis 的行内预留空间尚未实现）。
-                let spacetop = ly.font.spacetop.unwrap_or(0.0);
-                let spacemiddle = ly.font.spacemiddle.unwrap_or(0.0);
-                let ruby_top = ly.top + line as f32 * lh - (r.size + spacemiddle) + spacetop;
+                let ruby_top = ly.top + metrics.ruby_top + line as f32 * metrics.line_height;
                 for (g, gx) in r.glyphs.iter().zip(&xs) {
                     if g.atlas_w <= 0.0 || g.atlas_h <= 0.0 {
                         continue;
@@ -1116,8 +1240,13 @@ impl TextRenderer for GlyphTextRenderer<'_> {
             {
                 for link in ly.links.iter().filter(|k| k.hovered && k.link_type == 0) {
                     let end = link.end_or(ly.text_buffer.len());
-                    for (x, y, w, h) in link_line_rects(&ly.text_buffer, &laid, link.start, end, lh)
-                    {
+                    for (x, y, w, h) in link_line_rects(
+                        &ly.text_buffer,
+                        &laid,
+                        link.start,
+                        end,
+                        metrics.line_height,
+                    ) {
                         v.push(DrawCommand {
                             texture: tex,
                             size: TextureInfo {
@@ -1343,14 +1472,15 @@ impl TextRenderer for GlyphTextRenderer<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ATLAS_NAME, ATLAS_SZ, GlyphTextRenderer, layout_glyphs, link_line_rects,
-        replace_layer_span, ruby_positions, scetween_char_offset, shuffled_order,
+        ATLAS_NAME, ATLAS_SZ, GlyphTextRenderer, align_layout, layout_glyphs, layout_message_layer,
+        link_line_rects, replace_layer_span, ruby_positions, scetween_char_offset, shuffled_order,
+        text_line_metrics,
     };
     use crate::render_pipeline::draw::TextureId;
     use crate::text::backlog::BacklogTag;
     use crate::text::render::{
-        GlyphInfo, LinkRange, MessageLayer, RubyRange, ScetweenConfig, TextLayoutConfig,
-        TextRenderer, TextSpanToken,
+        FontDesc, GlyphInfo, LinkRange, MessageLayer, RubyRange, ScetweenConfig, TextAlignment,
+        TextLayoutConfig, TextRenderer, TextSpanToken,
     };
     use std::collections::HashMap;
 
@@ -1397,6 +1527,43 @@ mod tests {
             renderer.retained_texture_names(),
             vec![ATLAS_NAME.to_string(), format!("{ATLAS_NAME}/1")]
         );
+    }
+
+    #[test]
+    fn clear_scene_text_drops_glyphs_but_preserves_layer_styles() {
+        let mut renderer = GlyphTextRenderer::new();
+        renderer.switch_message_layer(Some("1.80.mw.adv"), true);
+        {
+            let layer = renderer.font_state_mut().active_layer_mut();
+            layer.text_buffer = glyphs("old text");
+            layer.left = 148.0;
+            layer.top = 552.0;
+            layer.font.size = Some(31.0);
+        }
+        renderer.font_state_mut().default_font.size = Some(37.0);
+        renderer.font_state_mut().backlog.settings.allow = true;
+        renderer
+            .font_state_mut()
+            .backlog
+            .push_page(crate::text::backlog::BacklogPage {
+                page_font: None,
+                tags: vec![BacklogTag::Text("history".into())],
+            });
+
+        renderer.clear_scene_text();
+
+        let layer = &renderer.font_state().layers["1.80.mw.adv"];
+        assert!(layer.text_buffer.is_empty());
+        assert_eq!(layer.left, 148.0);
+        assert_eq!(layer.top, 552.0);
+        assert_eq!(layer.font.size, Some(31.0));
+        assert_eq!(
+            renderer.font_state().active_layer.as_deref(),
+            Some("1.80.mw.adv")
+        );
+        assert!(renderer.font_state().layer_stack.is_empty());
+        assert_eq!(renderer.font_state().default_font.size, Some(37.0));
+        assert_eq!(renderer.font_state().backlog.size(), 1);
     }
 
     #[test]
@@ -1508,6 +1675,54 @@ mod tests {
         // 弹栈应回到 a（b 未入栈），而不是 b。
         r.pop_message_layer();
         assert_eq!(r.state.active_layer.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn line_metrics_apply_script_spacing_to_body_and_line_height() {
+        let font = FontDesc {
+            ruby_size: Some(14.0),
+            spacetop: Some(-2.0),
+            spacemiddle: Some(-10.0),
+            spacebottom: Some(-4.0),
+            ..FontDesc::default()
+        };
+        let metrics = text_line_metrics(&font, 40.0);
+        assert_eq!(metrics.ruby_top, -4.0);
+        assert_eq!(metrics.line_height, 38.0);
+    }
+
+    #[test]
+    fn center_and_right_alignment_offset_each_wrapped_line() {
+        let gs = glyphs("abc");
+        let mut centered = layout_glyphs(&gs, 50.0, &TextLayoutConfig::default(), &[]);
+        align_layout(&gs, &mut centered, 50.0, TextAlignment::Center);
+        assert_eq!(
+            centered.iter().map(|p| p.x).collect::<Vec<_>>(),
+            vec![10.0, 20.0, 30.0]
+        );
+
+        let mut right = layout_glyphs(&gs, 50.0, &TextLayoutConfig::default(), &[]);
+        align_layout(&gs, &mut right, 50.0, TextAlignment::Right);
+        assert_eq!(
+            right.iter().map(|p| p.x).collect::<Vec<_>>(),
+            vec![20.0, 30.0, 40.0]
+        );
+    }
+
+    #[test]
+    fn message_layout_does_not_retroactively_apply_current_font_kerning() {
+        let gs = glyphs("abc");
+        let laid = layout_message_layer(
+            &gs,
+            100.0,
+            &TextLayoutConfig::default(),
+            &[],
+            TextAlignment::Left,
+        );
+        assert_eq!(
+            laid.iter().map(|position| position.x).collect::<Vec<_>>(),
+            vec![0.0, 10.0, 20.0]
+        );
     }
 
     // ── 禁则处理（prohibit） ──

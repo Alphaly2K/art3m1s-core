@@ -623,7 +623,10 @@ mod tests {
 
         // 缺省：执行购买、不恢复、不消耗
         let TagResult::Emit(Event::Purchase {
-            purchase, restore, consume, ..
+            purchase,
+            restore,
+            consume,
+            ..
         }) = exec(&PurchaseHandler, "purchase", &[])
         else {
             panic!("purchase 应产出 Purchase");
@@ -657,13 +660,13 @@ mod tests {
         assert_eq!(command, "wasm_sync");
         assert_eq!(url.as_deref(), Some("https://example.com/list.txt"));
         assert_eq!(baseurl.as_deref(), Some("https://example.com/data/"));
-        assert_eq!(
-            list,
-            Some(vec!["a.png".to_string(), "b.png".to_string()])
-        );
+        assert_eq!(list, Some(vec!["a.png".to_string(), "b.png".to_string()]));
 
         let TagResult::Emit(Event::FileOperation {
-            command, target, list, ..
+            command,
+            target,
+            list,
+            ..
         }) = exec(
             &FileHandler,
             "file",

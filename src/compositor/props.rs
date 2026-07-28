@@ -185,7 +185,7 @@ impl LayerProps {
     /// 精灵裁剪矩形 `[x, y, w, h]`（纹理像素），未设置时返回 `None`（画整张）。
     pub fn clip_rect(&self) -> Option<[f32; 4]> {
         // intermediate_render 图层的 clip 是渲染目标尺寸，不是可视裁剪，忽略。
-        if self.intermediate_render.is_some() {
+        if self.intermediate_render.unwrap_or(0) != 0 {
             return None;
         }
         self.clip

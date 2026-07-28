@@ -601,11 +601,7 @@ impl TagHandler for WaitHandler {
         let input = ctx.resolve_param("input")?.as_int().unwrap_or(0) as i32;
         // 文档 wait.md：指定 scenario 或 video 参数时 time 被忽略；
         // se 与 time 并用时表示从该 SE 开始播放的时刻起算的毫秒数。
-        let reason = if let Some(video) = ctx
-            .instruction
-            .get("video")
-            .filter(|v| !v.is_empty())
-        {
+        let reason = if let Some(video) = ctx.instruction.get("video").filter(|v| !v.is_empty()) {
             crate::event::WaitReason::VideoLayer {
                 id: video.to_string(),
             }

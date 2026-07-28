@@ -45,7 +45,10 @@ fn main() {
             if motion.parameters.is_empty() {
                 continue;
             }
-            println!("motion {character}/{label} last={} loop={}", motion.last_time, motion.loop_time);
+            println!(
+                "motion {character}/{label} last={} loop={}",
+                motion.last_time, motion.loop_time
+            );
             for (index, parameter) in motion.parameters.iter().enumerate() {
                 println!(
                     "  param[{index}] id={} range=[{},{}] division={} enabled={} discretization={}",

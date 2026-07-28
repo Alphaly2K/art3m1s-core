@@ -29,7 +29,10 @@ fn walk(layer: &EmoteLayer, depth: usize) {
         let indent = "  ".repeat(depth);
         println!(
             "{indent}{} param_idx={:?} inherit_shape={} mesh_combine={} frames={}",
-            layer.label, layer.parameter_index, layer.inherit_shape, layer.mesh_combine,
+            layer.label,
+            layer.parameter_index,
+            layer.inherit_shape,
+            layer.mesh_combine,
             layer.frames.len()
         );
         for frame in layer.frames.iter().take(4) {

@@ -19,7 +19,10 @@ fn main() {
             variables,
         };
         let items = evaluator.evaluate_base(&state).expect("evaluate");
-        println!("== face_eye_open = {value} ({} items total) ==", items.len());
+        println!(
+            "== face_eye_open = {value} ({} items total) ==",
+            items.len()
+        );
         for item in &items {
             let label = &item.layer_label;
             if label.contains("目")

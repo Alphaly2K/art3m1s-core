@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-use super::{split_line_segments, LineSegment};
+use super::{LineSegment, split_line_segments};
 
 // ---------------------------------------------------------------------------
 // tag.ini：行标签位置参数名表
@@ -113,9 +113,7 @@ static GLOBAL_TAG_INI: RwLock<Option<TagIni>> = RwLock::new(None);
 
 /// 注册 / 卸载全局 tag.ini
 pub fn install_tag_ini(ini: Option<TagIni>) {
-    *GLOBAL_TAG_INI
-        .write()
-        .expect("GLOBAL_TAG_INI 写锁中毒") = ini;
+    *GLOBAL_TAG_INI.write().expect("GLOBAL_TAG_INI 写锁中毒") = ini;
 }
 
 /// 在全局 tag.ini 上执行只读操作
@@ -183,9 +181,9 @@ impl Preprocessor {
 
         // 含 [lua] 起始标签的行：进入 lua 模式并整行透传，不做注入。
         if raw.contains('[') {
-            let has_lua = split_line_segments(raw).iter().any(|seg| {
-                matches!(seg, LineSegment::Tag(inner) if inner.trim() == "lua")
-            });
+            let has_lua = split_line_segments(raw)
+                .iter()
+                .any(|seg| matches!(seg, LineSegment::Tag(inner) if inner.trim() == "lua"));
             if has_lua {
                 self.in_lua = true;
                 return raw.to_string();
@@ -245,9 +243,7 @@ impl Preprocessor {
         {
             out.push_str(cmd);
         }
-        if head_is_text
-            && let Some(cmd) = &self.linehead
-        {
+        if head_is_text && let Some(cmd) = &self.linehead {
             out.insert_str(0, cmd);
         }
         out
@@ -499,7 +495,8 @@ mod tests {
 
     #[test]
     fn autoinsert_lineend_skips_tag_or_clickwait_end() {
-        let src = "[&autoinsert target=\"lineend\" command=\"@[rt]\"]\ntext@[rp]\ntext@\nプレーン\n";
+        let src =
+            "[&autoinsert target=\"lineend\" command=\"@[rt]\"]\ntext@[rp]\ntext@\nプレーン\n";
         let out = pp(src);
         let ls = lines(&out);
         assert_eq!(ls[1], "text@[rp]"); // 行尾是标签：不注入
@@ -527,7 +524,10 @@ mod tests {
         assert_eq!(ls[3], "[スライム]");
         assert_eq!(ls[4], "[onlinehead]「ぷるぷる」[onlineend]");
         assert_eq!(ls[5], "[onblankline]");
-        assert_eq!(ls[6], "[onlinehead]スライムはぷるぷるしているようだ。[onlineend]");
+        assert_eq!(
+            ls[6],
+            "[onlinehead]スライムはぷるぷるしているようだ。[onlineend]"
+        );
     }
 
     // ---- &scpsupport ----
@@ -669,7 +669,8 @@ mod tests {
 
     #[test]
     fn tag_ini_parse_format() {
-        let src = "; 注释\n# 注释\n// 注释\n[tags]\nfoo=a,b,c\nbar = x , y\n\nbroken_line_without_eq\n";
+        let src =
+            "; 注释\n# 注释\n// 注释\n[tags]\nfoo=a,b,c\nbar = x , y\n\nbroken_line_without_eq\n";
         let ini = TagIni::parse(src);
         assert_eq!(
             ini.param_names("foo"),

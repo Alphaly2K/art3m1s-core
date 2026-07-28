@@ -196,7 +196,7 @@ impl CoreRuntime {
         self.compositor.reset_for_load();
         self.stop_all_media();
         self.reset_control_modes_for_load();
-        self.clear_pending_text_translation();
+        self.clear_scene_text();
         self.hovered_layers.clear();
         if let Some(scene) = data.scene.clone() {
             self.compositor.restore_scene(scene);
@@ -291,7 +291,7 @@ impl CoreRuntime {
         self.compositor.reset_for_load();
         self.sync_layer_info_all();
         self.stop_all_media();
-        self.clear_pending_text_translation();
+        self.clear_scene_text();
         self.hovered_layers.clear();
         self.save_screenshot = None;
         self.timed_remaining_ms = 0;

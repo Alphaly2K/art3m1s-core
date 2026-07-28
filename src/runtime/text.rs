@@ -117,12 +117,16 @@ fn build_backlog_snapshot(state: &crate::text::render::FontState) -> BacklogSnap
 fn apply_message_layer_binding(
     compositor: &mut crate::compositor::Compositor,
     active: Option<(String, bool)>,
+    revive: bool,
 ) {
     match active {
         Some((message_id, layered)) => {
             let scene_id = message_layer_scene_id(&message_id, layered);
             compositor.ensure_layer(&scene_id);
             compositor.set_message_layer_binding(&message_id, &scene_id);
+            if revive {
+                compositor.revive_message_layer(&message_id);
+            }
             compositor.set_default_message_layer(Some(message_id));
         }
         // 后续 [lyprop id="~"] 找不到默认层时按合成器约定忽略该操作。
@@ -223,6 +227,9 @@ impl CoreRuntime {
 
         let mut remapped = HashMap::<String, Vec<DrawCommand>>::new();
         for (message_id, layer_commands) in commands {
+            if !self.compositor.is_message_layer_visible(&message_id) {
+                continue;
+            }
             let scene_id = message_layer_scene_id(
                 &message_id,
                 layered.get(&message_id).copied().unwrap_or(false),
@@ -403,8 +410,11 @@ impl CoreRuntime {
         // 使 [lyprop id="~xxx"] / id="~" 能解析到对应场景图层。这里放在 renderer
         // 借用结束之后：切换后活动消息层由 renderer 决定，需回读它拿真实 ID。
         match event {
-            Event::MessageLayerSwitch { .. } | Event::MessageLayerPop => {
-                self.sync_message_layer_binding();
+            Event::MessageLayerSwitch { .. } => {
+                self.sync_message_layer_binding(true);
+            }
+            Event::MessageLayerPop => {
+                self.sync_message_layer_binding(false);
             }
             _ => {}
         }
@@ -518,9 +528,20 @@ impl CoreRuntime {
         self.pending_text_translations.clear();
     }
 
+    /// 清除只属于当前场景的文本状态。
+    ///
+    /// 合成器重置会移除消息层绑定，但渲染器里的字形缓冲若继续保留，之后标题
+    /// 或菜单重建同名层时旧剧情文字会再次出现。
+    pub(super) fn clear_scene_text(&mut self) {
+        self.clear_pending_text_translation();
+        if let Some(renderer) = self.text_renderer.as_mut() {
+            renderer.clear_scene_text();
+        }
+    }
+
     /// 把当前活动消息层登记为合成器的默认消息层，并建立「消息层 ID → 场景图层
     /// ID」映射。分层消息层绑定同名图像层；独立消息层绑定到内部顶层节点。
-    pub(super) fn sync_message_layer_binding(&mut self) {
+    pub(super) fn sync_message_layer_binding(&mut self, revive: bool) {
         let Some(renderer) = self.text_renderer.as_ref() else {
             return;
         };
@@ -529,7 +550,7 @@ impl CoreRuntime {
             let layered = state.layers.get(id).is_some_and(|layer| layer.layered);
             (id.clone(), layered)
         });
-        apply_message_layer_binding(&mut self.compositor, active);
+        apply_message_layer_binding(&mut self.compositor, active, revive);
     }
 
     // ── glyph 点击等待图标接线 ───────────────────────────────────────
@@ -773,7 +794,7 @@ mod tests {
         }));
 
         // 切到消息层 mw 后接线绑定（等价 sync_message_layer_binding 读到 active="mw"）
-        apply_message_layer_binding(&mut c, Some(("mw".to_string(), true)));
+        apply_message_layer_binding(&mut c, Some(("mw".to_string(), true)), true);
 
         // `~mw` 应解析到场景图层 mw
         c.apply_event(&Event::Layer(LayerEvent::SetProperty {
@@ -799,7 +820,7 @@ mod tests {
         use asb_interpreter::event::LayerEvent;
 
         let mut c = Compositor::new();
-        apply_message_layer_binding(&mut c, Some(("1.80.mw.adv".to_string(), false)));
+        apply_message_layer_binding(&mut c, Some(("1.80.mw.adv".to_string(), false)), true);
         let overlay = message_layer_scene_id("1.80.mw.adv", false);
 
         assert!(c.scene().get(&overlay).is_some());
@@ -814,6 +835,30 @@ mod tests {
     }
 
     #[test]
+    fn independent_message_layer_keeps_logical_ancestor_visibility() {
+        use super::apply_message_layer_binding;
+        use crate::compositor::Compositor;
+        use asb_interpreter::Event;
+        use asb_interpreter::event::LayerEvent;
+
+        let mut c = Compositor::new();
+        c.apply_event(&Event::Layer(LayerEvent::SetProperty {
+            id: "1.80".into(),
+            property: "visible".into(),
+            value: "1".into(),
+        }));
+        apply_message_layer_binding(&mut c, Some(("1.80.mw.adv_adv".to_string(), false)), true);
+        assert!(c.is_message_layer_visible("1.80.mw.adv_adv"));
+
+        c.apply_event(&Event::Layer(LayerEvent::SetProperty {
+            id: "1.80".into(),
+            property: "visible".into(),
+            value: "0".into(),
+        }));
+        assert!(!c.is_message_layer_visible("1.80.mw.adv_adv"));
+    }
+
+    #[test]
     fn message_layer_binding_none_clears_default() {
         use super::apply_message_layer_binding;
         use crate::compositor::Compositor;
@@ -825,9 +870,9 @@ mod tests {
             id: "mw".into(),
             file: "mw_bg".into(),
         }));
-        apply_message_layer_binding(&mut c, Some(("mw".to_string(), true)));
+        apply_message_layer_binding(&mut c, Some(("mw".to_string(), true)), true);
         // 弹空活动消息层：清默认消息层，`~` 此后无目标（合成器忽略该操作）
-        apply_message_layer_binding(&mut c, None);
+        apply_message_layer_binding(&mut c, None, false);
         c.apply_event(&Event::Layer(LayerEvent::SetProperty {
             id: "~".into(),
             property: "left".into(),

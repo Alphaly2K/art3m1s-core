@@ -8,6 +8,7 @@
 
 use crate::compositor::build::build_frame_with_content;
 use crate::compositor::reduce::Compositor;
+use crate::compositor::scene::Scene;
 pub mod draw;
 pub mod hlsl;
 pub mod shader;
@@ -135,6 +136,17 @@ impl<'a> RenderPipeline<'a> {
         provider: &mut dyn TextureProvider,
         text_for: Option<&LayerDrawSource<'_>>,
     ) -> DrawList {
+        self.build_with_content(provider, None, text_for)
+    }
+
+    /// Builds only the scene DrawList with host-owned layer content and text,
+    /// without a transition overlay.
+    pub fn build_with_content(
+        &self,
+        provider: &mut dyn TextureProvider,
+        content_for: Option<&LayerDrawSource<'_>>,
+        text_for: Option<&LayerDrawSource<'_>>,
+    ) -> DrawList {
         let compositor = self.compositor;
         compositor.process_layer_edits(provider);
         let overrides = compositor.layer_edit_overrides();
@@ -142,7 +154,36 @@ impl<'a> RenderPipeline<'a> {
             &compositor.scene,
             compositor.clock_ms,
             provider,
-            None,
+            content_for,
+            text_for,
+            if overrides.is_empty() {
+                None
+            } else {
+                Some(&overrides)
+            },
+        )
+    }
+
+    /// Builds a previously rendered scene without transition overlays.
+    ///
+    /// The runtime uses this to reconstruct a transition source frame from the
+    /// previous image-layer state while supplying text filtered by the current
+    /// message-layer visibility.
+    pub fn build_scene_with_content(
+        &self,
+        scene: &Scene,
+        clock_ms: u64,
+        provider: &mut dyn TextureProvider,
+        content_for: Option<&LayerDrawSource<'_>>,
+        text_for: Option<&LayerDrawSource<'_>>,
+    ) -> DrawList {
+        self.compositor.process_layer_edits(provider);
+        let overrides = self.compositor.layer_edit_overrides();
+        build_frame_with_content(
+            scene,
+            clock_ms,
+            provider,
+            content_for,
             text_for,
             if overrides.is_empty() {
                 None

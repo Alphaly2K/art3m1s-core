@@ -51,6 +51,25 @@ fn next_shader_group(
         .map(|(group_index, group)| (group_index, group.clone()))
 }
 
+fn shader_group_blend(group: &ShaderGroup) -> BlendMode {
+    if group.effect.name != crate::render_pipeline::shader::GROUP_COMPOSITE_SHADER {
+        return BlendMode::PremultipliedAlpha;
+    }
+    let mode = group
+        .effect
+        .uniforms
+        .get("blendMode")
+        .and_then(|values| values.first())
+        .copied()
+        .unwrap_or(0.0) as i32;
+    match mode {
+        1 => BlendMode::PremultipliedAdd,
+        2 => BlendMode::Screen,
+        3 => BlendMode::Multiply,
+        _ => BlendMode::PremultipliedAlpha,
+    }
+}
+
 /// GLES 渲染器：持有 GL 程序、四边形几何与舞台尺寸。
 ///
 /// 渲染器借用一个 [`glow::Context`]（用 `Rc` 共享，方便和
@@ -110,6 +129,18 @@ impl GlRenderer {
                 CustomProgram {
                     program: alpha_mask_program,
                     bindings: ProgramBindings::new(&gl, alpha_mask_program),
+                },
+            );
+            let group_composite_program = shader::build_builtin_program(
+                &gl,
+                profile,
+                crate::render_pipeline::shader::GROUP_COMPOSITE_SHADER,
+            )?;
+            custom_programs.insert(
+                crate::render_pipeline::shader::GROUP_COMPOSITE_SHADER.to_owned(),
+                CustomProgram {
+                    program: group_composite_program,
+                    bindings: ProgramBindings::new(&gl, group_composite_program),
                 },
             );
             // [trans type=2] 规则图像转场内置 shader，与 alpha-mask 同样在
@@ -429,7 +460,7 @@ impl GlRenderer {
                         // Rendering into a transparent group target produces
                         // premultiplied RGB. Composite that target without
                         // multiplying its alpha a second time.
-                        blend: BlendMode::PremultipliedAlpha,
+                        blend: shader_group_blend(&group),
                         color: ColorFilter::default(),
                         clip: ClipRect {
                             uv_offset: [0.0, 0.0],
@@ -508,6 +539,9 @@ impl GlRenderer {
                         glow::ONE,
                         glow::ONE_MINUS_SRC_ALPHA,
                     );
+                }
+                BlendMode::PremultipliedAdd => {
+                    gl.blend_func(glow::ONE, glow::ONE);
                 }
                 BlendMode::Add => {
                     gl.blend_func(glow::SRC_ALPHA, glow::ONE);
@@ -900,6 +934,14 @@ mod tests {
             clip_bounds: None,
             mask_range: None,
         }
+    }
+
+    #[test]
+    fn group_composite_uses_premultiplied_blend_variant() {
+        let mut group = shader_group(0, 1, crate::render_pipeline::shader::GROUP_COMPOSITE_SHADER);
+        assert_eq!(shader_group_blend(&group), BlendMode::PremultipliedAlpha);
+        group.effect.uniforms.insert("blendMode".into(), vec![1.0]);
+        assert_eq!(shader_group_blend(&group), BlendMode::PremultipliedAdd);
     }
 
     #[test]

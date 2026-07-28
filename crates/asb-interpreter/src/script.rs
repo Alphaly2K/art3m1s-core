@@ -70,17 +70,12 @@ impl Script {
         if !content.contains("[&") {
             return Self::parse_preprocessed(name, content);
         }
-        let pre =
-            preprocess::with_global_tag_ini(|ini| preprocess::preprocess(content, ini));
+        let pre = preprocess::with_global_tag_ini(|ini| preprocess::preprocess(content, ini));
         Self::parse_preprocessed(name, &pre)
     }
 
     /// 从文本解析脚本，显式指定 tag.ini（绕开全局注册表；测试/宿主定制用）
-    pub fn parse_with_tag_ini(
-        name: &str,
-        content: &str,
-        tag_ini: Option<&TagIni>,
-    ) -> Result<Self> {
+    pub fn parse_with_tag_ini(name: &str, content: &str, tag_ini: Option<&TagIni>) -> Result<Self> {
         let pre = preprocess::preprocess(content, tag_ini);
         Self::parse_preprocessed(name, &pre)
     }

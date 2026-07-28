@@ -45,7 +45,14 @@ impl CoreRuntime {
                     }
                 }
                 Event::GoTitle => {
-                    crate::core_info!("[runtime] Event::GoTitle");
+                    crate::core_info!(
+                        "[runtime] Event::GoTitle source={:?}:{} stack_depth={} wait={:?} skip={}",
+                        self.interpreter.current_script(),
+                        self.interpreter.current_line(),
+                        self.interpreter.call_stack().len(),
+                        self.wait_reason,
+                        self.skip_active()
+                    );
                     if let Err(e) = self.handle_go_title() {
                         crate::core_error!("[runtime] 返回标题失败: {}", e);
                     }
@@ -373,7 +380,14 @@ impl CoreRuntime {
                     self.handle_debug_reload();
                 }
                 Event::Reset => {
-                    crate::core_info!("[runtime] Event::Reset — 引擎全量重启");
+                    crate::core_info!(
+                        "[runtime] Event::Reset source={:?}:{} stack_depth={} wait={:?} skip={}",
+                        self.interpreter.current_script(),
+                        self.interpreter.current_line(),
+                        self.interpreter.call_stack().len(),
+                        self.wait_reason,
+                        self.skip_active()
+                    );
                     if let Err(e) = self.handle_engine_reset() {
                         crate::core_error!("[runtime] 引擎重启失败: {}", e);
                     }
@@ -388,6 +402,19 @@ impl CoreRuntime {
             // 只有真正送入文本渲染器后才算本帧展示过剧情文本。
             if matches!(event, Event::ScenarioText { .. }) {
                 self.scenario_text_shown = true;
+            }
+            // `[trans]` 捕获的是它之前所有图层事件已经生效的场景。事件派发会在
+            // 一帧内连续执行，必须在这里先提交一次，否则帧末会抓到旧 FBO，
+            // 已隐藏的消息文字便作为转场旧画面继续残留。
+            if matches!(
+                event,
+                Event::Trans {
+                    trans_type,
+                    ..
+                } if *trans_type != 0
+            ) {
+                self.refresh_transition_source_frame();
+                crate::core_debug!("[runtime] transition source refreshed before Trans");
             }
             if let Some(event) = CompositorEvent::from_interpreter(event) {
                 self.compositor.apply_event(event);
@@ -463,20 +490,36 @@ impl CoreRuntime {
     }
 
     pub(super) fn sync_layer_info_all(&self) {
+        let now_ms = self.compositor.clock_ms();
         let mut out = HashMap::new();
         for layer in self.compositor.scene().all_layers() {
-            out.insert(layer.id.clone(), layer_info_entry(layer));
+            let texture_info = layer
+                .file
+                .as_deref()
+                .and_then(|file| self.texture_provider.cached_info(file));
+            out.insert(
+                layer.id.clone(),
+                layer_info_entry(layer, now_ms, texture_info),
+            );
         }
         *self.layer_info.lock().unwrap() = out;
     }
 
     pub(super) fn sync_layer_info(&self, id: &str) {
+        let now_ms = self.compositor.clock_ms();
         let mut table = self.layer_info.lock().unwrap();
         let Some(layer) = self.compositor.scene().get(id) else {
             table.remove(id);
             return;
         };
-        table.insert(id.to_string(), layer_info_entry(layer));
+        let texture_info = layer
+            .file
+            .as_deref()
+            .and_then(|file| self.texture_provider.cached_info(file));
+        table.insert(
+            id.to_string(),
+            layer_info_entry(layer, now_ms, texture_info),
+        );
     }
 
     // ── callnative / purchase：经 ui_command 转发宿主，失败兜底 ──────
@@ -717,7 +760,7 @@ impl CoreRuntime {
         self.pointer_drag = super::PointerDragState::default();
         self.save_screenshot = None;
         self.pending_dialog = None;
-        self.clear_pending_text_translation();
+        self.clear_scene_text();
         self.active_inline_event_frame = None;
         self.timed_remaining_ms = 0;
         self.wait_reason = None;
@@ -878,16 +921,26 @@ fn crc32_ieee(data: &[u8]) -> u32 {
 }
 
 /// 单个图层暴露给脚本层的几何信息（left/top/width/height 字符串表）。
-fn layer_info_entry(layer: &crate::compositor::Layer) -> HashMap<String, String> {
-    let (left, top) = layer.props.offset();
-    let (width, height) =
-        if let (Some(width), Some(height)) = (layer.props.width, layer.props.height) {
-            (width, height)
-        } else if let Some([_, _, width, height]) = layer.props.clip_rect() {
-            (width, height)
-        } else {
-            (0.0, 0.0)
-        };
+fn layer_info_entry(
+    layer: &crate::compositor::Layer,
+    now_ms: u64,
+    texture_info: Option<crate::compositor::TextureInfo>,
+) -> HashMap<String, String> {
+    // get_layer_info 查询的是画面当前状态。缓动期间若仍返回静态 props，
+    // 脚本会在图层已经移动到中央时读到旧坐标，进而走错展开/收回分支。
+    let props = crate::compositor::build::resolved_props(layer, now_ms);
+    let (left, top) = props.offset();
+    let clip = props.clip_rect();
+    let width = props
+        .width
+        .or_else(|| clip.map(|rect| rect[2]))
+        .or_else(|| texture_info.map(|info| info.width as f32))
+        .unwrap_or(0.0);
+    let height = props
+        .height
+        .or_else(|| clip.map(|rect| rect[3]))
+        .or_else(|| texture_info.map(|info| info.height as f32))
+        .unwrap_or(0.0);
     HashMap::from([
         ("left".to_string(), trim_layer_float(left)),
         ("top".to_string(), trim_layer_float(top)),
@@ -1028,7 +1081,10 @@ fn sync_tween_finished(compositor: &crate::compositor::Compositor, id: &str) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{crc32_ieee, sync_tween_finished, sync_tween_wait_layer, sync_tween_wait_reason};
+    use super::{
+        crc32_ieee, layer_info_entry, sync_tween_finished, sync_tween_wait_layer,
+        sync_tween_wait_reason,
+    };
 
     #[test]
     fn crc32_matches_ieee_reference_vectors() {
@@ -1091,6 +1147,58 @@ mod tests {
 
         // 图层不存在（已删除）时同样视为结束，避免死等。
         assert!(sync_tween_finished(&c, "no-such-layer"));
+    }
+
+    #[test]
+    fn layer_info_reports_the_current_tween_position() {
+        let mut c = Compositor::new();
+        c.apply_event(&Event::Layer(LayerEvent::Create {
+            id: "toolbar".into(),
+            file: "toolbar.png".into(),
+        }));
+        c.apply_event(&Event::LayerTween {
+            id: "toolbar".into(),
+            param: "left".into(),
+            from: Some("-100".into()),
+            to: Some("0".into()),
+            ease: None,
+            time: Some(1000),
+            delay: None,
+            loop_count: None,
+            yoyo: None,
+            loop_delay: None,
+            sync: false,
+            delete: false,
+            handler_file: None,
+            handler_label: None,
+            handler_handler: None,
+        });
+
+        c.advance(750);
+        let layer = c.scene().get("toolbar").unwrap();
+        assert_eq!(layer.props.left, None);
+        assert_eq!(layer_info_entry(layer, c.clock_ms(), None)["left"], "-25");
+    }
+
+    #[test]
+    fn layer_info_falls_back_to_the_texture_dimensions() {
+        let mut c = Compositor::new();
+        c.apply_event(&Event::Layer(LayerEvent::Create {
+            id: "mask".into(),
+            file: "mask.png".into(),
+        }));
+
+        let layer = c.scene().get("mask").unwrap();
+        let info = layer_info_entry(
+            layer,
+            c.clock_ms(),
+            Some(crate::compositor::TextureInfo {
+                width: 1280,
+                height: 120,
+            }),
+        );
+        assert_eq!(info["width"], "1280");
+        assert_eq!(info["height"], "120");
     }
 
     // dispatch_events 里每个事件都过 CompositorEvent::from_interpreter 后交给

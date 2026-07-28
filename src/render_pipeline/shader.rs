@@ -52,6 +52,11 @@ impl ShaderManager for BuiltinShaderManager {
                 vertex_body: SPRITE_VERTEX_BODY,
                 fragment_body: ALPHA_MASK_FRAGMENT_BODY,
             }),
+            GROUP_COMPOSITE_SHADER => Some(ShaderProgramSource {
+                name: GROUP_COMPOSITE_SHADER,
+                vertex_body: SPRITE_VERTEX_BODY,
+                fragment_body: GROUP_COMPOSITE_FRAGMENT_BODY,
+            }),
             RULE_TRANS_SHADER => Some(ShaderProgramSource {
                 name: RULE_TRANS_SHADER,
                 vertex_body: SPRITE_VERTEX_BODY,
@@ -64,6 +69,7 @@ impl ShaderManager for BuiltinShaderManager {
 
 pub const SPRITE_SHADER: &str = "sprite";
 pub const ALPHA_MASK_SHADER: &str = "alpha-mask";
+pub const GROUP_COMPOSITE_SHADER: &str = "group-composite";
 /// `[trans type=2]` 规则图像转场：旧帧按 rule 灰度阈值逐像素溶解。
 pub const RULE_TRANS_SHADER: &str = "rule-trans";
 
@@ -163,5 +169,35 @@ void main() {
     c.rgb *= colorMultiply * mask_alpha;
     c.a *= mask_alpha;
     frag_color = c;
+}
+"#;
+
+const GROUP_COMPOSITE_FRAGMENT_BODY: &str = r#"
+in vec2 v_uv;
+out vec4 frag_color;
+
+uniform sampler2D u_texture_fore;
+uniform sampler2D u_texture_mask;
+uniform float alpha;
+uniform vec3 colorMultiply;
+uniform float grayscale;
+uniform float negative;
+uniform float opaque;
+
+void main() {
+    vec4 c = texture(u_texture_fore, v_uv);
+    float source_alpha = c.a;
+    vec3 rgb = source_alpha > 0.0 ? c.rgb / source_alpha : vec3(0.0);
+    rgb *= colorMultiply;
+    if (grayscale != 0.0) {
+        float gray = dot(rgb, vec3(0.299, 0.587, 0.114));
+        rgb = vec3(gray);
+    }
+    if (negative != 0.0) {
+        rgb = vec3(1.0) - rgb;
+    }
+    float mask_alpha = texture(u_texture_mask, v_uv).a;
+    float output_alpha = mix(source_alpha, 1.0, opaque) * alpha * mask_alpha;
+    frag_color = vec4(rgb * output_alpha, output_alpha);
 }
 "#;

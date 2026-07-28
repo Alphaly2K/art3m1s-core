@@ -49,7 +49,6 @@ pub(super) struct RuntimeControlState {
     read_lines: HashMap<String, HashSet<usize>>,
     auto_wait_elapsed_ms: u64,
     skip_wait_revealed: bool,
-    skip_hold_frames: u8,
     was_skipping: bool,
     // ── controlskip：按住 Ctrl（keyconfig role 14）期间的强制跳过 ──
     control_skip_active: bool,
@@ -131,7 +130,6 @@ impl Default for RuntimeControlState {
             automode_layer: None,
             auto_wait_elapsed_ms: 0,
             skip_wait_revealed: false,
-            skip_hold_frames: 0,
             was_skipping: false,
             control_skip_active: false,
             hide_allowed: true,
@@ -233,7 +231,6 @@ impl RuntimeControlState {
     pub(super) fn reset_wait_flags(&mut self) {
         self.auto_wait_elapsed_ms = 0;
         self.skip_wait_revealed = false;
-        self.skip_hold_frames = 0;
     }
 
     fn reset_modes_for_load(&mut self) {
@@ -541,18 +538,13 @@ impl CoreRuntime {
             .should_auto_advance(delta_ms, text_ready && voice_ready, wait_ms)
     }
 
-    pub(super) fn should_hold_for_skip_reveal(&mut self) -> bool {
-        if self.control.skip_wait_revealed() {
-            if self.control.skip_hold_frames < 3 {
-                self.control.skip_hold_frames += 1;
-                return true;
-            }
-            return false;
+    pub(super) fn reveal_text_for_skip(&mut self) {
+        if !self.control.skip_wait_revealed() {
+            // 本帧先把当前页揭示完整；advance_wait_line 后下一条剧情要到下一帧
+            // 才会执行，因此当前页仍会实际显示一帧，无需额外固定滞留三帧。
+            self.reveal_text_now();
+            self.control.mark_skip_wait_revealed();
         }
-        self.reveal_text_now();
-        self.control.mark_skip_wait_revealed();
-        self.control.skip_hold_frames = 1;
-        true
     }
 
     fn enqueue_control_handler(&mut self, event_name: &str) {
@@ -931,7 +923,6 @@ mod tests {
             automode_active: true,
             auto_wait_elapsed_ms: 500,
             skip_wait_revealed: true,
-            skip_hold_frames: 3,
             was_skipping: true,
             control_skip_active: true,
             hide_active: true,
@@ -945,7 +936,6 @@ mod tests {
         assert!(!control.automode_active());
         assert_eq!(control.auto_wait_elapsed_ms, 0);
         assert!(!control.skip_wait_revealed);
-        assert_eq!(control.skip_hold_frames, 0);
         assert!(!control.was_skipping);
         assert!(!control.control_skip_active());
         assert!(!control.hide_active());

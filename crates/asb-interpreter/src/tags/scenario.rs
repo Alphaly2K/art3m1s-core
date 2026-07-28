@@ -199,8 +199,7 @@ impl TagHandler for ChgmsgHandler {
         let id = match ctx.instruction.get("id").filter(|v| !v.is_empty()) {
             Some(id) => Some(id.to_string()),
             None => {
-                let serial =
-                    CHGMSG_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let serial = CHGMSG_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let nanos = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.subsec_nanos())
@@ -544,7 +543,11 @@ mod tests {
         assert!(allow);
         assert_eq!(
             window,
-            Some(vec!["mw".to_string(), "face".to_string(), "ui.btn".to_string()])
+            Some(vec![
+                "mw".to_string(),
+                "face".to_string(),
+                "ui.btn".to_string()
+            ])
         );
 
         // window 缺省 → None（继承之前设置）
@@ -589,8 +592,11 @@ mod tests {
 
     #[test]
     fn chgmsg_generates_random_id_when_omitted() {
-        let TagResult::Emit(Event::MessageLayerSwitch { id: id1, stack, layered }) =
-            exec(&ChgmsgHandler, "chgmsg", &[])
+        let TagResult::Emit(Event::MessageLayerSwitch {
+            id: id1,
+            stack,
+            layered,
+        }) = exec(&ChgmsgHandler, "chgmsg", &[])
         else {
             panic!("chgmsg 应产出 MessageLayerSwitch");
         };
@@ -633,10 +639,7 @@ mod tests {
         assert_eq!(layer.as_deref(), Some("automark"));
         assert_eq!(stopbyclick, Some(false));
         assert_eq!(stopbystop, Some(true));
-        assert_eq!(
-            syncse,
-            Some(vec!["se1".to_string(), "se2".to_string()])
-        );
+        assert_eq!(syncse, Some(vec!["se1".to_string(), "se2".to_string()]));
 
         // 缺省参数保留之前设置（None）
         let TagResult::Emit(Event::AutoModeConfig {
@@ -852,9 +855,11 @@ mod tests {
         assert_eq!(head, DEFAULT_PROHIBIT_HEAD);
         assert_eq!(foot, DEFAULT_PROHIBIT_FOOT);
 
-        let TagResult::Emit(Event::ProhibitConfig { head, foot }) =
-            exec(&ProhibitHandler, "prohibit", &[("head", "。、"), ("foot", "「")])
-        else {
+        let TagResult::Emit(Event::ProhibitConfig { head, foot }) = exec(
+            &ProhibitHandler,
+            "prohibit",
+            &[("head", "。、"), ("foot", "「")],
+        ) else {
             panic!("prohibit 应产出 ProhibitConfig");
         };
         assert_eq!(head, "。、");

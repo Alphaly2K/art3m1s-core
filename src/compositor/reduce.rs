@@ -37,6 +37,29 @@ pub struct InputHandler {
     /// 标签里除已知字段外的所有参数（function、key、adv、ui、btn 等），
     /// 触发时原样塞进 handler 标签的参数表。
     pub params: HashMap<String, String>,
+    /// 注册事件时的完整标签参数，供 `e:setEventFilter` 原样检查。
+    pub filter_params: HashMap<String, String>,
+}
+
+fn complete_event_filter_params(
+    extra_params: &HashMap<String, String>,
+    fields: &[(&str, Option<&str>)],
+    flags: &[(&str, bool)],
+) -> HashMap<String, String> {
+    let mut params = extra_params.clone();
+    for (name, value) in fields {
+        if let Some(value) = value
+            && !value.is_empty()
+        {
+            params.insert((*name).to_string(), (*value).to_string());
+        }
+    }
+    for (name, enabled) in flags {
+        if *enabled {
+            params.insert((*name).to_string(), "1".to_string());
+        }
+    }
+    params
 }
 
 /// `[tweenset]` 组内暂存的一条 lytween 请求（owned，等 `[/tweenset]` 统一启动）。
@@ -83,6 +106,11 @@ pub struct Compositor {
     pub(crate) layer_edits: RefCell<LayerEditQueue>,
     /// `~消息层ID` → 场景图层 ID 的绑定表（`[lyprop id="~xxx"]` 解析用）。
     message_layer_bindings: HashMap<String, String>,
+    /// 因逻辑父图层被删除而失效的消息层。
+    ///
+    /// `/chgmsg` 弹栈可能恢复旧 ID，但不能借此复活已随父层删除的文字；
+    /// 只有显式 `chgmsg` 再次切到该层时才清除此集合中的记录。
+    deleted_message_layers: HashSet<String>,
     /// 默认消息图层的消息层 ID（`[lyprop id="~"]` 解析用）。
     default_message_layer: Option<String>,
     /// 当前显示中的点击等待图标图层 ID（`[glyph]`）。
@@ -115,6 +143,7 @@ impl Default for Compositor {
             next_tween_set_id: 1,
             layer_edits: RefCell::new(LayerEditQueue::default()),
             message_layer_bindings: HashMap::new(),
+            deleted_message_layers: HashSet::new(),
             default_message_layer: None,
             active_wait_icon: None,
         }
@@ -164,6 +193,7 @@ impl Compositor {
         self.tween_set_pending = None;
         self.layer_edits.borrow_mut().clear();
         self.message_layer_bindings.clear();
+        self.deleted_message_layers.clear();
         self.default_message_layer = None;
         self.active_wait_icon = None;
     }
@@ -293,6 +323,11 @@ impl Compositor {
             .insert(message_id.to_string(), scene_layer_id.to_string());
     }
 
+    /// 显式 `chgmsg` 重新选择消息层时，使其脱离父层删除产生的失效状态。
+    pub fn revive_message_layer(&mut self, message_id: &str) {
+        self.deleted_message_layers.remove(message_id);
+    }
+
     /// 设置默认消息图层的消息层 ID（`[lyprop id="~"]` 解析用）。
     pub fn set_default_message_layer(&mut self, message_id: Option<String>) {
         self.default_message_layer = message_id;
@@ -332,12 +367,52 @@ impl Compositor {
     /// visible=0）后返回 false，使已隐藏文本区的链接命中失效。
     /// 未登记绑定时按 message_id 直查场景。
     pub fn is_message_layer_visible(&self, message_id: &str) -> bool {
+        if self.deleted_message_layers.contains(message_id) {
+            return false;
+        }
         let scene_id = self
             .message_layer_bindings
             .get(message_id)
             .map(String::as_str)
             .unwrap_or(message_id);
         self.scene.is_effectively_visible(scene_id)
+            && (scene_id == message_id || self.scene.existing_path_is_visible(message_id))
+    }
+
+    /// 删除逻辑图层子树时，同步移除挂在内部顶层节点上的独立消息层。
+    ///
+    /// 独立消息层为了保证绘制顺序不直接作为逻辑父层的场景子节点，因此普通的
+    /// `Scene::delete` 无法级联到它们。绑定的逻辑 ID 仍遵循点分层级，需在这里
+    /// 按逻辑子树清理，否则 `Delete 1` 后旧剧情文字会残留在后续转场中。
+    fn remove_message_layers_in_subtree(&mut self, deleted_id: &str) {
+        let removed: Vec<(String, String)> = self
+            .message_layer_bindings
+            .iter()
+            .filter(|(message_id, scene_id)| {
+                layer_id_is_same_or_descendant(message_id, deleted_id)
+                    || layer_id_is_same_or_descendant(scene_id, deleted_id)
+            })
+            .map(|(message_id, scene_id)| (message_id.clone(), scene_id.clone()))
+            .collect();
+
+        for (message_id, scene_id) in &removed {
+            self.message_layer_bindings.remove(message_id);
+            self.deleted_message_layers.insert(message_id.clone());
+            if !self
+                .message_layer_bindings
+                .values()
+                .any(|remaining| remaining == scene_id)
+            {
+                self.scene.delete(scene_id);
+            }
+        }
+
+        if self.default_message_layer.as_deref().is_some_and(|id| {
+            layer_id_is_same_or_descendant(id, deleted_id)
+                || removed.iter().any(|(message_id, _)| message_id == id)
+        }) {
+            self.default_message_layer = None;
+        }
     }
 
     // ── [glyph] 点击等待图标 ────────────────────────────────────
@@ -547,6 +622,18 @@ impl Compositor {
                             if let Some(existing) = layer.event_handlers.get_mut(event_type) {
                                 existing.enabled = true;
                             } else {
+                                let filter_params = complete_event_filter_params(
+                                    extra_params,
+                                    &[
+                                        ("id", Some(id)),
+                                        ("type", Some(event_type)),
+                                        ("mode", Some(mode)),
+                                        ("file", file),
+                                        ("label", label),
+                                        ("handler", handler),
+                                    ],
+                                    &[("call", call), ("penetration", penetration)],
+                                );
                                 layer.event_handlers.insert(
                                     event_type.to_string(),
                                     LayerEventHandler {
@@ -557,11 +644,24 @@ impl Compositor {
                                         call,
                                         penetration,
                                         params: extra_params.clone(),
+                                        filter_params,
                                     },
                                 );
                             }
                         }
                         _ => {
+                            let filter_params = complete_event_filter_params(
+                                extra_params,
+                                &[
+                                    ("id", Some(id)),
+                                    ("type", Some(event_type)),
+                                    ("mode", Some(mode)),
+                                    ("file", file),
+                                    ("label", label),
+                                    ("handler", handler),
+                                ],
+                                &[("call", call), ("penetration", penetration)],
+                            );
                             layer.event_handlers.insert(
                                 event_type.to_string(),
                                 LayerEventHandler {
@@ -572,6 +672,7 @@ impl Compositor {
                                     call,
                                     penetration,
                                     params: extra_params.clone(),
+                                    filter_params,
                                 },
                             );
                         }
@@ -590,6 +691,11 @@ impl Compositor {
                 // key 字段标识处理器响应的按键/输入（"1" = 鼠标左键）。
                 // 引擎按 (event_name, key) 索引，不解释 handler/function 的语义。
                 let key = extra_params.get("key").cloned().unwrap_or_default();
+                let filter_params = complete_event_filter_params(
+                    extra_params,
+                    &[("file", file), ("label", label), ("handler", handler)],
+                    &[("call", call)],
+                );
                 self.input_handlers.insert(
                     (event_name.to_string(), key),
                     InputHandler {
@@ -598,6 +704,7 @@ impl Compositor {
                         label: label.map(str::to_string),
                         call,
                         params: extra_params.clone(),
+                        filter_params,
                     },
                 );
             }
@@ -687,6 +794,7 @@ impl Compositor {
                     .flat_map(|layer| layer.tweens.iter().filter_map(|t| t.set_id))
                     .collect();
                 self.scene.delete(&id);
+                self.remove_message_layers_in_subtree(&id);
                 anim::remove_tween_sets(&mut self.scene, &set_ids);
                 // 图层没了，对应的 lyedit 加工态也随之作废。
                 self.layer_edits.borrow_mut().states.remove(&id);
@@ -757,6 +865,13 @@ fn trim_float(value: f32) -> String {
     } else {
         value.to_string()
     }
+}
+
+fn layer_id_is_same_or_descendant(candidate: &str, root: &str) -> bool {
+    candidate == root
+        || candidate
+            .strip_prefix(root)
+            .is_some_and(|suffix| suffix.starts_with('.'))
 }
 
 #[cfg(test)]
@@ -979,6 +1094,22 @@ mod tests {
         );
         assert_eq!(
             handler.params.get("function").map(String::as_str),
+            Some("btn_over")
+        );
+        assert_eq!(
+            handler.filter_params.get("id").map(String::as_str),
+            Some("slot")
+        );
+        assert_eq!(
+            handler.filter_params.get("type").map(String::as_str),
+            Some("rollover")
+        );
+        assert_eq!(
+            handler.filter_params.get("handler").map(String::as_str),
+            Some("calllua")
+        );
+        assert_eq!(
+            handler.filter_params.get("function").map(String::as_str),
             Some("btn_over")
         );
         let mut provider = MockProvider::new();
@@ -1246,6 +1377,48 @@ mod tests {
         c.apply_event(&Event::Layer(LayerEvent::Delete { id: "1".into() }));
         assert!(c.scene().get("1").is_none());
         assert!(c.scene().get("2").unwrap().tweens.is_empty());
+    }
+
+    #[test]
+    fn deleting_logical_parent_removes_independent_message_overlay() {
+        let mut c = Compositor::new();
+        c.apply_event(&create("1", "background"));
+        c.ensure_layer("__message_overlay_1_80_adv");
+        c.set_message_layer_binding("1.80.mw.adv", "__message_overlay_1_80_adv");
+        c.set_default_message_layer(Some("1.80.mw.adv".into()));
+        assert!(c.is_message_layer_visible("1.80.mw.adv"));
+
+        c.apply_event(&Event::Layer(LayerEvent::Delete { id: "1".into() }));
+
+        assert!(c.scene().get("__message_overlay_1_80_adv").is_none());
+        assert!(!c.is_message_layer_visible("1.80.mw.adv"));
+        assert!(c.default_message_layer.is_none());
+
+        // `/chgmsg` 弹栈只会重新登记绑定，不应复活已随父层删除的旧文字。
+        c.ensure_layer("__message_overlay_1_80_adv");
+        c.set_message_layer_binding("1.80.mw.adv", "__message_overlay_1_80_adv");
+        assert!(!c.is_message_layer_visible("1.80.mw.adv"));
+
+        // 脚本显式 chgmsg 到该层时才重新启用。
+        c.revive_message_layer("1.80.mw.adv");
+        assert!(c.is_message_layer_visible("1.80.mw.adv"));
+    }
+
+    #[test]
+    fn deleting_logical_parent_keeps_unrelated_message_overlay() {
+        let mut c = Compositor::new();
+        c.apply_event(&create("1", "background"));
+        c.apply_event(&create("2", "menu"));
+        c.ensure_layer("__message_overlay_1");
+        c.ensure_layer("__message_overlay_2");
+        c.set_message_layer_binding("1.80.mw.adv", "__message_overlay_1");
+        c.set_message_layer_binding("2.help", "__message_overlay_2");
+
+        c.apply_event(&Event::Layer(LayerEvent::Delete { id: "1".into() }));
+
+        assert!(c.scene().get("__message_overlay_1").is_none());
+        assert!(c.scene().get("__message_overlay_2").is_some());
+        assert!(c.is_message_layer_visible("2.help"));
     }
 
     #[test]

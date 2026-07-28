@@ -542,15 +542,98 @@ fn event_dispatch_layers(
 #[cfg(test)]
 mod tests {
     use super::{
-        InlineEventFrame, event_dispatch_layers, forced_drag_state,
+        InlineEventFrame, dispatch_handler, event_dispatch_layers, forced_drag_state,
         global_push_absorbs_default_click, inline_event_marker_is_active,
         link_area_has_jump_target,
     };
     use crate::compositor::Compositor;
     use crate::text::render::LinkHitArea;
-    use asb_interpreter::CallFrame;
     use asb_interpreter::event::{Event, WaitReason};
+    use asb_interpreter::{CallFrame, Interpreter, InterpreterConfig};
     use std::collections::HashMap;
+
+    #[test]
+    fn event_filter_fake_results_never_enqueue_the_original_handler() {
+        let interpreter = Interpreter::new(InterpreterConfig::default());
+        let filter_params = HashMap::from([
+            ("id".to_string(), "button".to_string()),
+            ("type".to_string(), "click".to_string()),
+        ]);
+
+        interpreter
+            .lua()
+            .load(
+                r#"
+                __engine:setEventFilter(function(e, name, param)
+                    seen_name = name
+                    seen_id = param.id
+                    return verdict
+                end)
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        interpreter.lua().globals().set("verdict", 1).unwrap();
+        let success = dispatch_handler(
+            &interpreter,
+            "lyevent",
+            &filter_params,
+            Some("calllua"),
+            None,
+            None,
+            false,
+            &HashMap::new(),
+            &[],
+        );
+        assert!(success.handled);
+        assert!(
+            interpreter
+                .engine_context()
+                .lock()
+                .unwrap()
+                .tag_queue
+                .is_empty()
+        );
+
+        interpreter.lua().globals().set("verdict", 2).unwrap();
+        let failure = dispatch_handler(
+            &interpreter,
+            "lyevent",
+            &filter_params,
+            Some("calllua"),
+            None,
+            None,
+            false,
+            &HashMap::new(),
+            &[],
+        );
+        assert!(!failure.handled);
+        assert!(
+            interpreter
+                .engine_context()
+                .lock()
+                .unwrap()
+                .tag_queue
+                .is_empty()
+        );
+        assert_eq!(
+            interpreter
+                .lua()
+                .globals()
+                .get::<String>("seen_name")
+                .unwrap(),
+            "lyevent"
+        );
+        assert_eq!(
+            interpreter
+                .lua()
+                .globals()
+                .get::<String>("seen_id")
+                .unwrap(),
+            "button"
+        );
+    }
 
     #[test]
     fn input_enabled_timed_wait_keeps_default_click_despite_global_push() {
@@ -714,6 +797,8 @@ pub(super) fn enqueue_handler_tags(
 /// 返回帧——这是层事件与全局输入事件共用的派发策略，改动请保持两侧一致。
 fn dispatch_handler(
     interpreter: &asb_interpreter::Interpreter,
+    filter_name: &str,
+    filter_params: &HashMap<String, String>,
     handler: Option<&str>,
     file: Option<&str>,
     label: Option<&str>,
@@ -721,23 +806,17 @@ fn dispatch_handler(
     params: &HashMap<String, String>,
     runtime_params: &[(&str, &str)],
 ) -> HandlerDispatch {
-    // e:setEventFilter 拦截：把设置参数 + 运行期参数（含 type）交给过滤器；
-    // 返回 1 表示脚本已自行处理，引擎不再派发（handled 但不排队处理器标签）。
-    // 事件名取运行期 type（点击/滚动等），无则退回 "event"。
-    let event_name = runtime_params
-        .iter()
-        .find(|(k, _)| *k == "type")
-        .map(|(_, v)| *v)
-        .unwrap_or("event");
-    let mut filter_params = params.clone();
-    for (k, v) in runtime_params {
-        filter_params.insert(k.to_string(), v.to_string());
-    }
-    if interpreter.run_event_filter(event_name, &filter_params) == Some(1) {
-        return HandlerDispatch {
-            handled: true,
-            needs_return_frame: false,
-        };
+    // 过滤器观察的是注册事件的标签名及原始参数，而非触发时的 click/key。
+    // 1 = 假装成功，2 = 假装失败；两者都不能把原处理器排入队列。
+    match interpreter.run_event_filter(filter_name, filter_params) {
+        Some(1) => {
+            return HandlerDispatch {
+                handled: true,
+                needs_return_frame: false,
+            };
+        }
+        Some(2) => return HandlerDispatch::default(),
+        _ => {}
     }
     enqueue_handler_tags(
         interpreter,
@@ -770,8 +849,37 @@ fn enqueue_layer_handler(
     if !h.enabled {
         return HandlerDispatch::default();
     }
+    let fallback_filter_params;
+    let filter_params = if h.filter_params.is_empty() {
+        fallback_filter_params = {
+            let mut params = h.params.clone();
+            params.insert("id".to_string(), layer_id.to_string());
+            params.insert("type".to_string(), event_type.to_string());
+            if let Some(value) = &h.file {
+                params.insert("file".to_string(), value.clone());
+            }
+            if let Some(value) = &h.label {
+                params.insert("label".to_string(), value.clone());
+            }
+            if let Some(value) = &h.handler {
+                params.insert("handler".to_string(), value.clone());
+            }
+            if h.call {
+                params.insert("call".to_string(), "1".to_string());
+            }
+            if h.penetration {
+                params.insert("penetration".to_string(), "1".to_string());
+            }
+            params
+        };
+        &fallback_filter_params
+    } else {
+        &h.filter_params
+    };
     dispatch_handler(
         interpreter,
+        "lyevent",
+        filter_params,
         h.handler.as_deref(),
         h.file.as_deref(),
         h.label.as_deref(),
@@ -791,8 +899,11 @@ fn enqueue_input_handler(
     let Some(h) = compositor.get_input_handler(event_name, key) else {
         return HandlerDispatch::default();
     };
+    let filter_name = format!("seton{event_name}");
     dispatch_handler(
         interpreter,
+        &filter_name,
+        &h.filter_params,
         h.handler.as_deref(),
         h.file.as_deref(),
         h.label.as_deref(),

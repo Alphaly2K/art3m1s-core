@@ -341,8 +341,6 @@ fn variable_number(value: &PsbValue) -> Option<f32> {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;

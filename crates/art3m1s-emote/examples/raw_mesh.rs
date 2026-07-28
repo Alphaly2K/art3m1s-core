@@ -30,7 +30,10 @@ fn walk(layer: &EmoteLayer, needle: &str, character: &str, motion: &str) {
                 .and_then(|m| m.blend_points.as_ref())
                 .map(|p| p.iter().take(8).map(|v| format!("{v:.3}")).collect())
                 .unwrap_or_default();
-            println!("  t={} type={} raw_mesh[..8]={:?}", frame.time, frame.frame_type, head);
+            println!(
+                "  t={} type={} raw_mesh[..8]={:?}",
+                frame.time, frame.frame_type, head
+            );
         }
     }
     for child in &layer.children {

@@ -678,7 +678,6 @@ mod tests {
     }
 }
 
-
 /// PSB 的整数按最小字节宽度存储且为有符号数：任何宽度都必须按其宽度
 /// 符号扩展（0xFF 单字节 = -1，而不是 255）。
 fn sign_extend(raw: u64, width: usize) -> i64 {

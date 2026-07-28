@@ -105,7 +105,10 @@ impl TagHandler for LycHandler {
             properties.insert("color".to_string(), color.to_string());
         }
 
-        let create = Event::Layer(LayerEvent::Create { id: id.clone(), file });
+        let create = Event::Layer(LayerEvent::Create {
+            id: id.clone(),
+            file,
+        });
         if properties.is_empty() {
             // 无附加参数时行为与旧实现完全一致，只发 Create
             Ok(TagResult::Emit(create))
@@ -297,7 +300,10 @@ mod tests {
         assert_eq!(properties.get("mask").map(String::as_str), Some("cg_mask"));
         assert_eq!(properties.get("width").map(String::as_str), Some("640"));
         assert_eq!(properties.get("height").map(String::as_str), Some("480"));
-        assert_eq!(properties.get("color").map(String::as_str), Some("AARRGGBB"));
+        assert_eq!(
+            properties.get("color").map(String::as_str),
+            Some("AARRGGBB")
+        );
     }
 
     #[test]
@@ -306,7 +312,12 @@ mod tests {
         let TagResult::EmitMany(events) = exec(
             &LycHandler,
             "lyc",
-            &[("id", "5"), ("width", "100"), ("height", "50"), ("color", "FF00FF")],
+            &[
+                ("id", "5"),
+                ("width", "100"),
+                ("height", "50"),
+                ("color", "FF00FF"),
+            ],
         ) else {
             panic!("lyc 单色模式应发 EmitMany");
         };

@@ -101,14 +101,23 @@ fn visit(
 
     let local = local_transform(&props);
     let world = parent_transform * local;
-    let opacity = parent_opacity * props.opacity();
+    let intermediate_mode = props.intermediate_render.unwrap_or(0);
+    let intermediate_render = intermediate_mode != 0;
+    // 中间渲染层的自身效果必须在子树合成后应用一次。把 alpha 乘到每个子层会让
+    // 眼睛/嘴/脸等重叠区域重复透出底层，结果与 Artemis 的组渲染不同。
+    let opacity = parent_opacity
+        * if intermediate_render {
+            1.0
+        } else {
+            props.opacity()
+        };
     let clip_bounds = subtree_clip_bounds(&props, world, parent_clip, provider);
     let children = scene.children(id);
     let local_shader = declared_shader(scene, &props, provider);
     let group_shader = local_shader
         .as_ref()
         .and_then(|shader| shader.clone())
-        .filter(|_| props.intermediate_render.is_some() || !children.is_empty());
+        .filter(|_| intermediate_render || !children.is_empty());
     let command_shader = if group_shader.is_some() {
         inherited_shader.clone()
     } else {
@@ -151,8 +160,16 @@ fn visit(
             size: info,
             transform: world,
             opacity,
-            blend: blend_mode(&props),
-            color: color_filter(&props),
+            blend: if intermediate_render {
+                BlendMode::Alpha
+            } else {
+                blend_mode(&props)
+            },
+            color: if intermediate_render {
+                ColorFilter::default()
+            } else {
+                color_filter(&props)
+            },
             clip,
             clip_bounds,
             shader: command_shader.clone(),
@@ -173,8 +190,16 @@ fn visit(
             size: info,
             transform: world,
             opacity,
-            blend: blend_mode(&props),
-            color: color_filter(&props),
+            blend: if intermediate_render {
+                BlendMode::Alpha
+            } else {
+                blend_mode(&props)
+            },
+            color: if intermediate_render {
+                ColorFilter::default()
+            } else {
+                color_filter(&props)
+            },
             clip: ClipRect {
                 uv_offset: [0.0, 0.0],
                 uv_scale: [1.0, 1.0],
@@ -241,6 +266,55 @@ fn visit(
                 mask_range: None,
             });
         }
+    }
+
+    if intermediate_render {
+        let end = frame.len();
+        if end > group_start {
+            let color = color_filter(&props);
+            let uniforms = BTreeMap::from([
+                ("alpha".to_string(), vec![props.opacity()]),
+                ("colorMultiply".to_string(), color.multiply.to_vec()),
+                (
+                    "grayscale".to_string(),
+                    vec![if color.grayscale { 1.0 } else { 0.0 }],
+                ),
+                (
+                    "negative".to_string(),
+                    vec![if color.negative { 1.0 } else { 0.0 }],
+                ),
+                (
+                    "opaque".to_string(),
+                    vec![if intermediate_mode == 2 { 1.0 } else { 0.0 }],
+                ),
+                ("blendMode".to_string(), vec![group_blend_uniform(&props)]),
+            ]);
+            let mask_texture = props
+                .custom
+                .get("intermediate_render_mask")
+                .and_then(|file| provider.resolve(file).map(|(texture, _)| texture));
+            frame.push_shader_group(ShaderGroup {
+                start: group_start,
+                end,
+                effect: ShaderEffect {
+                    name: crate::render_pipeline::shader::GROUP_COMPOSITE_SHADER.to_string(),
+                    uniforms,
+                    mask_texture,
+                    user_texture: None,
+                },
+                clip_bounds,
+                mask_range: None,
+            });
+        }
+    }
+}
+
+fn group_blend_uniform(props: &LayerProps) -> f32 {
+    match blend_mode(props) {
+        BlendMode::Add => 1.0,
+        BlendMode::Screen => 2.0,
+        BlendMode::Multiply => 3.0,
+        _ => 0.0,
     }
 }
 
@@ -323,7 +397,7 @@ fn shader_uniform_value(props: &LayerProps, name: &str) -> Option<Vec<f32>> {
 }
 
 /// 复制属性并叠加当前时刻的缓动值。
-fn resolved_props(layer: &crate::compositor::scene::Layer, now_ms: u64) -> LayerProps {
+pub(crate) fn resolved_props(layer: &crate::compositor::scene::Layer, now_ms: u64) -> LayerProps {
     let mut props = layer.props.clone();
     for tween in &layer.tweens {
         // tweenset 组内同参数可排多段：未到启动时刻的成员不参与求值，
@@ -353,7 +427,7 @@ fn subtree_clip_bounds(
         .and_then(|mask| provider.resolve(mask))
         .map(|(_, info)| [0.0, 0.0, info.width as f32, info.height as f32])
         .or_else(|| {
-            if props.intermediate_render.is_some() {
+            if props.intermediate_render.unwrap_or(0) != 0 {
                 props.clip.map(|[x, y, w, h]| [x, y, w, h])
             } else {
                 None
@@ -522,6 +596,55 @@ mod tests {
             frame.commands[0].clip_bounds,
             Some([100.0, 50.0, TEXTURE_SIZE as f32, TEXTURE_SIZE as f32])
         );
+    }
+
+    #[test]
+    fn intermediate_render_applies_group_alpha_after_children_are_composed() {
+        let mut scene = Scene::new();
+        scene.set_props(
+            "1",
+            &raw(&[
+                ("intermediate_render", "1"),
+                ("alpha", "128"),
+                ("colormultiply", "80C0FF"),
+            ]),
+        );
+        scene.create("1.0", Some("face".into()));
+        scene.create("1.1", Some("eyes".into()));
+
+        let mut provider = MockProvider::new();
+        let frame = build_frame(&scene, 0, &mut provider, None);
+        assert_eq!(frame.commands.len(), 2);
+        assert!(
+            frame
+                .commands
+                .iter()
+                .all(|command| command.opacity == 1.0 && command.color == ColorFilter::default())
+        );
+        assert_eq!(frame.shader_groups.len(), 1);
+        let group = &frame.shader_groups[0];
+        assert_eq!(
+            group.effect.name,
+            crate::render_pipeline::shader::GROUP_COMPOSITE_SHADER
+        );
+        assert_eq!(group.effect.uniforms["alpha"], [128.0 / 255.0]);
+        assert_eq!(
+            group.effect.uniforms["colorMultiply"],
+            [128.0 / 255.0, 192.0 / 255.0, 1.0]
+        );
+        assert_eq!(group.effect.uniforms["blendMode"], [0.0]);
+    }
+
+    #[test]
+    fn intermediate_render_zero_keeps_normal_child_alpha_inheritance() {
+        let mut scene = Scene::new();
+        scene.set_props("1", &raw(&[("intermediate_render", "0"), ("alpha", "128")]));
+        scene.create("1.0", Some("face".into()));
+
+        let mut provider = MockProvider::new();
+        let frame = build_frame(&scene, 0, &mut provider, None);
+        assert!(frame.shader_groups.is_empty());
+        assert!((frame.commands[0].opacity - 128.0 / 255.0).abs() < 0.001);
     }
 
     #[test]

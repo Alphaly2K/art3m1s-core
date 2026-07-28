@@ -433,11 +433,9 @@ mod tests {
 
     #[test]
     fn span_and_sepan_parse_fade_time() {
-        let TagResult::Emit(Event::BgmPan { pan, time }) = exec(
-            &SpanHandler,
-            "span",
-            &[("pan", "-1000"), ("time", "500")],
-        ) else {
+        let TagResult::Emit(Event::BgmPan { pan, time }) =
+            exec(&SpanHandler, "span", &[("pan", "-1000"), ("time", "500")])
+        else {
             panic!("span 应产出 BgmPan");
         };
         assert_eq!(pan, -1000);

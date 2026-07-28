@@ -80,6 +80,14 @@ impl GlTextureProvider {
         self
     }
 
+    /// 返回已解析纹理的逻辑尺寸，不触发加载。
+    ///
+    /// `get_layer_info` 在脚本查询图层尺寸时使用这份缓存；未显式设置
+    /// width/height/clip 的图片层应报告素材本身的尺寸。
+    pub fn cached_info(&self, name: &str) -> Option<TextureInfo> {
+        self.cache.get(name).map(|(_, info)| *info)
+    }
+
     /// 直接用一块 RGBA 像素登记一张命名纹理（测试或预置素材用）。
     /// 返回其句柄与尺寸；GL 纹理创建失败时返回 `None`。
     ///

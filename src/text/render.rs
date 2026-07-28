@@ -1006,6 +1006,12 @@ impl From<&str> for TextAlignment {
 // ---------------------------------------------------------------------------
 
 pub trait TextRenderer {
+    /// 清除当前场景持有的消息层与活动层栈。
+    ///
+    /// 返回标题、读档或引擎重置时调用。字体默认值、排版配置与 backlog
+    /// 属于会话级状态，不随场景清除。
+    fn clear_scene_text(&mut self) {}
+
     /// 切换当前用于光栅化的字体文件。
     fn set_font_bytes(&mut self, bytes: &'static [u8]) -> Result<(), String>;
 

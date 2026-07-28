@@ -200,7 +200,6 @@ fn required_f32(value: &PsbValue, key: &str) -> Result<f32> {
     }
 }
 
-
 fn decode_dxt5(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
     let blocks_x = width.div_ceil(4) as usize;
     let blocks_y = height.div_ceil(4) as usize;

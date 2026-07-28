@@ -70,7 +70,12 @@ fn with_host_hooks<R>(f: impl FnOnce(&HostQueryHooks) -> R) -> Option<R> {
 /// 标签参数是否为"开"（`1`/`true`/`on`/`yes`，缺省 false）。
 fn param_is_on(value: Option<&String>) -> bool {
     value
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "on" | "yes"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -360,10 +365,7 @@ pub fn execute_var_system(
             let source = get_resolved("source")
                 .map(|v| v.as_string())
                 .unwrap_or_default();
-            variables.set(
-                name,
-                Value::String(base64_encode_bytes(source.as_bytes())),
-            );
+            variables.set(name, Value::String(base64_encode_bytes(source.as_bytes())));
         }
 
         "url_encode" => {
@@ -442,7 +444,12 @@ pub fn execute_var_system(
                 variables.set(name, Value::Int(0));
                 return Ok(());
             };
-            apply_sound_info(name, params.get("id").map(|s| s.as_str()), &snapshot, variables);
+            apply_sound_info(
+                name,
+                params.get("id").map(|s| s.as_str()),
+                &snapshot,
+                variables,
+            );
         }
 
         // 历史总页数（文档 var/get_backlog_size.md）：name = 页数。
@@ -479,9 +486,7 @@ pub fn execute_var_system(
 
         // 当前消息层文本度量（文档 var/get_message_layer_*.md）：整体宽度 /
         // 总高度 / 最后一行宽度。经宿主钩子从 text_renderer 每帧快照读取。
-        "get_message_layer_width"
-        | "get_message_layer_height"
-        | "get_message_layer_line_width" => {
+        "get_message_layer_width" | "get_message_layer_height" | "get_message_layer_line_width" => {
             let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
             let (width, height, line_width) =
                 with_host_hooks(|h| (h.message_layer_metrics)()).unwrap_or((0.0, 0.0, 0.0));
@@ -816,7 +821,13 @@ fn base64_encode_bytes(data: &[u8]) -> String {
 
 /// SHA-1 摘要（RFC 3174），返回 20 字节
 fn sha1_digest(data: &[u8]) -> [u8; 20] {
-    let mut h: [u32; 5] = [0x6745_2301, 0xEFCD_AB89, 0x98BA_DCFE, 0x1032_5476, 0xC3D2_E1F0];
+    let mut h: [u32; 5] = [
+        0x6745_2301,
+        0xEFCD_AB89,
+        0x98BA_DCFE,
+        0x1032_5476,
+        0xC3D2_E1F0,
+    ];
     let bit_len = (data.len() as u64).wrapping_mul(8);
     // 填充：0x80 + 若干 0x00，直到长度 ≡ 56 (mod 64)，末尾附 64 位大端比特长度
     let mut msg = data.to_vec();
@@ -895,14 +906,14 @@ fn decode_character_references(source: &str) -> String {
         if rest.starts_with("&#") {
             if let Some(end) = rest.find(';') {
                 let body = &rest[2..end];
-                let code = if let Some(hex) = body.strip_prefix('x').or_else(|| body.strip_prefix('X'))
-                {
-                    u32::from_str_radix(hex, 16).ok()
-                } else if !body.is_empty() && body.bytes().all(|b| b.is_ascii_digit()) {
-                    body.parse::<u32>().ok()
-                } else {
-                    None
-                };
+                let code =
+                    if let Some(hex) = body.strip_prefix('x').or_else(|| body.strip_prefix('X')) {
+                        u32::from_str_radix(hex, 16).ok()
+                    } else if !body.is_empty() && body.bytes().all(|b| b.is_ascii_digit()) {
+                        body.parse::<u32>().ok()
+                    } else {
+                        None
+                    };
                 if let Some(ch) = code.and_then(char::from_u32) {
                     out.push(ch);
                     i += end + 1;
@@ -1091,8 +1102,14 @@ mod tests {
             Some(&["[print data=\"你好\"]".to_string(), "[rt]".to_string()]),
             &mut vars,
         );
-        assert_eq!(vars.get("t.bl.0").map(Value::as_string).as_deref(), Some("[print data=\"你好\"]"));
-        assert_eq!(vars.get("t.bl.1").map(Value::as_string).as_deref(), Some("[rt]"));
+        assert_eq!(
+            vars.get("t.bl.0").map(Value::as_string).as_deref(),
+            Some("[print data=\"你好\"]")
+        );
+        assert_eq!(
+            vars.get("t.bl.1").map(Value::as_string).as_deref(),
+            Some("[rt]")
+        );
         assert_eq!(vars.get("t.bl.size").and_then(Value::as_int), Some(2));
         // None（查询未命中）：只落 size=0，不留脏索引。
         set_pseudo_array("t.empty", None, &mut vars);
@@ -1127,8 +1144,10 @@ mod tests {
 
         let run = |params: &[(&str, &str)]| {
             let mut vars = VariableStore::new();
-            let map: HashMap<String, String> =
-                params.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            let map: HashMap<String, String> = params
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
             apply_var_tag(&map, &mut vars).unwrap();
             vars
         };
@@ -1143,11 +1162,21 @@ mod tests {
             ("allfont", "1"),
         ]);
         assert_eq!(tags.get("t.bl.size").and_then(Value::as_int), Some(2));
-        assert_eq!(tags.get("t.bl.0").map(Value::as_string).as_deref(), Some("[font size=\"40\"]"));
-        assert_eq!(tags.get("t.bl.1").map(Value::as_string).as_deref(), Some("[print data=\"page1\"]"));
+        assert_eq!(
+            tags.get("t.bl.0").map(Value::as_string).as_deref(),
+            Some("[font size=\"40\"]")
+        );
+        assert_eq!(
+            tags.get("t.bl.1").map(Value::as_string).as_deref(),
+            Some("[print data=\"page1\"]")
+        );
 
         // 越界页 → None → size=0。
-        let oob = run(&[("system", "get_backlog_tags"), ("name", "t.o"), ("page", "9")]);
+        let oob = run(&[
+            ("system", "get_backlog_tags"),
+            ("name", "t.o"),
+            ("page", "9"),
+        ]);
         assert_eq!(oob.get("t.o.size").and_then(Value::as_int), Some(0));
 
         let msg = run(&[
@@ -1156,7 +1185,10 @@ mod tests {
             ("id", "adv01"),
         ]);
         assert_eq!(msg.get("t.m.size").and_then(Value::as_int), Some(1));
-        assert_eq!(msg.get("t.m.0").map(Value::as_string).as_deref(), Some("[print data=\"cur\"]"));
+        assert_eq!(
+            msg.get("t.m.0").map(Value::as_string).as_deref(),
+            Some("[print data=\"cur\"]")
+        );
 
         // 文本度量：钩子返回 (320,48,120) → width/height/line_width 分别落值。
         let w = run(&[("system", "get_message_layer_width"), ("name", "t.w")]);
@@ -1185,7 +1217,10 @@ mod tests {
     fn update_time_format_patterns_match_doc() {
         // file_update_time.md：yyyy/yy 年、MM dd hh mm ss 补零、M d h m s 不补零
         let c = [2026, 7, 3, 9, 5, 8];
-        assert_eq!(format_update_time(&c, "yyyy/MM/dd hh:mm:ss"), "2026/07/03 09:05:08");
+        assert_eq!(
+            format_update_time(&c, "yyyy/MM/dd hh:mm:ss"),
+            "2026/07/03 09:05:08"
+        );
         assert_eq!(format_update_time(&c, "yy-M-d h:m:s"), "26-7-3 9:5:8");
         // 非模式字符原样输出
         assert_eq!(format_update_time(&c, "yyyy年M月d日"), "2026年7月3日");
@@ -1589,15 +1624,24 @@ mod tests {
         resolved.insert("source".to_string(), Value::String("Hello".to_string()));
 
         execute_var_system("base64_encode", &params, &resolved, &mut vars).unwrap();
-        assert_eq!(vars.get("b64"), Some(&Value::String("SGVsbG8=".to_string())));
+        assert_eq!(
+            vars.get("b64"),
+            Some(&Value::String("SGVsbG8=".to_string()))
+        );
     }
 
     // ---- SHA-1 / HMAC-SHA1 ----
 
     #[test]
     fn sha1_known_vectors() {
-        assert_eq!(hex(&sha1_digest(b"")), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
-        assert_eq!(hex(&sha1_digest(b"abc")), "a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert_eq!(
+            hex(&sha1_digest(b"")),
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        );
+        assert_eq!(
+            hex(&sha1_digest(b"abc")),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
     }
 
     #[test]
@@ -1639,14 +1683,16 @@ mod tests {
             Value::String("&#12354;&#x3044;u!".to_string()),
         );
 
-        execute_var_system("character_reference_to_utf8", &params, &resolved, &mut vars)
-            .unwrap();
+        execute_var_system("character_reference_to_utf8", &params, &resolved, &mut vars).unwrap();
         assert_eq!(vars.get("out"), Some(&Value::String("あいu!".to_string())));
     }
 
     #[test]
     fn character_reference_invalid_kept_as_is() {
-        assert_eq!(decode_character_references("&#zz; &#x; &#12354"), "&#zz; &#x; &#12354");
+        assert_eq!(
+            decode_character_references("&#zz; &#x; &#12354"),
+            "&#zz; &#x; &#12354"
+        );
     }
 
     // ---- convert_encoding ----

@@ -70,6 +70,11 @@ pub struct LayerEventHandler {
     /// lyevent 标签里除已知字段外的所有参数（function、name、key、se 等），
     /// 触发时原样塞进 handler 标签的参数表。
     pub params: HashMap<String, String>,
+    /// 注册事件时的完整标签参数，供 `e:setEventFilter` 原样检查。
+    ///
+    /// 旧存档没有此字段；派发侧会退回到 `params` 并补齐必要字段。
+    #[serde(default)]
+    pub filter_params: HashMap<String, String>,
 }
 
 fn event_handler_enabled_by_default() -> bool {
@@ -208,11 +213,21 @@ impl Scene {
     /// link 命中区必须失效，否则点在已隐藏的文本区会误触发链接跳转。
     /// 图层不存在时视为不可见。
     pub fn is_effectively_visible(&self, id: &str) -> bool {
-        if !self.root_props.is_visible() {
-            return false;
-        }
         // 目标层本身必须存在。
         if self.nodes.get(id).is_none() {
+            return false;
+        }
+        self.existing_path_is_visible(id)
+    }
+
+    /// 判断逻辑 ID 路径上所有已存在节点是否可见。
+    ///
+    /// 独立消息层虽然绘制在内部 overlay 根节点上，脚本仍会用消息层的逻辑 ID
+    /// （例如 `1.80.mw.adv_adv`）组织它，并通过隐藏 `1.80` 一并隐藏消息窗文字。
+    /// 这类消息层的逻辑叶节点可能没有物化在场景树中，因此这里不要求目标存在，
+    /// 只检查根属性和路径上已经存在的祖先。
+    pub fn existing_path_is_visible(&self, id: &str) -> bool {
+        if !self.root_props.is_visible() {
             return false;
         }
         let mut current = Some(id);
@@ -706,6 +721,17 @@ mod tests {
         // 不存在的图层视为不可见。
         scene.set_root_props(&HashMap::from([("visible".into(), "1".into())]));
         assert!(!scene.is_effectively_visible("9.9.9"));
+    }
+
+    #[test]
+    fn logical_path_visibility_checks_existing_ancestors_without_requiring_leaf() {
+        let mut scene = Scene::new();
+        scene.ensure("1.80");
+
+        assert!(scene.existing_path_is_visible("1.80.mw.adv_adv"));
+        scene.set_props("1.80", &HashMap::from([("visible".into(), "0".into())]));
+        assert!(!scene.existing_path_is_visible("1.80.mw.adv_adv"));
+        assert!(!scene.is_effectively_visible("1.80.mw.adv_adv"));
     }
 
     #[test]

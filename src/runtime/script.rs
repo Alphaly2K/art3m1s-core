@@ -184,12 +184,9 @@ impl CoreRuntime {
                     self.timed_remaining_ms = 0;
                     true
                 } else if self.skip_active() {
-                    if self.should_hold_for_skip_reveal() {
-                        false
-                    } else {
-                        self.timed_remaining_ms = 0;
-                        true
-                    }
+                    self.reveal_text_for_skip();
+                    self.timed_remaining_ms = 0;
+                    true
                 } else if delta_ms >= self.timed_remaining_ms {
                     self.timed_remaining_ms = 0;
                     true
@@ -228,7 +225,8 @@ impl CoreRuntime {
                         true
                     }
                 } else if self.skip_active() {
-                    !self.should_hold_for_skip_reveal()
+                    self.reveal_text_for_skip();
+                    true
                 } else {
                     self.should_auto_advance(delta_ms)
                 }

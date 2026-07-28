@@ -521,11 +521,14 @@ mod tests {
 
     #[test]
     fn videofinish_handlers_carry_layer_id() {
-        let TagResult::Emit(Event::VideoFinishHandler { id, label, call, .. }) = exec(
+        let TagResult::Emit(Event::VideoFinishHandler {
+            id, label, call, ..
+        }) = exec(
             &SetOnVideofinishHandler,
             "setonvideofinish",
             &[("id", "1.80"), ("label", "movie_done"), ("call", "1")],
-        ) else {
+        )
+        else {
             panic!("setonvideofinish 应产出 VideoFinishHandler");
         };
         assert_eq!(id.as_deref(), Some("1.80"), "图层 ID 不得丢尾零");
