@@ -107,6 +107,8 @@ fn replace_layer_span(
 
     let new_end = span.start + glyphs.len();
     let delta = glyphs.len() as isize - (span.end - span.start) as isize;
+    let previous_reveal_index = layer.reveal_index;
+    let reveal_was_pending = layer.reveal_pending;
     let shift = |index: usize| -> usize {
         if index <= span.start {
             index
@@ -121,7 +123,16 @@ fn replace_layer_span(
     if let Some(tag) = layer.page_tags.get_mut(span.page_tag_index) {
         *tag = BacklogTag::Text(content.to_string());
     }
-    layer.reveal_index = shift(layer.reveal_index).min(layer.text_buffer.len());
+    if layer.scetween.is_empty() {
+        layer.reveal_index = layer.text_buffer.len();
+        layer.reveal_pending = false;
+    } else {
+        // 异步译文替换必须保留已经揭示的字符数量。若把完成的原文 span
+        // 按 delta 直接推进到新末尾，长译文会被标记为全部揭示，但动画时钟
+        // 仍停在较短原文的结束时刻，新增字符会永久保持透明。
+        layer.reveal_index = previous_reveal_index.min(layer.text_buffer.len());
+        layer.reveal_pending = reveal_was_pending || layer.reveal_index < layer.text_buffer.len();
+    }
     if let Some((start, _)) = layer.open_ruby.as_mut() {
         *start = shift(*start);
     }
@@ -1616,6 +1627,83 @@ mod tests {
         assert_eq!((layer.rubies[0].start, layer.rubies[0].end), (1, 6));
         assert_eq!((layer.links[0].start, layer.links[0].end), (5, Some(7)));
         assert_eq!(layer.page_tags, vec![BacklogTag::Text("WXYZ".into())]);
+    }
+
+    #[test]
+    fn longer_async_translation_continues_reveal_from_the_original_progress() {
+        let mut layer = MessageLayer::new("adv".into());
+        layer.text_buffer = glyphs("abcde");
+        layer.reveal_index = layer.text_buffer.len();
+        layer.reveal_pending = false;
+        layer.reveal_clock_ms = 400;
+        layer.scetween.push(ScetweenConfig {
+            delay_per_char: 100,
+            time_per_char: 0,
+            ..Default::default()
+        });
+        layer.page_tags.push(BacklogTag::Text("bc".into()));
+        let span = TextSpanToken {
+            layer_id: "adv".into(),
+            generation: layer.generation,
+            start: 1,
+            end: 3,
+            page_tag_index: 0,
+            font_size: 40.0,
+            font_face: None,
+        };
+
+        assert_eq!(
+            replace_layer_span(&mut layer, &span, glyphs("WXYZ"), "WXYZ"),
+            Some(2)
+        );
+        assert_eq!(layer.text_buffer.len(), 7);
+        assert_eq!(layer.reveal_index, 5);
+        assert!(layer.reveal_pending, "新增的译文尾部应继续逐字显示");
+        assert_eq!(layer.reveal_clock_ms, 400, "翻译回填不得重置动画时钟");
+
+        let mut renderer = GlyphTextRenderer::new();
+        renderer.state.layers.insert("adv".into(), layer);
+        renderer.advance_reveal(100);
+        let layer = &renderer.state.layers["adv"];
+        assert_eq!(layer.reveal_index, 6);
+        assert!(layer.reveal_pending);
+        renderer.advance_reveal(100);
+        let layer = &renderer.state.layers["adv"];
+        assert_eq!(layer.reveal_index, 7);
+        assert!(!layer.reveal_pending);
+    }
+
+    #[test]
+    fn shorter_async_translation_does_not_restart_a_completed_reveal() {
+        let mut layer = MessageLayer::new("adv".into());
+        layer.text_buffer = glyphs("abcde");
+        layer.reveal_index = layer.text_buffer.len();
+        layer.reveal_pending = false;
+        layer.reveal_clock_ms = 400;
+        layer.scetween.push(ScetweenConfig {
+            delay_per_char: 100,
+            time_per_char: 0,
+            ..Default::default()
+        });
+        layer.page_tags.push(BacklogTag::Text("bcd".into()));
+        let span = TextSpanToken {
+            layer_id: "adv".into(),
+            generation: layer.generation,
+            start: 1,
+            end: 4,
+            page_tag_index: 0,
+            font_size: 40.0,
+            font_face: None,
+        };
+
+        assert_eq!(
+            replace_layer_span(&mut layer, &span, glyphs("W"), "W"),
+            Some(-2)
+        );
+        assert_eq!(layer.text_buffer.len(), 3);
+        assert_eq!(layer.reveal_index, 3);
+        assert!(!layer.reveal_pending, "短译文不应重新启动逐字动画");
+        assert_eq!(layer.reveal_clock_ms, 400);
     }
 
     #[test]
