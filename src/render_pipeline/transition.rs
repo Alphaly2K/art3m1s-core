@@ -206,7 +206,7 @@ pub(crate) fn overlay_old_frame(
     match (transition.trans_type, rule_effect) {
         // 规则图像转场：旧帧整屏叠加，逐像素 alpha 由 shader 按 rule 灰度决定。
         (2, Some(effect)) => {
-            frame.commands.push(DrawCommand {
+            frame.push(DrawCommand {
                 texture,
                 size: info,
                 transform: glam::Affine2::IDENTITY,
@@ -224,7 +224,7 @@ pub(crate) fn overlay_old_frame(
         }
         // 交叉淡化（type=1，以及 rule 不可用时 type=2 的回退）。
         (1, _) | (2, None) => {
-            frame.commands.push(DrawCommand {
+            frame.push(DrawCommand {
                 texture,
                 size: info,
                 transform: glam::Affine2::IDENTITY,

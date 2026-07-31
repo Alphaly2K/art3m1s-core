@@ -272,30 +272,18 @@ fn frame_damage(
             .commands
             .iter()
             .chain(current.commands.iter())
-            .any(|command| command.mesh.is_some() || command.shader.is_some())
+            .any(|command| command.shader.is_some())
     {
         return None;
     }
 
     let mut damage: Option<[f32; 4]> = None;
-    let command_count = previous.commands.len().max(current.commands.len());
-    for index in 0..command_count {
-        let old = previous.commands.get(index);
-        let new = current.commands.get(index);
-        let sampled_texture_changed = old
-            .into_iter()
-            .chain(new)
-            .any(|command| changed_textures.contains(&command.texture));
-        if old == new && !sampled_texture_changed {
-            continue;
-        }
-        for command in [old, new].into_iter().flatten() {
-            let bounds = command_bounds(command)?;
-            damage = Some(match damage {
-                Some(existing) => union_rect(existing, bounds),
-                None => bounds,
-            });
-        }
+    if previous.command_keys.iter().any(Option::is_some)
+        || current.command_keys.iter().any(Option::is_some)
+    {
+        accumulate_keyed_damage(previous, current, changed_textures, &mut damage)?;
+    } else {
+        accumulate_positional_damage(previous, current, changed_textures, &mut damage)?;
     }
 
     // A provider generation changed without identifying a sampled texture.
@@ -319,22 +307,151 @@ fn frame_damage(
     (damage_area < stage_area * 0.8).then_some(damage)
 }
 
+fn accumulate_keyed_damage(
+    previous: &DrawList,
+    current: &DrawList,
+    changed_textures: &std::collections::HashSet<crate::render_pipeline::draw::TextureId>,
+    damage: &mut Option<[f32; 4]>,
+) -> Option<()> {
+    use crate::render_pipeline::draw::DrawCommandKey;
+    use std::collections::HashMap;
+
+    let mut old_by_key: HashMap<&DrawCommandKey, &crate::render_pipeline::draw::DrawCommand> =
+        HashMap::new();
+    let mut new_by_key: HashMap<&DrawCommandKey, &crate::render_pipeline::draw::DrawCommand> =
+        HashMap::new();
+    for (index, command) in previous.commands.iter().enumerate() {
+        if let Some(key) = previous.command_key(index)
+            && old_by_key.insert(key, command).is_some()
+        {
+            return None;
+        }
+    }
+    for (index, command) in current.commands.iter().enumerate() {
+        if let Some(key) = current.command_key(index)
+            && new_by_key.insert(key, command).is_some()
+        {
+            return None;
+        }
+    }
+
+    // Insertion/removal keeps the relative order of surviving layers and is
+    // safe to localize. A real z-order change can affect every overlap between
+    // reordered layers, so retain the conservative full redraw for that case.
+    let old_common_order = previous
+        .command_keys
+        .iter()
+        .filter_map(Option::as_ref)
+        .filter(|key| new_by_key.contains_key(key))
+        .collect::<Vec<_>>();
+    let new_common_order = current
+        .command_keys
+        .iter()
+        .filter_map(Option::as_ref)
+        .filter(|key| old_by_key.contains_key(key))
+        .collect::<Vec<_>>();
+    if old_common_order != new_common_order {
+        return None;
+    }
+
+    for (&key, &old) in &old_by_key {
+        let new = new_by_key.get(key).copied();
+        accumulate_command_pair(Some(old), new, changed_textures, damage)?;
+    }
+    for (&key, &new) in &new_by_key {
+        if !old_by_key.contains_key(key) {
+            accumulate_command_pair(None, Some(new), changed_textures, damage)?;
+        }
+    }
+
+    let old_anonymous = previous
+        .commands
+        .iter()
+        .enumerate()
+        .filter_map(|(index, command)| previous.command_key(index).is_none().then_some(command))
+        .collect::<Vec<_>>();
+    let new_anonymous = current
+        .commands
+        .iter()
+        .enumerate()
+        .filter_map(|(index, command)| current.command_key(index).is_none().then_some(command))
+        .collect::<Vec<_>>();
+    for index in 0..old_anonymous.len().max(new_anonymous.len()) {
+        accumulate_command_pair(
+            old_anonymous.get(index).copied(),
+            new_anonymous.get(index).copied(),
+            changed_textures,
+            damage,
+        )?;
+    }
+    Some(())
+}
+
+fn accumulate_positional_damage(
+    previous: &DrawList,
+    current: &DrawList,
+    changed_textures: &std::collections::HashSet<crate::render_pipeline::draw::TextureId>,
+    damage: &mut Option<[f32; 4]>,
+) -> Option<()> {
+    for index in 0..previous.commands.len().max(current.commands.len()) {
+        accumulate_command_pair(
+            previous.commands.get(index),
+            current.commands.get(index),
+            changed_textures,
+            damage,
+        )?;
+    }
+    Some(())
+}
+
+fn accumulate_command_pair(
+    old: Option<&crate::render_pipeline::draw::DrawCommand>,
+    new: Option<&crate::render_pipeline::draw::DrawCommand>,
+    changed_textures: &std::collections::HashSet<crate::render_pipeline::draw::TextureId>,
+    damage: &mut Option<[f32; 4]>,
+) -> Option<()> {
+    let sampled_texture_changed = old
+        .into_iter()
+        .chain(new)
+        .any(|command| changed_textures.contains(&command.texture));
+    if old == new && !sampled_texture_changed {
+        return Some(());
+    }
+    for command in [old, new].into_iter().flatten() {
+        let bounds = command_bounds(command)?;
+        *damage = Some(match *damage {
+            Some(existing) => union_rect(existing, bounds),
+            None => bounds,
+        });
+    }
+    Some(())
+}
+
 fn command_bounds(command: &crate::render_pipeline::draw::DrawCommand) -> Option<[f32; 4]> {
     let width = command.clip.quad_size[0];
     let height = command.clip.quad_size[1];
     if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
         return None;
     }
-    let corners = [
+    let quad_corners = [
         glam::Vec2::ZERO,
         glam::Vec2::new(width, 0.0),
         glam::Vec2::new(width, height),
         glam::Vec2::new(0.0, height),
     ];
+    let mesh_points = command.mesh.as_ref().and_then(|mesh| {
+        (!mesh.vertices.is_empty()).then(|| {
+            mesh.vertices
+                .iter()
+                .map(|vertex| glam::Vec2::new(vertex[0], vertex[1]))
+                .collect::<Vec<_>>()
+        })
+    });
+    let points: &[glam::Vec2] = mesh_points.as_deref().unwrap_or(&quad_corners);
     let mut min = glam::Vec2::splat(f32::INFINITY);
     let mut max = glam::Vec2::splat(f32::NEG_INFINITY);
-    for corner in corners {
-        let point = command.transform.transform_point2(corner);
+    for &local_point in points {
+        let point = command.transform.transform_point2(local_point);
         min = min.min(point);
         max = max.max(point);
     }
@@ -366,9 +483,10 @@ fn union_rect(left: [f32; 4], right: [f32; 4]) -> [f32; 4] {
 
 #[cfg(test)]
 mod tests {
-    use super::{frame_damage, frame_requires_render, wait_reason_is_click_wait};
+    use super::{command_bounds, frame_damage, frame_requires_render, wait_reason_is_click_wait};
     use crate::render_pipeline::draw::{
-        BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, TextureId, TextureInfo,
+        BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, DrawMesh, LayerCommandKind,
+        TextureId, TextureInfo,
     };
     use asb_interpreter::event::WaitReason;
     use std::collections::HashSet;
@@ -432,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn texture_upload_localizes_sampled_command_and_mesh_forces_full() {
+    fn texture_upload_localizes_sampled_command_and_shader_forces_full() {
         let mut old = DrawList::new();
         old.push(quad(10.0, 20.0));
         let changed_textures = HashSet::from([TextureId(1)]);
@@ -442,10 +560,60 @@ mod tests {
         );
 
         let mut new = old.clone();
-        new.commands[0].mesh = Some(Default::default());
+        new.commands[0].shader = Some(crate::render_pipeline::draw::ShaderEffect {
+            name: "effect".into(),
+            uniforms: Default::default(),
+            mask_texture: None,
+            user_texture: None,
+        });
         assert_eq!(
             frame_damage(Some(&old), 4, &new, 4, &HashSet::new(), 100, 100),
             None
         );
+    }
+
+    #[test]
+    fn inserted_layer_command_does_not_dirty_shifted_following_layers() {
+        let mut old = DrawList::new();
+        old.push_layer("a", LayerCommandKind::Visual, 0, quad(0.0, 20.0));
+        old.push_layer("c", LayerCommandKind::Visual, 0, quad(140.0, 20.0));
+
+        let mut new = DrawList::new();
+        new.push_layer("a", LayerCommandKind::Visual, 0, quad(0.0, 20.0));
+        new.push_layer("b", LayerCommandKind::Visual, 0, quad(50.0, 20.0));
+        new.push_layer("c", LayerCommandKind::Visual, 0, quad(140.0, 20.0));
+
+        assert_eq!(
+            frame_damage(Some(&old), 4, &new, 4, &HashSet::new(), 200, 100),
+            Some([48.0, 18.0, 34.0, 44.0])
+        );
+    }
+
+    #[test]
+    fn reordered_layers_keep_conservative_full_damage() {
+        let mut old = DrawList::new();
+        old.push_layer("a", LayerCommandKind::Visual, 0, quad(0.0, 20.0));
+        old.push_layer("b", LayerCommandKind::Visual, 0, quad(50.0, 20.0));
+        let mut new = DrawList::new();
+        new.push_layer("b", LayerCommandKind::Visual, 0, quad(50.0, 20.0));
+        new.push_layer("a", LayerCommandKind::Visual, 0, quad(0.0, 20.0));
+
+        assert_eq!(
+            frame_damage(Some(&old), 4, &new, 4, &HashSet::new(), 200, 100),
+            None
+        );
+    }
+
+    #[test]
+    fn mesh_damage_uses_deformed_vertex_bounds() {
+        let mut command = quad(10.0, 20.0);
+        command.mesh = Some(DrawMesh {
+            vertices: vec![
+                [5.0, 5.0, 0.0, 0.0],
+                [15.0, 5.0, 1.0, 0.0],
+                [15.0, 12.0, 1.0, 1.0],
+            ],
+        });
+        assert_eq!(command_bounds(&command), Some([15.0, 25.0, 10.0, 7.0]));
     }
 }

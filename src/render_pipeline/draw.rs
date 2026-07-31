@@ -198,6 +198,21 @@ pub struct DrawCommand {
     pub stencil: Option<StencilMetadata>,
 }
 
+/// Stable compositor identity for matching draw commands across frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LayerCommandKind {
+    Visual,
+    Content,
+    Text,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DrawCommandKey {
+    pub layer_id: String,
+    pub kind: LayerCommandKind,
+    pub ordinal: u32,
+}
+
 /// Host-owned draw commands attached to a compositor layer.
 /// Supplies commands for one scene layer. Frame construction visits each layer
 /// once, so callers can move command batches into the final draw list.
@@ -231,6 +246,9 @@ impl ClipRect {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DrawList {
     pub commands: Vec<DrawCommand>,
+    /// Parallel to `commands`. Anonymous commands are reserved for global
+    /// render-pipeline overlays such as transitions.
+    pub command_keys: Vec<Option<DrawCommandKey>>,
     pub mask_commands: Vec<DrawCommand>,
     pub shader_groups: Vec<ShaderGroup>,
 }
@@ -242,6 +260,26 @@ impl DrawList {
 
     pub fn push(&mut self, command: DrawCommand) {
         self.commands.push(command);
+        self.command_keys.push(None);
+    }
+
+    pub fn push_layer(
+        &mut self,
+        layer_id: &str,
+        kind: LayerCommandKind,
+        ordinal: usize,
+        command: DrawCommand,
+    ) {
+        self.commands.push(command);
+        self.command_keys.push(Some(DrawCommandKey {
+            layer_id: layer_id.to_owned(),
+            kind,
+            ordinal: ordinal.try_into().unwrap_or(u32::MAX),
+        }));
+    }
+
+    pub fn command_key(&self, index: usize) -> Option<&DrawCommandKey> {
+        self.command_keys.get(index).and_then(Option::as_ref)
     }
 
     pub fn push_shader_group(&mut self, group: ShaderGroup) {

@@ -8,8 +8,8 @@
 use crate::compositor::props::LayerProps;
 use crate::compositor::scene::Scene;
 use crate::render_pipeline::draw::{
-    BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, LayerDrawSource, ShaderEffect,
-    ShaderGroup, TextureProvider,
+    BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, LayerCommandKind, LayerDrawSource,
+    ShaderEffect, ShaderGroup, TextureProvider,
 };
 use glam::{Affine2, Vec2};
 use std::collections::BTreeMap;
@@ -157,27 +157,32 @@ fn visit(
         } else {
             ClipRect::full(info)
         };
-        frame.push(DrawCommand {
-            texture,
-            size: info,
-            transform: world,
-            opacity,
-            blend: if intermediate_render {
-                BlendMode::Alpha
-            } else {
-                blend_mode(&props)
+        frame.push_layer(
+            id,
+            LayerCommandKind::Visual,
+            0,
+            DrawCommand {
+                texture,
+                size: info,
+                transform: world,
+                opacity,
+                blend: if intermediate_render {
+                    BlendMode::Alpha
+                } else {
+                    blend_mode(&props)
+                },
+                color: if intermediate_render {
+                    ColorFilter::default()
+                } else {
+                    color_filter(&props)
+                },
+                clip,
+                clip_bounds,
+                shader: command_shader.clone(),
+                mesh: None,
+                stencil: None,
             },
-            color: if intermediate_render {
-                ColorFilter::default()
-            } else {
-                color_filter(&props)
-            },
-            clip,
-            clip_bounds,
-            shader: command_shader.clone(),
-            mesh: None,
-            stencil: None,
-        });
+        );
     } else if effective_file.is_none_or(str::is_empty)
         && let Some(rgba) = layer.solid_color
         && let (Some(w), Some(h)) = (props.width, props.height)
@@ -187,37 +192,42 @@ fn visit(
     {
         // `lyc` 缺省 file 的单色图层：1x1 纯色纹理拉伸到 width×height。
         // 颜色（含 AARRGGBB 的 alpha）烘焙在纹理里，图层 alpha 继续走 opacity。
-        frame.push(DrawCommand {
-            texture,
-            size: info,
-            transform: world,
-            opacity,
-            blend: if intermediate_render {
-                BlendMode::Alpha
-            } else {
-                blend_mode(&props)
+        frame.push_layer(
+            id,
+            LayerCommandKind::Visual,
+            0,
+            DrawCommand {
+                texture,
+                size: info,
+                transform: world,
+                opacity,
+                blend: if intermediate_render {
+                    BlendMode::Alpha
+                } else {
+                    blend_mode(&props)
+                },
+                color: if intermediate_render {
+                    ColorFilter::default()
+                } else {
+                    color_filter(&props)
+                },
+                clip: ClipRect {
+                    uv_offset: [0.0, 0.0],
+                    uv_scale: [1.0, 1.0],
+                    quad_size: [w, h],
+                },
+                clip_bounds,
+                shader: command_shader.clone(),
+                mesh: None,
+                stencil: None,
             },
-            color: if intermediate_render {
-                ColorFilter::default()
-            } else {
-                color_filter(&props)
-            },
-            clip: ClipRect {
-                uv_offset: [0.0, 0.0],
-                uv_scale: [1.0, 1.0],
-                quad_size: [w, h],
-            },
-            clip_bounds,
-            shader: command_shader.clone(),
-            mesh: None,
-            stencil: None,
-        });
+        );
     }
 
     // Host-owned layer content is local to this scene node and therefore
     // belongs before its child layers.
     if let Some(content) = content_for.as_deref_mut() {
-        for mut cmd in content(id) {
+        for (ordinal, mut cmd) in content(id).into_iter().enumerate() {
             cmd.transform = world * cmd.transform;
             cmd.opacity *= opacity;
             let content_clip = cmd.clip_bounds.map(|bounds| transform_rect(world, bounds));
@@ -225,7 +235,7 @@ fn visit(
             if cmd.shader.is_none() {
                 cmd.shader = command_shader.clone();
             }
-            frame.push(cmd);
+            frame.push_layer(id, LayerCommandKind::Content, ordinal, cmd);
         }
     }
 
@@ -249,11 +259,11 @@ fn visit(
 
     // 文本注入：文本命令为层内局部坐标，乘入世界变换与不透明度。
     if let Some(tf) = text_for.as_deref_mut() {
-        for mut cmd in tf(id) {
+        for (ordinal, mut cmd) in tf(id).into_iter().enumerate() {
             cmd.transform = world * cmd.transform;
             cmd.opacity *= opacity;
             cmd.clip_bounds = intersect_clip_bounds(cmd.clip_bounds, clip_bounds);
-            frame.push(cmd);
+            frame.push_layer(id, LayerCommandKind::Text, ordinal, cmd);
         }
     }
 
