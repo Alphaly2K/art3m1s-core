@@ -26,7 +26,7 @@ pub fn build_frame(
     scene: &Scene,
     now_ms: u64,
     provider: &mut dyn TextureProvider,
-    text_for: Option<&LayerDrawSource<'_>>,
+    text_for: Option<&mut LayerDrawSource<'_>>,
 ) -> DrawList {
     build_frame_with_content(scene, now_ms, provider, None, text_for, None)
 }
@@ -40,11 +40,13 @@ pub fn build_frame_with_content(
     scene: &Scene,
     now_ms: u64,
     provider: &mut dyn TextureProvider,
-    content_for: Option<&LayerDrawSource<'_>>,
-    text_for: Option<&LayerDrawSource<'_>>,
+    content_for: Option<&mut LayerDrawSource<'_>>,
+    text_for: Option<&mut LayerDrawSource<'_>>,
     file_overrides: Option<&std::collections::HashMap<String, String>>,
 ) -> DrawList {
     let mut frame = DrawList::new();
+    let mut content_for = content_for;
+    let mut text_for = text_for;
     // `[lyprop id="!"]`：根图层属性作用于整棵场景树。
     let root_props = scene.root_props();
     if !root_props.is_visible() {
@@ -63,8 +65,8 @@ pub fn build_frame_with_content(
             None,
             provider,
             &mut frame,
-            content_for,
-            text_for,
+            &mut content_for,
+            &mut text_for,
             file_overrides,
         );
     }
@@ -83,8 +85,8 @@ fn visit(
     inherited_shader: Option<ShaderEffect>,
     provider: &mut dyn TextureProvider,
     frame: &mut DrawList,
-    content_for: Option<&LayerDrawSource<'_>>,
-    text_for: Option<&LayerDrawSource<'_>>,
+    content_for: &mut Option<&mut LayerDrawSource<'_>>,
+    text_for: &mut Option<&mut LayerDrawSource<'_>>,
     file_overrides: Option<&std::collections::HashMap<String, String>>,
 ) {
     let Some(layer) = scene.get(id) else {
@@ -214,7 +216,7 @@ fn visit(
 
     // Host-owned layer content is local to this scene node and therefore
     // belongs before its child layers.
-    if let Some(content) = content_for {
+    if let Some(content) = content_for.as_deref_mut() {
         for mut cmd in content(id) {
             cmd.transform = world * cmd.transform;
             cmd.opacity *= opacity;
@@ -246,7 +248,7 @@ fn visit(
     }
 
     // 文本注入：文本命令为层内局部坐标，乘入世界变换与不透明度。
-    if let Some(tf) = text_for {
+    if let Some(tf) = text_for.as_deref_mut() {
         for mut cmd in tf(id) {
             cmd.transform = world * cmd.transform;
             cmd.opacity *= opacity;
@@ -551,7 +553,7 @@ mod tests {
             mesh: None,
             stencil: None,
         };
-        let content_for = |id: &str| {
+        let mut content_for = |id: &str| {
             if id == "1" {
                 vec![injected.clone()]
             } else {
@@ -561,7 +563,7 @@ mod tests {
 
         let mut provider = MockProvider::new();
         let frame =
-            build_frame_with_content(&scene, 0, &mut provider, Some(&content_for), None, None);
+            build_frame_with_content(&scene, 0, &mut provider, Some(&mut content_for), None, None);
         assert_eq!(frame.commands.len(), 2);
         assert_eq!(frame.commands[0].texture, TextureId(999));
         assert_eq!(provider.name_of(frame.commands[1].texture), "child");

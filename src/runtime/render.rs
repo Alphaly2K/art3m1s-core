@@ -137,19 +137,16 @@ impl CoreRuntime {
         let text_map = self.build_text_commands();
         let text_layer_count = text_map.len();
         let text_command_count = text_map.values().map(Vec::len).sum();
-        let (emote_map, emote_files) = self.build_emote_commands();
-        let content_for: Option<&crate::render_pipeline::LayerDrawSource<'_>> =
-            if emote_map.is_empty() {
-                None
-            } else {
-                Some(&|layer_id: &str| emote_map.get(layer_id).cloned().unwrap_or_default())
-            };
-        let text_for: Option<&crate::render_pipeline::LayerDrawSource<'_>> = if text_map.is_empty()
-        {
-            None
-        } else {
-            Some(&|layer_id: &str| text_map.get(layer_id).cloned().unwrap_or_default())
-        };
+        let (mut emote_map, emote_files) = self.build_emote_commands();
+        let has_emote_commands = !emote_map.is_empty();
+        let has_text_commands = !text_map.is_empty();
+        let mut content_source = |layer_id: &str| emote_map.remove(layer_id).unwrap_or_default();
+        let mut text_map = text_map;
+        let mut text_source = |layer_id: &str| text_map.remove(layer_id).unwrap_or_default();
+        let content_for: Option<&mut crate::render_pipeline::LayerDrawSource<'_>> =
+            has_emote_commands.then_some(&mut content_source);
+        let text_for: Option<&mut crate::render_pipeline::LayerDrawSource<'_>> =
+            has_text_commands.then_some(&mut text_source);
         let pipeline = RenderPipeline::new(&self.compositor);
         let mut frame = if let Some((scene, clock_ms)) = scene_snapshot {
             pipeline.build_scene_with_content(

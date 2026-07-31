@@ -171,7 +171,9 @@ pub struct DrawCommand {
 }
 
 /// Host-owned draw commands attached to a compositor layer.
-pub type LayerDrawSource<'a> = dyn Fn(&str) -> Vec<DrawCommand> + 'a;
+/// Supplies commands for one scene layer. Frame construction visits each layer
+/// once, so callers can move command batches into the final draw list.
+pub type LayerDrawSource<'a> = dyn FnMut(&str) -> Vec<DrawCommand> + 'a;
 
 /// Expanded triangle-list geometry for deformed sprites.
 ///

@@ -46,7 +46,7 @@ impl<'a> RenderPipeline<'a> {
     pub fn build_composited_with_text(
         &self,
         provider: &mut dyn TextureProvider,
-        text_for: Option<&LayerDrawSource<'_>>,
+        text_for: Option<&mut LayerDrawSource<'_>>,
     ) -> DrawList {
         self.build_composited_with_content(provider, None, text_for)
     }
@@ -55,8 +55,8 @@ impl<'a> RenderPipeline<'a> {
     pub fn build_composited_with_content(
         &self,
         provider: &mut dyn TextureProvider,
-        content_for: Option<&LayerDrawSource<'_>>,
-        text_for: Option<&LayerDrawSource<'_>>,
+        content_for: Option<&mut LayerDrawSource<'_>>,
+        text_for: Option<&mut LayerDrawSource<'_>>,
     ) -> DrawList {
         let compositor = self.compositor;
         // [lyedit] 像素加工在进入帧构建前落地（需要 provider 才能读写像素）。
@@ -134,7 +134,7 @@ impl<'a> RenderPipeline<'a> {
     pub fn build_with_text(
         &self,
         provider: &mut dyn TextureProvider,
-        text_for: Option<&LayerDrawSource<'_>>,
+        text_for: Option<&mut LayerDrawSource<'_>>,
     ) -> DrawList {
         self.build_with_content(provider, None, text_for)
     }
@@ -144,8 +144,8 @@ impl<'a> RenderPipeline<'a> {
     pub fn build_with_content(
         &self,
         provider: &mut dyn TextureProvider,
-        content_for: Option<&LayerDrawSource<'_>>,
-        text_for: Option<&LayerDrawSource<'_>>,
+        content_for: Option<&mut LayerDrawSource<'_>>,
+        text_for: Option<&mut LayerDrawSource<'_>>,
     ) -> DrawList {
         let compositor = self.compositor;
         compositor.process_layer_edits(provider);
@@ -174,8 +174,8 @@ impl<'a> RenderPipeline<'a> {
         scene: &Scene,
         clock_ms: u64,
         provider: &mut dyn TextureProvider,
-        content_for: Option<&LayerDrawSource<'_>>,
-        text_for: Option<&LayerDrawSource<'_>>,
+        content_for: Option<&mut LayerDrawSource<'_>>,
+        text_for: Option<&mut LayerDrawSource<'_>>,
     ) -> DrawList {
         self.compositor.process_layer_edits(provider);
         let overrides = self.compositor.layer_edit_overrides();

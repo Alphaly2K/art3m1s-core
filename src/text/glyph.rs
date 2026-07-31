@@ -1009,12 +1009,7 @@ impl TextRenderer for GlyphTextRenderer<'_> {
         }
         let mut out: HashMap<String, Vec<DrawCommand>> = HashMap::new();
 
-        let lids: Vec<String> = self.state.layers.keys().cloned().collect();
-        for lid in &lids {
-            let ly = match self.state.layers.get(lid) {
-                Some(l) => l.clone(),
-                None => continue,
-            };
+        for (lid, ly) in &self.state.layers {
             if ly.text_buffer.is_empty() {
                 continue;
             }
@@ -1050,11 +1045,12 @@ impl TextRenderer for GlyphTextRenderer<'_> {
             let has_shadow = st.contains("shadow");
 
             // 统一走排版函数：禁则 / wordparts / 缩进 / 注音不可拆行都在这里生效
+            let keep_ranges = ly.keep_ranges();
             let laid = layout_message_layer(
                 &ly.text_buffer,
                 lw,
                 &self.state.layout,
-                &ly.keep_ranges(),
+                &keep_ranges,
                 TextAlignment::from(ly.font.align.as_deref().unwrap_or("left")),
             );
             // randomdelay：字符按随机顺序揭示。取相关配置里的随机顺序表，
