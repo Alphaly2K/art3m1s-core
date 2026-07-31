@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::ops::Range;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::{EmoteError, Result};
 
@@ -70,6 +72,23 @@ pub struct ResourceRef {
     pub extra: bool,
 }
 
+/// Owned view into a PSB resource without copying its bytes.
+///
+/// Keeping this view alive retains only the shared source byte buffer, not the
+/// parsed generic PSB tree. Runtime users can therefore discard the document
+/// as soon as model-specific data has been extracted.
+#[derive(Clone, Debug)]
+pub struct PsbResourceData {
+    data: Arc<Vec<u8>>,
+    range: Range<usize>,
+}
+
+impl PsbResourceData {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.data[self.range.clone()]
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PsbHeader {
     pub version: u16,
@@ -102,7 +121,7 @@ impl PsbHeader {
 
 #[derive(Debug)]
 pub struct PsbDocument {
-    data: Vec<u8>,
+    data: Arc<Vec<u8>>,
     pub header: PsbHeader,
     pub names: Vec<String>,
     pub strings: Vec<String>,
@@ -167,7 +186,7 @@ impl PsbDocument {
         let root = parser.parse_value(header.offset_entries as usize, 0)?;
 
         Ok(Self {
-            data,
+            data: Arc::new(data),
             header,
             names,
             strings,
@@ -180,6 +199,18 @@ impl PsbDocument {
     }
 
     pub fn resource(&self, reference: ResourceRef) -> Result<&[u8]> {
+        let range = self.resource_range(reference)?;
+        Ok(&self.data[range])
+    }
+
+    pub fn resource_data(&self, reference: ResourceRef) -> Result<PsbResourceData> {
+        Ok(PsbResourceData {
+            data: Arc::clone(&self.data),
+            range: self.resource_range(reference)?,
+        })
+    }
+
+    fn resource_range(&self, reference: ResourceRef) -> Result<Range<usize>> {
         let (base, offsets, lengths) = if reference.extra {
             (
                 self.header.offset_extra_chunk_data.ok_or_else(|| {
@@ -203,7 +234,19 @@ impl PsbDocument {
         let length = *lengths.get(index).ok_or_else(|| {
             EmoteError::InvalidFormat(format!("resource length index {index} is out of bounds"))
         })? as usize;
-        checked_slice(&self.data, base + offset, length)
+        let start = base
+            .checked_add(offset)
+            .ok_or_else(|| EmoteError::InvalidFormat("resource offset overflow".into()))?;
+        let end = start
+            .checked_add(length)
+            .ok_or_else(|| EmoteError::InvalidFormat("resource length overflow".into()))?;
+        if end > self.data.len() {
+            return Err(EmoteError::InvalidFormat(format!(
+                "resource range {start}..{end} exceeds source length {}",
+                self.data.len()
+            )));
+        }
+        Ok(start..end)
     }
 
     pub fn source_len(&self) -> usize {
@@ -679,6 +722,24 @@ mod tests {
         let str3 = [1, 2];
 
         assert_eq!(decode_names(&str1, &str2, &str3).unwrap(), ["a", "ab"]);
+    }
+
+    #[test]
+    fn resource_data_keeps_a_zero_copy_view_alive() {
+        let data = Arc::new(vec![1, 2, 3, 4]);
+        let weak = Arc::downgrade(&data);
+        let resource = PsbResourceData {
+            data: Arc::clone(&data),
+            range: 1..3,
+        };
+        assert!(std::ptr::eq(
+            resource.as_bytes().as_ptr(),
+            data[1..].as_ptr()
+        ));
+        drop(data);
+        assert_eq!(resource.as_bytes(), [2, 3]);
+        drop(resource);
+        assert!(weak.upgrade().is_none());
     }
 }
 

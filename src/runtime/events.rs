@@ -754,6 +754,7 @@ impl CoreRuntime {
     /// 在不重建解释器的情况下清空，boot 脚本重跑时会重新初始化其自有状态。
     fn handle_engine_reset(&mut self) -> Result<(), String> {
         self.stop_all_media();
+        self.clear_emote_state("engine reset");
         self.compositor.reset_for_load();
         self.sync_layer_info_all();
         self.hovered_layers.clear();

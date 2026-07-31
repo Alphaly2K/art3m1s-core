@@ -162,6 +162,23 @@ impl GlTextureProvider {
         self.cache.get(name).map(|(_, info)| *info)
     }
 
+    /// Immediately releases cached textures in a private runtime namespace.
+    pub fn evict_prefix(&mut self, prefix: &str) -> usize {
+        let names = self
+            .cache
+            .keys()
+            .filter(|name| name.starts_with(prefix))
+            .cloned()
+            .collect::<Vec<_>>();
+        for name in &names {
+            self.remove_if_cached(name);
+        }
+        if !names.is_empty() {
+            self.mark_content_changed();
+        }
+        names.len()
+    }
+
     /// 直接用一块 RGBA 像素登记一张命名纹理（测试或预置素材用）。
     /// 返回其句柄与尺寸；GL 纹理创建失败时返回 `None`。
     ///

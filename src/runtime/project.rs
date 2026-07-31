@@ -48,7 +48,7 @@ impl CoreRuntime {
         self.loaded_font_face = None;
         self.pending_dialog = None;
         self.clear_pending_text_translation();
-        self.emote.lock().unwrap().clear();
+        self.clear_emote_state("project reload");
         self.interpreter = project.create_interpreter();
         self.interpreter.register_tag("reset", RuntimeResetHandler);
 

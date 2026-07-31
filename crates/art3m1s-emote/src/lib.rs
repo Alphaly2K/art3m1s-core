@@ -20,7 +20,7 @@ pub use motion::{
     EmoteMotionParameter, EmoteMotionRef,
 };
 pub use player::{EmoteCommand, EmotePlayer, EmoteTransform, TimelineState, VariableState};
-pub use psb::{PsbDocument, PsbHeader, PsbValue, ResourceRef};
+pub use psb::{PsbDocument, PsbHeader, PsbResourceData, PsbValue, ResourceRef};
 pub use render::{EmoteDrawItem, EmoteMotionEvaluator, EmoteRenderState};
 pub use timeline::{
     EmoteEyeControl, EmoteKeyframe, EmoteSelectorControl, EmoteSelectorOption, EmoteTimeline,

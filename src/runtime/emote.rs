@@ -1,6 +1,6 @@
 use art3m1s_emote::{
     EmoteDrawItem, EmoteEyeControl, EmoteModel, EmoteMotionEvaluator, EmotePlayer,
-    EmoteRenderState, PsbDocument,
+    EmoteRenderState, PsbDocument, PsbResourceData,
 };
 use asb_interpreter::EmoteLayerCommand;
 use glam::{Affine2, Vec2};
@@ -36,6 +36,7 @@ struct EmoteInstance {
     player: EmotePlayer,
     eye_blinks: Vec<EmoteEyeBlink>,
     textures: BTreeMap<String, EmoteTextureState>,
+    texture_source_bytes: usize,
     #[cfg(any(
         target_os = "android",
         target_os = "ios",
@@ -56,6 +57,7 @@ struct EmoteTextureState {
     width: u32,
     height: u32,
     gpu: Option<(TextureId, TextureInfo)>,
+    source: Option<PsbResourceData>,
 }
 
 impl EmoteState {
@@ -78,8 +80,11 @@ impl EmoteState {
             .ok_or_else(|| format!("E-Mote layer {id} has no model file"))?;
         let document = PsbDocument::from_bytes(bytes)
             .map_err(|error| format!("failed to parse E-Mote model {path}: {error}"))?;
-        let model = EmoteModel::from_document(document)
+        let mut model = EmoteModel::from_document(document)
             .map_err(|error| format!("failed to load E-Mote model {path}: {error}"))?;
+        let (texture_source_bytes, mut texture_data) = model
+            .take_texture_data()
+            .map_err(|error| format!("failed to detach E-Mote textures {path}: {error}"))?;
 
         self.next_generation = self.next_generation.wrapping_add(1);
         let generation = self.next_generation;
@@ -92,6 +97,7 @@ impl EmoteState {
                     width: texture.width,
                     height: texture.height,
                     gpu: None,
+                    source: texture_data.remove(texture_id),
                 },
             );
         }
@@ -114,6 +120,7 @@ impl EmoteState {
             player: EmotePlayer::default(),
             eye_blinks,
             textures,
+            texture_source_bytes,
             #[cfg(any(
                 target_os = "android",
                 target_os = "ios",
@@ -230,8 +237,10 @@ impl EmoteState {
         self.layers.retain(|id, _| scene_ids.contains(id));
     }
 
-    pub fn clear(&mut self) {
+    pub fn clear(&mut self) -> usize {
+        let count = self.layers.len();
         self.layers.clear();
+        count
     }
 
     pub fn build_commands(
@@ -267,16 +276,10 @@ impl EmoteInstance {
         for (texture_id, texture) in &mut self.textures {
             retained.insert(texture.name.clone());
             if texture.gpu.is_none() {
-                let document = self.model.source_document().ok_or_else(|| {
+                let compressed = texture.source.as_ref().ok_or_else(|| {
                     format!("E-Mote texture {texture_id} was evicted after source release")
                 })?;
-                let compressed = self
-                    .model
-                    .atlas()
-                    .compressed_texture(document, texture_id)
-                    .map_err(|error| {
-                        format!("failed to read E-Mote texture {texture_id}: {error}")
-                    })?;
+                let compressed = compressed.as_bytes();
                 texture.gpu = provider.upload_dxt5_render_only(
                     &texture.name,
                     texture.width,
@@ -312,7 +315,7 @@ impl EmoteInstance {
                         let rgba = self
                             .model
                             .atlas()
-                            .decode_texture_rgba8(document, texture_id)
+                            .decode_texture_data_rgba8(texture_id, compressed)
                             .map_err(|error| {
                                 format!("failed to decode E-Mote texture {texture_id}: {error}")
                             })?;
@@ -362,7 +365,7 @@ impl EmoteInstance {
                     } else {
                         self.model
                             .atlas()
-                            .decode_texture_rgba8(document, texture_id)
+                            .decode_texture_data_rgba8(texture_id, compressed)
                             .map_err(|error| {
                                 format!("failed to decode E-Mote texture {texture_id}: {error}")
                             })?
@@ -375,7 +378,7 @@ impl EmoteInstance {
                     let rgba = self
                         .model
                         .atlas()
-                        .decode_texture_rgba8(document, texture_id)
+                        .decode_texture_data_rgba8(texture_id, compressed)
                         .map_err(|error| {
                             format!("failed to decode E-Mote texture {texture_id}: {error}")
                         })?;
@@ -386,9 +389,16 @@ impl EmoteInstance {
                         &rgba,
                     );
                 }
+                if texture.gpu.is_some() {
+                    texture.source = None;
+                }
             }
         }
-        if self.textures.values().all(|texture| texture.gpu.is_some()) {
+        if self
+            .textures
+            .values()
+            .all(|texture| texture.source.is_none())
+        {
             #[cfg(any(
                 target_os = "android",
                 target_os = "ios",
@@ -397,10 +407,10 @@ impl EmoteInstance {
             {
                 self.astc_encoder = None;
             }
-            let released = self.model.release_source_document();
+            let released = std::mem::take(&mut self.texture_source_bytes);
             if released != 0 {
                 crate::core_info!(
-                    "[E-Mote] released {:.1} MiB source document after GPU upload",
+                    "[E-Mote] released {:.1} MiB shared texture source after GPU upload",
                     released as f64 / (1024.0 * 1024.0)
                 );
             }
@@ -665,6 +675,22 @@ fn draw_mesh(points: Option<&[f32]>, width: f32, height: f32) -> Option<DrawMesh
 }
 
 impl CoreRuntime {
+    pub(super) fn clear_emote_state(&mut self, reason: &str) {
+        let layers = self.emote.lock().unwrap().clear();
+        let textures = if self.gl_ctx.make_current() {
+            self.texture_provider.evict_prefix(":emote/")
+        } else {
+            crate::core_warn!("[E-Mote] GL context unavailable while clearing {reason}");
+            0
+        };
+        if layers != 0 || textures != 0 {
+            crate::core_info!(
+                "[E-Mote] cleared {layers} layer(s) and {textures} GPU texture(s): {reason}"
+            );
+        }
+        self.last_submitted_frame = None;
+    }
+
     pub(super) fn sync_emote_scene(&mut self) {
         let attachments = self.emote.lock().unwrap().take_scene_attachments();
         for id in attachments {
@@ -788,6 +814,14 @@ mod tests {
                 .create_layer("1.0", vec![(path.display().to_string(), bytes)], 1600, 1350,)
                 .unwrap()
         );
+        let instance = state.layers["1.0"].active.as_ref().unwrap();
+        assert!(instance.model.source_document().is_none());
+        assert!(
+            instance
+                .textures
+                .values()
+                .all(|texture| texture.source.is_some())
+        );
         {
             let instance = state.layers["1.0"].active.as_ref().unwrap();
             let items = EmoteMotionEvaluator::new(&instance.model)
@@ -842,6 +876,15 @@ mod tests {
                 .source_document()
                 .is_none()
         );
+        assert!(
+            state.layers["1.0"]
+                .active
+                .as_ref()
+                .unwrap()
+                .textures
+                .values()
+                .all(|texture| texture.source.is_none())
+        );
         assert!(commands["1.0"].iter().any(|command| command.mesh.is_some()));
         let mut frame = DrawList {
             commands: commands["1.0"].clone(),
@@ -855,5 +898,7 @@ mod tests {
                 .iter()
                 .any(|group| group.mask_range.is_some())
         );
+        assert_eq!(state.clear(), 1);
+        assert!(state.layers.is_empty());
     }
 }

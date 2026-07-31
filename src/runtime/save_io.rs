@@ -193,6 +193,7 @@ impl CoreRuntime {
         let bytes = crate::ffi::request_file(&path)?;
         let data: crate::save::SaveData =
             serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        self.clear_emote_state("save load");
         self.compositor.reset_for_load();
         self.stop_all_media();
         self.reset_control_modes_for_load();
@@ -288,6 +289,7 @@ impl CoreRuntime {
         const FALLBACK_TITLE_SCRIPT: &str = "system/first.iet";
         const TITLE_LABEL: &str = "title";
 
+        self.clear_emote_state("go title");
         self.compositor.reset_for_load();
         self.sync_layer_info_all();
         self.stop_all_media();

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::{EmoteError, PsbDocument, PsbValue, ResourceRef, Result};
+use crate::{EmoteError, PsbDocument, PsbResourceData, PsbValue, ResourceRef, Result};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TextureFormat {
@@ -93,11 +93,30 @@ impl EmoteAtlas {
         document.resource(texture.resource)
     }
 
+    pub fn texture_data(&self, document: &PsbDocument, id: &str) -> Result<PsbResourceData> {
+        let texture = self
+            .texture(id)
+            .ok_or_else(|| EmoteError::InvalidFormat(format!("unknown texture {id}")))?;
+        document.resource_data(texture.resource)
+    }
+
     pub fn decode_texture_rgba8(&self, document: &PsbDocument, id: &str) -> Result<Vec<u8>> {
         let texture = self
             .texture(id)
             .ok_or_else(|| EmoteError::InvalidFormat(format!("unknown texture {id}")))?;
         let bytes = document.resource(texture.resource)?;
+        match texture.format {
+            TextureFormat::Dxt5 => decode_dxt5(bytes, texture.width, texture.height),
+            TextureFormat::Other(ref format) => {
+                Err(EmoteError::Unsupported(format!("texture format {format}")))
+            }
+        }
+    }
+
+    pub fn decode_texture_data_rgba8(&self, id: &str, bytes: &[u8]) -> Result<Vec<u8>> {
+        let texture = self
+            .texture(id)
+            .ok_or_else(|| EmoteError::InvalidFormat(format!("unknown texture {id}")))?;
         match texture.format {
             TextureFormat::Dxt5 => decode_dxt5(bytes, texture.width, texture.height),
             TextureFormat::Other(ref format) => {

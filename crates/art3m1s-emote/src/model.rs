@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     EmoteAtlas, EmoteError, EmoteEyeControl, EmoteMotionLibrary, EmoteSelectorControl,
-    EmoteTimeline, EmoteVariable, PsbDocument, PsbValue, Result,
+    EmoteTimeline, EmoteVariable, PsbDocument, PsbResourceData, PsbValue, Result,
 };
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -78,6 +78,25 @@ impl EmoteModel {
             .take()
             .map(|document| document.source_len())
             .unwrap_or(0)
+    }
+
+    /// Detaches the embedded texture resources and releases the generic PSB
+    /// tree immediately. All returned resource views share the original byte
+    /// buffer and therefore do not duplicate large texture payloads.
+    pub fn take_texture_data(&mut self) -> Result<(usize, BTreeMap<String, PsbResourceData>)> {
+        let document = self.document.as_ref().ok_or_else(|| {
+            EmoteError::InvalidFormat("E-Mote source document has been released".into())
+        })?;
+        let mut textures = BTreeMap::new();
+        for texture_id in self.atlas.textures().keys() {
+            textures.insert(
+                texture_id.clone(),
+                self.atlas.texture_data(document, texture_id)?,
+            );
+        }
+        let source_len = document.source_len();
+        self.document = None;
+        Ok((source_len, textures))
     }
 
     pub fn info(&self) -> &EmoteModelInfo {
