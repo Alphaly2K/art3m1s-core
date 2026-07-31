@@ -67,6 +67,9 @@ impl CoreRuntime {
 
         let (frame, _, _) = self.build_bound_scene(true, None);
         let texture_revision = self.texture_provider.content_revision();
+        let changed_textures = self
+            .texture_provider
+            .changed_texture_ids_since(self.last_submitted_texture_revision);
         if !frame_requires_render(
             self.last_submitted_frame.as_ref(),
             self.last_submitted_texture_revision,
@@ -86,6 +89,7 @@ impl CoreRuntime {
             self.last_submitted_texture_revision,
             &frame,
             texture_revision,
+            &changed_textures,
             self.stage_w,
             self.stage_h,
         ) {
@@ -255,12 +259,12 @@ fn frame_damage(
     previous_texture_revision: u64,
     current: &DrawList,
     current_texture_revision: u64,
+    changed_textures: &std::collections::HashSet<crate::render_pipeline::draw::TextureId>,
     stage_width: u32,
     stage_height: u32,
 ) -> Option<[f32; 4]> {
     let previous = previous?;
-    if previous_texture_revision != current_texture_revision
-        || !previous.shader_groups.is_empty()
+    if !previous.shader_groups.is_empty()
         || !current.shader_groups.is_empty()
         || !previous.mask_commands.is_empty()
         || !current.mask_commands.is_empty()
@@ -278,7 +282,11 @@ fn frame_damage(
     for index in 0..command_count {
         let old = previous.commands.get(index);
         let new = current.commands.get(index);
-        if old == new {
+        let sampled_texture_changed = old
+            .into_iter()
+            .chain(new)
+            .any(|command| changed_textures.contains(&command.texture));
+        if old == new && !sampled_texture_changed {
             continue;
         }
         for command in [old, new].into_iter().flatten() {
@@ -288,6 +296,13 @@ fn frame_damage(
                 None => bounds,
             });
         }
+    }
+
+    // A provider generation changed without identifying a sampled texture.
+    // Keep the conservative full redraw for unknown invalidations such as a
+    // cache eviction; ordinary uploads are localized by `changed_textures`.
+    if damage.is_none() && previous_texture_revision != current_texture_revision {
+        return None;
     }
 
     let [x, y, width, height] = damage?;
@@ -356,6 +371,7 @@ mod tests {
         BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, TextureId, TextureInfo,
     };
     use asb_interpreter::event::WaitReason;
+    use std::collections::HashSet;
 
     #[test]
     fn click_wait_covers_generic_variants_only() {
@@ -410,20 +426,26 @@ mod tests {
         new.push(quad(15.0, 20.0));
 
         assert_eq!(
-            frame_damage(Some(&old), 4, &new, 4, 100, 100),
+            frame_damage(Some(&old), 4, &new, 4, &HashSet::new(), 100, 100),
             Some([8.0, 18.0, 39.0, 44.0])
         );
     }
 
     #[test]
-    fn texture_upload_and_mesh_force_full_frame_damage() {
+    fn texture_upload_localizes_sampled_command_and_mesh_forces_full() {
         let mut old = DrawList::new();
         old.push(quad(10.0, 20.0));
-        let mut new = old.clone();
-        new.commands[0].opacity = 0.5;
-        assert_eq!(frame_damage(Some(&old), 4, &new, 5, 100, 100), None);
+        let changed_textures = HashSet::from([TextureId(1)]);
+        assert_eq!(
+            frame_damage(Some(&old), 4, &old, 5, &changed_textures, 100, 100),
+            Some([8.0, 18.0, 34.0, 44.0])
+        );
 
+        let mut new = old.clone();
         new.commands[0].mesh = Some(Default::default());
-        assert_eq!(frame_damage(Some(&old), 4, &new, 4, 100, 100), None);
+        assert_eq!(
+            frame_damage(Some(&old), 4, &new, 4, &HashSet::new(), 100, 100),
+            None
+        );
     }
 }

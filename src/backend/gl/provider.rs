@@ -105,6 +105,9 @@ pub struct GlTextureProvider {
     placeholder_size: u32,
     /// Monotonic generation for texture pixel content visible to the renderer.
     content_revision: u64,
+    /// Last content generation for each live GL texture. This lets frame damage
+    /// include only commands sampling a texture that actually changed.
+    texture_revisions: HashMap<TextureId, u64>,
 }
 
 impl GlTextureProvider {
@@ -117,6 +120,7 @@ impl GlTextureProvider {
             placeholder: PlaceholderKind::Checker,
             placeholder_size: 256,
             content_revision: 0,
+            texture_revisions: HashMap::new(),
         }
     }
 
@@ -125,8 +129,21 @@ impl GlTextureProvider {
         self.content_revision
     }
 
+    pub fn changed_texture_ids_since(&self, revision: u64) -> std::collections::HashSet<TextureId> {
+        self.texture_revisions
+            .iter()
+            .filter_map(|(&texture, &changed_at)| (changed_at > revision).then_some(texture))
+            .collect()
+    }
+
     fn mark_content_changed(&mut self) {
         self.content_revision = self.content_revision.wrapping_add(1);
+    }
+
+    fn mark_texture_changed(&mut self, texture: TextureId) {
+        self.mark_content_changed();
+        self.texture_revisions
+            .insert(texture, self.content_revision);
     }
 
     /// 设置素材字节源（资源名 → 原始图片字节）。
@@ -197,7 +214,7 @@ impl GlTextureProvider {
             entry.0,
             CpuTexturePixels::readable_rgba(width, height, rgba),
         );
-        self.mark_content_changed();
+        self.mark_texture_changed(entry.0);
         Some(entry)
     }
 
@@ -212,7 +229,7 @@ impl GlTextureProvider {
         self.remove_if_cached(name);
         let entry = unsafe { self.try_create_texture(width, height, rgba) }?;
         self.cache.insert(name.to_string(), entry);
-        self.mark_content_changed();
+        self.mark_texture_changed(entry.0);
         Some(entry)
     }
 
@@ -297,7 +314,7 @@ impl GlTextureProvider {
             TextureInfo { width, height },
         );
         self.cache.insert(name.to_string(), entry);
-        self.mark_content_changed();
+        self.mark_texture_changed(entry.0);
         Some(entry)
     }
 
@@ -372,7 +389,7 @@ impl GlTextureProvider {
             TextureInfo { width, height },
         );
         self.cache.insert(name.to_string(), entry);
-        self.mark_content_changed();
+        self.mark_texture_changed(entry.0);
         Some(entry)
     }
 
@@ -412,7 +429,7 @@ impl GlTextureProvider {
                 self.gl.bind_texture(glow::TEXTURE_2D, None);
             }
             self.cpu_pixels.remove(&texture);
-            self.mark_content_changed();
+            self.mark_texture_changed(texture);
             return true;
         }
 
@@ -437,13 +454,14 @@ impl GlTextureProvider {
         }
         self.cache.insert(name.to_string(), entry);
         self.cpu_pixels.remove(&entry.0);
-        self.mark_content_changed();
+        self.mark_texture_changed(entry.0);
         true
     }
 
     fn remove_if_cached(&mut self, name: &str) {
         if let Some((id, _)) = self.cache.remove(name) {
             self.cpu_pixels.remove(&id);
+            self.texture_revisions.remove(&id);
             if let Some(nz) = NonZeroU32::new(id.0 as u32) {
                 unsafe {
                     self.gl.delete_texture(glow::NativeTexture(nz));
@@ -552,6 +570,7 @@ impl Drop for GlTextureProvider {
             }
         }
         self.cpu_pixels.clear();
+        self.texture_revisions.clear();
     }
 }
 
@@ -575,7 +594,7 @@ impl TextureProvider for GlTextureProvider {
                         self.cache.insert(name.to_string(), entry);
                         self.cpu_pixels
                             .insert(entry.0, CpuTexturePixels::alpha_only(w, h, &rgba));
-                        self.mark_content_changed();
+                        self.mark_texture_changed(entry.0);
                         return Some(entry);
                     }
                     // 只在首次失败时到达（结果按名缓存），不会刷屏。
@@ -595,7 +614,7 @@ impl TextureProvider for GlTextureProvider {
         self.cache.insert(name.to_string(), entry);
         self.cpu_pixels
             .insert(entry.0, CpuTexturePixels::alpha_only(size, size, &pixels));
-        self.mark_content_changed();
+        self.mark_texture_changed(entry.0);
         Some(entry)
     }
 
