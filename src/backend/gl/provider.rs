@@ -206,6 +206,12 @@ impl GlTextureProvider {
         height: u32,
         data: &[u8],
     ) -> Option<(TextureId, TextureInfo)> {
+        // E-Mote archives contain desktop DXT5 data. Mobile GPUs are optimized
+        // for ASTC; accepting an ANGLE-emulated S3TC extension may silently
+        // expand the texture and provides no reliable memory saving there.
+        if cfg!(any(target_os = "android", target_os = "ios")) {
+            return None;
+        }
         let extensions = self.gl.supported_extensions();
         let supported = [
             "GL_EXT_texture_compression_s3tc",
