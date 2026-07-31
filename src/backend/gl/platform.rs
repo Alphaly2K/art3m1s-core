@@ -29,15 +29,21 @@ pub trait GLPlatformContext: Send {
 
     fn clear_external_surface(&self) {}
 
-    /// Copies the completed internal FBO to the external surface and presents it.
-    fn present_fbo(
-        &self,
-        _gl: &glow::Context,
-        _source: glow::Framebuffer,
-        _width: i32,
-        _height: i32,
-    ) -> Result<(), String> {
+    /// Makes the configured host surface current for a renderer-owned draw pass.
+    fn bind_external_surface(&self) -> Result<(), String> {
         Err("external surfaces are unsupported by this GL backend".into())
+    }
+
+    /// Presents the current host surface and restores the internal offscreen surface.
+    fn present_external_surface(&self) -> Result<(), String> {
+        Err("external surfaces are unsupported by this GL backend".into())
+    }
+
+    /// Restores the internal offscreen surface after an aborted presentation pass.
+    fn restore_internal_surface(&self) -> Result<(), String> {
+        self.make_current()
+            .then_some(())
+            .ok_or_else(|| "failed to restore internal GL surface".into())
     }
 }
 
@@ -238,7 +244,6 @@ fn create_egl(
 ) -> Result<(Rc<glow::Context>, Box<dyn GLPlatformContext>), String> {
     mod egl {
         use super::GLPlatformContext;
-        use glow::HasContext;
         use libloading::Library;
         use std::ffi::{CString, c_char, c_uint, c_void};
         use std::rc::Rc;
@@ -279,6 +284,7 @@ fn create_egl(
 
         struct ExternalSurface {
             surface: EGLSurface,
+            swap_on_present: bool,
         }
 
         macro_rules! load {
@@ -465,7 +471,13 @@ fn create_egl(
                 if surface.is_null() {
                     return Err(format!("failed to create EGL external surface kind {kind}"));
                 }
-                *self.external_surface.lock().unwrap() = Some(ExternalSurface { surface });
+                *self.external_surface.lock().unwrap() = Some(ExternalSurface {
+                    surface,
+                    // Window surfaces are double buffered. IOSurface client-buffer
+                    // pbuffers are single-buffered shared storage; glFlush from the
+                    // renderer is the commit and swapping them is unnecessary.
+                    swap_on_present: kind == 1,
+                });
                 Ok(())
             }
 
@@ -480,13 +492,7 @@ fn create_egl(
                 }
             }
 
-            fn present_fbo(
-                &self,
-                gl: &glow::Context,
-                source: glow::Framebuffer,
-                width: i32,
-                height: i32,
-            ) -> Result<(), String> {
+            fn bind_external_surface(&self) -> Result<(), String> {
                 let guard = self.external_surface.lock().unwrap();
                 let output = guard
                     .as_ref()
@@ -497,34 +503,23 @@ fn create_egl(
                 {
                     return Err("eglMakeCurrent(external surface) failed".into());
                 }
-                unsafe {
-                    gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(source));
-                    gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
-                    gl.disable(glow::SCISSOR_TEST);
-                    gl.blit_framebuffer(
-                        0,
-                        0,
-                        width,
-                        height,
-                        0,
-                        0,
-                        width,
-                        height,
-                        glow::COLOR_BUFFER_BIT,
-                        glow::NEAREST,
-                    );
-                    gl.flush();
-                    let error = gl.get_error();
-                    if error != glow::NO_ERROR {
-                        let _ = self.make_current();
-                        return Err(format!("external framebuffer blit failed: GL {error:#x}"));
-                    }
-                }
-                if unsafe { (self.swap_buffers)(self.display, output.surface) } == 0 {
-                    let _ = self.make_current();
+                Ok(())
+            }
+
+            fn present_external_surface(&self) -> Result<(), String> {
+                let swap_result = {
+                    let guard = self.external_surface.lock().unwrap();
+                    let output = guard
+                        .as_ref()
+                        .ok_or_else(|| "external surface is not configured".to_string())?;
+                    !output.swap_on_present
+                        || unsafe { (self.swap_buffers)(self.display, output.surface) != 0 }
+                };
+                let restored = self.make_current();
+                if !swap_result {
                     return Err("eglSwapBuffers(external surface) failed".into());
                 }
-                if !self.make_current() {
+                if !restored {
                     return Err("failed to restore internal EGL pbuffer".into());
                 }
                 Ok(())

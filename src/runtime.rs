@@ -89,6 +89,7 @@ pub struct CoreRuntime {
 
     stage_w: u32,
     stage_h: u32,
+    external_surface_size: Option<(i32, i32)>,
     /// 上次下发的系统音量 (bgm, se)，用于跳过重复下发。
     last_system_volume: (Option<f32>, Option<f32>),
     wait_reason: Option<WaitReason>,
@@ -196,6 +197,7 @@ impl CoreRuntime {
             emote,
             stage_w: stage_width,
             stage_h: stage_height,
+            external_surface_size: None,
             last_system_volume: (None, None),
             wait_reason: None,
             timed_remaining_ms: 0,
@@ -258,7 +260,7 @@ impl CoreRuntime {
         let saved_ctx = self.gl_ctx.bind_save();
 
         self.advance_logic(delta_ms);
-        let written = if self.render_current_frame() {
+        let written = if self.render_current_frame().is_some() {
             self.read_current_frame_into(out_pixels)
         } else {
             0
@@ -279,18 +281,17 @@ impl CoreRuntime {
         width: u32,
         height: u32,
     ) -> Result<(), String> {
+        let width = i32::try_from(width).map_err(|_| "external width overflow")?;
+        let height = i32::try_from(height).map_err(|_| "external height overflow")?;
         let saved_ctx = self.gl_ctx.bind_save();
-        let result = (|| {
-            self.gl_ctx.set_external_surface(
-                kind,
-                handle,
-                width.try_into().map_err(|_| "external width overflow")?,
-                height.try_into().map_err(|_| "external height overflow")?,
-            )
-        })();
+        self.external_surface_size = None;
+        let result = self
+            .gl_ctx
+            .set_external_surface(kind, handle, width, height);
         if result.is_ok() {
             // A newly attached or recreated host surface has no previous frame.
             self.last_submitted_frame = None;
+            self.external_surface_size = Some((width, height));
         }
         self.gl_ctx.restore(saved_ctx);
         result
@@ -299,6 +300,7 @@ impl CoreRuntime {
     pub fn clear_external_surface(&mut self) {
         let saved_ctx = self.gl_ctx.bind_save();
         self.gl_ctx.clear_external_surface();
+        self.external_surface_size = None;
         self.gl_ctx.restore(saved_ctx);
     }
 
@@ -307,11 +309,23 @@ impl CoreRuntime {
     pub fn advance_and_present(&mut self, delta_ms: u64) -> Result<bool, String> {
         let saved_ctx = self.gl_ctx.bind_save();
         self.advance_logic(delta_ms);
-        let changed = self.render_current_frame();
-        let result = if changed {
-            self.gl_ctx
-                .present_fbo(&self.gl, self.fbo, self.stage_w as i32, self.stage_h as i32)
-                .map(|()| true)
+        let repaint = self.render_current_frame();
+        let result = if let Some(repaint) = repaint {
+            (|| {
+                let (width, height) = self
+                    .external_surface_size
+                    .ok_or_else(|| "external surface is not configured".to_string())?;
+                self.gl_ctx.bind_external_surface()?;
+                if let Err(error) =
+                    self.renderer
+                        .present_texture(self.fbo_tex, width, height, repaint.damage())
+                {
+                    let _ = self.gl_ctx.restore_internal_surface();
+                    return Err(error);
+                }
+                self.gl_ctx.present_external_surface()?;
+                Ok(true)
+            })()
         } else {
             Ok(false)
         };
@@ -690,7 +704,7 @@ mod tests {
                 .gl
                 .bind_framebuffer(glow::FRAMEBUFFER, Some(runtime.fbo));
         }
-        assert!(runtime.renderer.clear_damage_overlay(&frame));
+        assert!(runtime.renderer.clear_damage_overlay(&frame).is_some());
         let mut cleaned = vec![0; runtime.pixel_buffer_size()];
         runtime.read_current_frame_into(&mut cleaned);
 
@@ -711,6 +725,6 @@ mod tests {
             .count();
         assert!(changed_pixels > 0);
         assert!(changed_pixels <= 12 * 12);
-        assert!(!runtime.renderer.clear_damage_overlay(&frame));
+        assert!(runtime.renderer.clear_damage_overlay(&frame).is_none());
     }
 }

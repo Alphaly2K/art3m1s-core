@@ -797,7 +797,7 @@ impl GlRenderer {
         frame: &DrawList,
         damage: Option<[f32; 4]>,
         visualize_damage: bool,
-    ) {
+    ) -> RenderRegion {
         let current_region = RenderRegion::from_damage(damage);
         let repaint_region = self
             .last_damage_overlay
@@ -812,7 +812,7 @@ impl GlRenderer {
                 true,
                 (self.viewport_width, self.viewport_height),
             ) {
-                return;
+                return repaint_region;
             }
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
@@ -885,38 +885,110 @@ impl GlRenderer {
             gl.use_program(None);
         }
         self.last_damage_overlay = visualize_damage.then_some(current_region);
+        repaint_region
     }
 
-    pub fn render_damage(&mut self, frame: &DrawList, damage: [f32; 4]) {
-        self.render_internal(frame, Some(damage), false);
+    pub(crate) fn render_damage(&mut self, frame: &DrawList, damage: [f32; 4]) -> RenderRegion {
+        self.render_internal(frame, Some(damage), false)
     }
 
-    pub fn render_damage_visualized(&mut self, frame: &DrawList, damage: [f32; 4]) {
-        self.render_internal(frame, Some(damage), true);
+    pub(crate) fn render_damage_visualized(
+        &mut self,
+        frame: &DrawList,
+        damage: [f32; 4],
+    ) -> RenderRegion {
+        self.render_internal(frame, Some(damage), true)
     }
 
-    pub fn render_visualized(&mut self, frame: &DrawList) {
-        self.render_internal(frame, None, true);
+    pub(crate) fn render_visualized(&mut self, frame: &DrawList) -> RenderRegion {
+        self.render_internal(frame, None, true)
     }
 
-    /// 清掉上一帧临时脏区色。返回 `true` 表示 FBO 确实发生了更新，宿主应提交该帧。
-    pub fn clear_damage_overlay(&mut self, frame: &DrawList) -> bool {
+    /// 清掉上一帧临时脏区色。返回实际重绘区域，供外部纹理做同范围提交。
+    pub(crate) fn clear_damage_overlay(&mut self, frame: &DrawList) -> Option<RenderRegion> {
         let Some(region) = self.last_damage_overlay else {
-            return false;
+            return None;
         };
-        self.render_internal(frame, region.damage(), false);
-        true
+        Some(self.render_internal(frame, region.damage(), false))
+    }
+
+    /// Draws the persistent internal FBO texture into the currently bound
+    /// framebuffer. ANGLE cannot blit an RGBA FBO into a BGRA-backed
+    /// IOSurface default framebuffer, but its regular texture draw path handles
+    /// that format conversion correctly without a CPU readback.
+    pub(crate) fn present_texture(
+        &self,
+        texture: glow::Texture,
+        width: i32,
+        height: i32,
+        damage: Option<[f32; 4]>,
+    ) -> Result<(), String> {
+        let gl = &self.gl;
+        unsafe {
+            // Do not attribute an error left by the scene pass to this copy.
+            while gl.get_error() != glow::NO_ERROR {}
+
+            gl.viewport(0, 0, width, height);
+            if !self.apply_scissor(damage, true, (width, height)) {
+                return Ok(());
+            }
+            gl.disable(glow::BLEND);
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::STENCIL_TEST);
+            gl.disable(glow::CULL_FACE);
+            gl.color_mask(true, true, true, true);
+            gl.use_program(Some(self.program));
+            gl.bind_vertex_array(Some(self.vao));
+
+            gl.uniform_matrix_3_f32_slice(
+                self.program_bindings.projection.as_ref(),
+                false,
+                &self.projection(),
+            );
+            gl.uniform_matrix_3_f32_slice(
+                self.program_bindings.transform.as_ref(),
+                false,
+                &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            );
+            gl.uniform_2_f32(
+                self.program_bindings.size.as_ref(),
+                self.stage_width,
+                self.stage_height,
+            );
+            // FBO texture storage has a bottom-left origin while the stage and
+            // host texture use top-left coordinates. Flip V during sampling.
+            gl.uniform_2_f32(self.program_bindings.uv_offset.as_ref(), 0.0, 1.0);
+            gl.uniform_2_f32(self.program_bindings.uv_scale.as_ref(), 1.0, -1.0);
+            gl.uniform_1_f32(self.program_bindings.opacity.as_ref(), 1.0);
+            gl.uniform_3_f32(self.program_bindings.multiply.as_ref(), 1.0, 1.0, 1.0);
+            gl.uniform_1_i32(self.program_bindings.grayscale.as_ref(), 0);
+            gl.uniform_1_i32(self.program_bindings.negative.as_ref(), 0);
+            gl.uniform_1_i32(self.program_bindings.sampler.as_ref(), 0);
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            gl.draw_arrays(glow::TRIANGLES, 0, 6);
+            gl.flush();
+
+            gl.disable(glow::SCISSOR_TEST);
+            gl.bind_vertex_array(None);
+            gl.use_program(None);
+            let error = gl.get_error();
+            if error != glow::NO_ERROR {
+                return Err(format!("external texture draw failed: GL {error:#x}"));
+            }
+        }
+        Ok(())
     }
 }
 
 impl Renderer for GlRenderer {
     fn render(&mut self, frame: &DrawList) {
-        self.render_internal(frame, None, false);
+        let _ = self.render_internal(frame, None, false);
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum RenderRegion {
+pub(crate) enum RenderRegion {
     Full,
     Rect([f32; 4]),
 }
@@ -926,7 +998,7 @@ impl RenderRegion {
         damage.map(Self::Rect).unwrap_or(Self::Full)
     }
 
-    fn damage(self) -> Option<[f32; 4]> {
+    pub(crate) fn damage(self) -> Option<[f32; 4]> {
         match self {
             Self::Full => None,
             Self::Rect(rect) => Some(rect),
@@ -1178,5 +1250,106 @@ mod tests {
             RenderRegion::Rect([1.0, 2.0, 3.0, 4.0]).union(RenderRegion::Full),
             RenderRegion::Full
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    unsafe fn make_present_source(gl: &glow::Context) -> glow::Texture {
+        unsafe {
+            let texture = gl.create_texture().unwrap();
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::NEAREST as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::NEAREST as i32,
+            );
+            // GL uploads rows bottom first, matching the persistent scene FBO.
+            let pixels = [
+                0, 0, 255, 255, 0, 0, 255, 255, // stage bottom
+                255, 0, 0, 255, 255, 0, 0, 255, // stage top
+            ];
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA as i32,
+                2,
+                2,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(&pixels)),
+            );
+            texture
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    unsafe fn read_raw_pixels(gl: &glow::Context) -> Vec<u8> {
+        let mut pixels = vec![0; 16];
+        unsafe {
+            gl.read_pixels(
+                0,
+                0,
+                2,
+                2,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut pixels)),
+            );
+        }
+        pixels
+    }
+
+    #[cfg(target_os = "macos")]
+    fn raw_pixel(pixels: &[u8], x: usize, bottom_left_y: usize) -> [u8; 4] {
+        let index = (bottom_left_y * 2 + x) * 4;
+        pixels[index..index + 4].try_into().unwrap()
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn texture_present_keeps_the_stage_upright() {
+        let (gl, _ctx, _) =
+            platform::create_offscreen_context(platform::GfxBackend::Cgl, 2, 2).unwrap();
+        let renderer = GlRenderer::new(gl.clone(), 2, 2, ShaderProfile::GlCore330).unwrap();
+        let source = unsafe { make_present_source(&gl) };
+        let (target, _) = unsafe { platform::create_fbo_target(&gl, 2, 2).unwrap() };
+        unsafe { gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target)) };
+
+        renderer.present_texture(source, 2, 2, None).unwrap();
+        let pixels = unsafe { read_raw_pixels(&gl) };
+
+        assert_eq!(raw_pixel(&pixels, 0, 1), [255, 0, 0, 255]);
+        assert_eq!(raw_pixel(&pixels, 0, 0), [0, 0, 255, 255]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn texture_present_limits_writes_to_top_left_damage() {
+        let (gl, _ctx, _) =
+            platform::create_offscreen_context(platform::GfxBackend::Cgl, 2, 2).unwrap();
+        let renderer = GlRenderer::new(gl.clone(), 2, 2, ShaderProfile::GlCore330).unwrap();
+        let source = unsafe { make_present_source(&gl) };
+        let (target, _) = unsafe { platform::create_fbo_target(&gl, 2, 2).unwrap() };
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target));
+            gl.disable(glow::SCISSOR_TEST);
+            gl.clear_color(0.0, 1.0, 0.0, 1.0);
+            gl.clear(glow::COLOR_BUFFER_BIT);
+        }
+
+        renderer
+            .present_texture(source, 2, 2, Some([0.0, 0.0, 1.0, 1.0]))
+            .unwrap();
+        let pixels = unsafe { read_raw_pixels(&gl) };
+
+        assert_eq!(raw_pixel(&pixels, 0, 1), [255, 0, 0, 255]);
+        assert_eq!(raw_pixel(&pixels, 1, 1), [0, 255, 0, 255]);
+        assert_eq!(raw_pixel(&pixels, 0, 0), [0, 255, 0, 255]);
+        assert_eq!(raw_pixel(&pixels, 1, 0), [0, 255, 0, 255]);
     }
 }

@@ -1,4 +1,5 @@
 use super::CoreRuntime;
+use crate::backend::gl::RenderRegion;
 use crate::backend::gl::platform;
 use crate::render_pipeline::RenderPipeline;
 use crate::render_pipeline::draw::{DrawList, Renderer, TextureProvider};
@@ -35,8 +36,8 @@ impl CoreRuntime {
     }
 
     /// Renders the current logical scene into the persistent internal FBO.
-    /// Returns false when the visual frame is identical to the submitted one.
-    pub(super) fn render_current_frame(&mut self) -> bool {
+    /// Returns the actual repaint region, or `None` when no pixels changed.
+    pub(super) fn render_current_frame(&mut self) -> Option<RenderRegion> {
         // 绑定 FBO，渲染到纹理而不是默认帧缓冲
         unsafe {
             self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
@@ -92,7 +93,7 @@ impl CoreRuntime {
             .filter(|&texture| self.texture_provider.texture_is_opaque(texture))
             .collect::<std::collections::HashSet<_>>();
         let visualize_damage = crate::ffi::damage_visualization_enabled();
-        match frame_damage(
+        let repaint_region = match frame_damage(
             self.last_submitted_frame.as_ref(),
             self.last_submitted_texture_revision,
             &frame,
@@ -114,12 +115,15 @@ impl CoreRuntime {
                 return cleared_debug_overlay;
             }
             DamageDecision::Partial(damage) if visualize_damage => {
-                self.renderer.render_damage_visualized(&frame, damage);
+                self.renderer.render_damage_visualized(&frame, damage)
             }
             DamageDecision::Partial(damage) => self.renderer.render_damage(&frame, damage),
             DamageDecision::Full if visualize_damage => self.renderer.render_visualized(&frame),
-            DamageDecision::Full => self.renderer.render(&frame),
-        }
+            DamageDecision::Full => {
+                self.renderer.render(&frame);
+                RenderRegion::Full
+            }
+        };
         self.last_submitted_frame = Some(frame);
         self.last_submitted_texture_revision = texture_revision;
         self.last_rendered_scene = Some(self.compositor.scene_snapshot());
@@ -128,7 +132,7 @@ impl CoreRuntime {
         unsafe {
             self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         }
-        true
+        Some(repaint_region)
     }
 
     pub(super) fn read_current_frame_into(&mut self, out_pixels: &mut [u8]) -> usize {
