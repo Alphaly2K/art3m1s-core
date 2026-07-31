@@ -262,8 +262,12 @@ impl EmoteInstance {
                     .map_err(|error| {
                         format!("failed to decode E-Mote texture {texture_id}: {error}")
                     })?;
-                texture.gpu =
-                    provider.upload_rgba(&texture.name, texture.width, texture.height, &rgba);
+                texture.gpu = provider.upload_rgba_render_only(
+                    &texture.name,
+                    texture.width,
+                    texture.height,
+                    &rgba,
+                );
             }
         }
 

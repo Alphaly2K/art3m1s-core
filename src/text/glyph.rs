@@ -72,7 +72,7 @@ impl Atlas {
     }
     fn flush(&mut self, p: &mut dyn TextureProvider) -> Option<(TextureId, TextureInfo)> {
         if self.dirty {
-            if let Some(r) = p.upload_rgba(&self.name, ATLAS_SZ, ATLAS_SZ, &self.px) {
+            if let Some(r) = p.upload_rgba_render_only(&self.name, ATLAS_SZ, ATLAS_SZ, &self.px) {
                 self.dirty = false;
                 return Some(r);
             }

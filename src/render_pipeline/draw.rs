@@ -30,6 +30,20 @@ pub trait TextureProvider {
         data: &[u8],
     ) -> Option<(TextureId, TextureInfo)>;
 
+    /// Uploads pixels that will only be sampled by the renderer.
+    ///
+    /// Backends may avoid retaining a CPU-readable copy. The default keeps
+    /// compatibility with providers that only implement [`Self::upload_rgba`].
+    fn upload_rgba_render_only(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) -> Option<(TextureId, TextureInfo)> {
+        self.upload_rgba(name, width, height, data)
+    }
+
     /// Samples a texture alpha value at the given pixel coordinate.
     fn pixel_alpha(&self, _texture: TextureId, _x: u32, _y: u32) -> Option<u8> {
         None

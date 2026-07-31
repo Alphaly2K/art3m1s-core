@@ -358,9 +358,12 @@ impl CoreRuntime {
         let (resource_name, path) = self.screenshot_paths_for(file)?;
 
         crate::ffi::request_write(&path, &png)?;
-        let _ =
-            self.texture_provider
-                .upload_rgba(&resource_name, target_width, target_height, &rgba);
+        let _ = self.texture_provider.upload_rgba_render_only(
+            &resource_name,
+            target_width,
+            target_height,
+            &rgba,
+        );
         crate::core_info!(
             "[runtime] 已保存缩略图: {} (resource={}, {}x{})",
             path,

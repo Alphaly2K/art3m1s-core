@@ -27,6 +27,68 @@ pub enum PlaceholderKind {
     Solid([u8; 4]),
 }
 
+enum PixelStorage {
+    /// Every pixel is fully opaque, so no per-pixel allocation is needed.
+    Opaque,
+    Alpha(Vec<u8>),
+    Rgba(Vec<u8>),
+}
+
+struct CpuTexturePixels {
+    width: u32,
+    height: u32,
+    storage: PixelStorage,
+}
+
+impl CpuTexturePixels {
+    fn alpha_only(width: u32, height: u32, rgba: &[u8]) -> Self {
+        let mut alpha = Vec::with_capacity((width as usize).saturating_mul(height as usize));
+        let mut opaque = true;
+        for pixel in rgba.chunks_exact(4) {
+            opaque &= pixel[3] == 255;
+            alpha.push(pixel[3]);
+        }
+        Self {
+            width,
+            height,
+            storage: if opaque {
+                PixelStorage::Opaque
+            } else {
+                PixelStorage::Alpha(alpha)
+            },
+        }
+    }
+
+    fn readable_rgba(width: u32, height: u32, rgba: &[u8]) -> Self {
+        Self {
+            width,
+            height,
+            storage: PixelStorage::Rgba(rgba.to_vec()),
+        }
+    }
+
+    fn alpha_at(&self, x: u32, y: u32) -> Option<u8> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let pixel = (y as usize)
+            .checked_mul(self.width as usize)?
+            .checked_add(x as usize)?;
+        match &self.storage {
+            PixelStorage::Opaque => Some(255),
+            PixelStorage::Alpha(alpha) => alpha.get(pixel).copied(),
+            PixelStorage::Rgba(rgba) => rgba.get(pixel.checked_mul(4)?.checked_add(3)?).copied(),
+        }
+    }
+
+    fn rgba(&self) -> Option<(u32, u32, Vec<u8>)> {
+        match &self.storage {
+            PixelStorage::Rgba(rgba) => Some((self.width, self.height, rgba.clone())),
+            PixelStorage::Opaque | PixelStorage::Alpha(_) => None,
+        }
+    }
+}
+
 /// 把资源名解析为 GL 纹理并缓存的提供者。
 ///
 /// 与 [`GlRenderer`](super::GlRenderer) 共享同一个 [`glow::Context`]。
@@ -34,8 +96,8 @@ pub struct GlTextureProvider {
     gl: Rc<glow::Context>,
     /// 资源名 → (句柄, 尺寸)。
     cache: HashMap<String, (TextureId, TextureInfo)>,
-    /// 纹理句柄 → CPU 侧 RGBA 缓存（用于 hit-test 像素采样）。
-    pixels: HashMap<TextureId, (u32, u32, Vec<u8>)>,
+    /// CPU pixels retained only when hit-testing or explicit readback needs them.
+    cpu_pixels: HashMap<TextureId, CpuTexturePixels>,
     /// 可选的素材字节源（资源名 → 原始字节）。无则一律用占位。
     source: Option<Box<AssetSource>>,
     /// 缺失资源回退的占位外观与尺寸。
@@ -50,7 +112,7 @@ impl GlTextureProvider {
         Self {
             gl,
             cache: HashMap::new(),
-            pixels: HashMap::new(),
+            cpu_pixels: HashMap::new(),
             source: None,
             placeholder: PlaceholderKind::Checker,
             placeholder_size: 256,
@@ -114,7 +176,25 @@ impl GlTextureProvider {
         self.remove_if_cached(name);
         let entry = unsafe { self.try_create_texture(width, height, rgba) }?;
         self.cache.insert(name.to_string(), entry);
-        self.pixels.insert(entry.0, (width, height, rgba.to_vec()));
+        self.cpu_pixels.insert(
+            entry.0,
+            CpuTexturePixels::readable_rgba(width, height, rgba),
+        );
+        self.mark_content_changed();
+        Some(entry)
+    }
+
+    /// Upload pixels without retaining a second CPU-side RGBA allocation.
+    pub fn upload_rgba_render_only(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Option<(TextureId, TextureInfo)> {
+        self.remove_if_cached(name);
+        let entry = unsafe { self.try_create_texture(width, height, rgba) }?;
+        self.cache.insert(name.to_string(), entry);
         self.mark_content_changed();
         Some(entry)
     }
@@ -154,7 +234,7 @@ impl GlTextureProvider {
                 );
                 self.gl.bind_texture(glow::TEXTURE_2D, None);
             }
-            self.pixels.remove(&texture);
+            self.cpu_pixels.remove(&texture);
             self.mark_content_changed();
             return true;
         }
@@ -179,14 +259,14 @@ impl GlTextureProvider {
             }
         }
         self.cache.insert(name.to_string(), entry);
-        self.pixels.remove(&entry.0);
+        self.cpu_pixels.remove(&entry.0);
         self.mark_content_changed();
         true
     }
 
     fn remove_if_cached(&mut self, name: &str) {
         if let Some((id, _)) = self.cache.remove(name) {
-            self.pixels.remove(&id);
+            self.cpu_pixels.remove(&id);
             if let Some(nz) = NonZeroU32::new(id.0 as u32) {
                 unsafe {
                     self.gl.delete_texture(glow::NativeTexture(nz));
@@ -303,7 +383,8 @@ impl TextureProvider for GlTextureProvider {
                     Some((w, h, rgba)) => {
                         let entry = unsafe { self.try_create_texture(w, h, &rgba) }?;
                         self.cache.insert(name.to_string(), entry);
-                        self.pixels.insert(entry.0, (w, h, rgba));
+                        self.cpu_pixels
+                            .insert(entry.0, CpuTexturePixels::alpha_only(w, h, &rgba));
                         self.mark_content_changed();
                         return Some(entry);
                     }
@@ -322,7 +403,8 @@ impl TextureProvider for GlTextureProvider {
         let (size, pixels) = self.placeholder_pixels();
         let entry = unsafe { self.try_create_texture(size, size, &pixels) }?;
         self.cache.insert(name.to_string(), entry);
-        self.pixels.insert(entry.0, (size, size, pixels));
+        self.cpu_pixels
+            .insert(entry.0, CpuTexturePixels::alpha_only(size, size, &pixels));
         self.mark_content_changed();
         Some(entry)
     }
@@ -337,13 +419,18 @@ impl TextureProvider for GlTextureProvider {
         GlTextureProvider::upload_rgba(self, name, width, height, data)
     }
 
+    fn upload_rgba_render_only(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) -> Option<(TextureId, TextureInfo)> {
+        GlTextureProvider::upload_rgba_render_only(self, name, width, height, data)
+    }
+
     fn pixel_alpha(&self, texture: TextureId, x: u32, y: u32) -> Option<u8> {
-        let (w, h, rgba) = self.pixels.get(&texture)?;
-        if x >= *w || y >= *h {
-            return None;
-        }
-        let idx = ((y * *w + x) * 4 + 3) as usize; // +3 = alpha channel
-        rgba.get(idx).copied()
+        self.cpu_pixels.get(&texture)?.alpha_at(x, y)
     }
 
     /// 1x1 纯色纹理（`lyc` 单色图层）：按稳定名缓存，避免每帧重建。
@@ -384,17 +471,32 @@ impl TextureProvider for GlTextureProvider {
         });
 
         match combined {
-            Some((w, h, pixels)) => GlTextureProvider::upload_rgba(self, &name, w, h, &pixels),
+            Some((w, h, pixels)) => {
+                GlTextureProvider::upload_rgba_render_only(self, &name, w, h, &pixels)
+            }
             None => self.resolve(file),
         }
     }
 
     /// 读取逻辑资源的 CPU 侧像素副本（`lyedit` 用）。
     fn pixels_of(&mut self, name: &str) -> Option<(u32, u32, Vec<u8>)> {
+        if let Some((texture, _)) = self.cache.get(name)
+            && let Some(rgba) = self
+                .cpu_pixels
+                .get(texture)
+                .and_then(CpuTexturePixels::rgba)
+        {
+            return Some(rgba);
+        }
+        if let Some(source) = &self.source
+            && let Some(decoded) = source(name).as_deref().and_then(decode_rgba)
+        {
+            return Some(decoded);
+        }
         let (texture, _) = self.resolve(name)?;
-        self.pixels
+        self.cpu_pixels
             .get(&texture)
-            .map(|(w, h, rgba)| (*w, *h, rgba.clone()))
+            .and_then(CpuTexturePixels::rgba)
     }
 
     fn retain(&mut self, names: &std::collections::HashSet<String>) {
@@ -406,7 +508,7 @@ impl TextureProvider for GlTextureProvider {
             .collect();
         for name in &stale {
             if let Some((id, _)) = self.cache.remove(name) {
-                self.pixels.remove(&id);
+                self.cpu_pixels.remove(&id);
                 if let Some(nz) = NonZeroU32::new(id.0 as u32) {
                     unsafe {
                         self.gl.delete_texture(glow::NativeTexture(nz));
@@ -423,4 +525,27 @@ fn decode_rgba(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     let rgba = img.to_rgba8();
     let (w, h) = rgba.dimensions();
     Some((w, h, rgba.into_raw()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CpuTexturePixels, PixelStorage};
+
+    #[test]
+    fn opaque_texture_needs_no_per_pixel_cpu_storage() {
+        let pixels = CpuTexturePixels::alpha_only(2, 1, &[1, 2, 3, 255, 4, 5, 6, 255]);
+        assert!(matches!(pixels.storage, PixelStorage::Opaque));
+        assert_eq!(pixels.alpha_at(1, 0), Some(255));
+    }
+
+    #[test]
+    fn translucent_texture_retains_only_one_alpha_byte_per_pixel() {
+        let pixels = CpuTexturePixels::alpha_only(2, 1, &[1, 2, 3, 64, 4, 5, 6, 128]);
+        let PixelStorage::Alpha(alpha) = &pixels.storage else {
+            panic!("expected alpha-only storage");
+        };
+        assert_eq!(alpha, &[64, 128]);
+        assert_eq!(pixels.alpha_at(0, 0), Some(64));
+        assert_eq!(pixels.alpha_at(2, 0), None);
+    }
 }

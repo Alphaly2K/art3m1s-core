@@ -130,7 +130,8 @@ pub(crate) fn capture_texture(
     if !transition.needs_capture {
         return;
     }
-    if let Some((texture, info)) = provider.upload_rgba(CAPTURE_TEXTURE_NAME, width, height, pixels)
+    if let Some((texture, info)) =
+        provider.upload_rgba_render_only(CAPTURE_TEXTURE_NAME, width, height, pixels)
     {
         transition.captured_texture = Some(texture);
         transition.captured_info = Some(info);

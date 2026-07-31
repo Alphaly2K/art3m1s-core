@@ -149,7 +149,7 @@ fn process_one(
     queue.counter += 1;
     let texture_name = format!("__lyedit_{}_{}__", request.id, queue.counter);
     if provider
-        .upload_rgba(&texture_name, width, height, &pixels)
+        .upload_rgba_render_only(&texture_name, width, height, &pixels)
         .is_none()
     {
         crate::core_warn!("[lyedit] 上传加工结果失败: {}", texture_name);
