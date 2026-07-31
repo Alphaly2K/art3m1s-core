@@ -938,6 +938,35 @@ pub unsafe extern "C" fn art3m1s_runtime_advance_and_render(
     }
 }
 
+/// 推进一个引擎 tick，但不合成或回读像素。
+///
+/// 宿主上一帧仍在异步解码时调用，避免阻塞显示链导致 `onEnterFrame`
+/// （包括 E-Mote 口型采样）漏帧。返回 1 表示成功，0 表示参数无效或 panic。
+#[cfg(feature = "gl-backend")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_advance_without_render(
+    rt: *mut CoreRuntime,
+    delta_ms: u32,
+) -> i32 {
+    if rt.is_null() {
+        return 0;
+    }
+    let rt = unsafe { &mut *rt };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rt.advance_without_render(delta_ms as u64);
+    }));
+    match result {
+        Ok(()) => 1,
+        Err(panic_info) => {
+            core_error!(
+                "art3m1s_runtime_advance_without_render panicked: {}",
+                panic_msg(&panic_info)
+            );
+            0
+        }
+    }
+}
+
 #[cfg(feature = "gl-backend")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_set_volume(

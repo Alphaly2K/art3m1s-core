@@ -257,6 +257,28 @@ impl CoreRuntime {
         // 宿主窗口就黑了。
         let saved_ctx = self.gl_ctx.bind_save();
 
+        self.advance_logic(delta_ms);
+        let written = self.render_current_frame_into(out_pixels);
+        self.clear_input_edges();
+
+        // 渲染完毕，把 GL 上下文还给宿主。
+        self.gl_ctx.restore(saved_ctx);
+
+        written
+    }
+
+    /// Advance one engine tick while a previously rendered frame is still
+    /// being consumed by the host. This keeps `onEnterFrame`-driven systems
+    /// such as E-Mote lip sync on the audio clock without paying for a GPU
+    /// readback whose pixels cannot be displayed yet.
+    pub fn advance_without_render(&mut self, delta_ms: u64) {
+        let saved_ctx = self.gl_ctx.bind_save();
+        self.advance_logic(delta_ms);
+        self.clear_input_edges();
+        self.gl_ctx.restore(saved_ctx);
+    }
+
+    fn advance_logic(&mut self, delta_ms: u64) {
         // isPush 的按键重复语义依赖每键按下时间戳，逐帧维护。
         self.input
             .lock()
@@ -297,14 +319,6 @@ impl CoreRuntime {
         self.advance_text(delta_ms);
         self.apply_ready_text_translations();
         self.advance_media_and_enqueue_finish_handlers(delta_ms);
-
-        let written = self.render_current_frame_into(out_pixels);
-        self.clear_input_edges();
-
-        // 渲染完毕，把 GL 上下文还给宿主。
-        self.gl_ctx.restore(saved_ctx);
-
-        written
     }
 
     pub fn is_exit_requested(&self) -> bool {
@@ -505,11 +519,19 @@ mod tests {
     #[cfg(all(target_os = "macos", feature = "gl-backend"))]
     #[test]
     fn static_runtime_emits_first_frame_then_skips_identical_frame() {
-        let mut runtime = CoreRuntime::create(8, 8, GfxBackend::Cgl).unwrap();
+        let Ok(mut runtime) = CoreRuntime::create(8, 8, GfxBackend::Cgl) else {
+            // Headless CGL availability varies with the macOS login/session
+            // state. Target builds still cover this code when no context can
+            // be created in the test process.
+            return;
+        };
         let mut pixels = vec![0; runtime.pixel_buffer_size()];
 
+        runtime.advance_without_render(17);
+        assert_eq!(runtime.compositor.clock_ms(), 17);
+        assert!(runtime.last_submitted_frame.is_none());
         assert_eq!(
-            runtime.advance_and_render_into(16, &mut pixels),
+            runtime.advance_and_render_into(0, &mut pixels),
             pixels.len()
         );
         assert_eq!(runtime.advance_and_render_into(17, &mut pixels), 0);
