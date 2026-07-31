@@ -288,6 +288,10 @@ impl CoreRuntime {
                 height.try_into().map_err(|_| "external height overflow")?,
             )
         })();
+        if result.is_ok() {
+            // A newly attached or recreated host surface has no previous frame.
+            self.last_submitted_frame = None;
+        }
         self.gl_ctx.restore(saved_ctx);
         result
     }
