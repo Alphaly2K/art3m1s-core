@@ -484,6 +484,10 @@ mod tests {
     use super::CoreRuntime;
     #[cfg(all(target_os = "macos", feature = "gl-backend"))]
     use crate::backend::gl::platform::GfxBackend;
+    #[cfg(all(target_os = "macos", feature = "gl-backend"))]
+    use asb_interpreter::event::{Event, LayerEvent};
+    #[cfg(all(target_os = "macos", feature = "gl-backend"))]
+    use std::collections::HashMap;
 
     #[test]
     fn engine_status_maps_wait_states_to_script_status_codes() {
@@ -588,5 +592,51 @@ mod tests {
             pixels.len()
         );
         assert_eq!(runtime.advance_and_render_into(17, &mut pixels), 0);
+    }
+
+    #[cfg(all(target_os = "macos", feature = "gl-backend"))]
+    #[test]
+    fn damage_render_matches_a_forced_full_redraw() {
+        let Ok(mut runtime) = CoreRuntime::create(64, 64, GfxBackend::Cgl) else {
+            return;
+        };
+        runtime
+            .compositor
+            .apply_event(&Event::Layer(LayerEvent::Create {
+                id: "1".into(),
+                file: String::new(),
+            }));
+        runtime
+            .compositor
+            .apply_event(&Event::Layer(LayerEvent::SetProperties {
+                id: "1".into(),
+                properties: HashMap::from([
+                    ("color".into(), "#ff0000".into()),
+                    ("width".into(), "10".into()),
+                    ("height".into(), "10".into()),
+                    ("left".into(), "5".into()),
+                    ("top".into(), "5".into()),
+                ]),
+            }));
+
+        let mut first = vec![0; runtime.pixel_buffer_size()];
+        assert_eq!(runtime.advance_and_render_into(0, &mut first), first.len());
+        runtime
+            .compositor
+            .apply_event(&Event::Layer(LayerEvent::SetProperties {
+                id: "1".into(),
+                properties: HashMap::from([("left".into(), "20".into())]),
+            }));
+
+        let mut damaged = vec![0; runtime.pixel_buffer_size()];
+        assert_eq!(
+            runtime.advance_and_render_into(0, &mut damaged),
+            damaged.len()
+        );
+
+        runtime.last_submitted_frame = None;
+        let mut full = vec![0; runtime.pixel_buffer_size()];
+        assert_eq!(runtime.advance_and_render_into(0, &mut full), full.len());
+        assert_eq!(damaged, full);
     }
 }

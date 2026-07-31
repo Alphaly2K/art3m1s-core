@@ -357,6 +357,7 @@ impl GlRenderer {
         depth: usize,
         viewport: (i32, i32),
         top_left_target: bool,
+        damage: Option<[f32; 4]>,
     ) {
         let mut index = start;
         while index < end {
@@ -369,6 +370,7 @@ impl GlRenderer {
                         mesh_ranges[index],
                         top_left_target,
                         viewport,
+                        damage,
                     );
                 }
                 index += 1;
@@ -395,6 +397,7 @@ impl GlRenderer {
                         depth,
                         viewport,
                         top_left_target,
+                        damage,
                     );
                 }
                 index = group.end;
@@ -417,6 +420,7 @@ impl GlRenderer {
                     depth + 1,
                     (self.stage_width as i32, self.stage_height as i32),
                     false,
+                    None,
                 );
 
                 let mut effect = group.effect.clone();
@@ -440,6 +444,7 @@ impl GlRenderer {
                             mask_mesh_ranges[mask_index],
                             false,
                             (self.stage_width as i32, self.stage_height as i32),
+                            None,
                         );
                     }
                     effect.mask_texture = Some(TextureId(mask_texture.0.get() as u64));
@@ -475,6 +480,7 @@ impl GlRenderer {
                     None,
                     top_left_target,
                     viewport,
+                    damage,
                 );
             }
             index = group.end;
@@ -563,6 +569,7 @@ impl GlRenderer {
         mesh_range: Option<(i32, i32)>,
         top_left_target: bool,
         viewport: (i32, i32),
+        damage: Option<[f32; 4]>,
     ) {
         let gl = &self.gl;
         unsafe {
@@ -584,24 +591,17 @@ impl GlRenderer {
                 },
             );
 
-            if let Some([x, y, w, h]) = cmd.clip_bounds {
-                if w <= 0.0 || h <= 0.0 {
-                    return;
-                }
-                let sx = viewport.0 as f32 / self.stage_width;
-                let sy = viewport.1 as f32 / self.stage_height;
-                let left = (x * sx).floor() as i32;
-                let bottom = if top_left_target {
-                    ((self.stage_height - (y + h)) * sy).floor() as i32
-                } else {
-                    (y * sy).floor() as i32
-                };
-                let width = (w * sx).ceil().max(1.0) as i32;
-                let height = (h * sy).ceil().max(1.0) as i32;
-                gl.enable(glow::SCISSOR_TEST);
-                gl.scissor(left, bottom, width, height);
-            } else {
-                gl.disable(glow::SCISSOR_TEST);
+            let scissor = match (cmd.clip_bounds, damage) {
+                (Some(clip), Some(damage)) => match intersect_rect(clip, damage) {
+                    Some(rect) => Some(rect),
+                    None => return,
+                },
+                (Some(clip), None) => Some(clip),
+                (None, Some(damage)) => Some(damage),
+                (None, None) => None,
+            };
+            if !self.apply_scissor(scissor, top_left_target, viewport) {
+                return;
             }
 
             self.set_blend(cmd.blend);
@@ -698,13 +698,51 @@ impl GlRenderer {
             }
         }
     }
-}
 
-impl Renderer for GlRenderer {
-    fn render(&mut self, frame: &DrawList) {
+    unsafe fn apply_scissor(
+        &self,
+        rect: Option<[f32; 4]>,
+        top_left_target: bool,
+        viewport: (i32, i32),
+    ) -> bool {
+        let Some(rect) = rect else {
+            unsafe { self.gl.disable(glow::SCISSOR_TEST) };
+            return true;
+        };
+        let Some([x, y, width, height]) =
+            intersect_rect(rect, [0.0, 0.0, self.stage_width, self.stage_height])
+        else {
+            return false;
+        };
+        let sx = viewport.0 as f32 / self.stage_width;
+        let sy = viewport.1 as f32 / self.stage_height;
+        let left = (x * sx).floor() as i32;
+        let right = ((x + width) * sx).ceil() as i32;
+        let bottom = if top_left_target {
+            ((self.stage_height - (y + height)) * sy).floor() as i32
+        } else {
+            (y * sy).floor() as i32
+        };
+        let top = if top_left_target {
+            ((self.stage_height - y) * sy).ceil() as i32
+        } else {
+            ((y + height) * sy).ceil() as i32
+        };
+        unsafe {
+            self.gl.enable(glow::SCISSOR_TEST);
+            self.gl
+                .scissor(left, bottom, (right - left).max(1), (top - bottom).max(1));
+        }
+        true
+    }
+
+    fn render_internal(&mut self, frame: &DrawList, damage: Option<[f32; 4]>) {
         let gl = self.gl.clone();
         unsafe {
             gl.viewport(0, 0, self.viewport_width, self.viewport_height);
+            if !self.apply_scissor(damage, true, (self.viewport_width, self.viewport_height)) {
+                return;
+            }
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
 
@@ -764,6 +802,7 @@ impl Renderer for GlRenderer {
                 0,
                 (self.viewport_width, self.viewport_height),
                 true,
+                damage,
             );
 
             gl.disable(glow::SCISSOR_TEST);
@@ -771,6 +810,31 @@ impl Renderer for GlRenderer {
             gl.use_program(None);
         }
     }
+
+    pub fn render_damage(&mut self, frame: &DrawList, damage: [f32; 4]) {
+        self.render_internal(frame, Some(damage));
+    }
+}
+
+impl Renderer for GlRenderer {
+    fn render(&mut self, frame: &DrawList) {
+        self.render_internal(frame, None);
+    }
+}
+
+fn intersect_rect(left: [f32; 4], right: [f32; 4]) -> Option<[f32; 4]> {
+    if !left
+        .iter()
+        .chain(right.iter())
+        .all(|value| value.is_finite())
+    {
+        return None;
+    }
+    let x0 = left[0].max(right[0]);
+    let y0 = left[1].max(right[1]);
+    let x1 = (left[0] + left[2]).min(right[0] + right[2]);
+    let y1 = (left[1] + left[3]).min(right[1] + right[3]);
+    (x1 > x0 && y1 > y0).then_some([x0, y0, x1 - x0, y1 - y0])
 }
 
 impl Drop for GlRenderer {
@@ -961,5 +1025,17 @@ mod tests {
         assert_eq!(inner.effect.name, "inner");
         assert_eq!(inner_index, 0);
         assert!(next_shader_group(&frame, 0, 1, inner_index).is_none());
+    }
+
+    #[test]
+    fn damage_intersection_clips_to_both_rectangles() {
+        assert_eq!(
+            intersect_rect([10.0, 10.0, 20.0, 20.0], [25.0, 5.0, 20.0, 20.0]),
+            Some([25.0, 10.0, 5.0, 15.0])
+        );
+        assert_eq!(
+            intersect_rect([0.0, 0.0, 5.0, 5.0], [6.0, 0.0, 5.0, 5.0]),
+            None
+        );
     }
 }

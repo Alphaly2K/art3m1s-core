@@ -79,7 +79,18 @@ impl CoreRuntime {
             return false;
         }
 
-        self.renderer.render(&frame);
+        if let Some(damage) = frame_damage(
+            self.last_submitted_frame.as_ref(),
+            self.last_submitted_texture_revision,
+            &frame,
+            texture_revision,
+            self.stage_w,
+            self.stage_h,
+        ) {
+            self.renderer.render_damage(&frame, damage);
+        } else {
+            self.renderer.render(&frame);
+        }
         self.last_submitted_frame = Some(frame);
         self.last_submitted_texture_revision = texture_revision;
         self.last_rendered_scene = Some(self.compositor.scene_snapshot());
@@ -231,10 +242,111 @@ fn frame_requires_render(
     previous != Some(current) || previous_texture_revision != current_texture_revision
 }
 
+fn frame_damage(
+    previous: Option<&DrawList>,
+    previous_texture_revision: u64,
+    current: &DrawList,
+    current_texture_revision: u64,
+    stage_width: u32,
+    stage_height: u32,
+) -> Option<[f32; 4]> {
+    let previous = previous?;
+    if previous_texture_revision != current_texture_revision
+        || !previous.shader_groups.is_empty()
+        || !current.shader_groups.is_empty()
+        || !previous.mask_commands.is_empty()
+        || !current.mask_commands.is_empty()
+        || previous
+            .commands
+            .iter()
+            .chain(current.commands.iter())
+            .any(|command| command.mesh.is_some() || command.shader.is_some())
+    {
+        return None;
+    }
+
+    let mut damage: Option<[f32; 4]> = None;
+    let command_count = previous.commands.len().max(current.commands.len());
+    for index in 0..command_count {
+        let old = previous.commands.get(index);
+        let new = current.commands.get(index);
+        if old == new {
+            continue;
+        }
+        for command in [old, new].into_iter().flatten() {
+            let bounds = command_bounds(command)?;
+            damage = Some(match damage {
+                Some(existing) => union_rect(existing, bounds),
+                None => bounds,
+            });
+        }
+    }
+
+    let [x, y, width, height] = damage?;
+    let x0 = (x - 2.0).floor().max(0.0);
+    let y0 = (y - 2.0).floor().max(0.0);
+    let x1 = (x + width + 2.0).ceil().min(stage_width as f32);
+    let y1 = (y + height + 2.0).ceil().min(stage_height as f32);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let damage = [x0, y0, x1 - x0, y1 - y0];
+    let stage_area = stage_width as f32 * stage_height as f32;
+    let damage_area = damage[2] * damage[3];
+    (damage_area < stage_area * 0.8).then_some(damage)
+}
+
+fn command_bounds(command: &crate::render_pipeline::draw::DrawCommand) -> Option<[f32; 4]> {
+    let width = command.clip.quad_size[0];
+    let height = command.clip.quad_size[1];
+    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    let corners = [
+        glam::Vec2::ZERO,
+        glam::Vec2::new(width, 0.0),
+        glam::Vec2::new(width, height),
+        glam::Vec2::new(0.0, height),
+    ];
+    let mut min = glam::Vec2::splat(f32::INFINITY);
+    let mut max = glam::Vec2::splat(f32::NEG_INFINITY);
+    for corner in corners {
+        let point = command.transform.transform_point2(corner);
+        min = min.min(point);
+        max = max.max(point);
+    }
+    let mut bounds = [min.x, min.y, max.x - min.x, max.y - min.y];
+    if let Some(clip) = command.clip_bounds {
+        bounds = intersect_rect(bounds, clip)?;
+    }
+    bounds
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(bounds)
+}
+
+fn intersect_rect(left: [f32; 4], right: [f32; 4]) -> Option<[f32; 4]> {
+    let x0 = left[0].max(right[0]);
+    let y0 = left[1].max(right[1]);
+    let x1 = (left[0] + left[2]).min(right[0] + right[2]);
+    let y1 = (left[1] + left[3]).min(right[1] + right[3]);
+    (x1 > x0 && y1 > y0).then_some([x0, y0, x1 - x0, y1 - y0])
+}
+
+fn union_rect(left: [f32; 4], right: [f32; 4]) -> [f32; 4] {
+    let x0 = left[0].min(right[0]);
+    let y0 = left[1].min(right[1]);
+    let x1 = (left[0] + left[2]).max(right[0] + right[2]);
+    let y1 = (left[1] + left[3]).max(right[1] + right[3]);
+    [x0, y0, x1 - x0, y1 - y0]
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{frame_requires_render, wait_reason_is_click_wait};
-    use crate::render_pipeline::draw::DrawList;
+    use super::{frame_damage, frame_requires_render, wait_reason_is_click_wait};
+    use crate::render_pipeline::draw::{
+        BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, TextureId, TextureInfo,
+    };
     use asb_interpreter::event::WaitReason;
 
     #[test]
@@ -260,5 +372,50 @@ mod tests {
         assert!(frame_requires_render(None, 0, &frame, 0));
         assert!(!frame_requires_render(Some(&frame), 7, &frame, 7));
         assert!(frame_requires_render(Some(&frame), 7, &frame, 8));
+    }
+
+    fn quad(x: f32, y: f32) -> DrawCommand {
+        let size = TextureInfo {
+            width: 30,
+            height: 40,
+        };
+        DrawCommand {
+            texture: TextureId(1),
+            size,
+            transform: glam::Affine2::from_translation(glam::Vec2::new(x, y)),
+            opacity: 1.0,
+            blend: BlendMode::Alpha,
+            color: ColorFilter::default(),
+            clip: ClipRect::full(size),
+            clip_bounds: None,
+            shader: None,
+            mesh: None,
+            stencil: None,
+        }
+    }
+
+    #[test]
+    fn moved_quad_damages_old_and_new_bounds_only() {
+        let mut old = DrawList::new();
+        old.push(quad(10.0, 20.0));
+        let mut new = DrawList::new();
+        new.push(quad(15.0, 20.0));
+
+        assert_eq!(
+            frame_damage(Some(&old), 4, &new, 4, 100, 100),
+            Some([8.0, 18.0, 39.0, 44.0])
+        );
+    }
+
+    #[test]
+    fn texture_upload_and_mesh_force_full_frame_damage() {
+        let mut old = DrawList::new();
+        old.push(quad(10.0, 20.0));
+        let mut new = old.clone();
+        new.commands[0].opacity = 0.5;
+        assert_eq!(frame_damage(Some(&old), 4, &new, 5, 100, 100), None);
+
+        new.commands[0].mesh = Some(Default::default());
+        assert_eq!(frame_damage(Some(&old), 4, &new, 4, 100, 100), None);
     }
 }
