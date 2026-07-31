@@ -99,6 +99,10 @@ pub struct GlRenderer {
     /// 视口必须用物理像素，否则画面只占左下角并出现拉伸/花屏。默认等于舞台尺寸。
     viewport_width: i32,
     viewport_height: i32,
+    /// 上一帧临时绘制的脏区调试色。下一次渲染必须把它一并重绘，避免调试色
+    /// 烘进持久 FBO 后污染后续局部帧。
+    last_damage_overlay: Option<RenderRegion>,
+    damage_flash_index: usize,
 }
 
 impl GlRenderer {
@@ -231,6 +235,8 @@ impl GlRenderer {
                 // [`set_viewport_size`] 传入物理像素尺寸。
                 viewport_width: stage_width as i32,
                 viewport_height: stage_height as i32,
+                last_damage_overlay: None,
+                damage_flash_index: 0,
             };
             Ok(renderer)
         }
@@ -261,6 +267,7 @@ impl GlRenderer {
     pub fn set_stage_size(&mut self, width: u32, height: u32) {
         self.stage_width = width as f32;
         self.stage_height = height as f32;
+        self.last_damage_overlay = None;
     }
 
     /// Register one Artemis `[lyshader]` HLSL effect under its script id.
@@ -736,11 +743,69 @@ impl GlRenderer {
         true
     }
 
-    fn render_internal(&mut self, frame: &DrawList, damage: Option<[f32; 4]>) {
+    unsafe fn draw_damage_overlay(&mut self, region: RenderRegion) {
+        const FLASH_COLORS: [[f32; 3]; 4] = [
+            [1.0, 0.12, 0.08],
+            [0.05, 0.72, 1.0],
+            [0.18, 1.0, 0.28],
+            [1.0, 0.82, 0.05],
+        ];
+        let color = FLASH_COLORS[self.damage_flash_index % FLASH_COLORS.len()];
+        self.damage_flash_index = self.damage_flash_index.wrapping_add(1);
+        unsafe {
+            self.draw_one(
+                &DrawCommand {
+                    texture: TextureId(self.white_texture.0.get() as u64),
+                    size: TextureInfo {
+                        width: 1,
+                        height: 1,
+                    },
+                    transform: glam::Affine2::IDENTITY,
+                    opacity: 0.24,
+                    blend: BlendMode::Alpha,
+                    color: ColorFilter {
+                        multiply: color,
+                        grayscale: false,
+                        negative: false,
+                    },
+                    clip: ClipRect {
+                        uv_offset: [0.0, 0.0],
+                        uv_scale: [1.0, 1.0],
+                        quad_size: [self.stage_width, self.stage_height],
+                    },
+                    clip_bounds: None,
+                    shader: None,
+                    mesh: None,
+                    stencil: None,
+                },
+                None,
+                true,
+                (self.viewport_width, self.viewport_height),
+                region.damage(),
+            );
+        }
+    }
+
+    fn render_internal(
+        &mut self,
+        frame: &DrawList,
+        damage: Option<[f32; 4]>,
+        visualize_damage: bool,
+    ) {
+        let current_region = RenderRegion::from_damage(damage);
+        let repaint_region = self
+            .last_damage_overlay
+            .map(|previous| previous.union(current_region))
+            .unwrap_or(current_region);
+        let repaint_damage = repaint_region.damage();
         let gl = self.gl.clone();
         unsafe {
             gl.viewport(0, 0, self.viewport_width, self.viewport_height);
-            if !self.apply_scissor(damage, true, (self.viewport_width, self.viewport_height)) {
+            if !self.apply_scissor(
+                repaint_damage,
+                true,
+                (self.viewport_width, self.viewport_height),
+            ) {
                 return;
             }
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
@@ -802,23 +867,71 @@ impl GlRenderer {
                 0,
                 (self.viewport_width, self.viewport_height),
                 true,
-                damage,
+                repaint_damage,
             );
+
+            if visualize_damage {
+                self.draw_damage_overlay(current_region);
+            }
 
             gl.disable(glow::SCISSOR_TEST);
             gl.bind_vertex_array(None);
             gl.use_program(None);
         }
+        self.last_damage_overlay = visualize_damage.then_some(current_region);
     }
 
     pub fn render_damage(&mut self, frame: &DrawList, damage: [f32; 4]) {
-        self.render_internal(frame, Some(damage));
+        self.render_internal(frame, Some(damage), false);
+    }
+
+    pub fn render_damage_visualized(&mut self, frame: &DrawList, damage: [f32; 4]) {
+        self.render_internal(frame, Some(damage), true);
+    }
+
+    pub fn render_visualized(&mut self, frame: &DrawList) {
+        self.render_internal(frame, None, true);
+    }
+
+    /// 清掉上一帧临时脏区色。返回 `true` 表示 FBO 确实发生了更新，宿主应提交该帧。
+    pub fn clear_damage_overlay(&mut self, frame: &DrawList) -> bool {
+        let Some(region) = self.last_damage_overlay else {
+            return false;
+        };
+        self.render_internal(frame, region.damage(), false);
+        true
     }
 }
 
 impl Renderer for GlRenderer {
     fn render(&mut self, frame: &DrawList) {
-        self.render_internal(frame, None);
+        self.render_internal(frame, None, false);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum RenderRegion {
+    Full,
+    Rect([f32; 4]),
+}
+
+impl RenderRegion {
+    fn from_damage(damage: Option<[f32; 4]>) -> Self {
+        damage.map(Self::Rect).unwrap_or(Self::Full)
+    }
+
+    fn damage(self) -> Option<[f32; 4]> {
+        match self {
+            Self::Full => None,
+            Self::Rect(rect) => Some(rect),
+        }
+    }
+
+    fn union(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Full, _) | (_, Self::Full) => Self::Full,
+            (Self::Rect(left), Self::Rect(right)) => Self::Rect(union_rect(left, right)),
+        }
     }
 }
 
@@ -835,6 +948,14 @@ fn intersect_rect(left: [f32; 4], right: [f32; 4]) -> Option<[f32; 4]> {
     let x1 = (left[0] + left[2]).min(right[0] + right[2]);
     let y1 = (left[1] + left[3]).min(right[1] + right[3]);
     (x1 > x0 && y1 > y0).then_some([x0, y0, x1 - x0, y1 - y0])
+}
+
+fn union_rect(left: [f32; 4], right: [f32; 4]) -> [f32; 4] {
+    let x0 = left[0].min(right[0]);
+    let y0 = left[1].min(right[1]);
+    let x1 = (left[0] + left[2]).max(right[0] + right[2]);
+    let y1 = (left[1] + left[3]).max(right[1] + right[3]);
+    [x0, y0, x1 - x0, y1 - y0]
 }
 
 impl Drop for GlRenderer {
@@ -1036,6 +1157,19 @@ mod tests {
         assert_eq!(
             intersect_rect([0.0, 0.0, 5.0, 5.0], [6.0, 0.0, 5.0, 5.0]),
             None
+        );
+    }
+
+    #[test]
+    fn damage_overlay_cleanup_repaints_old_and_new_regions() {
+        assert_eq!(
+            RenderRegion::Rect([10.0, 10.0, 20.0, 10.0])
+                .union(RenderRegion::Rect([25.0, 5.0, 20.0, 20.0])),
+            RenderRegion::Rect([10.0, 5.0, 35.0, 20.0])
+        );
+        assert_eq!(
+            RenderRegion::Rect([1.0, 2.0, 3.0, 4.0]).union(RenderRegion::Full),
+            RenderRegion::Full
         );
     }
 }

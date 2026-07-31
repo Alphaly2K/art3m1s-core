@@ -73,12 +73,14 @@ impl CoreRuntime {
             &frame,
             texture_revision,
         ) {
+            let cleared_debug_overlay = self.renderer.clear_damage_overlay(&frame);
             unsafe {
                 self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             }
-            return false;
+            return cleared_debug_overlay;
         }
 
+        let visualize_damage = crate::ffi::debug_enabled();
         if let Some(damage) = frame_damage(
             self.last_submitted_frame.as_ref(),
             self.last_submitted_texture_revision,
@@ -87,7 +89,13 @@ impl CoreRuntime {
             self.stage_w,
             self.stage_h,
         ) {
-            self.renderer.render_damage(&frame, damage);
+            if visualize_damage {
+                self.renderer.render_damage_visualized(&frame, damage);
+            } else {
+                self.renderer.render_damage(&frame, damage);
+            }
+        } else if visualize_damage {
+            self.renderer.render_visualized(&frame);
         } else {
             self.renderer.render(&frame);
         }

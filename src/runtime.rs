@@ -487,6 +487,8 @@ mod tests {
     #[cfg(all(target_os = "macos", feature = "gl-backend"))]
     use asb_interpreter::event::{Event, LayerEvent};
     #[cfg(all(target_os = "macos", feature = "gl-backend"))]
+    use glow::HasContext;
+    #[cfg(all(target_os = "macos", feature = "gl-backend"))]
     use std::collections::HashMap;
 
     #[test]
@@ -638,5 +640,77 @@ mod tests {
         let mut full = vec![0; runtime.pixel_buffer_size()];
         assert_eq!(runtime.advance_and_render_into(0, &mut full), full.len());
         assert_eq!(damaged, full);
+    }
+
+    #[cfg(all(target_os = "macos", feature = "gl-backend"))]
+    #[test]
+    fn damage_visualization_is_transient_and_cleans_to_the_scene() {
+        let Ok(mut runtime) = CoreRuntime::create(32, 32, GfxBackend::Cgl) else {
+            return;
+        };
+        runtime
+            .compositor
+            .apply_event(&Event::Layer(LayerEvent::Create {
+                id: "1".into(),
+                file: String::new(),
+            }));
+        runtime
+            .compositor
+            .apply_event(&Event::Layer(LayerEvent::SetProperties {
+                id: "1".into(),
+                properties: HashMap::from([
+                    ("color".into(), "#ffffff".into()),
+                    ("width".into(), "20".into()),
+                    ("height".into(), "20".into()),
+                    ("left".into(), "4".into()),
+                    ("top".into(), "4".into()),
+                ]),
+            }));
+
+        let mut initial = vec![0; runtime.pixel_buffer_size()];
+        assert_eq!(
+            runtime.advance_and_render_into(0, &mut initial),
+            initial.len()
+        );
+        let frame = runtime.last_submitted_frame.clone().unwrap();
+        unsafe {
+            runtime
+                .gl
+                .bind_framebuffer(glow::FRAMEBUFFER, Some(runtime.fbo));
+        }
+        crate::render_pipeline::draw::Renderer::render(&mut runtime.renderer, &frame);
+        runtime
+            .renderer
+            .render_damage_visualized(&frame, [4.0, 4.0, 12.0, 12.0]);
+        let mut flashed = vec![0; runtime.pixel_buffer_size()];
+        runtime.read_current_frame_into(&mut flashed);
+
+        unsafe {
+            runtime
+                .gl
+                .bind_framebuffer(glow::FRAMEBUFFER, Some(runtime.fbo));
+        }
+        assert!(runtime.renderer.clear_damage_overlay(&frame));
+        let mut cleaned = vec![0; runtime.pixel_buffer_size()];
+        runtime.read_current_frame_into(&mut cleaned);
+
+        unsafe {
+            runtime
+                .gl
+                .bind_framebuffer(glow::FRAMEBUFFER, Some(runtime.fbo));
+        }
+        crate::render_pipeline::draw::Renderer::render(&mut runtime.renderer, &frame);
+        let mut full = vec![0; runtime.pixel_buffer_size()];
+        runtime.read_current_frame_into(&mut full);
+
+        assert_eq!(cleaned, full);
+        let changed_pixels = flashed
+            .chunks_exact(4)
+            .zip(cleaned.chunks_exact(4))
+            .filter(|(left, right)| left != right)
+            .count();
+        assert!(changed_pixels > 0);
+        assert!(changed_pixels <= 12 * 12);
+        assert!(!runtime.renderer.clear_damage_overlay(&frame));
     }
 }
