@@ -415,6 +415,11 @@ impl GlRenderer {
                     .bind_framebuffer(glow::FRAMEBUFFER, Some(group_framebuffer));
                 self.gl
                     .viewport(0, 0, self.stage_width as i32, self.stage_height as i32);
+                // The parent pass may have a top-left damage scissor enabled.
+                // Group targets use their own bottom-left projection and must
+                // start from a fully transparent image; inheriting that scissor
+                // leaves stale pixels in the reused offscreen target.
+                self.gl.disable(glow::SCISSOR_TEST);
                 self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
                 self.gl.clear(glow::COLOR_BUFFER_BIT);
                 self.render_range(
@@ -443,6 +448,7 @@ impl GlRenderer {
                         .bind_framebuffer(glow::FRAMEBUFFER, Some(mask_framebuffer));
                     self.gl
                         .viewport(0, 0, self.stage_width as i32, self.stage_height as i32);
+                    self.gl.disable(glow::SCISSOR_TEST);
                     self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
                     self.gl.clear(glow::COLOR_BUFFER_BIT);
                     for mask_index in mask_start..mask_end {
