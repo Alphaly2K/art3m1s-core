@@ -365,6 +365,19 @@ impl GlTextureProvider {
     }
 }
 
+impl Drop for GlTextureProvider {
+    fn drop(&mut self) {
+        for (id, _) in self.cache.drain().map(|(_, entry)| entry) {
+            if let Some(raw) = NonZeroU32::new(id.0 as u32) {
+                unsafe {
+                    self.gl.delete_texture(glow::NativeTexture(raw));
+                }
+            }
+        }
+        self.cpu_pixels.clear();
+    }
+}
+
 impl TextureProvider for GlTextureProvider {
     fn resolve(&mut self, name: &str) -> Option<(TextureId, TextureInfo)> {
         if let Some(entry) = self.cache.get(name) {

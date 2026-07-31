@@ -88,6 +88,11 @@ pub(crate) fn backlog_snapshot() -> BacklogSnapshot {
     BACKLOG_SNAPSHOT.lock().unwrap().clone()
 }
 
+pub(super) fn clear_process_snapshots() {
+    *BACKLOG_SNAPSHOT.lock().unwrap() = BacklogSnapshot::default();
+    *TEXT_METRICS.lock().unwrap() = (0.0, 0.0, 0.0);
+}
+
 /// 从 FontState 抽取 backlog / 消息层再现标签，构造快照。
 ///
 /// 拆成自由函数便于用 GlyphTextRenderer 直接单测，无需 GL runtime。

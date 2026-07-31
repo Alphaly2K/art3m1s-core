@@ -625,6 +625,10 @@ fn surface_cache() -> &'static std::sync::Mutex<SurfaceCache> {
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+pub(super) fn clear_surface_cache() {
+    surface_cache().lock().unwrap().clear();
+}
+
 /// bind：引用计数 +1；首次绑定时经 loader 预取字节。返回新的计数。
 pub(super) fn surface_cache_bind(
     cache: &mut SurfaceCache,

@@ -151,6 +151,9 @@ fn create_cgl() -> Result<(Rc<glow::Context>, Box<dyn GLPlatformContext>), Strin
         impl Drop for Ctx {
             fn drop(&mut self) {
                 unsafe {
+                    if CGLGetCurrentContext() == self.h {
+                        let _ = CGLSetCurrentContext(std::ptr::null_mut());
+                    }
                     CGLReleaseContext(self.h);
                 }
             }
@@ -328,8 +331,16 @@ fn create_egl(
         impl Drop for EglCtx {
             fn drop(&mut self) {
                 unsafe {
-                    (self.destroy)(self._display, self.ctx);
+                    if (self.get_current_context)() == self.ctx {
+                        (self.make_current)(
+                            self._display,
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                        );
+                    }
                     (self.destroy_surface)(self._display, self._surface);
+                    (self.destroy)(self._display, self.ctx);
                     (self.terminate)(self._display);
                 }
             }

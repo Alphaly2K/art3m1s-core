@@ -23,6 +23,13 @@ pub(super) fn sound_info_snapshot() -> SoundInfoSnapshot {
     SOUND_INFO.lock().unwrap().clone()
 }
 
+pub(super) fn clear_sound_info_snapshot() {
+    *SOUND_INFO.lock().unwrap() = SoundInfoSnapshot {
+        bgm: None,
+        se: Vec::new(),
+    };
+}
+
 /// splay 的 A-B 循环文件名约定：file 以 `_a` 结尾（扩展名前）时，
 /// 返回把 `_a` 换成 `_b` 的循环段文件名；否则 None。
 fn ab_loop_file(file: &str) -> Option<String> {

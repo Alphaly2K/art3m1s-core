@@ -164,7 +164,7 @@ impl CoreRuntime {
         for candidate in std::iter::once(Self::DEFAULT_FONT_PATH.to_string()).chain(
             super::text::font_fallback_candidates(Self::DEFAULT_FONT_PATH),
         ) {
-            match crate::load_font_ffi(&candidate).and_then(|font| text.set_font(font)) {
+            match crate::load_font_ffi(&candidate).and_then(|font| text.set_font_owned(font)) {
                 Ok(()) => {
                     if candidate != Self::DEFAULT_FONT_PATH {
                         crate::core_info!(

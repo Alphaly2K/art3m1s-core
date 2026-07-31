@@ -1013,7 +1013,7 @@ pub trait TextRenderer {
     fn clear_scene_text(&mut self) {}
 
     /// 切换当前用于光栅化的字体文件。
-    fn set_font_bytes(&mut self, bytes: &'static [u8]) -> Result<(), String>;
+    fn set_font_bytes(&mut self, bytes: Vec<u8>) -> Result<(), String>;
 
     /// 当前消息层的逻辑字体文件，用于消息层/字体栈恢复后同步光栅化字体。
     fn active_font_face(&self) -> Option<&str>;

@@ -9,7 +9,7 @@ use crate::text::render::{
     LinkRange, RubyRange, ScetweenConfig, TextAlignment, TextLayoutConfig, TextRenderer,
     TextSpanToken,
 };
-use ab_glyph::{Font, FontRef, PxScale, PxScaleFont, ScaleFont};
+use ab_glyph::{Font, FontArc, PxScale, PxScaleFont, ScaleFont};
 use glam::{Affine2, Vec2};
 use std::collections::HashMap;
 
@@ -81,12 +81,12 @@ impl Atlas {
     }
 }
 
-pub struct GlyphTextRenderer<'font> {
+pub struct GlyphTextRenderer {
     state: FontState,
-    font: Option<FontRef<'font>>,
-    font_key: (usize, usize),
+    font: Option<FontArc>,
+    font_generation: u64,
     atlases: Vec<Atlas>,
-    cache: HashMap<(usize, usize, u16, u32), (usize, u32, u32, u32, u32)>,
+    cache: HashMap<(u64, u16, u32), (usize, u32, u32, u32, u32)>,
     /// atlas 里的纯白小块（link type=0 hover 强调的白色方形板用），惰性分配
     white_patch: Option<(usize, u32, u32)>,
 }
@@ -149,10 +149,7 @@ fn replace_layer_span(
     Some(delta)
 }
 
-fn scaled<'a>(
-    font: &'a Option<FontRef<'a>>,
-    scale: PxScale,
-) -> Option<PxScaleFont<&'a FontRef<'a>>> {
+fn scaled(font: &Option<FontArc>, scale: PxScale) -> Option<PxScaleFont<&FontArc>> {
     font.as_ref().map(|f| f.as_scaled(scale))
 }
 
@@ -390,20 +387,24 @@ pub(crate) fn layout_glyphs(
     out
 }
 
-impl<'font> GlyphTextRenderer<'font> {
+impl GlyphTextRenderer {
     pub fn new() -> Self {
         Self {
             state: FontState::new(),
             font: None,
-            font_key: (0, 0),
+            font_generation: 0,
             atlases: vec![Atlas::new(0)],
             cache: HashMap::new(),
             white_patch: None,
         }
     }
-    pub fn set_font(&mut self, bytes: &'font [u8]) -> Result<(), String> {
-        self.font = Some(FontRef::try_from_slice(bytes).map_err(|e| format!("{e}"))?);
-        self.font_key = (bytes.as_ptr() as usize, bytes.len());
+    pub fn set_font(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.set_font_owned(bytes.to_vec())
+    }
+
+    pub fn set_font_owned(&mut self, bytes: Vec<u8>) -> Result<(), String> {
+        self.font = Some(FontArc::try_from_vec(bytes).map_err(|e| format!("{e}"))?);
+        self.font_generation = self.font_generation.wrapping_add(1);
         Ok(())
     }
 
@@ -437,7 +438,7 @@ impl<'font> GlyphTextRenderer<'font> {
         let offset_y = sf.ascent() + b.min.y;
         let advance_x = sf.h_advance(glyph_id.with_scale(sz).id);
         let (page, ax, ay, aw, ah) = if w > 0 && h > 0 && w < ATLAS_SZ && h < ATLAS_SZ {
-            let k = (self.font_key.0, self.font_key.1, glyph_id.0, sz.to_bits());
+            let k = (self.font_generation, glyph_id.0, sz.to_bits());
             if let Some(cached) = self.cache.get(&k).copied() {
                 cached
             } else {
@@ -488,7 +489,7 @@ impl<'font> GlyphTextRenderer<'font> {
     }
 }
 
-impl TextRenderer for GlyphTextRenderer<'_> {
+impl TextRenderer for GlyphTextRenderer {
     fn clear_scene_text(&mut self) {
         self.state.layers_dirtied_this_frame.clear();
         for (id, layer) in &mut self.state.layers {
@@ -505,8 +506,8 @@ impl TextRenderer for GlyphTextRenderer<'_> {
         self.state.reveal_clock_ms = 0;
     }
 
-    fn set_font_bytes(&mut self, bytes: &'static [u8]) -> Result<(), String> {
-        self.set_font(bytes)
+    fn set_font_bytes(&mut self, bytes: Vec<u8>) -> Result<(), String> {
+        self.set_font_owned(bytes)
     }
 
     fn active_font_face(&self) -> Option<&str> {

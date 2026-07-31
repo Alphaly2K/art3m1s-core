@@ -10,6 +10,7 @@ use crate::text::TextRenderer;
 use crate::video::VideoBackend;
 use asb_interpreter::Event;
 use asb_interpreter::event::WaitReason;
+use glow::HasContext;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU8};
@@ -55,7 +56,6 @@ struct InlineEventFrame {
 
 pub struct CoreRuntime {
     gl: Rc<glow::Context>,
-    gl_ctx: Box<dyn platform::GLPlatformContext>,
     fbo: glow::Framebuffer,
     fbo_tex: glow::Texture,
 
@@ -122,6 +122,9 @@ pub struct CoreRuntime {
     scenario_text_shown: bool,
     /// 已读记录自上次持久化后是否有新增（syssave 时落 aread.dat）。
     read_dirty: bool,
+    /// Must drop after every GL-owned field. Runtime destruction first makes
+    /// this context current, then renderer/provider drops can release objects.
+    gl_ctx: Box<dyn platform::GLPlatformContext>,
 }
 
 impl CoreRuntime {
@@ -167,7 +170,6 @@ impl CoreRuntime {
 
         Ok(Self {
             gl,
-            gl_ctx: gl_ctx,
             fbo,
             fbo_tex,
             renderer,
@@ -215,6 +217,7 @@ impl CoreRuntime {
             was_click_wait: false,
             scenario_text_shown: false,
             read_dirty: false,
+            gl_ctx,
         })
     }
 
@@ -352,6 +355,22 @@ impl CoreRuntime {
             self.script_status.store(computed, Ordering::SeqCst);
             self.last_engine_status = computed;
         }
+    }
+}
+
+impl Drop for CoreRuntime {
+    fn drop(&mut self) {
+        if self.gl_ctx.make_current() {
+            unsafe {
+                self.gl.delete_framebuffer(self.fbo);
+                self.gl.delete_texture(self.fbo_tex);
+            }
+        } else {
+            crate::core_warn!("[CoreRuntime] GL context unavailable during destruction");
+        }
+        text::clear_process_snapshots();
+        media::clear_sound_info_snapshot();
+        callbacks::clear_surface_cache();
     }
 }
 
