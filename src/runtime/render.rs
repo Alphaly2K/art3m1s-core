@@ -83,25 +83,42 @@ impl CoreRuntime {
             return cleared_debug_overlay;
         }
 
+        let opaque_textures = self
+            .last_submitted_frame
+            .iter()
+            .chain(std::iter::once(&frame))
+            .flat_map(|draw_list| draw_list.commands.iter())
+            .map(|command| command.texture)
+            .filter(|&texture| self.texture_provider.texture_is_opaque(texture))
+            .collect::<std::collections::HashSet<_>>();
         let visualize_damage = crate::ffi::damage_visualization_enabled();
-        if let Some(damage) = frame_damage(
+        match frame_damage(
             self.last_submitted_frame.as_ref(),
             self.last_submitted_texture_revision,
             &frame,
             texture_revision,
             &changed_textures,
+            &opaque_textures,
             self.stage_w,
             self.stage_h,
         ) {
-            if visualize_damage {
-                self.renderer.render_damage_visualized(&frame, damage);
-            } else {
-                self.renderer.render_damage(&frame, damage);
+            DamageDecision::Skip => {
+                let cleared_debug_overlay = self.renderer.clear_damage_overlay(&frame);
+                self.last_submitted_frame = Some(frame);
+                self.last_submitted_texture_revision = texture_revision;
+                self.last_rendered_scene = Some(self.compositor.scene_snapshot());
+                self.last_rendered_clock_ms = self.compositor.clock_ms();
+                unsafe {
+                    self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                }
+                return cleared_debug_overlay;
             }
-        } else if visualize_damage {
-            self.renderer.render_visualized(&frame);
-        } else {
-            self.renderer.render(&frame);
+            DamageDecision::Partial(damage) if visualize_damage => {
+                self.renderer.render_damage_visualized(&frame, damage);
+            }
+            DamageDecision::Partial(damage) => self.renderer.render_damage(&frame, damage),
+            DamageDecision::Full if visualize_damage => self.renderer.render_visualized(&frame),
+            DamageDecision::Full => self.renderer.render(&frame),
         }
         self.last_submitted_frame = Some(frame);
         self.last_submitted_texture_revision = texture_revision;
@@ -254,84 +271,121 @@ fn frame_requires_render(
     previous != Some(current) || previous_texture_revision != current_texture_revision
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DamageDecision {
+    Skip,
+    Partial([f32; 4]),
+    Full,
+}
+
 fn frame_damage(
     previous: Option<&DrawList>,
     previous_texture_revision: u64,
     current: &DrawList,
     current_texture_revision: u64,
     changed_textures: &std::collections::HashSet<crate::render_pipeline::draw::TextureId>,
+    opaque_textures: &std::collections::HashSet<crate::render_pipeline::draw::TextureId>,
     stage_width: u32,
     stage_height: u32,
-) -> Option<[f32; 4]> {
-    let previous = previous?;
+) -> DamageDecision {
+    let Some(previous) = previous else {
+        return DamageDecision::Full;
+    };
     let mut damage: Option<[f32; 4]> = None;
     let mut changed_keys = std::collections::HashSet::new();
     if previous.command_keys.iter().any(Option::is_some)
         || current.command_keys.iter().any(Option::is_some)
     {
-        accumulate_keyed_damage(
+        if accumulate_keyed_damage(
             previous,
             current,
             changed_textures,
+            opaque_textures,
             &mut changed_keys,
             &mut damage,
-        )?;
+        )
+        .is_none()
+        {
+            return DamageDecision::Full;
+        }
     } else {
-        accumulate_positional_damage(previous, current, changed_textures, &mut damage)?;
+        if accumulate_positional_damage(
+            previous,
+            current,
+            changed_textures,
+            opaque_textures,
+            &mut damage,
+        )
+        .is_none()
+        {
+            return DamageDecision::Full;
+        }
     }
-    accumulate_shader_group_damage(
+    if accumulate_shader_group_damage(
         previous,
         current,
         changed_textures,
+        opaque_textures,
         &changed_keys,
         &mut damage,
-    )?;
+    )
+    .is_none()
+    {
+        return DamageDecision::Full;
+    }
 
     // A provider generation changed without identifying a sampled texture.
     // Keep the conservative full redraw for unknown invalidations such as a
     // cache eviction; ordinary uploads are localized by `changed_textures`.
-    if damage.is_none() && previous_texture_revision != current_texture_revision {
-        return None;
+    if damage.is_none()
+        && previous_texture_revision != current_texture_revision
+        && changed_textures.is_empty()
+    {
+        return DamageDecision::Full;
     }
 
-    let [x, y, width, height] = damage?;
+    let Some([x, y, width, height]) = damage else {
+        return DamageDecision::Skip;
+    };
     let x0 = (x - 2.0).floor().max(0.0);
     let y0 = (y - 2.0).floor().max(0.0);
     let x1 = (x + width + 2.0).ceil().min(stage_width as f32);
     let y1 = (y + height + 2.0).ceil().min(stage_height as f32);
     if x1 <= x0 || y1 <= y0 {
-        return None;
+        return DamageDecision::Skip;
     }
     let damage = [x0, y0, x1 - x0, y1 - y0];
     let stage_area = stage_width as f32 * stage_height as f32;
     let damage_area = damage[2] * damage[3];
-    (damage_area < stage_area * 0.8).then_some(damage)
+    if damage_area < stage_area * 0.8 {
+        DamageDecision::Partial(damage)
+    } else {
+        DamageDecision::Full
+    }
 }
 
 fn accumulate_keyed_damage(
     previous: &DrawList,
     current: &DrawList,
     changed_textures: &std::collections::HashSet<crate::render_pipeline::draw::TextureId>,
+    opaque_textures: &std::collections::HashSet<crate::render_pipeline::draw::TextureId>,
     changed_keys: &mut std::collections::HashSet<crate::render_pipeline::draw::DrawCommandKey>,
     damage: &mut Option<[f32; 4]>,
 ) -> Option<()> {
-    use crate::render_pipeline::draw::DrawCommandKey;
     use std::collections::HashMap;
 
-    let mut old_by_key: HashMap<&DrawCommandKey, &crate::render_pipeline::draw::DrawCommand> =
-        HashMap::new();
-    let mut new_by_key: HashMap<&DrawCommandKey, &crate::render_pipeline::draw::DrawCommand> =
-        HashMap::new();
+    let mut old_by_key = HashMap::new();
+    let mut new_by_key = HashMap::new();
     for (index, command) in previous.commands.iter().enumerate() {
         if let Some(key) = previous.command_key(index)
-            && old_by_key.insert(key, command).is_some()
+            && old_by_key.insert(key, (index, command)).is_some()
         {
             return None;
         }
     }
     for (index, command) in current.commands.iter().enumerate() {
         if let Some(key) = current.command_key(index)
-            && new_by_key.insert(key, command).is_some()
+            && new_by_key.insert(key, (index, command)).is_some()
         {
             return None;
         }
@@ -356,15 +410,27 @@ fn accumulate_keyed_damage(
         return None;
     }
 
-    for (&key, &old) in &old_by_key {
+    for (&key, &(old_index, old)) in &old_by_key {
         let new = new_by_key.get(key).copied();
-        if accumulate_command_pair(Some(old), new, changed_textures, damage)? {
+        if accumulate_command_pair(
+            Some((previous, old_index, old)),
+            new.map(|(index, command)| (current, index, command)),
+            changed_textures,
+            opaque_textures,
+            damage,
+        )? {
             changed_keys.insert(key.clone());
         }
     }
-    for (&key, &new) in &new_by_key {
+    for (&key, &(new_index, new)) in &new_by_key {
         if !old_by_key.contains_key(key) {
-            if accumulate_command_pair(None, Some(new), changed_textures, damage)? {
+            if accumulate_command_pair(
+                None,
+                Some((current, new_index, new)),
+                changed_textures,
+                opaque_textures,
+                damage,
+            )? {
                 changed_keys.insert(key.clone());
             }
         }
@@ -374,19 +440,34 @@ fn accumulate_keyed_damage(
         .commands
         .iter()
         .enumerate()
-        .filter_map(|(index, command)| previous.command_key(index).is_none().then_some(command))
+        .filter_map(|(index, command)| {
+            previous
+                .command_key(index)
+                .is_none()
+                .then_some((index, command))
+        })
         .collect::<Vec<_>>();
     let new_anonymous = current
         .commands
         .iter()
         .enumerate()
-        .filter_map(|(index, command)| current.command_key(index).is_none().then_some(command))
+        .filter_map(|(index, command)| {
+            current
+                .command_key(index)
+                .is_none()
+                .then_some((index, command))
+        })
         .collect::<Vec<_>>();
     for index in 0..old_anonymous.len().max(new_anonymous.len()) {
         let _ = accumulate_command_pair(
-            old_anonymous.get(index).copied(),
-            new_anonymous.get(index).copied(),
+            old_anonymous
+                .get(index)
+                .map(|&(command_index, command)| (previous, command_index, command)),
+            new_anonymous
+                .get(index)
+                .map(|&(command_index, command)| (current, command_index, command)),
             changed_textures,
+            opaque_textures,
             damage,
         )?;
     }
@@ -397,13 +478,21 @@ fn accumulate_positional_damage(
     previous: &DrawList,
     current: &DrawList,
     changed_textures: &std::collections::HashSet<crate::render_pipeline::draw::TextureId>,
+    opaque_textures: &std::collections::HashSet<crate::render_pipeline::draw::TextureId>,
     damage: &mut Option<[f32; 4]>,
 ) -> Option<()> {
     for index in 0..previous.commands.len().max(current.commands.len()) {
         let _ = accumulate_command_pair(
-            previous.commands.get(index),
-            current.commands.get(index),
+            previous
+                .commands
+                .get(index)
+                .map(|command| (previous, index, command)),
+            current
+                .commands
+                .get(index)
+                .map(|command| (current, index, command)),
             changed_textures,
+            opaque_textures,
             damage,
         )?;
     }
@@ -411,20 +500,26 @@ fn accumulate_positional_damage(
 }
 
 fn accumulate_command_pair(
-    old: Option<&crate::render_pipeline::draw::DrawCommand>,
-    new: Option<&crate::render_pipeline::draw::DrawCommand>,
+    old: Option<CommandAt<'_>>,
+    new: Option<CommandAt<'_>>,
     changed_textures: &std::collections::HashSet<crate::render_pipeline::draw::TextureId>,
+    opaque_textures: &std::collections::HashSet<crate::render_pipeline::draw::TextureId>,
     damage: &mut Option<[f32; 4]>,
 ) -> Option<bool> {
     let sampled_texture_changed = old
         .into_iter()
         .chain(new)
-        .any(|command| command_samples_changed_texture(command, changed_textures));
-    if old == new && !sampled_texture_changed {
+        .any(|(_, _, command)| command_samples_changed_texture(command, changed_textures));
+    if old.map(|(_, _, command)| command) == new.map(|(_, _, command)| command)
+        && !sampled_texture_changed
+    {
         return Some(false);
     }
-    for command in [old, new].into_iter().flatten() {
+    for (frame, index, command) in [old, new].into_iter().flatten() {
         let bounds = command_bounds(command)?;
+        if command_is_fully_occluded(frame, index, bounds, opaque_textures) {
+            continue;
+        }
         *damage = Some(match *damage {
             Some(existing) => union_rect(existing, bounds),
             None => bounds,
@@ -433,10 +528,102 @@ fn accumulate_command_pair(
     Some(true)
 }
 
+type CommandAt<'a> = (
+    &'a DrawList,
+    usize,
+    &'a crate::render_pipeline::draw::DrawCommand,
+);
+
+fn command_is_fully_occluded(
+    frame: &DrawList,
+    index: usize,
+    bounds: [f32; 4],
+    opaque_textures: &std::collections::HashSet<crate::render_pipeline::draw::TextureId>,
+) -> bool {
+    let mut uncovered = vec![bounds];
+    for (occluder_index, occluder) in frame.commands.iter().enumerate().skip(index + 1) {
+        let Some(cover) = opaque_occluder_bounds(frame, occluder_index, occluder, opaque_textures)
+        else {
+            continue;
+        };
+        uncovered = uncovered
+            .into_iter()
+            .flat_map(|rect| subtract_rect(rect, cover))
+            .collect();
+        if uncovered.is_empty() {
+            return true;
+        }
+        // A highly fragmented cover is unusual for this engine. Stop
+        // conservatively instead of spending unbounded time in frame damage.
+        if uncovered.len() > 64 {
+            return false;
+        }
+    }
+    false
+}
+
+fn opaque_occluder_bounds(
+    frame: &DrawList,
+    index: usize,
+    command: &crate::render_pipeline::draw::DrawCommand,
+    opaque_textures: &std::collections::HashSet<crate::render_pipeline::draw::TextureId>,
+) -> Option<[f32; 4]> {
+    if command.opacity < 1.0
+        || !command.opacity.is_finite()
+        || !matches!(
+            command.blend,
+            crate::render_pipeline::draw::BlendMode::Alpha
+                | crate::render_pipeline::draw::BlendMode::PremultipliedAlpha
+        )
+        || command.shader.is_some()
+        || command.mesh.is_some()
+        || command.stencil.is_some()
+        || !opaque_textures.contains(&command.texture)
+        || frame
+            .shader_groups
+            .iter()
+            .any(|group| group.start <= index && index < group.end)
+    {
+        return None;
+    }
+    let matrix = command.transform.matrix2;
+    if matrix.x_axis.y.abs() > 1.0e-5 || matrix.y_axis.x.abs() > 1.0e-5 {
+        return None;
+    }
+    command_bounds(command)
+}
+
+fn subtract_rect(rect: [f32; 4], cover: [f32; 4]) -> Vec<[f32; 4]> {
+    let Some(overlap) = intersect_rect(rect, cover) else {
+        return vec![rect];
+    };
+    let [x, y, width, height] = rect;
+    let [ox, oy, ow, oh] = overlap;
+    let right = x + width;
+    let bottom = y + height;
+    let overlap_right = ox + ow;
+    let overlap_bottom = oy + oh;
+    let mut remaining = Vec::with_capacity(4);
+    if oy > y {
+        remaining.push([x, y, width, oy - y]);
+    }
+    if overlap_bottom < bottom {
+        remaining.push([x, overlap_bottom, width, bottom - overlap_bottom]);
+    }
+    if ox > x {
+        remaining.push([x, oy, ox - x, oh]);
+    }
+    if overlap_right < right {
+        remaining.push([overlap_right, oy, right - overlap_right, oh]);
+    }
+    remaining
+}
+
 fn accumulate_shader_group_damage(
     previous: &DrawList,
     current: &DrawList,
     changed_textures: &std::collections::HashSet<crate::render_pipeline::draw::TextureId>,
+    opaque_textures: &std::collections::HashSet<crate::render_pipeline::draw::TextureId>,
     changed_keys: &std::collections::HashSet<crate::render_pipeline::draw::DrawCommandKey>,
     damage: &mut Option<[f32; 4]>,
 ) -> Option<()> {
@@ -485,9 +672,9 @@ fn accumulate_shader_group_damage(
         let member_changed = group_contains_changed_key(previous, old, changed_keys)?;
         let unsafe_member_change = member_changed && !shader_group_is_pixel_local(old);
         if semantic_changed || unsafe_member_change {
-            accumulate_group_bounds(previous, old, damage)?;
+            accumulate_group_bounds(previous, old, opaque_textures, damage)?;
             if let Some(new) = new {
-                accumulate_group_bounds(current, new, damage)?;
+                accumulate_group_bounds(current, new, opaque_textures, damage)?;
             }
         }
     }
@@ -495,7 +682,7 @@ fn accumulate_shader_group_damage(
         if old_by_key.contains_key(key) {
             continue;
         }
-        accumulate_group_bounds(current, new, damage)?;
+        accumulate_group_bounds(current, new, opaque_textures, damage)?;
     }
     Some(())
 }
@@ -578,6 +765,7 @@ fn command_samples_changed_texture(
 fn accumulate_group_bounds(
     frame: &DrawList,
     group: &crate::render_pipeline::draw::ShaderGroup,
+    opaque_textures: &std::collections::HashSet<crate::render_pipeline::draw::TextureId>,
     damage: &mut Option<[f32; 4]>,
 ) -> Option<()> {
     let bounds = if let Some(clip) = group.clip_bounds {
@@ -595,6 +783,11 @@ fn accumulate_group_bounds(
     } else {
         return None;
     };
+    if group.end > group.start
+        && command_is_fully_occluded(frame, group.end - 1, bounds, opaque_textures)
+    {
+        return Some(());
+    }
     *damage = Some(match *damage {
         Some(existing) => union_rect(existing, bounds),
         None => bounds,
@@ -658,7 +851,10 @@ fn union_rect(left: [f32; 4], right: [f32; 4]) -> [f32; 4] {
 
 #[cfg(test)]
 mod tests {
-    use super::{command_bounds, frame_damage, frame_requires_render, wait_reason_is_click_wait};
+    use super::{
+        DamageDecision, command_bounds, frame_damage, frame_requires_render,
+        wait_reason_is_click_wait,
+    };
     use crate::render_pipeline::draw::{
         BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, DrawMesh, LayerCommandKind,
         LayerShaderGroupKind, ShaderEffect, ShaderGroup, ShaderGroupKey, TextureId, TextureInfo,
@@ -719,8 +915,17 @@ mod tests {
         new.push(quad(15.0, 20.0));
 
         assert_eq!(
-            frame_damage(Some(&old), 4, &new, 4, &HashSet::new(), 100, 100),
-            Some([8.0, 18.0, 39.0, 44.0])
+            frame_damage(
+                Some(&old),
+                4,
+                &new,
+                4,
+                &HashSet::new(),
+                &HashSet::new(),
+                100,
+                100,
+            ),
+            DamageDecision::Partial([8.0, 18.0, 39.0, 44.0])
         );
     }
 
@@ -730,8 +935,17 @@ mod tests {
         old.push(quad(10.0, 20.0));
         let changed_textures = HashSet::from([TextureId(1)]);
         assert_eq!(
-            frame_damage(Some(&old), 4, &old, 5, &changed_textures, 100, 100),
-            Some([8.0, 18.0, 34.0, 44.0])
+            frame_damage(
+                Some(&old),
+                4,
+                &old,
+                5,
+                &changed_textures,
+                &HashSet::new(),
+                100,
+                100,
+            ),
+            DamageDecision::Partial([8.0, 18.0, 34.0, 44.0])
         );
 
         let mut new = old.clone();
@@ -742,8 +956,17 @@ mod tests {
             user_texture: None,
         });
         assert_eq!(
-            frame_damage(Some(&old), 4, &new, 4, &HashSet::new(), 100, 100),
-            Some([8.0, 18.0, 34.0, 44.0])
+            frame_damage(
+                Some(&old),
+                4,
+                &new,
+                4,
+                &HashSet::new(),
+                &HashSet::new(),
+                100,
+                100,
+            ),
+            DamageDecision::Partial([8.0, 18.0, 34.0, 44.0])
         );
     }
 
@@ -777,8 +1000,17 @@ mod tests {
         new.commands[1].opacity = 0.5;
 
         assert_eq!(
-            frame_damage(Some(&old), 4, &new, 4, &HashSet::new(), 120, 100),
-            Some([58.0, 18.0, 34.0, 44.0])
+            frame_damage(
+                Some(&old),
+                4,
+                &new,
+                4,
+                &HashSet::new(),
+                &HashSet::new(),
+                120,
+                100,
+            ),
+            DamageDecision::Partial([58.0, 18.0, 34.0, 44.0])
         );
     }
 
@@ -792,8 +1024,17 @@ mod tests {
         new.commands[0].opacity = 0.5;
 
         assert_eq!(
-            frame_damage(Some(&old), 4, &new, 4, &HashSet::new(), 120, 100),
-            None
+            frame_damage(
+                Some(&old),
+                4,
+                &new,
+                4,
+                &HashSet::new(),
+                &HashSet::new(),
+                120,
+                100,
+            ),
+            DamageDecision::Full
         );
     }
 
@@ -812,8 +1053,121 @@ mod tests {
         new.commands[0].opacity = 0.5;
 
         assert_eq!(
-            frame_damage(Some(&old), 4, &new, 4, &HashSet::new(), 120, 100),
-            Some([58.0, 18.0, 34.0, 44.0])
+            frame_damage(
+                Some(&old),
+                4,
+                &new,
+                4,
+                &HashSet::new(),
+                &HashSet::new(),
+                120,
+                100,
+            ),
+            DamageDecision::Partial([58.0, 18.0, 34.0, 44.0])
+        );
+    }
+
+    #[test]
+    fn texture_change_fully_covered_by_opaque_upper_layer_skips_rendering() {
+        let mut frame = DrawList::new();
+        frame.push_layer("animated", LayerCommandKind::Visual, 0, quad(10.0, 20.0));
+        let mut cover = quad(10.0, 20.0);
+        cover.texture = TextureId(2);
+        frame.push_layer("cover", LayerCommandKind::Visual, 0, cover);
+
+        assert_eq!(
+            frame_damage(
+                Some(&frame),
+                4,
+                &frame,
+                5,
+                &HashSet::from([TextureId(1)]),
+                &HashSet::from([TextureId(2)]),
+                100,
+                100,
+            ),
+            DamageDecision::Skip
+        );
+    }
+
+    #[test]
+    fn multiple_opaque_upper_layers_can_jointly_cover_damage() {
+        let mut frame = DrawList::new();
+        frame.push_layer("animated", LayerCommandKind::Visual, 0, quad(10.0, 20.0));
+        let mut left = quad(10.0, 20.0);
+        left.texture = TextureId(2);
+        left.clip.quad_size = [15.0, 40.0];
+        frame.push_layer("left-cover", LayerCommandKind::Visual, 0, left);
+        let mut right = quad(25.0, 20.0);
+        right.texture = TextureId(3);
+        right.clip.quad_size = [15.0, 40.0];
+        frame.push_layer("right-cover", LayerCommandKind::Visual, 0, right);
+
+        assert_eq!(
+            frame_damage(
+                Some(&frame),
+                4,
+                &frame,
+                5,
+                &HashSet::from([TextureId(1)]),
+                &HashSet::from([TextureId(2), TextureId(3)]),
+                100,
+                100,
+            ),
+            DamageDecision::Skip
+        );
+    }
+
+    #[test]
+    fn translucent_upper_layer_does_not_hide_texture_damage() {
+        let mut frame = DrawList::new();
+        frame.push_layer("animated", LayerCommandKind::Visual, 0, quad(10.0, 20.0));
+        let mut cover = quad(10.0, 20.0);
+        cover.texture = TextureId(2);
+        cover.opacity = 0.5;
+        frame.push_layer("cover", LayerCommandKind::Visual, 0, cover);
+
+        assert_eq!(
+            frame_damage(
+                Some(&frame),
+                4,
+                &frame,
+                5,
+                &HashSet::from([TextureId(1)]),
+                &HashSet::from([TextureId(2)]),
+                100,
+                100,
+            ),
+            DamageDecision::Partial([8.0, 18.0, 34.0, 44.0])
+        );
+    }
+
+    #[test]
+    fn shader_group_member_is_not_assumed_to_be_an_opaque_cover() {
+        let mut frame = DrawList::new();
+        frame.push_layer("animated", LayerCommandKind::Visual, 0, quad(10.0, 20.0));
+        let mut cover = quad(10.0, 20.0);
+        cover.texture = TextureId(2);
+        frame.push_layer("cover", LayerCommandKind::Visual, 0, cover);
+        frame.push_shader_group(shader_group(
+            1,
+            2,
+            "cover",
+            crate::render_pipeline::shader::GROUP_COMPOSITE_SHADER,
+        ));
+
+        assert_eq!(
+            frame_damage(
+                Some(&frame),
+                4,
+                &frame,
+                5,
+                &HashSet::from([TextureId(1)]),
+                &HashSet::from([TextureId(2)]),
+                100,
+                100,
+            ),
+            DamageDecision::Partial([8.0, 18.0, 34.0, 44.0])
         );
     }
 
@@ -829,8 +1183,17 @@ mod tests {
         new.push_layer("c", LayerCommandKind::Visual, 0, quad(140.0, 20.0));
 
         assert_eq!(
-            frame_damage(Some(&old), 4, &new, 4, &HashSet::new(), 200, 100),
-            Some([48.0, 18.0, 34.0, 44.0])
+            frame_damage(
+                Some(&old),
+                4,
+                &new,
+                4,
+                &HashSet::new(),
+                &HashSet::new(),
+                200,
+                100,
+            ),
+            DamageDecision::Partial([48.0, 18.0, 34.0, 44.0])
         );
     }
 
@@ -844,8 +1207,17 @@ mod tests {
         new.push_layer("a", LayerCommandKind::Visual, 0, quad(0.0, 20.0));
 
         assert_eq!(
-            frame_damage(Some(&old), 4, &new, 4, &HashSet::new(), 200, 100),
-            None
+            frame_damage(
+                Some(&old),
+                4,
+                &new,
+                4,
+                &HashSet::new(),
+                &HashSet::new(),
+                200,
+                100,
+            ),
+            DamageDecision::Full
         );
     }
 

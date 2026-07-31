@@ -11,7 +11,7 @@
 
 use crate::render_pipeline::draw::{TextureId, TextureInfo, TextureProvider};
 use glow::HasContext;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::rc::Rc;
 
@@ -108,6 +108,8 @@ pub struct GlTextureProvider {
     /// Last content generation for each live GL texture. This lets frame damage
     /// include only commands sampling a texture that actually changed.
     texture_revisions: HashMap<TextureId, u64>,
+    /// Texture handles whose uploaded pixels are known to have alpha 255.
+    opaque_textures: HashSet<TextureId>,
 }
 
 impl GlTextureProvider {
@@ -121,6 +123,7 @@ impl GlTextureProvider {
             placeholder_size: 256,
             content_revision: 0,
             texture_revisions: HashMap::new(),
+            opaque_textures: HashSet::new(),
         }
     }
 
@@ -144,6 +147,14 @@ impl GlTextureProvider {
         self.mark_content_changed();
         self.texture_revisions
             .insert(texture, self.content_revision);
+    }
+
+    fn set_texture_opaque(&mut self, texture: TextureId, opaque: bool) {
+        if opaque {
+            self.opaque_textures.insert(texture);
+        } else {
+            self.opaque_textures.remove(&texture);
+        }
     }
 
     /// 设置素材字节源（资源名 → 原始图片字节）。
@@ -214,6 +225,7 @@ impl GlTextureProvider {
             entry.0,
             CpuTexturePixels::readable_rgba(width, height, rgba),
         );
+        self.set_texture_opaque(entry.0, rgba_is_opaque(rgba));
         self.mark_texture_changed(entry.0);
         Some(entry)
     }
@@ -229,6 +241,7 @@ impl GlTextureProvider {
         self.remove_if_cached(name);
         let entry = unsafe { self.try_create_texture(width, height, rgba) }?;
         self.cache.insert(name.to_string(), entry);
+        self.set_texture_opaque(entry.0, rgba_is_opaque(rgba));
         self.mark_texture_changed(entry.0);
         Some(entry)
     }
@@ -429,6 +442,7 @@ impl GlTextureProvider {
                 self.gl.bind_texture(glow::TEXTURE_2D, None);
             }
             self.cpu_pixels.remove(&texture);
+            self.opaque_textures.insert(texture);
             self.mark_texture_changed(texture);
             return true;
         }
@@ -454,6 +468,7 @@ impl GlTextureProvider {
         }
         self.cache.insert(name.to_string(), entry);
         self.cpu_pixels.remove(&entry.0);
+        self.opaque_textures.insert(entry.0);
         self.mark_texture_changed(entry.0);
         true
     }
@@ -462,6 +477,7 @@ impl GlTextureProvider {
         if let Some((id, _)) = self.cache.remove(name) {
             self.cpu_pixels.remove(&id);
             self.texture_revisions.remove(&id);
+            self.opaque_textures.remove(&id);
             if let Some(nz) = NonZeroU32::new(id.0 as u32) {
                 unsafe {
                     self.gl.delete_texture(glow::NativeTexture(nz));
@@ -571,6 +587,7 @@ impl Drop for GlTextureProvider {
         }
         self.cpu_pixels.clear();
         self.texture_revisions.clear();
+        self.opaque_textures.clear();
     }
 }
 
@@ -594,6 +611,7 @@ impl TextureProvider for GlTextureProvider {
                         self.cache.insert(name.to_string(), entry);
                         self.cpu_pixels
                             .insert(entry.0, CpuTexturePixels::alpha_only(w, h, &rgba));
+                        self.set_texture_opaque(entry.0, rgba_is_opaque(&rgba));
                         self.mark_texture_changed(entry.0);
                         return Some(entry);
                     }
@@ -614,6 +632,7 @@ impl TextureProvider for GlTextureProvider {
         self.cache.insert(name.to_string(), entry);
         self.cpu_pixels
             .insert(entry.0, CpuTexturePixels::alpha_only(size, size, &pixels));
+        self.set_texture_opaque(entry.0, rgba_is_opaque(&pixels));
         self.mark_texture_changed(entry.0);
         Some(entry)
     }
@@ -664,6 +683,10 @@ impl TextureProvider for GlTextureProvider {
 
     fn pixel_alpha(&self, texture: TextureId, x: u32, y: u32) -> Option<u8> {
         self.cpu_pixels.get(&texture)?.alpha_at(x, y)
+    }
+
+    fn texture_is_opaque(&self, texture: TextureId) -> bool {
+        self.opaque_textures.contains(&texture)
     }
 
     /// 1x1 纯色纹理（`lyc` 单色图层）：按稳定名缓存，避免每帧重建。
@@ -742,6 +765,7 @@ impl TextureProvider for GlTextureProvider {
         for name in &stale {
             if let Some((id, _)) = self.cache.remove(name) {
                 self.cpu_pixels.remove(&id);
+                self.opaque_textures.remove(&id);
                 if let Some(nz) = NonZeroU32::new(id.0 as u32) {
                     unsafe {
                         self.gl.delete_texture(glow::NativeTexture(nz));
@@ -750,6 +774,12 @@ impl TextureProvider for GlTextureProvider {
             }
         }
     }
+}
+
+fn rgba_is_opaque(rgba: &[u8]) -> bool {
+    !rgba.is_empty()
+        && rgba.len().is_multiple_of(4)
+        && rgba.chunks_exact(4).all(|pixel| pixel[3] == 255)
 }
 
 /// 把图片字节解码成 `(宽, 高, RGBA8)`。无法识别/解码失败返回 `None`。
@@ -762,7 +792,15 @@ fn decode_rgba(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CpuTexturePixels, PixelStorage};
+    use super::{CpuTexturePixels, PixelStorage, rgba_is_opaque};
+
+    #[test]
+    fn opacity_summary_requires_every_alpha_byte_to_be_full() {
+        assert!(rgba_is_opaque(&[1, 2, 3, 255, 4, 5, 6, 255]));
+        assert!(!rgba_is_opaque(&[1, 2, 3, 255, 4, 5, 6, 254]));
+        assert!(!rgba_is_opaque(&[1, 2, 3, 255, 4]));
+        assert!(!rgba_is_opaque(&[]));
+    }
 
     #[test]
     fn opaque_texture_needs_no_per_pixel_cpu_storage() {

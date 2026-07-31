@@ -77,6 +77,12 @@ pub trait TextureProvider {
         None
     }
 
+    /// Returns true only when every texel is known to have alpha 1.0.
+    /// Unknown and compressed textures must conservatively return false.
+    fn texture_is_opaque(&self, _texture: TextureId) -> bool {
+        false
+    }
+
     /// Retains only the named resources. Implementations may no-op.
     fn retain(&mut self, _names: &std::collections::HashSet<String>) {}
 
