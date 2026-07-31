@@ -227,14 +227,7 @@ fn event_requires_host_pause(e: &Event) -> bool {
         e,
         Event::Wait { .. } | Event::YesNo { .. } | Event::ShowDialog { .. }
     ) || matches!(e, Event::VideoPlay { id, .. } if id.is_none())
-        || matches!(
-            e,
-            Event::Trans {
-                trans_type,
-                time,
-                ..
-            } if crate::render_pipeline::transition::is_animated_request(*trans_type, *time)
-        )
+        || matches!(e, Event::Trans { trans_type, .. } if *trans_type != 0)
 }
 
 #[cfg(test)]
@@ -245,27 +238,6 @@ mod tests {
         Arc,
         atomic::{AtomicBool, Ordering},
     };
-
-    #[test]
-    fn zero_duration_transition_does_not_pause_the_interpreter() {
-        let immediate = Event::Trans {
-            trans_type: 1,
-            time: Some(0),
-            rule: None,
-            vague: None,
-            input: 1,
-        };
-        let animated = Event::Trans {
-            trans_type: 1,
-            time: Some(1),
-            rule: None,
-            vague: None,
-            input: 1,
-        };
-
-        assert!(!event_requires_host_pause(&immediate));
-        assert!(event_requires_host_pause(&animated));
-    }
 
     #[test]
     fn go_title_reset_triggers_event() {
