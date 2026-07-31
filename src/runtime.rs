@@ -222,12 +222,27 @@ impl CoreRuntime {
 
     /// 返回一帧像素数据的字节数（width * height * 4）。
     pub fn pixel_buffer_size(&self) -> usize {
-        (self.stage_w * self.stage_h * 4) as usize
+        (self.stage_w as usize)
+            .saturating_mul(self.stage_h as usize)
+            .saturating_mul(4)
     }
 
     /// Advance logic and render one frame. Returns the RGBA pixel buffer.
     /// The caller owns the returned `Vec<u8>`.
     pub fn advance_and_render(&mut self, delta_ms: u64) -> Vec<u8> {
+        let mut pixels = vec![0; self.pixel_buffer_size()];
+        let written = self.advance_and_render_into(delta_ms, &mut pixels);
+        pixels.truncate(written);
+        pixels
+    }
+
+    /// Advance logic and render directly into a caller-owned RGBA buffer.
+    /// Returns the number of bytes written, or zero when the buffer is too small.
+    pub fn advance_and_render_into(&mut self, delta_ms: u64, out_pixels: &mut [u8]) -> usize {
+        if out_pixels.len() < self.pixel_buffer_size() {
+            return 0;
+        }
+
         // 抢占当前线程的 GL 上下文前，先保存宿主（Flutter）的上下文；
         // 渲染完后必须 restore，否则宿主后续的 GL 调用全打到我们的离屏 FBO，
         // 宿主窗口就黑了。
@@ -274,13 +289,13 @@ impl CoreRuntime {
         self.apply_ready_text_translations();
         self.advance_media_and_enqueue_finish_handlers(delta_ms);
 
-        let pixels = self.render_current_frame();
+        let written = self.render_current_frame_into(out_pixels);
         self.clear_input_edges();
 
         // 渲染完毕，把 GL 上下文还给宿主。
         self.gl_ctx.restore(saved_ctx);
 
-        pixels
+        written
     }
 
     pub fn is_exit_requested(&self) -> bool {

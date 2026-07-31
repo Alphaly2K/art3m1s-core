@@ -33,7 +33,7 @@ impl CoreRuntime {
         Ok(())
     }
 
-    pub(super) fn render_current_frame(&mut self) -> Vec<u8> {
+    pub(super) fn render_current_frame_into(&mut self, out_pixels: &mut [u8]) -> usize {
         // 绑定 FBO，渲染到纹理而不是默认帧缓冲
         unsafe {
             self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
@@ -67,15 +67,21 @@ impl CoreRuntime {
         self.last_rendered_clock_ms = self.compositor.clock_ms();
 
         // 从 FBO 读取像素（使用 glReadPixels，对所有后端都可靠）
-        let pixels =
-            unsafe { platform::read_pixels(&self.gl, self.stage_w as i32, self.stage_h as i32) };
+        let written = unsafe {
+            platform::read_pixels_into(
+                &self.gl,
+                self.stage_w as i32,
+                self.stage_h as i32,
+                out_pixels,
+            )
+        };
 
         // 解绑 FBO
         unsafe {
             self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         }
 
-        pixels
+        written
     }
 
     /// 用上一帧场景重建转场源画面。
@@ -156,9 +162,6 @@ impl CoreRuntime {
             used_files.insert(f);
         }
         self.texture_provider.retain(&used_files);
-        unsafe {
-            self.gl.finish();
-        }
         (text_layer_count, text_command_count)
     }
 

@@ -755,10 +755,25 @@ unsafe fn configure_render_texture(gl: &glow::Context) {
     }
 }
 
-pub unsafe fn read_pixels(gl: &glow::Context, width: i32, height: i32) -> Vec<u8> {
-    let row_bytes = (width * 4) as usize;
-    let total = row_bytes * height as usize;
-    let mut buf = vec![0u8; total];
+/// Reads the current framebuffer into `out` as top-left-origin RGBA8 pixels.
+///
+/// # Safety
+///
+/// `gl` must have a current context on this thread, with a readable framebuffer
+/// whose dimensions are at least `width` by `height`.
+pub unsafe fn read_pixels_into(
+    gl: &glow::Context,
+    width: i32,
+    height: i32,
+    out: &mut [u8],
+) -> usize {
+    let Some((row_bytes, total)) = pixel_buffer_layout(width, height) else {
+        return 0;
+    };
+    if out.len() < total {
+        return 0;
+    }
+    let buf = &mut out[..total];
 
     unsafe {
         gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
@@ -770,21 +785,43 @@ pub unsafe fn read_pixels(gl: &glow::Context, width: i32, height: i32) -> Vec<u8
             height,
             glow::RGBA,
             glow::UNSIGNED_BYTE,
-            glow::PixelPackData::Slice(Some(&mut buf)),
+            glow::PixelPackData::Slice(Some(buf)),
         );
     }
 
     // 垂直翻转（OpenGL 原点在左下，我们需要左上）
-    let mut tmp = vec![0u8; row_bytes];
-    for y in 0..(height / 2) as usize {
-        let top = y * row_bytes;
-        let bottom = (height as usize - 1 - y) * row_bytes;
-        tmp.copy_from_slice(&buf[top..top + row_bytes]);
-        let (left, right) = buf.split_at_mut(bottom);
-        left[top..top + row_bytes].copy_from_slice(&right[..row_bytes]);
-        right[..row_bytes].copy_from_slice(&tmp);
-    }
+    flip_rows_in_place(buf, row_bytes, height as usize);
+    total
+}
+
+pub unsafe fn read_pixels(gl: &glow::Context, width: i32, height: i32) -> Vec<u8> {
+    let Some((_, total)) = pixel_buffer_layout(width, height) else {
+        return Vec::new();
+    };
+    let mut buf = vec![0u8; total];
+    let written = unsafe { read_pixels_into(gl, width, height, &mut buf) };
+    buf.truncate(written);
     buf
+}
+
+fn pixel_buffer_layout(width: i32, height: i32) -> Option<(usize, usize)> {
+    let width = usize::try_from(width).ok()?;
+    let height = usize::try_from(height).ok()?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let row_bytes = width.checked_mul(4)?;
+    let total = row_bytes.checked_mul(height)?;
+    Some((row_bytes, total))
+}
+
+fn flip_rows_in_place(buf: &mut [u8], row_bytes: usize, height: usize) {
+    for y in 0..height / 2 {
+        let top = y * row_bytes;
+        let bottom = (height - 1 - y) * row_bytes;
+        let (top_region, bottom_region) = buf.split_at_mut(bottom);
+        top_region[top..top + row_bytes].swap_with_slice(&mut bottom_region[..row_bytes]);
+    }
 }
 
 /// 从当前绑定的 FBO 读取像素（原点在左上，Y 向下）。
@@ -792,4 +829,36 @@ pub unsafe fn read_pixels(gl: &glow::Context, width: i32, height: i32) -> Vec<u8
 /// 与 [`read_pixels`] 相同，但语义上明确表示从 FBO 读取。
 pub unsafe fn read_pixels_from_fbo(gl: &glow::Context, width: i32, height: i32) -> Vec<u8> {
     unsafe { read_pixels(gl, width, height) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{flip_rows_in_place, pixel_buffer_layout};
+
+    #[test]
+    fn pixel_buffer_layout_rejects_invalid_or_overflowing_sizes() {
+        assert_eq!(pixel_buffer_layout(2, 3), Some((8, 24)));
+        assert_eq!(pixel_buffer_layout(0, 3), None);
+        assert_eq!(pixel_buffer_layout(-1, 3), None);
+    }
+
+    #[test]
+    fn flip_rows_swaps_in_place_and_keeps_middle_row() {
+        let mut pixels = vec![
+            1, 2, 3, 4, // top
+            5, 6, 7, 8, // middle
+            9, 10, 11, 12, // bottom
+        ];
+
+        flip_rows_in_place(&mut pixels, 4, 3);
+
+        assert_eq!(
+            pixels,
+            vec![
+                9, 10, 11, 12, // former bottom
+                5, 6, 7, 8, // middle
+                1, 2, 3, 4, // former top
+            ]
+        );
+    }
 }

@@ -918,17 +918,16 @@ pub unsafe extern "C" fn art3m1s_runtime_advance_and_render(
         return 0;
     }
     let rt = unsafe { &mut *rt };
+    let out_capacity = out_capacity as usize;
+    if out_capacity < rt.pixel_buffer_size() {
+        return 0;
+    }
+    let out_pixels = unsafe { std::slice::from_raw_parts_mut(out_pixels, out_capacity) };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        rt.advance_and_render(delta_ms as u64)
+        rt.advance_and_render_into(delta_ms as u64, out_pixels)
     }));
     match result {
-        Ok(pixels) => {
-            let to_copy = pixels.len().min(out_capacity as usize);
-            unsafe {
-                std::ptr::copy_nonoverlapping(pixels.as_ptr(), out_pixels, to_copy);
-            }
-            to_copy as u32
-        }
+        Ok(written) => written as u32,
         Err(panic_info) => {
             core_error!(
                 "art3m1s_runtime_advance_and_render panicked: {}",
