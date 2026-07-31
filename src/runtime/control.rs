@@ -50,7 +50,7 @@ pub(super) struct RuntimeControlState {
     auto_wait_elapsed_ms: u64,
     skip_wait_revealed: bool,
     was_skipping: bool,
-    // ── controlskip：按住 Ctrl（keyconfig role 14）期间的强制跳过 ──
+    // ── controlskip：按住 Ctrl（keyconfig role 14）期间的临时跳过 ──
     control_skip_active: bool,
     // ── hide：临时隐藏消息窗 ──
     hide_allowed: bool,
@@ -85,7 +85,7 @@ pub(super) struct RuntimeControlState {
 }
 
 /// keyconfig 的默认按键分配（docs/spec/key_assign.md，Windows 缺省）：
-/// Enter=前进、Space=隐藏、↑=日志、A=自动、Shift=跳过切换、Ctrl=强制跳过。
+/// Enter=前进、Space=隐藏、↑=日志、A=自动、Shift=跳过切换、Ctrl=临时跳过。
 fn default_keymap() -> HashMap<i32, Vec<u32>> {
     HashMap::from([
         (ROLE_ADVANCE, vec![13]),
@@ -153,7 +153,7 @@ impl Default for RuntimeControlState {
 
 impl RuntimeControlState {
     pub(super) fn skip_active(&self) -> bool {
-        (self.skip_active && self.skip_allowed) || self.control_skip_active
+        self.skip_allowed && (self.skip_active || self.control_skip_active)
     }
 
     pub(super) fn control_skip_active(&self) -> bool {
@@ -326,9 +326,20 @@ impl CoreRuntime {
     /// [skip] 配置：allow/unread 缺省（None）时继承之前的设置，只覆盖显式给出的值。
     pub(super) fn apply_skip_config(&mut self, allow: Option<bool>, skip_unread: Option<bool>) {
         if let Some(allow) = allow {
-            self.control.skip_allowed = allow;
-            if !allow {
+            let was_skipping = self.control.skip_active();
+            if !allow && self.control.skip_active {
                 self.set_skip_mode(false);
+            }
+            self.control.skip_allowed = allow;
+            let is_skipping = self.control.skip_active();
+            if was_skipping != is_skipping {
+                self.control.reset_auto_wait();
+                self.audio.set_skipping(is_skipping);
+                self.sync_control_status_variables();
+                if was_skipping {
+                    self.control.was_skipping = true;
+                    self.reveal_text_now();
+                }
             }
         }
         if let Some(skip_unread) = skip_unread {
@@ -591,19 +602,21 @@ impl CoreRuntime {
         );
     }
 
-    // ── controlskip：按住强制跳过 ─────────────────────────────────────
+    // ── controlskip：按住临时跳过 ─────────────────────────────────────
 
-    /// 强制跳过态切换：进入/退出时派发 controlskipin/out 并同步
-    /// s.status.controlskip。强制跳过无视 [skip allow=0]（这正是"强制"）。
+    /// 临时跳过按键状态切换：进入/退出时派发 controlskipin/out 并同步
+    /// s.status.controlskip。实际跳过仍受 [skip allow=] 约束。
     pub(super) fn set_control_skip(&mut self, active: bool) {
         if self.control.control_skip_active == active {
             return;
         }
+        let was_skipping = self.control.skip_active();
         self.control.control_skip_active = active;
+        let is_skipping = self.control.skip_active();
         self.control.reset_auto_wait();
-        self.audio.set_skipping(self.control.skip_active());
+        self.audio.set_skipping(is_skipping);
         self.sync_control_status_variables();
-        if !active {
+        if was_skipping && !is_skipping {
             self.control.was_skipping = true;
             // 与 commandskip 退出一致：立即揭示当前文本，避免卡在初始进度。
             self.reveal_text_now();
@@ -615,7 +628,7 @@ impl CoreRuntime {
         });
     }
 
-    /// 每帧根据按住的键更新强制跳过态（keyconfig role 14，默认 Ctrl=17）。
+    /// 每帧根据按住的键更新临时跳过态（keyconfig role 14，默认 Ctrl=17）。
     pub(super) fn update_control_skip_from_keys(&mut self, keys_down: &HashSet<u32>) {
         let held = self
             .control
@@ -875,7 +888,7 @@ impl CoreRuntime {
                         self.exit_avoid();
                     }
                 }
-                // role 14（强制跳过）按"按住"处理，见 update_control_skip_from_keys。
+                // role 14（临时跳过）按"按住"处理，见 update_control_skip_from_keys。
                 _ => {}
             }
         }
@@ -965,15 +978,14 @@ mod tests {
     }
 
     #[test]
-    fn control_skip_forces_skip_even_when_commandskip_disallowed() {
-        // 强制跳过（Ctrl 按住）应无视 [skip allow=0] 的门控。
+    fn control_skip_respects_the_script_skip_gate() {
         let control = RuntimeControlState {
             skip_allowed: false,
             skip_active: false,
             control_skip_active: true,
             ..RuntimeControlState::default()
         };
-        assert!(control.skip_active());
+        assert!(!control.skip_active());
         assert!(control.control_skip_active());
     }
 
@@ -997,7 +1009,7 @@ mod tests {
 
     #[test]
     fn default_keymap_matches_key_assign_spec() {
-        // docs/spec/key_assign.md：Enter 前进、Space 隐藏、Shift 跳过、Ctrl 强制跳过
+        // docs/spec/key_assign.md：Enter 前进、Space 隐藏、Shift 跳过、Ctrl 临时跳过
         let control = RuntimeControlState::default();
         assert_eq!(control.roles_for_key(13), vec![ROLE_ADVANCE]);
         assert!(control.roles_for_key(32).contains(&ROLE_HIDE_IN));

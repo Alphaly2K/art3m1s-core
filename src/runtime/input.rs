@@ -88,7 +88,7 @@ impl CoreRuntime {
         let left_down = mouse_buttons.contains(&1);
         let mut needs_inline_event_frame = false;
 
-        // controlskip：按住 keyconfig role 14 的键（缺省 Ctrl=17）期间强制跳过。
+        // controlskip：按住 keyconfig role 14 的键（缺省 Ctrl=17）期间临时跳过。
         self.update_control_skip_from_keys(&keys_down);
 
         // hide 模式：左键单击先恢复消息窗，本帧不再进入常规点击/前进链。
