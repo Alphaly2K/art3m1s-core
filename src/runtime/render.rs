@@ -34,7 +34,9 @@ impl CoreRuntime {
         Ok(())
     }
 
-    pub(super) fn render_current_frame_into(&mut self, out_pixels: &mut [u8]) -> usize {
+    /// Renders the current logical scene into the persistent internal FBO.
+    /// Returns false when the visual frame is identical to the submitted one.
+    pub(super) fn render_current_frame(&mut self) -> bool {
         // 绑定 FBO，渲染到纹理而不是默认帧缓冲
         unsafe {
             self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
@@ -74,7 +76,7 @@ impl CoreRuntime {
             unsafe {
                 self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             }
-            return 0;
+            return false;
         }
 
         self.renderer.render(&frame);
@@ -83,7 +85,16 @@ impl CoreRuntime {
         self.last_rendered_scene = Some(self.compositor.scene_snapshot());
         self.last_rendered_clock_ms = self.compositor.clock_ms();
 
-        // 从 FBO 读取像素（使用 glReadPixels，对所有后端都可靠）
+        unsafe {
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        }
+        true
+    }
+
+    pub(super) fn read_current_frame_into(&mut self, out_pixels: &mut [u8]) -> usize {
+        unsafe {
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
+        }
         let written = unsafe {
             platform::read_pixels_into(
                 &self.gl,

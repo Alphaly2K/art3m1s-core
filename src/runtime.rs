@@ -258,13 +258,62 @@ impl CoreRuntime {
         let saved_ctx = self.gl_ctx.bind_save();
 
         self.advance_logic(delta_ms);
-        let written = self.render_current_frame_into(out_pixels);
+        let written = if self.render_current_frame() {
+            self.read_current_frame_into(out_pixels)
+        } else {
+            0
+        };
         self.clear_input_edges();
 
         // 渲染完毕，把 GL 上下文还给宿主。
         self.gl_ctx.restore(saved_ctx);
 
         written
+    }
+
+    /// Configures a host-owned platform texture as the presentation target.
+    pub fn set_external_surface(
+        &mut self,
+        kind: i32,
+        handle: *mut std::ffi::c_void,
+        width: u32,
+        height: u32,
+    ) -> Result<(), String> {
+        let saved_ctx = self.gl_ctx.bind_save();
+        let result = (|| {
+            self.gl_ctx.set_external_surface(
+                kind,
+                handle,
+                width.try_into().map_err(|_| "external width overflow")?,
+                height.try_into().map_err(|_| "external height overflow")?,
+            )
+        })();
+        self.gl_ctx.restore(saved_ctx);
+        result
+    }
+
+    pub fn clear_external_surface(&mut self) {
+        let saved_ctx = self.gl_ctx.bind_save();
+        self.gl_ctx.clear_external_surface();
+        self.gl_ctx.restore(saved_ctx);
+    }
+
+    /// Advances logic and presents a changed frame through the host texture.
+    /// Returns `Ok(false)` when no visual update was necessary.
+    pub fn advance_and_present(&mut self, delta_ms: u64) -> Result<bool, String> {
+        let saved_ctx = self.gl_ctx.bind_save();
+        self.advance_logic(delta_ms);
+        let changed = self.render_current_frame();
+        let result = if changed {
+            self.gl_ctx
+                .present_fbo(&self.gl, self.fbo, self.stage_w as i32, self.stage_h as i32)
+                .map(|()| true)
+        } else {
+            Ok(false)
+        };
+        self.clear_input_edges();
+        self.gl_ctx.restore(saved_ctx);
+        result
     }
 
     /// Advance one engine tick while a previously rendered frame is still

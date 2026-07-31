@@ -14,6 +14,31 @@ pub trait GLPlatformContext: Send {
 
     /// 恢复之前由 [`GLPlatformContext::bind_save`] 保存的 GL 上下文。
     fn restore(&self, saved: SavedGlContext);
+
+    /// Binds a host-owned platform surface as the zero-copy presentation target.
+    /// Kind 1 is an Android `ANativeWindow`; kind 2 is an Apple `IOSurface`.
+    fn set_external_surface(
+        &self,
+        _kind: i32,
+        _handle: *mut std::ffi::c_void,
+        _width: i32,
+        _height: i32,
+    ) -> Result<(), String> {
+        Err("external surfaces are unsupported by this GL backend".into())
+    }
+
+    fn clear_external_surface(&self) {}
+
+    /// Copies the completed internal FBO to the external surface and presents it.
+    fn present_fbo(
+        &self,
+        _gl: &glow::Context,
+        _source: glow::Framebuffer,
+        _width: i32,
+        _height: i32,
+    ) -> Result<(), String> {
+        Err("external surfaces are unsupported by this GL backend".into())
+    }
 }
 
 /// 之前线程当前的 GL 上下文快照（不透明句柄）。
@@ -213,8 +238,10 @@ fn create_egl(
 ) -> Result<(Rc<glow::Context>, Box<dyn GLPlatformContext>), String> {
     mod egl {
         use super::GLPlatformContext;
+        use glow::HasContext;
         use std::ffi::{CString, c_char, c_int, c_uint, c_void};
         use std::rc::Rc;
+        use std::sync::Mutex;
 
         type EGLBoolean = c_uint;
         type EGLDisplay = *mut c_void;
@@ -229,6 +256,7 @@ fn create_egl(
         const EGL_OPENGL_ES3_BIT: EGLint = 0x0040;
         const EGL_SURFACE_TYPE: EGLint = 0x3033;
         const EGL_PBUFFER_BIT: EGLint = 0x0001;
+        const EGL_WINDOW_BIT: EGLint = 0x0004;
         const EGL_BLUE_SIZE: EGLint = 0x3022;
         const EGL_GREEN_SIZE: EGLint = 0x3023;
         const EGL_RED_SIZE: EGLint = 0x3024;
@@ -237,6 +265,20 @@ fn create_egl(
         const EGL_HEIGHT: EGLint = 0x3056;
         const EGL_DEFAULT_DISPLAY: EGLint = 0;
         const EGL_OPENGL_ES_API: EGLint = 0x30A0;
+        const EGL_TEXTURE_FORMAT: EGLint = 0x3080;
+        const EGL_TEXTURE_TARGET: EGLint = 0x3081;
+        const EGL_TEXTURE_RGBA: EGLint = 0x305E;
+        const EGL_IOSURFACE_ANGLE: EGLint = 0x3454;
+        const EGL_IOSURFACE_PLANE_ANGLE: EGLint = 0x345A;
+        const EGL_TEXTURE_RECTANGLE_ANGLE: EGLint = 0x345B;
+        const EGL_TEXTURE_TYPE_ANGLE: EGLint = 0x345C;
+        const EGL_TEXTURE_INTERNAL_FORMAT_ANGLE: EGLint = 0x345D;
+        const GL_BGRA_EXT: EGLint = 0x80E1;
+        const GL_UNSIGNED_BYTE: EGLint = 0x1401;
+
+        struct ExternalSurface {
+            surface: EGLSurface,
+        }
 
         unsafe extern "C" {
             fn dlopen(path: *const c_char, mode: c_int) -> *mut c_void;
@@ -263,8 +305,9 @@ fn create_egl(
         }
 
         pub struct EglCtx {
-            _display: EGLDisplay,
-            _surface: EGLSurface,
+            display: EGLDisplay,
+            pbuffer: EGLSurface,
+            config: EGLConfig,
             ctx: EGLContext,
             destroy: unsafe extern "C" fn(EGLDisplay, EGLContext) -> EGLBoolean,
             destroy_surface: unsafe extern "C" fn(EGLDisplay, EGLSurface) -> EGLBoolean,
@@ -275,6 +318,21 @@ fn create_egl(
             get_current_display: unsafe extern "C" fn() -> EGLDisplay,
             get_current_surface: unsafe extern "C" fn(EGLint) -> EGLSurface,
             get_current_context: unsafe extern "C" fn() -> EGLContext,
+            create_window_surface: unsafe extern "C" fn(
+                EGLDisplay,
+                EGLConfig,
+                *mut c_void,
+                *const EGLint,
+            ) -> EGLSurface,
+            create_pbuffer_from_client_buffer: unsafe extern "C" fn(
+                EGLDisplay,
+                EGLint,
+                *mut c_void,
+                EGLConfig,
+                *const EGLint,
+            ) -> EGLSurface,
+            swap_buffers: unsafe extern "C" fn(EGLDisplay, EGLSurface) -> EGLBoolean,
+            external_surface: Mutex<Option<ExternalSurface>>,
         }
 
         unsafe impl Send for EglCtx {}
@@ -282,7 +340,7 @@ fn create_egl(
         impl GLPlatformContext for EglCtx {
             fn make_current(&self) -> bool {
                 unsafe {
-                    (self.make_current)(self._display, self._surface, self._surface, self.ctx) != 0
+                    (self.make_current)(self.display, self.pbuffer, self.pbuffer, self.ctx) != 0
                 }
             }
             fn bind_save(&self) -> super::SavedGlContext {
@@ -306,7 +364,7 @@ fn create_egl(
                     let _ = unsafe {
                         (self.make_current)(
                             if saved.display.is_null() {
-                                self._display
+                                self.display
                             } else {
                                 saved.display.cast()
                             },
@@ -326,22 +384,139 @@ fn create_egl(
                     };
                 }
             }
+
+            fn set_external_surface(
+                &self,
+                kind: i32,
+                handle: *mut c_void,
+                width: i32,
+                height: i32,
+            ) -> Result<(), String> {
+                if handle.is_null() || width <= 0 || height <= 0 {
+                    return Err("invalid external surface handle or dimensions".into());
+                }
+                self.clear_external_surface();
+                let surface = unsafe {
+                    match kind {
+                        1 => (self.create_window_surface)(
+                            self.display,
+                            self.config,
+                            handle,
+                            [EGL_NONE].as_ptr(),
+                        ),
+                        2 => {
+                            let attrs = [
+                                EGL_WIDTH,
+                                width,
+                                EGL_HEIGHT,
+                                height,
+                                EGL_IOSURFACE_PLANE_ANGLE,
+                                0,
+                                EGL_TEXTURE_TARGET,
+                                EGL_TEXTURE_RECTANGLE_ANGLE,
+                                EGL_TEXTURE_FORMAT,
+                                EGL_TEXTURE_RGBA,
+                                EGL_TEXTURE_TYPE_ANGLE,
+                                GL_UNSIGNED_BYTE,
+                                EGL_TEXTURE_INTERNAL_FORMAT_ANGLE,
+                                GL_BGRA_EXT,
+                                EGL_NONE,
+                            ];
+                            (self.create_pbuffer_from_client_buffer)(
+                                self.display,
+                                EGL_IOSURFACE_ANGLE,
+                                handle,
+                                self.config,
+                                attrs.as_ptr(),
+                            )
+                        }
+                        _ => return Err(format!("unknown external surface kind {kind}")),
+                    }
+                };
+                if surface.is_null() {
+                    return Err(format!("failed to create EGL external surface kind {kind}"));
+                }
+                *self.external_surface.lock().unwrap() = Some(ExternalSurface { surface });
+                Ok(())
+            }
+
+            fn clear_external_surface(&self) {
+                if let Some(surface) = self.external_surface.lock().unwrap().take() {
+                    unsafe {
+                        if (self.get_current_surface)(0x305A /* EGL_DRAW */) == surface.surface {
+                            let _ = self.make_current();
+                        }
+                        (self.destroy_surface)(self.display, surface.surface);
+                    }
+                }
+            }
+
+            fn present_fbo(
+                &self,
+                gl: &glow::Context,
+                source: glow::Framebuffer,
+                width: i32,
+                height: i32,
+            ) -> Result<(), String> {
+                let guard = self.external_surface.lock().unwrap();
+                let output = guard
+                    .as_ref()
+                    .ok_or_else(|| "external surface is not configured".to_string())?;
+                if unsafe {
+                    (self.make_current)(self.display, output.surface, output.surface, self.ctx)
+                } == 0
+                {
+                    return Err("eglMakeCurrent(external surface) failed".into());
+                }
+                unsafe {
+                    gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(source));
+                    gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
+                    gl.disable(glow::SCISSOR_TEST);
+                    gl.blit_framebuffer(
+                        0,
+                        0,
+                        width,
+                        height,
+                        0,
+                        0,
+                        width,
+                        height,
+                        glow::COLOR_BUFFER_BIT,
+                        glow::NEAREST,
+                    );
+                    gl.flush();
+                    let error = gl.get_error();
+                    if error != glow::NO_ERROR {
+                        let _ = self.make_current();
+                        return Err(format!("external framebuffer blit failed: GL {error:#x}"));
+                    }
+                }
+                if unsafe { (self.swap_buffers)(self.display, output.surface) } == 0 {
+                    let _ = self.make_current();
+                    return Err("eglSwapBuffers(external surface) failed".into());
+                }
+                if !self.make_current() {
+                    return Err("failed to restore internal EGL pbuffer".into());
+                }
+                Ok(())
+            }
         }
 
         impl Drop for EglCtx {
             fn drop(&mut self) {
                 unsafe {
+                    self.clear_external_surface();
                     if (self.get_current_context)() == self.ctx {
                         (self.make_current)(
-                            self._display,
+                            self.display,
                             std::ptr::null_mut(),
                             std::ptr::null_mut(),
                             std::ptr::null_mut(),
                         );
                     }
-                    (self.destroy_surface)(self._display, self._surface);
-                    (self.destroy)(self._display, self.ctx);
-                    (self.terminate)(self._display);
+                    (self.destroy_surface)(self.display, self.pbuffer);
+                    (self.destroy)(self.display, self.ctx);
+                    (self.terminate)(self.display);
                 }
             }
         }
@@ -471,6 +646,20 @@ fn create_egl(
                     *const EGLint,
                 )
                     -> EGLSurface = load!(egl_lib, "eglCreatePbufferSurface");
+                let egl_create_window_surface: unsafe extern "C" fn(
+                    EGLDisplay,
+                    EGLConfig,
+                    *mut c_void,
+                    *const EGLint,
+                ) -> EGLSurface = load!(egl_lib, "eglCreateWindowSurface");
+                let egl_create_pbuffer_from_client_buffer: unsafe extern "C" fn(
+                    EGLDisplay,
+                    EGLint,
+                    *mut c_void,
+                    EGLConfig,
+                    *const EGLint,
+                )
+                    -> EGLSurface = load!(egl_lib, "eglCreatePbufferFromClientBuffer");
                 let egl_create_context: unsafe extern "C" fn(
                     EGLDisplay,
                     EGLConfig,
@@ -493,6 +682,8 @@ fn create_egl(
                 ) -> EGLBoolean = load!(egl_lib, "eglDestroySurface");
                 let egl_terminate: unsafe extern "C" fn(EGLDisplay) -> EGLBoolean =
                     load!(egl_lib, "eglTerminate");
+                let egl_swap_buffers: unsafe extern "C" fn(EGLDisplay, EGLSurface) -> EGLBoolean =
+                    load!(egl_lib, "eglSwapBuffers");
                 // 查询当前线程的 EGL 上下文（bind_save/restore 用来保存/恢复宿主上下文）。
                 let egl_get_current_display: unsafe extern "C" fn() -> EGLDisplay =
                     load!(egl_lib, "eglGetCurrentDisplay");
@@ -524,7 +715,11 @@ fn create_egl(
                         EGL_OPENGL_ES2_BIT
                     },
                     EGL_SURFACE_TYPE,
-                    EGL_PBUFFER_BIT,
+                    if cfg!(target_os = "android") {
+                        EGL_PBUFFER_BIT | EGL_WINDOW_BIT
+                    } else {
+                        EGL_PBUFFER_BIT
+                    },
                     EGL_RED_SIZE,
                     8,
                     EGL_GREEN_SIZE,
@@ -561,7 +756,11 @@ fn create_egl(
                     return Err("eglCreatePbufferSurface failed".into());
                 }
 
-                let context_version = if cfg!(target_os = "ios") { 3 } else { 2 };
+                let context_version = if cfg!(any(target_os = "ios", target_os = "android")) {
+                    3
+                } else {
+                    2
+                };
                 let ctx_attrs = [
                     0x3098, /* EGL_CONTEXT_CLIENT_VERSION */
                     context_version,
@@ -643,8 +842,9 @@ fn create_egl(
                 Ok((
                     Rc::new(gl),
                     EglCtx {
-                        _display: display,
-                        _surface: surface,
+                        display,
+                        pbuffer: surface,
+                        config,
                         ctx,
                         destroy: egl_destroy_context,
                         destroy_surface: egl_destroy_surface,
@@ -653,6 +853,10 @@ fn create_egl(
                         get_current_display: egl_get_current_display,
                         get_current_surface: egl_get_current_surface,
                         get_current_context: egl_get_current_context,
+                        create_window_surface: egl_create_window_surface,
+                        create_pbuffer_from_client_buffer: egl_create_pbuffer_from_client_buffer,
+                        swap_buffers: egl_swap_buffers,
+                        external_surface: Mutex::new(None),
                     },
                 ))
             }

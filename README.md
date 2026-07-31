@@ -131,6 +131,8 @@ feature 自动决定后端。
 | `art3m1s_runtime_create` / `destroy` | 创建和销毁 runtime |
 | `art3m1s_runtime_load_project` | 读取 `system.ini` 并启动项目 |
 | `art3m1s_runtime_advance_and_render` | 推进一帧并返回 RGBA |
+| `art3m1s_runtime_set_external_surface` / `clear_external_surface` | 绑定或解绑 Android `ANativeWindow` / Apple `IOSurface` |
+| `art3m1s_runtime_advance_and_present` | 推进一帧并直接提交到宿主纹理，静止画面不重复提交 |
 | `art3m1s_runtime_advance_without_render` | 显示链繁忙时仅推进逻辑，保持 `onEnterFrame` 时序 |
 | `art3m1s_runtime_feed_mouse` | 更新鼠标坐标 |
 | `art3m1s_runtime_feed_mouse_button` | 发送鼠标左右键状态变化 |

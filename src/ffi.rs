@@ -3,7 +3,7 @@
 //! The Flutter frontend registers callbacks at startup; afterwards every
 //! filesystem operation inside the core is routed through those callbacks,
 //! keeping the core entirely free of direct I/O.
-use std::ffi::{CString, c_char, c_int, c_longlong};
+use std::ffi::{CString, c_char, c_int, c_longlong, c_void};
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -963,6 +963,80 @@ pub unsafe extern "C" fn art3m1s_runtime_advance_without_render(
                 panic_msg(&panic_info)
             );
             0
+        }
+    }
+}
+
+/// Attaches a host platform texture to the runtime.
+/// `kind`: 1 = Android ANativeWindow, 2 = Apple IOSurface.
+#[cfg(feature = "gl-backend")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_set_external_surface(
+    rt: *mut CoreRuntime,
+    kind: i32,
+    handle: *mut c_void,
+    width: u32,
+    height: u32,
+) -> i32 {
+    if rt.is_null() || handle.is_null() || width == 0 || height == 0 {
+        return 0;
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        unsafe { &mut *rt }.set_external_surface(kind, handle, width, height)
+    }));
+    match result {
+        Ok(Ok(())) => 1,
+        Ok(Err(error)) => {
+            core_warn!("external surface unavailable: {error}");
+            0
+        }
+        Err(panic_info) => {
+            core_error!(
+                "art3m1s_runtime_set_external_surface panicked: {}",
+                panic_msg(&panic_info)
+            );
+            0
+        }
+    }
+}
+
+#[cfg(feature = "gl-backend")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_clear_external_surface(rt: *mut CoreRuntime) {
+    if rt.is_null() {
+        return;
+    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        unsafe { &mut *rt }.clear_external_surface();
+    }));
+}
+
+/// Advances and presents through the configured host texture.
+/// Returns 1 for a newly presented frame, 0 for an unchanged frame, and -1 on error.
+#[cfg(feature = "gl-backend")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_advance_and_present(
+    rt: *mut CoreRuntime,
+    delta_ms: u32,
+) -> i32 {
+    if rt.is_null() {
+        return -1;
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        unsafe { &mut *rt }.advance_and_present(delta_ms as u64)
+    }));
+    match result {
+        Ok(Ok(changed)) => i32::from(changed),
+        Ok(Err(error)) => {
+            core_warn!("external surface present failed: {error}");
+            -1
+        }
+        Err(panic_info) => {
+            core_error!(
+                "art3m1s_runtime_advance_and_present panicked: {}",
+                panic_msg(&panic_info)
+            );
+            -1
         }
     }
 }
