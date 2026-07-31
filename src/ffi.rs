@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 // ── Global debug flag ──────────────────────────────────────────
 
 static DEBUG: AtomicBool = AtomicBool::new(false);
+static DAMAGE_VISUALIZATION: AtomicBool = AtomicBool::new(false);
 
 // ── 脚本 [debug] 标签的日志模式/级别 ───────────────────────────
 //
@@ -62,11 +63,24 @@ fn panic_msg(payload: &Box<dyn std::any::Any + Send>) -> String {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_set_debug(enabled: c_int) {
-    DEBUG.store(enabled != 0, Ordering::Relaxed);
+    let enabled = enabled != 0;
+    DEBUG.store(enabled, Ordering::Relaxed);
+    if !enabled {
+        DAMAGE_VISUALIZATION.store(false, Ordering::Relaxed);
+    }
 }
 
 pub fn debug_enabled() -> bool {
     DEBUG.load(Ordering::Relaxed)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_set_damage_visualization(enabled: c_int) {
+    DAMAGE_VISUALIZATION.store(enabled != 0 && debug_enabled(), Ordering::Relaxed);
+}
+
+pub fn damage_visualization_enabled() -> bool {
+    debug_enabled() && DAMAGE_VISUALIZATION.load(Ordering::Relaxed)
 }
 
 // ── Log callback ───────────────────────────────────────────────

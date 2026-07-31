@@ -83,7 +83,7 @@ impl CoreRuntime {
             return cleared_debug_overlay;
         }
 
-        let visualize_damage = crate::ffi::debug_enabled();
+        let visualize_damage = crate::ffi::damage_visualization_enabled();
         if let Some(damage) = frame_damage(
             self.last_submitted_frame.as_ref(),
             self.last_submitted_texture_revision,
