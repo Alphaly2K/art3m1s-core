@@ -36,6 +36,7 @@ dependencies = [
  "glam",
  "glow",
  "image",
+ "libloading",
  "pfs-upk-rust",
  "serde",
  "serde_json",

@@ -239,7 +239,8 @@ fn create_egl(
     mod egl {
         use super::GLPlatformContext;
         use glow::HasContext;
-        use std::ffi::{CString, c_char, c_int, c_uint, c_void};
+        use libloading::Library;
+        use std::ffi::{CString, c_char, c_uint, c_void};
         use std::rc::Rc;
         use std::sync::Mutex;
 
@@ -280,28 +281,53 @@ fn create_egl(
             surface: EGLSurface,
         }
 
-        unsafe extern "C" {
-            fn dlopen(path: *const c_char, mode: c_int) -> *mut c_void;
-            fn dlsym(h: *mut c_void, sym: *const c_char) -> *const c_void;
-        }
-
-        // dlopen 标志位：RTLD_LAZY=1 / RTLD_NOW=2 是 POSIX；RTLD_GLOBAL 在
-        // Linux (glibc) 与 macOS 都是 0x100。让 libGL 的桌面符号对后续 dlopen 的
-        // mesa libGLESv2 可见，必须用 GLOBAL。
-        const RTLD_LAZY: c_int = 1;
-        const RTLD_NOW: c_int = 2;
-        #[allow(dead_code)]
-        const RTLD_GLOBAL: c_int = 0x100;
-
         macro_rules! load {
             ($lib:expr, $name:expr) => {{
-                let cs = CString::new($name).unwrap();
-                let ptr = dlsym($lib, cs.as_ptr());
-                if ptr.is_null() {
-                    return Err(format!("dlsym {} failed", $name));
-                }
-                std::mem::transmute::<*const c_void, _>(ptr)
+                *$lib
+                    .get(concat!($name, "\0").as_bytes())
+                    .map_err(|error| format!("load {} failed: {error}", $name))?
             }};
+        }
+
+        unsafe fn open_library(path: &str, global: bool) -> Result<Library, String> {
+            #[cfg(unix)]
+            if global {
+                let library = unsafe {
+                    libloading::os::unix::Library::open(
+                        Some(path),
+                        libloading::os::unix::RTLD_NOW | libloading::os::unix::RTLD_GLOBAL,
+                    )
+                }
+                .map_err(|error| format!("load {path} failed: {error}"))?;
+                return Ok(library.into());
+            }
+            let _ = global;
+            unsafe { Library::new(path) }.map_err(|error| format!("load {path} failed: {error}"))
+        }
+
+        unsafe fn open_first(candidates: &[String], global: bool) -> Result<Library, String> {
+            let mut errors = Vec::new();
+            for path in candidates {
+                match unsafe { open_library(path, global) } {
+                    Ok(library) => return Ok(library),
+                    Err(error) => errors.push(error),
+                }
+            }
+            Err(errors.join("; "))
+        }
+
+        unsafe fn optional_symbol<T: Copy>(library: &Library, name: &str) -> Option<T> {
+            let name = CString::new(name).ok()?;
+            unsafe { library.get::<T>(name.as_bytes_with_nul()).ok() }.map(|symbol| *symbol)
+        }
+
+        unsafe fn symbol_address(library: &Library, name: &CString) -> *const c_void {
+            unsafe {
+                library
+                    .get::<unsafe extern "C" fn()>(name.as_bytes_with_nul())
+                    .map(|symbol| *symbol as *const () as *const c_void)
+                    .unwrap_or(std::ptr::null())
+            }
         }
 
         pub struct EglCtx {
@@ -333,6 +359,9 @@ fn create_egl(
             ) -> EGLSurface,
             swap_buffers: unsafe extern "C" fn(EGLDisplay, EGLSurface) -> EGLBoolean,
             external_surface: Mutex<Option<ExternalSurface>>,
+            _egl_library: Library,
+            _gles_library: Library,
+            _desktop_gl_library: Option<Library>,
         }
 
         unsafe impl Send for EglCtx {}
@@ -542,46 +571,39 @@ fn create_egl(
                 // 符号表，否则 libGLESv2 初始化时 ld.so 会报大量 "undefined symbol"
                 // 并标为 fatal，导致后续 GL 调用 SIGSEGV。
                 #[cfg(target_os = "linux")]
-                {
-                    let gl_lib = dlopen(c"libGL.so.1".as_ptr(), RTLD_NOW | RTLD_GLOBAL);
-                    if gl_lib.is_null() {
-                        return Err(
-                            "libGL.so.1 not found — install mesa/libGL (e.g. libglvnd)".into()
-                        );
-                    }
-                }
+                let desktop_gl_library = Some(open_library("libGL.so.1", true).map_err(|_| {
+                    "libGL.so.1 not found — install mesa/libGL (e.g. libglvnd)".to_string()
+                })?);
+                #[cfg(not(target_os = "linux"))]
+                let desktop_gl_library = None;
 
                 // Load libEGL。Linux 没有独立 ANGLE 时走 mesa libEGL，需要
                 // RTLD_GLOBAL 让 EGL/GL 跨库共享符号。
-                let egl_name = if cfg!(target_os = "ios") {
-                    crate::ffi::angle_lib_path("MetalANGLE.framework/MetalANGLE")
+                let egl_candidates = if cfg!(target_os = "ios") {
+                    vec![crate::ffi::angle_lib_path(
+                        "MetalANGLE.framework/MetalANGLE",
+                    )]
                 } else if cfg!(target_os = "macos") {
-                    crate::ffi::angle_lib_path("libEGL.dylib")
+                    vec![crate::ffi::angle_lib_path("libEGL.dylib")]
                 } else if cfg!(target_os = "android") {
                     // Android 系统自带 libEGL.so，无需 ANGLE。
-                    "libEGL.so".to_string()
+                    vec!["libEGL.so".to_string()]
                 } else if cfg!(target_os = "linux") {
                     // 优先加载带版本号的 .so.1（mesa 标准）；fallback 到 libEGL.so。
-                    let versioned = "libEGL.so.1";
-                    let probe = CString::new(versioned).unwrap();
-                    let h = dlopen(probe.as_ptr(), RTLD_LAZY);
-                    if !h.is_null() {
-                        versioned.to_string()
-                    } else {
-                        crate::ffi::angle_lib_path("libEGL.so")
-                    }
+                    vec![
+                        "libEGL.so.1".to_string(),
+                        crate::ffi::angle_lib_path("libEGL.so"),
+                    ]
                 } else {
-                    crate::ffi::angle_lib_path("libEGL.dll")
+                    vec![crate::ffi::angle_lib_path("libEGL.dll")]
                 };
-                let egl_mode = if cfg!(target_os = "linux") || cfg!(target_os = "android") {
-                    RTLD_NOW | RTLD_GLOBAL
-                } else {
-                    RTLD_LAZY
-                };
-                let egl_lib = dlopen(CString::new(egl_name.as_str()).unwrap().as_ptr(), egl_mode);
-                if egl_lib.is_null() {
-                    return Err("libEGL not found — install mesa EGL or bundle ANGLE".into());
-                }
+                let egl_lib = open_first(
+                    &egl_candidates,
+                    cfg!(target_os = "linux") || cfg!(target_os = "android"),
+                )
+                .map_err(|error| {
+                    format!("libEGL not found — install mesa EGL or bundle ANGLE: {error}")
+                })?;
 
                 let egl_get_display: unsafe extern "C" fn(EGLint) -> EGLDisplay =
                     load!(egl_lib, "eglGetDisplay");
@@ -618,12 +640,7 @@ fn create_egl(
                     ["eglGetPlatformDisplay", "eglGetPlatformDisplayEXT"]
                         .iter()
                         .find_map(|name| {
-                            let cs = CString::new(*name).unwrap();
-                            let ptr = dlsym(egl_lib, cs.as_ptr());
-                            if ptr.is_null() {
-                                return None;
-                            }
-                            let f: PfPlatformDisplay = std::mem::transmute(ptr);
+                            let f: PfPlatformDisplay = optional_symbol(&egl_lib, name)?;
                             let d = f(
                                 EGL_PLATFORM_ANGLE_ANGLE,
                                 EGL_DEFAULT_DISPLAY as *mut c_void,
@@ -778,53 +795,37 @@ fn create_egl(
 
                 // Load GLESv2 for glow. Linux 必须用 RTLD_GLOBAL 让 mesa 的
                 // dispatch 层找到已预加载的 libGL 桌面符号。
-                let gles_name = if cfg!(target_os = "ios") {
-                    crate::ffi::angle_lib_path("MetalANGLE.framework/MetalANGLE")
+                let gles_candidates = if cfg!(target_os = "ios") {
+                    vec![crate::ffi::angle_lib_path(
+                        "MetalANGLE.framework/MetalANGLE",
+                    )]
                 } else if cfg!(target_os = "macos") {
-                    crate::ffi::angle_lib_path("libGLESv2.dylib")
+                    vec![crate::ffi::angle_lib_path("libGLESv2.dylib")]
                 } else if cfg!(target_os = "android") {
                     // Android 系统自带 libGLESv2.so。
-                    "libGLESv2.so".to_string()
+                    vec!["libGLESv2.so".to_string()]
                 } else if cfg!(target_os = "linux") {
                     // 先尝试带版本号的 .so.2（mesa 标准命名）。
-                    let versioned = "libGLESv2.so.2";
-                    let probe = CString::new(versioned).unwrap();
-                    let h = dlopen(probe.as_ptr(), RTLD_LAZY);
-                    if !h.is_null() {
-                        versioned.to_string()
-                    } else {
-                        crate::ffi::angle_lib_path("libGLESv2.so")
-                    }
+                    vec![
+                        "libGLESv2.so.2".to_string(),
+                        crate::ffi::angle_lib_path("libGLESv2.so"),
+                    ]
                 } else {
-                    crate::ffi::angle_lib_path("libGLESv2.dll")
+                    vec![crate::ffi::angle_lib_path("libGLESv2.dll")]
                 };
-                let gles_mode = if cfg!(target_os = "linux") || cfg!(target_os = "android") {
-                    RTLD_NOW | RTLD_GLOBAL
-                } else {
-                    RTLD_LAZY
-                };
-                let gles_lib = dlopen(
-                    CString::new(gles_name.as_str()).unwrap().as_ptr(),
-                    gles_mode,
-                );
-                if gles_lib.is_null() {
-                    return Err("libGLESv2 not found".into());
-                }
+                let gles_lib = open_first(
+                    &gles_candidates,
+                    cfg!(target_os = "linux") || cfg!(target_os = "android"),
+                )
+                .map_err(|error| format!("libGLESv2 not found: {error}"))?;
 
                 // ── GL 函数指针加载 ────────────────────────────────────
                 // EGL 标准提供 eglGetProcAddress 取 GLES 函数；对桌面 GL 扩展符号
                 // mesa 可能返回 NULL，此时退回 dlsym(gles_lib)。
                 // macOS/ANGLE 上 dlsym 已经够用，保留原路径。
                 type EglGetProcAddress = unsafe extern "C" fn(*const c_char) -> *const c_void;
-                let egl_get_proc_addr: Option<EglGetProcAddress> = {
-                    let cs = CString::new("eglGetProcAddress").unwrap();
-                    let ptr = dlsym(egl_lib, cs.as_ptr());
-                    if ptr.is_null() {
-                        None
-                    } else {
-                        Some(std::mem::transmute(ptr))
-                    }
-                };
+                let egl_get_proc_addr: Option<EglGetProcAddress> =
+                    optional_symbol(&egl_lib, "eglGetProcAddress");
 
                 let gl = glow::Context::from_loader_function(|s| {
                     let cs = CString::new(s).unwrap();
@@ -836,7 +837,7 @@ fn create_egl(
                         }
                     }
                     // 2) 退回 dlsym（扩展名或 macOS 路径）。
-                    dlsym(gles_lib, cs.as_ptr())
+                    symbol_address(&gles_lib, &cs)
                 });
 
                 Ok((
@@ -857,6 +858,9 @@ fn create_egl(
                         create_pbuffer_from_client_buffer: egl_create_pbuffer_from_client_buffer,
                         swap_buffers: egl_swap_buffers,
                         external_surface: Mutex::new(None),
+                        _egl_library: egl_lib,
+                        _gles_library: gles_lib,
+                        _desktop_gl_library: desktop_gl_library,
                     },
                 ))
             }

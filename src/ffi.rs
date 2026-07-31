@@ -295,7 +295,10 @@ pub unsafe extern "C" fn art3m1s_set_angle_path(path: *const c_char) {
 
 pub fn angle_lib_path(name: &str) -> String {
     if let Some(prefix) = ANGLE_PATH.get() {
-        format!("{prefix}/{name}")
+        std::path::Path::new(prefix)
+            .join(name)
+            .to_string_lossy()
+            .into_owned()
     } else {
         name.to_string()
     }
