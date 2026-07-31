@@ -1108,6 +1108,7 @@ mod tests {
 
     fn shader_group(start: usize, end: usize, name: &str) -> ShaderGroup {
         ShaderGroup {
+            key: None,
             start,
             end,
             effect: ShaderEffect {

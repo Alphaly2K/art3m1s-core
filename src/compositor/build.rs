@@ -9,7 +9,7 @@ use crate::compositor::props::LayerProps;
 use crate::compositor::scene::Scene;
 use crate::render_pipeline::draw::{
     BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, LayerCommandKind, LayerDrawSource,
-    ShaderEffect, ShaderGroup, TextureProvider,
+    LayerShaderGroupKind, ShaderEffect, ShaderGroup, ShaderGroupKey, TextureProvider,
 };
 use glam::{Affine2, Vec2};
 use std::collections::BTreeMap;
@@ -271,6 +271,10 @@ fn visit(
         let end = frame.len();
         if end > group_start {
             frame.push_shader_group(ShaderGroup {
+                key: Some(ShaderGroupKey::Layer {
+                    layer_id: id.to_owned(),
+                    kind: LayerShaderGroupKind::Declared,
+                }),
                 start: group_start,
                 end,
                 effect,
@@ -306,6 +310,10 @@ fn visit(
                 .get("intermediate_render_mask")
                 .and_then(|file| provider.resolve(file).map(|(texture, _)| texture));
             frame.push_shader_group(ShaderGroup {
+                key: Some(ShaderGroupKey::Layer {
+                    layer_id: id.to_owned(),
+                    kind: LayerShaderGroupKind::Intermediate,
+                }),
                 start: group_start,
                 end,
                 effect: ShaderEffect {

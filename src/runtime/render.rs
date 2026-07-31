@@ -264,27 +264,28 @@ fn frame_damage(
     stage_height: u32,
 ) -> Option<[f32; 4]> {
     let previous = previous?;
-    if !previous.shader_groups.is_empty()
-        || !current.shader_groups.is_empty()
-        || !previous.mask_commands.is_empty()
-        || !current.mask_commands.is_empty()
-        || previous
-            .commands
-            .iter()
-            .chain(current.commands.iter())
-            .any(|command| command.shader.is_some())
-    {
-        return None;
-    }
-
     let mut damage: Option<[f32; 4]> = None;
+    let mut changed_keys = std::collections::HashSet::new();
     if previous.command_keys.iter().any(Option::is_some)
         || current.command_keys.iter().any(Option::is_some)
     {
-        accumulate_keyed_damage(previous, current, changed_textures, &mut damage)?;
+        accumulate_keyed_damage(
+            previous,
+            current,
+            changed_textures,
+            &mut changed_keys,
+            &mut damage,
+        )?;
     } else {
         accumulate_positional_damage(previous, current, changed_textures, &mut damage)?;
     }
+    accumulate_shader_group_damage(
+        previous,
+        current,
+        changed_textures,
+        &changed_keys,
+        &mut damage,
+    )?;
 
     // A provider generation changed without identifying a sampled texture.
     // Keep the conservative full redraw for unknown invalidations such as a
@@ -311,6 +312,7 @@ fn accumulate_keyed_damage(
     previous: &DrawList,
     current: &DrawList,
     changed_textures: &std::collections::HashSet<crate::render_pipeline::draw::TextureId>,
+    changed_keys: &mut std::collections::HashSet<crate::render_pipeline::draw::DrawCommandKey>,
     damage: &mut Option<[f32; 4]>,
 ) -> Option<()> {
     use crate::render_pipeline::draw::DrawCommandKey;
@@ -356,11 +358,15 @@ fn accumulate_keyed_damage(
 
     for (&key, &old) in &old_by_key {
         let new = new_by_key.get(key).copied();
-        accumulate_command_pair(Some(old), new, changed_textures, damage)?;
+        if accumulate_command_pair(Some(old), new, changed_textures, damage)? {
+            changed_keys.insert(key.clone());
+        }
     }
     for (&key, &new) in &new_by_key {
         if !old_by_key.contains_key(key) {
-            accumulate_command_pair(None, Some(new), changed_textures, damage)?;
+            if accumulate_command_pair(None, Some(new), changed_textures, damage)? {
+                changed_keys.insert(key.clone());
+            }
         }
     }
 
@@ -377,7 +383,7 @@ fn accumulate_keyed_damage(
         .filter_map(|(index, command)| current.command_key(index).is_none().then_some(command))
         .collect::<Vec<_>>();
     for index in 0..old_anonymous.len().max(new_anonymous.len()) {
-        accumulate_command_pair(
+        let _ = accumulate_command_pair(
             old_anonymous.get(index).copied(),
             new_anonymous.get(index).copied(),
             changed_textures,
@@ -394,7 +400,7 @@ fn accumulate_positional_damage(
     damage: &mut Option<[f32; 4]>,
 ) -> Option<()> {
     for index in 0..previous.commands.len().max(current.commands.len()) {
-        accumulate_command_pair(
+        let _ = accumulate_command_pair(
             previous.commands.get(index),
             current.commands.get(index),
             changed_textures,
@@ -409,13 +415,13 @@ fn accumulate_command_pair(
     new: Option<&crate::render_pipeline::draw::DrawCommand>,
     changed_textures: &std::collections::HashSet<crate::render_pipeline::draw::TextureId>,
     damage: &mut Option<[f32; 4]>,
-) -> Option<()> {
+) -> Option<bool> {
     let sampled_texture_changed = old
         .into_iter()
         .chain(new)
-        .any(|command| changed_textures.contains(&command.texture));
+        .any(|command| command_samples_changed_texture(command, changed_textures));
     if old == new && !sampled_texture_changed {
-        return Some(());
+        return Some(false);
     }
     for command in [old, new].into_iter().flatten() {
         let bounds = command_bounds(command)?;
@@ -424,6 +430,175 @@ fn accumulate_command_pair(
             None => bounds,
         });
     }
+    Some(true)
+}
+
+fn accumulate_shader_group_damage(
+    previous: &DrawList,
+    current: &DrawList,
+    changed_textures: &std::collections::HashSet<crate::render_pipeline::draw::TextureId>,
+    changed_keys: &std::collections::HashSet<crate::render_pipeline::draw::DrawCommandKey>,
+    damage: &mut Option<[f32; 4]>,
+) -> Option<()> {
+    use crate::render_pipeline::draw::{ShaderGroup, ShaderGroupKey};
+    use std::collections::HashMap;
+
+    let mut old_by_key: HashMap<&ShaderGroupKey, &ShaderGroup> = HashMap::new();
+    let mut new_by_key: HashMap<&ShaderGroupKey, &ShaderGroup> = HashMap::new();
+    for group in &previous.shader_groups {
+        if let Some(key) = group.key.as_ref()
+            && old_by_key.insert(key, group).is_some()
+        {
+            return None;
+        }
+    }
+    for group in &current.shader_groups {
+        if let Some(key) = group.key.as_ref()
+            && new_by_key.insert(key, group).is_some()
+        {
+            return None;
+        }
+    }
+
+    let old_anonymous = previous
+        .shader_groups
+        .iter()
+        .filter(|group| group.key.is_none())
+        .collect::<Vec<_>>();
+    let new_anonymous = current
+        .shader_groups
+        .iter()
+        .filter(|group| group.key.is_none())
+        .collect::<Vec<_>>();
+    if old_anonymous != new_anonymous {
+        return None;
+    }
+
+    for (&key, &old) in &old_by_key {
+        let new = new_by_key.get(key).copied();
+        let semantic_changed = match new {
+            Some(new) => {
+                shader_group_semantics_changed(previous, old, current, new, changed_textures)?
+            }
+            None => true,
+        };
+        let member_changed = group_contains_changed_key(previous, old, changed_keys)?;
+        let unsafe_member_change = member_changed && !shader_group_is_pixel_local(old);
+        if semantic_changed || unsafe_member_change {
+            accumulate_group_bounds(previous, old, damage)?;
+            if let Some(new) = new {
+                accumulate_group_bounds(current, new, damage)?;
+            }
+        }
+    }
+    for (&key, &new) in &new_by_key {
+        if old_by_key.contains_key(key) {
+            continue;
+        }
+        accumulate_group_bounds(current, new, damage)?;
+    }
+    Some(())
+}
+
+fn shader_group_semantics_changed(
+    old_frame: &DrawList,
+    old: &crate::render_pipeline::draw::ShaderGroup,
+    new_frame: &DrawList,
+    new: &crate::render_pipeline::draw::ShaderGroup,
+    changed_textures: &std::collections::HashSet<crate::render_pipeline::draw::TextureId>,
+) -> Option<bool> {
+    if old.effect != new.effect || old.clip_bounds != new.clip_bounds {
+        return Some(true);
+    }
+    if effect_samples_changed_texture(&old.effect, changed_textures)
+        || effect_samples_changed_texture(&new.effect, changed_textures)
+    {
+        return Some(true);
+    }
+    let old_masks = group_masks(old_frame, old)?;
+    let new_masks = group_masks(new_frame, new)?;
+    Some(
+        old_masks != new_masks
+            || old_masks
+                .iter()
+                .chain(new_masks.iter())
+                .any(|command| command_samples_changed_texture(command, changed_textures)),
+    )
+}
+
+fn group_masks<'a>(
+    frame: &'a DrawList,
+    group: &crate::render_pipeline::draw::ShaderGroup,
+) -> Option<&'a [crate::render_pipeline::draw::DrawCommand]> {
+    match group.mask_range {
+        Some([start, end]) => frame.mask_commands.get(start..end),
+        None => Some(&[]),
+    }
+}
+
+fn group_contains_changed_key(
+    frame: &DrawList,
+    group: &crate::render_pipeline::draw::ShaderGroup,
+    changed_keys: &std::collections::HashSet<crate::render_pipeline::draw::DrawCommandKey>,
+) -> Option<bool> {
+    let keys = frame.command_keys.get(group.start..group.end)?;
+    Some(keys.iter().flatten().any(|key| changed_keys.contains(key)))
+}
+
+fn shader_group_is_pixel_local(group: &crate::render_pipeline::draw::ShaderGroup) -> bool {
+    matches!(
+        group.effect.name.as_str(),
+        crate::render_pipeline::shader::ALPHA_MASK_SHADER
+            | crate::render_pipeline::shader::GROUP_COMPOSITE_SHADER
+    )
+}
+
+fn effect_samples_changed_texture(
+    effect: &crate::render_pipeline::draw::ShaderEffect,
+    changed_textures: &std::collections::HashSet<crate::render_pipeline::draw::TextureId>,
+) -> bool {
+    effect
+        .mask_texture
+        .into_iter()
+        .chain(effect.user_texture)
+        .any(|texture| changed_textures.contains(&texture))
+}
+
+fn command_samples_changed_texture(
+    command: &crate::render_pipeline::draw::DrawCommand,
+    changed_textures: &std::collections::HashSet<crate::render_pipeline::draw::TextureId>,
+) -> bool {
+    changed_textures.contains(&command.texture)
+        || command
+            .shader
+            .as_ref()
+            .is_some_and(|effect| effect_samples_changed_texture(effect, changed_textures))
+}
+
+fn accumulate_group_bounds(
+    frame: &DrawList,
+    group: &crate::render_pipeline::draw::ShaderGroup,
+    damage: &mut Option<[f32; 4]>,
+) -> Option<()> {
+    let bounds = if let Some(clip) = group.clip_bounds {
+        clip
+    } else if shader_group_is_pixel_local(group) {
+        let mut bounds = None;
+        for command in frame.commands.get(group.start..group.end)? {
+            let command_bounds = command_bounds(command)?;
+            bounds = Some(match bounds {
+                Some(existing) => union_rect(existing, command_bounds),
+                None => command_bounds,
+            });
+        }
+        bounds?
+    } else {
+        return None;
+    };
+    *damage = Some(match *damage {
+        Some(existing) => union_rect(existing, bounds),
+        None => bounds,
+    });
     Some(())
 }
 
@@ -486,7 +661,7 @@ mod tests {
     use super::{command_bounds, frame_damage, frame_requires_render, wait_reason_is_click_wait};
     use crate::render_pipeline::draw::{
         BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, DrawMesh, LayerCommandKind,
-        TextureId, TextureInfo,
+        LayerShaderGroupKind, ShaderEffect, ShaderGroup, ShaderGroupKey, TextureId, TextureInfo,
     };
     use asb_interpreter::event::WaitReason;
     use std::collections::HashSet;
@@ -550,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    fn texture_upload_localizes_sampled_command_and_shader_forces_full() {
+    fn texture_upload_and_direct_shader_change_stay_within_command_bounds() {
         let mut old = DrawList::new();
         old.push(quad(10.0, 20.0));
         let changed_textures = HashSet::from([TextureId(1)]);
@@ -568,7 +743,77 @@ mod tests {
         });
         assert_eq!(
             frame_damage(Some(&old), 4, &new, 4, &HashSet::new(), 100, 100),
+            Some([8.0, 18.0, 34.0, 44.0])
+        );
+    }
+
+    fn shader_group(start: usize, end: usize, layer_id: &str, name: &str) -> ShaderGroup {
+        ShaderGroup {
+            key: Some(ShaderGroupKey::Layer {
+                layer_id: layer_id.to_owned(),
+                kind: LayerShaderGroupKind::Declared,
+            }),
+            start,
+            end,
+            effect: ShaderEffect {
+                name: name.to_owned(),
+                uniforms: Default::default(),
+                mask_texture: None,
+                user_texture: None,
+            },
+            clip_bounds: None,
+            mask_range: None,
+        }
+    }
+
+    #[test]
+    fn static_shader_group_does_not_expand_unrelated_hover_damage() {
+        let mut old = DrawList::new();
+        old.push_layer("background", LayerCommandKind::Visual, 0, quad(0.0, 0.0));
+        old.push_layer("button", LayerCommandKind::Visual, 0, quad(60.0, 20.0));
+        old.push_shader_group(shader_group(0, 1, "background", "custom-effect"));
+
+        let mut new = old.clone();
+        new.commands[1].opacity = 0.5;
+
+        assert_eq!(
+            frame_damage(Some(&old), 4, &new, 4, &HashSet::new(), 120, 100),
+            Some([58.0, 18.0, 34.0, 44.0])
+        );
+    }
+
+    #[test]
+    fn changed_member_of_unbounded_custom_shader_group_remains_conservative() {
+        let mut old = DrawList::new();
+        old.push_layer("button", LayerCommandKind::Visual, 0, quad(60.0, 20.0));
+        old.push_shader_group(shader_group(0, 1, "button", "custom-effect"));
+
+        let mut new = old.clone();
+        new.commands[0].opacity = 0.5;
+
+        assert_eq!(
+            frame_damage(Some(&old), 4, &new, 4, &HashSet::new(), 120, 100),
             None
+        );
+    }
+
+    #[test]
+    fn changed_member_of_builtin_group_uses_command_bounds() {
+        let mut old = DrawList::new();
+        old.push_layer("button", LayerCommandKind::Visual, 0, quad(60.0, 20.0));
+        old.push_shader_group(shader_group(
+            0,
+            1,
+            "button",
+            crate::render_pipeline::shader::GROUP_COMPOSITE_SHADER,
+        ));
+
+        let mut new = old.clone();
+        new.commands[0].opacity = 0.5;
+
+        assert_eq!(
+            frame_damage(Some(&old), 4, &new, 4, &HashSet::new(), 120, 100),
+            Some([58.0, 18.0, 34.0, 44.0])
         );
     }
 

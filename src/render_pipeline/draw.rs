@@ -169,11 +169,29 @@ pub struct ShaderEffect {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShaderGroup {
+    pub key: Option<ShaderGroupKey>,
     pub start: usize,
     pub end: usize,
     pub effect: ShaderEffect,
     pub clip_bounds: Option<[f32; 4]>,
     pub mask_range: Option<[usize; 2]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LayerShaderGroupKind {
+    Declared,
+    Intermediate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ShaderGroupKey {
+    Layer {
+        layer_id: String,
+        kind: LayerShaderGroupKind,
+    },
+    Stencil {
+        command: DrawCommandKey,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -296,11 +314,11 @@ impl DrawList {
                     .stencil
                     .as_ref()
                     .filter(|stencil| !stencil.mask_labels.is_empty())
-                    .map(|stencil| (index, stencil.clone()))
+                    .map(|stencil| (index, self.command_key(index).cloned(), stencil.clone()))
             })
             .collect::<Vec<_>>();
 
-        for (index, stencil) in masked {
+        for (index, command_key, stencil) in masked {
             let content_center = command_center(&self.commands[index]);
             let mask_start = self.mask_commands.len();
             for label in &stencil.mask_labels {
@@ -331,6 +349,7 @@ impl DrawList {
                 continue;
             }
             self.shader_groups.push(ShaderGroup {
+                key: command_key.map(|command| ShaderGroupKey::Stencil { command }),
                 start: index,
                 end: index + 1,
                 effect: ShaderEffect {
