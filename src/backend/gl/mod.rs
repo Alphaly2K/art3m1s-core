@@ -922,6 +922,7 @@ impl GlRenderer {
         width: i32,
         height: i32,
         damage: Option<[f32; 4]>,
+        top_left_memory: bool,
     ) -> Result<(), String> {
         let gl = &self.gl;
         unsafe {
@@ -929,7 +930,7 @@ impl GlRenderer {
             while gl.get_error() != glow::NO_ERROR {}
 
             gl.viewport(0, 0, width, height);
-            if !self.apply_scissor(damage, true, (width, height)) {
+            if !self.apply_scissor(damage, !top_left_memory, (width, height)) {
                 return Ok(());
             }
             gl.disable(glow::BLEND);
@@ -955,10 +956,18 @@ impl GlRenderer {
                 self.stage_width,
                 self.stage_height,
             );
-            // FBO texture storage has a bottom-left origin while the stage and
-            // host texture use top-left coordinates. Flip V during sampling.
-            gl.uniform_2_f32(self.program_bindings.uv_offset.as_ref(), 0.0, 1.0);
-            gl.uniform_2_f32(self.program_bindings.uv_scale.as_ref(), 1.0, -1.0);
+            // A window framebuffer displays GL y=0 at the bottom, so its
+            // top-left stage quad must flip the FBO texture during sampling.
+            // IOSurface/CVPixelBuffer consumers instead display the first
+            // memory row (GL y=0) at the top; leaving V unchanged compensates
+            // for that target-row inversion.
+            let (uv_offset_y, uv_scale_y) = if top_left_memory {
+                (0.0, 1.0)
+            } else {
+                (1.0, -1.0)
+            };
+            gl.uniform_2_f32(self.program_bindings.uv_offset.as_ref(), 0.0, uv_offset_y);
+            gl.uniform_2_f32(self.program_bindings.uv_scale.as_ref(), 1.0, uv_scale_y);
             gl.uniform_1_f32(self.program_bindings.opacity.as_ref(), 1.0);
             gl.uniform_3_f32(self.program_bindings.multiply.as_ref(), 1.0, 1.0, 1.0);
             gl.uniform_1_i32(self.program_bindings.grayscale.as_ref(), 0);
@@ -1320,7 +1329,7 @@ mod tests {
         let (target, _) = unsafe { platform::create_fbo_target(&gl, 2, 2).unwrap() };
         unsafe { gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target)) };
 
-        renderer.present_texture(source, 2, 2, None).unwrap();
+        renderer.present_texture(source, 2, 2, None, false).unwrap();
         let pixels = unsafe { read_raw_pixels(&gl) };
 
         assert_eq!(raw_pixel(&pixels, 0, 1), [255, 0, 0, 255]);
@@ -1343,7 +1352,7 @@ mod tests {
         }
 
         renderer
-            .present_texture(source, 2, 2, Some([0.0, 0.0, 1.0, 1.0]))
+            .present_texture(source, 2, 2, Some([0.0, 0.0, 1.0, 1.0]), false)
             .unwrap();
         let pixels = unsafe { read_raw_pixels(&gl) };
 
@@ -1351,5 +1360,49 @@ mod tests {
         assert_eq!(raw_pixel(&pixels, 1, 1), [0, 255, 0, 255]);
         assert_eq!(raw_pixel(&pixels, 0, 0), [0, 255, 0, 255]);
         assert_eq!(raw_pixel(&pixels, 1, 0), [0, 255, 0, 255]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn iosurface_memory_rows_keep_the_stage_upright() {
+        let (gl, _ctx, _) =
+            platform::create_offscreen_context(platform::GfxBackend::Cgl, 2, 2).unwrap();
+        let renderer = GlRenderer::new(gl.clone(), 2, 2, ShaderProfile::GlCore330).unwrap();
+        let source = unsafe { make_present_source(&gl) };
+        let (target, _) = unsafe { platform::create_fbo_target(&gl, 2, 2).unwrap() };
+        unsafe { gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target)) };
+
+        renderer.present_texture(source, 2, 2, None, true).unwrap();
+        let pixels = unsafe { read_raw_pixels(&gl) };
+
+        // CVPixelBuffer displays GL's first/bottom memory row as its top row.
+        assert_eq!(raw_pixel(&pixels, 0, 0), [255, 0, 0, 255]);
+        assert_eq!(raw_pixel(&pixels, 0, 1), [0, 0, 255, 255]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn iosurface_damage_writes_the_first_memory_row_for_stage_top() {
+        let (gl, _ctx, _) =
+            platform::create_offscreen_context(platform::GfxBackend::Cgl, 2, 2).unwrap();
+        let renderer = GlRenderer::new(gl.clone(), 2, 2, ShaderProfile::GlCore330).unwrap();
+        let source = unsafe { make_present_source(&gl) };
+        let (target, _) = unsafe { platform::create_fbo_target(&gl, 2, 2).unwrap() };
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target));
+            gl.disable(glow::SCISSOR_TEST);
+            gl.clear_color(0.0, 1.0, 0.0, 1.0);
+            gl.clear(glow::COLOR_BUFFER_BIT);
+        }
+
+        renderer
+            .present_texture(source, 2, 2, Some([0.0, 0.0, 1.0, 1.0]), true)
+            .unwrap();
+        let pixels = unsafe { read_raw_pixels(&gl) };
+
+        assert_eq!(raw_pixel(&pixels, 0, 0), [255, 0, 0, 255]);
+        assert_eq!(raw_pixel(&pixels, 1, 0), [0, 255, 0, 255]);
+        assert_eq!(raw_pixel(&pixels, 0, 1), [0, 255, 0, 255]);
+        assert_eq!(raw_pixel(&pixels, 1, 1), [0, 255, 0, 255]);
     }
 }

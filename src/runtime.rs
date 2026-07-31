@@ -90,6 +90,7 @@ pub struct CoreRuntime {
     stage_w: u32,
     stage_h: u32,
     external_surface_size: Option<(i32, i32)>,
+    external_surface_kind: Option<i32>,
     /// 上次下发的系统音量 (bgm, se)，用于跳过重复下发。
     last_system_volume: (Option<f32>, Option<f32>),
     wait_reason: Option<WaitReason>,
@@ -198,6 +199,7 @@ impl CoreRuntime {
             stage_w: stage_width,
             stage_h: stage_height,
             external_surface_size: None,
+            external_surface_kind: None,
             last_system_volume: (None, None),
             wait_reason: None,
             timed_remaining_ms: 0,
@@ -285,6 +287,7 @@ impl CoreRuntime {
         let height = i32::try_from(height).map_err(|_| "external height overflow")?;
         let saved_ctx = self.gl_ctx.bind_save();
         self.external_surface_size = None;
+        self.external_surface_kind = None;
         let result = self
             .gl_ctx
             .set_external_surface(kind, handle, width, height);
@@ -292,6 +295,7 @@ impl CoreRuntime {
             // A newly attached or recreated host surface has no previous frame.
             self.last_submitted_frame = None;
             self.external_surface_size = Some((width, height));
+            self.external_surface_kind = Some(kind);
         }
         self.gl_ctx.restore(saved_ctx);
         result
@@ -301,6 +305,7 @@ impl CoreRuntime {
         let saved_ctx = self.gl_ctx.bind_save();
         self.gl_ctx.clear_external_surface();
         self.external_surface_size = None;
+        self.external_surface_kind = None;
         self.gl_ctx.restore(saved_ctx);
     }
 
@@ -315,11 +320,15 @@ impl CoreRuntime {
                 let (width, height) = self
                     .external_surface_size
                     .ok_or_else(|| "external surface is not configured".to_string())?;
+                let top_left_memory = self.external_surface_kind == Some(2);
                 self.gl_ctx.bind_external_surface()?;
-                if let Err(error) =
-                    self.renderer
-                        .present_texture(self.fbo_tex, width, height, repaint.damage())
-                {
+                if let Err(error) = self.renderer.present_texture(
+                    self.fbo_tex,
+                    width,
+                    height,
+                    repaint.damage(),
+                    top_left_memory,
+                ) {
                     let _ = self.gl_ctx.restore_internal_surface();
                     return Err(error);
                 }
