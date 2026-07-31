@@ -410,8 +410,9 @@ impl CoreRuntime {
                 event,
                 Event::Trans {
                     trans_type,
+                    time,
                     ..
-                } if *trans_type != 0
+                } if crate::render_pipeline::transition::is_animated_request(*trans_type, *time)
             ) {
                 self.refresh_transition_source_frame();
                 crate::core_debug!("[runtime] transition source refreshed before Trans");

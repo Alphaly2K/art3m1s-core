@@ -33,12 +33,19 @@ pub(crate) struct TransitionState {
     input: i32,
 }
 
+/// Whether a `[trans]` request has an animated interval that needs an old-frame
+/// capture. `time=0` is an immediate scene commit, not a one-frame transition.
+pub(crate) fn is_animated_request(trans_type: i32, time: Option<u64>) -> bool {
+    trans_type != 0 && time.unwrap_or(1000) > 0
+}
+
 pub(crate) fn start(
     slot: &RefCell<Option<TransitionState>>,
     clock_ms: u64,
     request: TransitionRequest<'_>,
 ) {
-    if request.trans_type == 0 {
+    let duration_ms = request.time.unwrap_or(1000);
+    if !is_animated_request(request.trans_type, request.time) {
         clear(slot);
         return;
     }
@@ -46,7 +53,7 @@ pub(crate) fn start(
     *slot.borrow_mut() = Some(TransitionState {
         trans_type: request.trans_type,
         start_ms: clock_ms,
-        duration_ms: request.time.unwrap_or(1000),
+        duration_ms,
         captured_texture: None,
         captured_info: None,
         needs_capture: true,
@@ -263,6 +270,31 @@ mod tests {
 
     fn capture(slot: &RefCell<Option<TransitionState>>, provider: &mut MockProvider) {
         capture_texture(slot, 0, &[0u8; 16], 2, 2, provider);
+    }
+
+    #[test]
+    fn zero_duration_transition_is_an_immediate_commit() {
+        let slot = RefCell::new(None);
+        start_type2(&slot, 1);
+        assert!(needs_capture(&slot));
+
+        start(
+            &slot,
+            500,
+            TransitionRequest {
+                trans_type: 1,
+                time: Some(0),
+                rule: None,
+                vague: None,
+                input: 1,
+            },
+        );
+
+        assert!(slot.borrow().is_none());
+        assert!(!needs_capture(&slot));
+        assert!(!is_in_progress(&slot, 500));
+        assert!(!is_animated_request(1, Some(0)));
+        assert!(is_animated_request(1, None));
     }
 
     #[test]
