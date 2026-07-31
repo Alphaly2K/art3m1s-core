@@ -206,10 +206,12 @@ impl GlTextureProvider {
         height: u32,
         data: &[u8],
     ) -> Option<(TextureId, TextureInfo)> {
-        // E-Mote archives contain desktop DXT5 data. Mobile GPUs are optimized
-        // for ASTC; accepting an ANGLE-emulated S3TC extension may silently
-        // expand the texture and provides no reliable memory saving there.
-        if cfg!(any(target_os = "android", target_os = "ios")) {
+        // Mobile GPUs are optimized for ASTC; accepting emulated S3TC there may
+        // silently expand the texture. On Apple Silicon, prefer ASTC only when
+        // the active backend exposes it, leaving the CGL path unchanged.
+        if cfg!(any(target_os = "android", target_os = "ios"))
+            || (cfg!(all(target_os = "macos", target_arch = "aarch64")) && self.supports_astc_4x4())
+        {
             return None;
         }
         let extensions = self.gl.supported_extensions();
@@ -260,6 +262,81 @@ impl GlTextureProvider {
                 glow::TEXTURE_2D,
                 0,
                 glow::COMPRESSED_RGBA_S3TC_DXT5_EXT as i32,
+                width as i32,
+                height as i32,
+                0,
+                data.len() as i32,
+                data,
+            );
+            self.gl.bind_texture(glow::TEXTURE_2D, None);
+            if self.gl.get_error() != glow::NO_ERROR {
+                self.gl.delete_texture(texture);
+                return None;
+            }
+        }
+
+        let entry = (
+            TextureId(texture.0.get() as u64),
+            TextureInfo { width, height },
+        );
+        self.cache.insert(name.to_string(), entry);
+        self.mark_content_changed();
+        Some(entry)
+    }
+
+    fn supports_astc_4x4(&self) -> bool {
+        self.gl
+            .supported_extensions()
+            .contains("GL_KHR_texture_compression_astc_ldr")
+    }
+
+    fn upload_astc_4x4_render_only(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) -> Option<(TextureId, TextureInfo)> {
+        if !self.supports_astc_4x4() {
+            return None;
+        }
+        let expected = (width as usize)
+            .checked_add(3)?
+            .checked_div(4)?
+            .checked_mul((height as usize).checked_add(3)?.checked_div(4)?)?
+            .checked_mul(16)?;
+        if width == 0 || height == 0 || data.len() != expected {
+            return None;
+        }
+
+        self.remove_if_cached(name);
+        let texture = unsafe { self.gl.create_texture().ok()? };
+        unsafe {
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR as i32,
+            );
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::LINEAR as i32,
+            );
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_S,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            self.gl.compressed_tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::COMPRESSED_RGBA_ASTC_4x4_KHR as i32,
                 width as i32,
                 height as i32,
                 0,
@@ -533,6 +610,20 @@ impl TextureProvider for GlTextureProvider {
         data: &[u8],
     ) -> Option<(TextureId, TextureInfo)> {
         GlTextureProvider::upload_dxt5_render_only(self, name, width, height, data)
+    }
+
+    fn supports_astc_4x4(&self) -> bool {
+        GlTextureProvider::supports_astc_4x4(self)
+    }
+
+    fn upload_astc_4x4_render_only(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) -> Option<(TextureId, TextureInfo)> {
+        GlTextureProvider::upload_astc_4x4_render_only(self, name, width, height, data)
     }
 
     fn pixel_alpha(&self, texture: TextureId, x: u32, y: u32) -> Option<u8> {

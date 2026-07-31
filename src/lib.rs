@@ -15,6 +15,12 @@ pub mod backend;
 pub mod compositor;
 pub mod ffi;
 pub mod host_media;
+#[cfg(any(
+    target_os = "android",
+    target_os = "ios",
+    all(target_os = "macos", target_arch = "aarch64")
+))]
+mod mobile_astc;
 pub mod render_pipeline;
 #[cfg(feature = "gl-backend")]
 pub mod runtime;

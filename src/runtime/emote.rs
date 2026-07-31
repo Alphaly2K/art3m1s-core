@@ -36,6 +36,12 @@ struct EmoteInstance {
     player: EmotePlayer,
     eye_blinks: Vec<EmoteEyeBlink>,
     textures: BTreeMap<String, EmoteTextureState>,
+    #[cfg(any(
+        target_os = "android",
+        target_os = "ios",
+        all(target_os = "macos", target_arch = "aarch64")
+    ))]
+    astc_encoder: Option<crate::mobile_astc::AstcEncoder>,
 }
 
 struct EmoteEyeBlink {
@@ -108,6 +114,12 @@ impl EmoteState {
             player: EmotePlayer::default(),
             eye_blinks,
             textures,
+            #[cfg(any(
+                target_os = "android",
+                target_os = "ios",
+                all(target_os = "macos", target_arch = "aarch64")
+            ))]
+            astc_encoder: None,
         };
         let slots = self.layers.entry(id.to_string()).or_default();
         slots.attach_to_scene = true;
@@ -271,7 +283,95 @@ impl EmoteInstance {
                     texture.height,
                     compressed,
                 );
+
+                #[cfg(any(
+                    target_os = "android",
+                    target_os = "ios",
+                    all(target_os = "macos", target_arch = "aarch64")
+                ))]
+                let mut decoded_rgba = None;
+                #[cfg(any(
+                    target_os = "android",
+                    target_os = "ios",
+                    all(target_os = "macos", target_arch = "aarch64")
+                ))]
+                if texture.gpu.is_none() && provider.supports_astc_4x4() {
+                    let cache_path = astc_cache_path(compressed, texture.width, texture.height);
+                    if let Ok(cached) = crate::ffi::request_file(&cache_path)
+                        && crate::mobile_astc::astc_4x4_len(texture.width, texture.height)
+                            == Some(cached.len())
+                    {
+                        texture.gpu = provider.upload_astc_4x4_render_only(
+                            &texture.name,
+                            texture.width,
+                            texture.height,
+                            &cached,
+                        );
+                    }
+                    if texture.gpu.is_none() {
+                        let rgba = self
+                            .model
+                            .atlas()
+                            .decode_texture_rgba8(document, texture_id)
+                            .map_err(|error| {
+                                format!("failed to decode E-Mote texture {texture_id}: {error}")
+                            })?;
+                        if self.astc_encoder.is_none() {
+                            match crate::mobile_astc::AstcEncoder::new() {
+                                Ok(encoder) => self.astc_encoder = Some(encoder),
+                                Err(error) => {
+                                    crate::core_warn!("[E-Mote] ASTC encoder unavailable: {error}");
+                                }
+                            }
+                        }
+                        if let Some(encoder) = self.astc_encoder.as_mut() {
+                            match encoder.encode_rgba8(texture.width, texture.height, &rgba) {
+                                Ok(astc) => {
+                                    if let Err(error) =
+                                        crate::ffi::request_write(&cache_path, &astc)
+                                    {
+                                        crate::core_debug!(
+                                            "[E-Mote] ASTC cache write failed {cache_path}: {error}"
+                                        );
+                                    }
+                                    texture.gpu = provider.upload_astc_4x4_render_only(
+                                        &texture.name,
+                                        texture.width,
+                                        texture.height,
+                                        &astc,
+                                    );
+                                }
+                                Err(error) => {
+                                    crate::core_warn!(
+                                        "[E-Mote] ASTC encode failed for {texture_id}: {error}"
+                                    );
+                                }
+                            }
+                        }
+                        decoded_rgba = Some(rgba);
+                    }
+                }
                 if texture.gpu.is_none() {
+                    #[cfg(any(
+                        target_os = "android",
+                        target_os = "ios",
+                        all(target_os = "macos", target_arch = "aarch64")
+                    ))]
+                    let rgba = if let Some(rgba) = decoded_rgba.take() {
+                        rgba
+                    } else {
+                        self.model
+                            .atlas()
+                            .decode_texture_rgba8(document, texture_id)
+                            .map_err(|error| {
+                                format!("failed to decode E-Mote texture {texture_id}: {error}")
+                            })?
+                    };
+                    #[cfg(not(any(
+                        target_os = "android",
+                        target_os = "ios",
+                        all(target_os = "macos", target_arch = "aarch64")
+                    )))]
                     let rgba = self
                         .model
                         .atlas()
@@ -289,6 +389,14 @@ impl EmoteInstance {
             }
         }
         if self.textures.values().all(|texture| texture.gpu.is_some()) {
+            #[cfg(any(
+                target_os = "android",
+                target_os = "ios",
+                all(target_os = "macos", target_arch = "aarch64")
+            ))]
+            {
+                self.astc_encoder = None;
+            }
             let released = self.model.release_source_document();
             if released != 0 {
                 crate::core_info!(
@@ -405,6 +513,20 @@ impl EmoteInstance {
             }),
         })
     }
+}
+
+#[cfg(any(
+    target_os = "android",
+    target_os = "ios",
+    all(target_os = "macos", target_arch = "aarch64")
+))]
+fn astc_cache_path(compressed: &[u8], width: u32, height: u32) -> String {
+    let hash = compressed
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x1000_0000_01b3)
+        });
+    format!("cache/emote/astc4x4/{hash:016x}-{width}x{height}.bin")
 }
 
 impl EmoteInstance {

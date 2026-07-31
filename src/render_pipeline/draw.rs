@@ -56,6 +56,22 @@ pub trait TextureProvider {
         None
     }
 
+    fn supports_astc_4x4(&self) -> bool {
+        false
+    }
+
+    /// Uploads raw ASTC 4x4 blocks. Mobile backends use this for persistent
+    /// E-Mote transcode caches; unsupported GPUs return `None`.
+    fn upload_astc_4x4_render_only(
+        &mut self,
+        _name: &str,
+        _width: u32,
+        _height: u32,
+        _data: &[u8],
+    ) -> Option<(TextureId, TextureInfo)> {
+        None
+    }
+
     /// Samples a texture alpha value at the given pixel coordinate.
     fn pixel_alpha(&self, _texture: TextureId, _x: u32, _y: u32) -> Option<u8> {
         None
