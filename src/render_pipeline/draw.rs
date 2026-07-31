@@ -44,6 +44,18 @@ pub trait TextureProvider {
         self.upload_rgba(name, width, height, data)
     }
 
+    /// Uploads a DXT5-compressed texture without expanding it to RGBA first.
+    /// Backends without S3TC support return `None` and callers may decode it.
+    fn upload_dxt5_render_only(
+        &mut self,
+        _name: &str,
+        _width: u32,
+        _height: u32,
+        _data: &[u8],
+    ) -> Option<(TextureId, TextureInfo)> {
+        None
+    }
+
     /// Samples a texture alpha value at the given pixel coordinate.
     fn pixel_alpha(&self, _texture: TextureId, _x: u32, _y: u32) -> Option<u8> {
         None

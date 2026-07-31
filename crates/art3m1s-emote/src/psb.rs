@@ -206,6 +206,10 @@ impl PsbDocument {
         checked_slice(&self.data, base + offset, length)
     }
 
+    pub fn source_len(&self) -> usize {
+        self.data.len()
+    }
+
     pub fn resource_count(&self) -> usize {
         self.chunk_offsets.len()
     }

@@ -199,6 +199,83 @@ impl GlTextureProvider {
         Some(entry)
     }
 
+    fn upload_dxt5_render_only(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) -> Option<(TextureId, TextureInfo)> {
+        let extensions = self.gl.supported_extensions();
+        let supported = [
+            "GL_EXT_texture_compression_s3tc",
+            "GL_EXT_texture_compression_dxt5",
+            "GL_ANGLE_texture_compression_dxt5",
+        ]
+        .iter()
+        .any(|extension| extensions.contains(*extension));
+        if !supported {
+            return None;
+        }
+        let expected = (width as usize)
+            .checked_add(3)?
+            .checked_div(4)?
+            .checked_mul((height as usize).checked_add(3)?.checked_div(4)?)?
+            .checked_mul(16)?;
+        if width == 0 || height == 0 || data.len() != expected {
+            return None;
+        }
+
+        self.remove_if_cached(name);
+        let texture = unsafe { self.gl.create_texture().ok()? };
+        unsafe {
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR as i32,
+            );
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::LINEAR as i32,
+            );
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_S,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            self.gl.compressed_tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::COMPRESSED_RGBA_S3TC_DXT5_EXT as i32,
+                width as i32,
+                height as i32,
+                0,
+                data.len() as i32,
+                data,
+            );
+            self.gl.bind_texture(glow::TEXTURE_2D, None);
+            if self.gl.get_error() != glow::NO_ERROR {
+                self.gl.delete_texture(texture);
+                return None;
+            }
+        }
+
+        let entry = (
+            TextureId(texture.0.get() as u64),
+            TextureInfo { width, height },
+        );
+        self.cache.insert(name.to_string(), entry);
+        self.mark_content_changed();
+        Some(entry)
+    }
+
     /// Upload one host-decoded RGBA video frame without retaining a CPU copy.
     /// Reuses the GL texture while the frame dimensions stay unchanged.
     pub fn upload_video_rgba(&mut self, name: &str, width: u32, height: u32, rgba: &[u8]) -> bool {
@@ -440,6 +517,16 @@ impl TextureProvider for GlTextureProvider {
         data: &[u8],
     ) -> Option<(TextureId, TextureInfo)> {
         GlTextureProvider::upload_rgba_render_only(self, name, width, height, data)
+    }
+
+    fn upload_dxt5_render_only(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) -> Option<(TextureId, TextureInfo)> {
+        GlTextureProvider::upload_dxt5_render_only(self, name, width, height, data)
     }
 
     fn pixel_alpha(&self, texture: TextureId, x: u32, y: u32) -> Option<u8> {

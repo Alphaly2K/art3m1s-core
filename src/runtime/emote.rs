@@ -255,18 +255,45 @@ impl EmoteInstance {
         for (texture_id, texture) in &mut self.textures {
             retained.insert(texture.name.clone());
             if texture.gpu.is_none() {
-                let rgba = self
+                let document = self.model.source_document().ok_or_else(|| {
+                    format!("E-Mote texture {texture_id} was evicted after source release")
+                })?;
+                let compressed = self
                     .model
                     .atlas()
-                    .decode_texture_rgba8(self.model.document(), texture_id)
+                    .compressed_texture(document, texture_id)
                     .map_err(|error| {
-                        format!("failed to decode E-Mote texture {texture_id}: {error}")
+                        format!("failed to read E-Mote texture {texture_id}: {error}")
                     })?;
-                texture.gpu = provider.upload_rgba_render_only(
+                texture.gpu = provider.upload_dxt5_render_only(
                     &texture.name,
                     texture.width,
                     texture.height,
-                    &rgba,
+                    compressed,
+                );
+                if texture.gpu.is_none() {
+                    let rgba = self
+                        .model
+                        .atlas()
+                        .decode_texture_rgba8(document, texture_id)
+                        .map_err(|error| {
+                            format!("failed to decode E-Mote texture {texture_id}: {error}")
+                        })?;
+                    texture.gpu = provider.upload_rgba_render_only(
+                        &texture.name,
+                        texture.width,
+                        texture.height,
+                        &rgba,
+                    );
+                }
+            }
+        }
+        if self.textures.values().all(|texture| texture.gpu.is_some()) {
+            let released = self.model.release_source_document();
+            if released != 0 {
+                crate::core_info!(
+                    "[E-Mote] released {:.1} MiB source document after GPU upload",
+                    released as f64 / (1024.0 * 1024.0)
                 );
             }
         }
@@ -684,6 +711,15 @@ mod tests {
         let (commands, retained) = state.build_commands(&mut provider);
         assert!(!commands["1.0"].is_empty());
         assert_eq!(retained.len(), 8);
+        assert!(
+            state.layers["1.0"]
+                .active
+                .as_ref()
+                .unwrap()
+                .model
+                .source_document()
+                .is_none()
+        );
         assert!(commands["1.0"].iter().any(|command| command.mesh.is_some()));
         let mut frame = DrawList {
             commands: commands["1.0"].clone(),

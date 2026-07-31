@@ -23,7 +23,7 @@ pub struct EmoteModelInfo {
 
 #[derive(Debug)]
 pub struct EmoteModel {
-    document: PsbDocument,
+    document: Option<PsbDocument>,
     info: EmoteModelInfo,
     atlas: EmoteAtlas,
     motions: EmoteMotionLibrary,
@@ -50,7 +50,7 @@ impl EmoteModel {
             )));
         }
         Ok(Self {
-            document,
+            document: Some(document),
             info,
             atlas,
             motions,
@@ -62,7 +62,22 @@ impl EmoteModel {
     }
 
     pub fn document(&self) -> &PsbDocument {
-        &self.document
+        self.document
+            .as_ref()
+            .expect("E-Mote source document has been released")
+    }
+
+    pub fn source_document(&self) -> Option<&PsbDocument> {
+        self.document.as_ref()
+    }
+
+    /// Releases the generic PSB tree and original archive bytes once every
+    /// embedded texture has reached the GPU. Parsed playback data remains.
+    pub fn release_source_document(&mut self) -> usize {
+        self.document
+            .take()
+            .map(|document| document.source_len())
+            .unwrap_or(0)
     }
 
     pub fn info(&self) -> &EmoteModelInfo {
