@@ -548,9 +548,19 @@ impl CoreRuntime {
     }
 
     fn enqueue_control_handler(&mut self, event_name: &str) {
-        let Some(handler) = self.compositor.get_input_handler(event_name, "") else {
+        let Some(handler) = self.compositor.get_input_handler(event_name, "").cloned() else {
             return;
         };
+        if handler.handler.is_none() && handler.file.is_none() && handler.label.is_none() {
+            return;
+        }
+        // Mode handlers interrupt the scenario asynchronously, just like a
+        // push/layer callback. Give label-only jumps a synthetic return frame
+        // so a trailing [return] resumes the interrupted wait instead of
+        // completing the handler script at top level on every following tick.
+        // A queued call replaces this marker with its own real call frame in
+        // settle_inline_event_frame.
+        self.begin_inline_event_frame();
         enqueue_handler_tags(
             &self.interpreter,
             handler.handler.as_deref(),

@@ -243,7 +243,7 @@ impl CoreRuntime {
         self.input.lock().unwrap().scripted_down_edge()
     }
 
-    fn begin_inline_event_frame(&mut self) {
+    pub(super) fn begin_inline_event_frame(&mut self) {
         self.refresh_inline_event_frame();
         if self.active_inline_event_frame.is_some() {
             return;
