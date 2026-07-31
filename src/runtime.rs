@@ -66,6 +66,10 @@ pub struct CoreRuntime {
     /// 剔除刚隐藏或删除的消息文字，不能直接复用已经烘入文字的 FBO。
     last_rendered_scene: Option<crate::compositor::Scene>,
     last_rendered_clock_ms: u64,
+    /// Draw list and texture generation last delivered to the host. Logic still
+    /// advances every tick, but identical visual frames skip GPU work/readback.
+    last_submitted_frame: Option<crate::render_pipeline::draw::DrawList>,
+    last_submitted_texture_revision: u64,
     text_renderer: Option<Box<dyn TextRenderer>>,
     /// core 内部文本注入链。宿主 FFI 注入在该链之前执行。
     text_inject: crate::text::InjectionChain,
@@ -171,6 +175,8 @@ impl CoreRuntime {
             compositor,
             last_rendered_scene: None,
             last_rendered_clock_ms: 0,
+            last_submitted_frame: None,
+            last_submitted_texture_revision: 0,
             text_renderer: None,
             text_inject: crate::text::InjectionChain::new(),
             pending_text_translations: HashMap::new(),
@@ -388,6 +394,11 @@ mod tests {
     use super::engine_status_for;
     use asb_interpreter::event::WaitReason;
 
+    #[cfg(all(target_os = "macos", feature = "gl-backend"))]
+    use super::CoreRuntime;
+    #[cfg(all(target_os = "macos", feature = "gl-backend"))]
+    use crate::backend::gl::platform::GfxBackend;
+
     #[test]
     fn engine_status_maps_wait_states_to_script_status_codes() {
         // 0 执行中。
@@ -470,5 +481,18 @@ mod tests {
         );
         // 14 引擎退出最高优先。
         assert_eq!(engine_status_for(None, true, true, true), 14);
+    }
+
+    #[cfg(all(target_os = "macos", feature = "gl-backend"))]
+    #[test]
+    fn static_runtime_emits_first_frame_then_skips_identical_frame() {
+        let mut runtime = CoreRuntime::create(8, 8, GfxBackend::Cgl).unwrap();
+        let mut pixels = vec![0; runtime.pixel_buffer_size()];
+
+        assert_eq!(
+            runtime.advance_and_render_into(16, &mut pixels),
+            pixels.len()
+        );
+        assert_eq!(runtime.advance_and_render_into(17, &mut pixels), 0);
     }
 }

@@ -41,6 +41,8 @@ pub struct GlTextureProvider {
     /// 缺失资源回退的占位外观与尺寸。
     placeholder: PlaceholderKind,
     placeholder_size: u32,
+    /// Monotonic generation for texture pixel content visible to the renderer.
+    content_revision: u64,
 }
 
 impl GlTextureProvider {
@@ -52,7 +54,17 @@ impl GlTextureProvider {
             source: None,
             placeholder: PlaceholderKind::Checker,
             placeholder_size: 256,
+            content_revision: 0,
         }
+    }
+
+    /// Changes whenever an upload can alter pixels sampled by a draw command.
+    pub fn content_revision(&self) -> u64 {
+        self.content_revision
+    }
+
+    fn mark_content_changed(&mut self) {
+        self.content_revision = self.content_revision.wrapping_add(1);
     }
 
     /// 设置素材字节源（资源名 → 原始图片字节）。
@@ -103,6 +115,7 @@ impl GlTextureProvider {
         let entry = unsafe { self.try_create_texture(width, height, rgba) }?;
         self.cache.insert(name.to_string(), entry);
         self.pixels.insert(entry.0, (width, height, rgba.to_vec()));
+        self.mark_content_changed();
         Some(entry)
     }
 
@@ -142,6 +155,7 @@ impl GlTextureProvider {
                 self.gl.bind_texture(glow::TEXTURE_2D, None);
             }
             self.pixels.remove(&texture);
+            self.mark_content_changed();
             return true;
         }
 
@@ -166,6 +180,7 @@ impl GlTextureProvider {
         }
         self.cache.insert(name.to_string(), entry);
         self.pixels.remove(&entry.0);
+        self.mark_content_changed();
         true
     }
 
@@ -289,6 +304,7 @@ impl TextureProvider for GlTextureProvider {
                         let entry = unsafe { self.try_create_texture(w, h, &rgba) }?;
                         self.cache.insert(name.to_string(), entry);
                         self.pixels.insert(entry.0, (w, h, rgba));
+                        self.mark_content_changed();
                         return Some(entry);
                     }
                     // 只在首次失败时到达（结果按名缓存），不会刷屏。
@@ -307,6 +323,7 @@ impl TextureProvider for GlTextureProvider {
         let entry = unsafe { self.try_create_texture(size, size, &pixels) }?;
         self.cache.insert(name.to_string(), entry);
         self.pixels.insert(entry.0, (size, size, pixels));
+        self.mark_content_changed();
         Some(entry)
     }
 

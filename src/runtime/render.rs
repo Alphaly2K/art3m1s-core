@@ -1,7 +1,7 @@
 use super::CoreRuntime;
 use crate::backend::gl::platform;
 use crate::render_pipeline::RenderPipeline;
-use crate::render_pipeline::draw::{Renderer, TextureProvider};
+use crate::render_pipeline::draw::{DrawList, Renderer, TextureProvider};
 use asb_interpreter::event::WaitReason;
 use glow::HasContext;
 
@@ -29,6 +29,7 @@ impl CoreRuntime {
         self.renderer.set_viewport_size(new_width, new_height);
         self.renderer.set_stage_size(new_width, new_height);
         self.last_rendered_scene = None;
+        self.last_submitted_frame = None;
 
         Ok(())
     }
@@ -62,7 +63,23 @@ impl CoreRuntime {
         // script.rs 的 wait 建立/退出路径（那不在本任务白名单内）。
         self.drive_click_wait_icon();
 
-        self.render_bound_scene(true, None);
+        let (frame, _, _) = self.build_bound_scene(true, None);
+        let texture_revision = self.texture_provider.content_revision();
+        if !frame_requires_render(
+            self.last_submitted_frame.as_ref(),
+            self.last_submitted_texture_revision,
+            &frame,
+            texture_revision,
+        ) {
+            unsafe {
+                self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            }
+            return 0;
+        }
+
+        self.renderer.render(&frame);
+        self.last_submitted_frame = Some(frame);
+        self.last_submitted_texture_revision = texture_revision;
         self.last_rendered_scene = Some(self.compositor.scene_snapshot());
         self.last_rendered_clock_ms = self.compositor.clock_ms();
 
@@ -96,8 +113,12 @@ impl CoreRuntime {
         unsafe {
             self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
         }
-        let (text_layers, text_commands) =
-            self.render_bound_scene(false, Some((&scene, self.last_rendered_clock_ms)));
+        let (frame, text_layers, text_commands) =
+            self.build_bound_scene(false, Some((&scene, self.last_rendered_clock_ms)));
+        self.renderer.render(&frame);
+        // The FBO now contains a reconstructed transition source rather than
+        // the frame represented by `last_submitted_frame`.
+        self.last_submitted_frame = None;
         crate::core_debug!(
             "[runtime] transition source snapshot text_layers={} text_commands={}",
             text_layers,
@@ -108,11 +129,11 @@ impl CoreRuntime {
         }
     }
 
-    fn render_bound_scene(
+    fn build_bound_scene(
         &mut self,
         include_transition: bool,
         scene_snapshot: Option<(&crate::compositor::Scene, u64)>,
-    ) -> (usize, usize) {
+    ) -> (DrawList, usize, usize) {
         let text_map = self.build_text_commands();
         let text_layer_count = text_map.len();
         let text_command_count = text_map.values().map(Vec::len).sum();
@@ -148,7 +169,6 @@ impl CoreRuntime {
             pipeline.build_with_content(&mut self.texture_provider, content_for, text_for)
         };
         frame.materialize_stencil_groups(crate::render_pipeline::shader::ALPHA_MASK_SHADER);
-        self.renderer.render(&frame);
         let mut used_files = scene_snapshot
             .map(|(scene, _)| scene.collect_files())
             .unwrap_or_else(|| self.compositor.scene().collect_files());
@@ -162,7 +182,7 @@ impl CoreRuntime {
             used_files.insert(f);
         }
         self.texture_provider.retain(&used_files);
-        (text_layer_count, text_command_count)
+        (frame, text_layer_count, text_command_count)
     }
 
     /// 每帧驱动 glyph 点击等待图标的显隐。
@@ -194,9 +214,19 @@ fn wait_reason_is_click_wait(reason: Option<&WaitReason>) -> bool {
     )
 }
 
+fn frame_requires_render(
+    previous: Option<&DrawList>,
+    previous_texture_revision: u64,
+    current: &DrawList,
+    current_texture_revision: u64,
+) -> bool {
+    previous != Some(current) || previous_texture_revision != current_texture_revision
+}
+
 #[cfg(test)]
 mod tests {
-    use super::wait_reason_is_click_wait;
+    use super::{frame_requires_render, wait_reason_is_click_wait};
+    use crate::render_pipeline::draw::DrawList;
     use asb_interpreter::event::WaitReason;
 
     #[test]
@@ -214,5 +244,13 @@ mod tests {
         assert!(!wait_reason_is_click_wait(Some(&WaitReason::KeyWait {
             buttons: vec![],
         })));
+    }
+
+    #[test]
+    fn unchanged_draw_list_and_textures_skip_rendering() {
+        let frame = DrawList::default();
+        assert!(frame_requires_render(None, 0, &frame, 0));
+        assert!(!frame_requires_render(Some(&frame), 7, &frame, 7));
+        assert!(frame_requires_render(Some(&frame), 7, &frame, 8));
     }
 }
