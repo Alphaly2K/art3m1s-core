@@ -422,6 +422,16 @@ impl CoreRuntime {
         self.control.already_read_enabled = mode != 0;
     }
 
+    /// `[alreadyread mode=0]` 的 Lua ADV 框架自行维护剧情块已读状态。
+    /// 这些框架共同提供纯查询函数 `getAread()`；不存在该函数的游戏继续使用
+    /// 引擎按脚本位置维护的兼容记录。
+    fn script_owned_read_state(&self) -> Option<bool> {
+        if self.control.already_read_enabled {
+            return None;
+        }
+        self.interpreter.query_lua_truthy("getAread")
+    }
+
     /// 已读跟踪 + 未读停跳 + `s.status.alreadyread` 暴露。
     ///
     /// 已读键 = (脚本文件, 该段之后的等待行号)，按**脚本执行位置**隔离——这天然
@@ -453,7 +463,9 @@ impl CoreRuntime {
         let line = self.interpreter.current_line();
 
         // 本行在「此前的访问/会话」是否已读 —— 必须在本次标记之前取值。
-        let was_read = self.control.is_read(&script, line);
+        let engine_was_read = self.control.is_read(&script, line);
+        let script_was_read = self.script_owned_read_state();
+        let was_read = script_was_read.unwrap_or(engine_was_read);
         self.control.current_scenario_was_read = Some(was_read);
         // 暴露给脚本：s.status.alreadyread（当前执行行此前是否已读，1/0）。
         self.interpreter.set_variable(
@@ -472,7 +484,7 @@ impl CoreRuntime {
         }
         // 标记本段剧情已读（始终维护，使 s.status.alreadyread 跨访问准确）；
         // 有新增则置脏，供 syssave 落 aread.dat。
-        if self.control.mark_read(&script, line) {
+        if script_was_read.is_none() && self.control.mark_read(&script, line) {
             self.read_dirty = true;
         }
     }
@@ -631,16 +643,29 @@ impl CoreRuntime {
         if self.control.control_skip_active == active {
             return;
         }
+        let script_was_read = if active {
+            self.script_owned_read_state()
+        } else {
+            None
+        };
+        if let Some(was_read) = script_was_read {
+            self.control.current_scenario_was_read = Some(was_read);
+        }
         let was_skipping = self.control.skip_active();
         let was_control_skipping = self.control.control_skip_effective();
         self.control.set_control_skip_pressed(active);
         let is_skipping = self.control.skip_active();
         let is_control_skipping = self.control.control_skip_effective();
         crate::core_debug!(
-            "[controlskip] pressed={} allow={} current_read={:?} blocked={} effective={}",
+            "[controlskip] pressed={} allow={} current_read={:?} read_source={} blocked={} effective={}",
             active,
             self.control.skip_allowed,
             self.control.current_scenario_was_read,
+            if script_was_read.is_some() {
+                "lua"
+            } else {
+                "engine"
+            },
             self.control.control_skip_blocked,
             is_control_skipping
         );

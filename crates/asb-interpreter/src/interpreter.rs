@@ -1981,6 +1981,23 @@ impl Interpreter {
     pub fn get_variable(&self, name: &str) -> Option<Value> {
         self.variables.lock().unwrap().get(name).cloned()
     }
+
+    /// 调用脚本提供的无参数状态查询函数，并按 Lua truthy 语义返回结果。
+    ///
+    /// 函数不存在或调用失败时返回 `None`，让宿主保留自己的兼容路径；函数存在且
+    /// 返回 nil/false 时返回 `Some(false)`。
+    pub fn query_lua_truthy(&self, function_name: &str) -> Option<bool> {
+        let function = self
+            .lua
+            .globals()
+            .get::<mlua::Function>(function_name)
+            .ok()?;
+        let value = function.call::<mlua::Value>(()).ok()?;
+        Some(!matches!(
+            value,
+            mlua::Value::Nil | mlua::Value::Boolean(false)
+        ))
+    }
 }
 
 impl Default for Interpreter {
@@ -1997,6 +2014,26 @@ mod tests {
     use crate::{CallbackResult, Event, ExecutionResult, InterpreterConfig, Value};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn lua_truthy_query_distinguishes_missing_false_and_true() {
+        let interpreter = Interpreter::new(InterpreterConfig::default());
+        assert_eq!(interpreter.query_lua_truthy("getAread"), None);
+
+        interpreter
+            .lua()
+            .load(
+                r#"
+                function getAread() return nil end
+                function getEnabled() return "yes" end
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        assert_eq!(interpreter.query_lua_truthy("getAread"), Some(false));
+        assert_eq!(interpreter.query_lua_truthy("getEnabled"), Some(true));
+    }
 
     #[test]
     fn event_filter_intercepts_and_reports_verdict() {
