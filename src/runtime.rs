@@ -106,6 +106,9 @@ pub struct CoreRuntime {
     voice_serial: u64,
     hovered_layers: HashSet<String>,
     pointer_drag: PointerDragState,
+    last_pointer_hit_position: Option<(i32, i32)>,
+    last_pointer_hit_texture_revision: u64,
+    pointer_hit_test_dirty: bool,
     volumes: Arc<Mutex<HashMap<String, f32>>>,
     exit_requested: Arc<AtomicBool>,
     /// system.ini 的 SAVEPATH 原值（可能含反斜杠/CSIDL），由 load_project 捕获。
@@ -217,6 +220,9 @@ impl CoreRuntime {
             voice_serial: 0,
             hovered_layers: HashSet::new(),
             pointer_drag: PointerDragState::default(),
+            last_pointer_hit_position: None,
+            last_pointer_hit_texture_revision: 0,
+            pointer_hit_test_dirty: true,
             volumes: Arc::new(Mutex::new(HashMap::new())),
             exit_requested: Arc::new(AtomicBool::new(false)),
             project_savepath: None,
@@ -409,6 +415,7 @@ impl CoreRuntime {
         let event_drain_started = profile.mark();
         let collected = self.drain_events();
         self.frame_visual_dirty |= !collected.is_empty();
+        self.pointer_hit_test_dirty |= !collected.is_empty();
         profile.event_drain_ns = crate::profiler::FrameProfile::elapsed(event_drain_started);
         self.dispatch_events(&collected, profile);
         let event_post_started = profile.mark();
@@ -443,6 +450,7 @@ impl CoreRuntime {
             .is_transition_in_progress();
         let layer_info_clock_changed = self.compositor.advance(delta_ms);
         self.frame_visual_dirty |= layer_info_clock_changed || transition_was_active;
+        self.pointer_hit_test_dirty |= layer_info_clock_changed;
         // get_layer_info 必须反映本帧缓动后的实际位置，而不是缓动开始前的
         // 静态 LayerProps。下一帧输入回调执行 Lua 前会读取这份快照。
         if self.layer_info_dirty || layer_info_clock_changed {
@@ -461,8 +469,11 @@ impl CoreRuntime {
             .saturating_add(crate::profiler::FrameProfile::elapsed(emote_started));
 
         let text_started = profile.mark();
-        self.frame_visual_dirty |= self.advance_text(delta_ms);
-        self.frame_visual_dirty |= self.apply_ready_text_translations();
+        let reveal_changed = self.advance_text(delta_ms);
+        let translation_changed = self.apply_ready_text_translations();
+        let text_changed = reveal_changed || translation_changed;
+        self.frame_visual_dirty |= text_changed;
+        self.pointer_hit_test_dirty |= text_changed;
         profile.text_ns = crate::profiler::FrameProfile::elapsed(text_started);
 
         let media_started = profile.mark();

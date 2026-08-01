@@ -753,6 +753,8 @@ impl CoreRuntime {
                 value: if visible { "1" } else { "0" }.to_string(),
             },
         ));
+        self.frame_visual_dirty = true;
+        self.pointer_hit_test_dirty = true;
     }
 
     // ── rclick：右键单击脚本 ─────────────────────────────────────────

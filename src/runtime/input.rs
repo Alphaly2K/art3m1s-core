@@ -86,6 +86,18 @@ impl CoreRuntime {
         let left_down_edge = legacy_clicked || mouse_down_edges.contains(&1);
         let left_up_edge = mouse_up_edges.contains(&1);
         let left_down = mouse_buttons.contains(&1);
+        let pointer_position = (mouse_x as i32, mouse_y as i32);
+        let pointer_moved = self.last_pointer_hit_position != Some(pointer_position);
+        let texture_revision = self.texture_provider.content_revision();
+        let refresh_pointer_hit_test = pointer_hit_test_required(
+            self.last_pointer_hit_position,
+            pointer_position,
+            self.pointer_hit_test_dirty,
+            self.last_pointer_hit_texture_revision,
+            texture_revision,
+            left_down_edge || left_up_edge,
+        );
+        self.frame_visual_dirty |= left_down_edge || left_up_edge || !key_down_edges.is_empty();
         let mut needs_inline_event_frame = false;
 
         // controlskip：按住 keyconfig role 14 的键（缺省 Ctrl=17）期间临时跳过。
@@ -100,18 +112,28 @@ impl CoreRuntime {
 
         // 文本内联链接（[link]）：鼠标移动刷新 hover 强调；点击命中链接则以其
         // file/label 触发 jump 并吞掉该次点击（不再推进剧情）。
-        self.frame_visual_dirty |= self.update_link_hover(mouse_x, mouse_y);
+        if refresh_pointer_hit_test {
+            self.frame_visual_dirty |= self.update_link_hover(mouse_x, mouse_y);
+        }
         if left_down_edge && self.handle_link_click(mouse_x, mouse_y) {
             return false;
         }
 
-        let hit_layers = self
-            .compositor
-            .hit_test_all(mouse_x, mouse_y, &mut self.texture_provider);
+        let hit_layers = if refresh_pointer_hit_test {
+            self.last_pointer_hit_position = Some(pointer_position);
+            self.last_pointer_hit_texture_revision = texture_revision;
+            self.pointer_hit_test_dirty = false;
+            self.compositor
+                .hit_test_all(mouse_x, mouse_y, &mut self.texture_provider)
+        } else {
+            Vec::new()
+        };
         let top_hover = hit_layers.first().cloned();
-        let hover_dispatch = event_dispatch_layers(&self.compositor, &hit_layers, "rollover");
+        let hover_dispatch = refresh_pointer_hit_test
+            .then(|| event_dispatch_layers(&self.compositor, &hit_layers, "rollover"))
+            .unwrap_or_default();
         let new_hovered: HashSet<String> = hover_dispatch.iter().cloned().collect();
-        if new_hovered != self.hovered_layers {
+        if refresh_pointer_hit_test && new_hovered != self.hovered_layers {
             let mut old_only: Vec<String> = self
                 .hovered_layers
                 .difference(&new_hovered)
@@ -173,7 +195,7 @@ impl CoreRuntime {
             }
         }
 
-        if left_down {
+        if left_down && pointer_moved {
             let dispatch = self.continue_pointer_drag(mouse_x, mouse_y);
             handled_by_drag |= dispatch.handled;
             needs_inline_event_frame |= dispatch.needs_return_frame;
@@ -360,6 +382,8 @@ impl CoreRuntime {
             dx,
             dy,
         );
+        self.frame_visual_dirty = true;
+        self.pointer_hit_test_dirty = true;
         self.sync_layer_info(&layer_id);
         let dispatch = enqueue_layer_handler(
             &self.interpreter,
@@ -374,8 +398,7 @@ impl CoreRuntime {
         }
     }
 
-    /// 每帧按鼠标位置刷新文本链接的 hover 强调。返回 hover 是否发生变化
-    /// （runtime 目前每帧都重建文本命令，返回值仅供未来节流用）。
+    /// 按鼠标位置刷新文本链接的 hover 强调。返回 hover 是否发生变化。
     fn update_link_hover(&mut self, mouse_x: f32, mouse_y: f32) -> bool {
         match self.text_renderer.as_mut() {
             Some(renderer) => renderer.update_link_hover(mouse_x, mouse_y),
@@ -435,6 +458,20 @@ impl CoreRuntime {
             needs_return_frame: dispatch.needs_return_frame,
         }
     }
+}
+
+fn pointer_hit_test_required(
+    previous_position: Option<(i32, i32)>,
+    current_position: (i32, i32),
+    scene_dirty: bool,
+    previous_texture_revision: u64,
+    current_texture_revision: u64,
+    button_edge: bool,
+) -> bool {
+    scene_dirty
+        || previous_position != Some(current_position)
+        || previous_texture_revision != current_texture_revision
+        || button_edge
 }
 
 pub(super) fn inline_event_marker_is_active(
@@ -544,13 +581,58 @@ mod tests {
     use super::{
         InlineEventFrame, dispatch_handler, event_dispatch_layers, forced_drag_state,
         global_push_absorbs_default_click, inline_event_marker_is_active,
-        link_area_has_jump_target,
+        link_area_has_jump_target, pointer_hit_test_required,
     };
     use crate::compositor::Compositor;
     use crate::text::render::LinkHitArea;
     use asb_interpreter::event::{Event, WaitReason};
     use asb_interpreter::{CallFrame, Interpreter, InterpreterConfig};
     use std::collections::HashMap;
+
+    #[test]
+    fn stationary_pointer_reuses_hit_test_until_an_input_changes() {
+        let position = (640, 360);
+        assert!(!pointer_hit_test_required(
+            Some(position),
+            position,
+            false,
+            7,
+            7,
+            false
+        ));
+        assert!(pointer_hit_test_required(
+            Some(position),
+            (641, 360),
+            false,
+            7,
+            7,
+            false
+        ));
+        assert!(pointer_hit_test_required(
+            Some(position),
+            position,
+            true,
+            7,
+            7,
+            false
+        ));
+        assert!(pointer_hit_test_required(
+            Some(position),
+            position,
+            false,
+            7,
+            8,
+            false
+        ));
+        assert!(pointer_hit_test_required(
+            Some(position),
+            position,
+            false,
+            7,
+            7,
+            true
+        ));
+    }
 
     #[test]
     fn event_filter_fake_results_never_enqueue_the_original_handler() {
