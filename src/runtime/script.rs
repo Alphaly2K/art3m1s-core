@@ -131,13 +131,15 @@ impl CoreRuntime {
         let Some(reason) = self.wait_reason.clone() else {
             return;
         };
+        let physical_clicked = clicked;
         let scripted_decide = self.script_decide_edge();
-        let clicked = clicked || scripted_decide;
-        // 自动模式：左键单击（stopbyclick）或进入 [stop]（stopbystop）时停止自动模式。
-        if clicked && self.automode_stops_on_click() {
+        let advance_requested = physical_clicked || scripted_decide;
+        // stopbyclick 只响应宿主真实点击。overrideKey 注入的 decide 边沿是脚本内部
+        // 推进信号，若也视作点击，自动模式会被自己的 mainloop 立即关闭。
+        if physical_clicked && self.automode_stops_on_click() {
             self.set_automode_mode(false);
         }
-        if matches!(&reason, WaitReason::Stop { .. }) && self.automode_stops_on_stop() {
+        if automode_stop_by_stop_wait(&reason) && self.automode_stops_on_stop() {
             self.set_automode_mode(false);
         }
         if let WaitReason::Stop {
@@ -165,7 +167,7 @@ impl CoreRuntime {
         // 跳过态（skip）同样视作输入意图，让 input=2 生效。
         if trans_input_skip_requested(
             is_trans_wait,
-            clicked,
+            advance_requested,
             self.skip_active(),
             RenderPipeline::new(&self.compositor).is_transition_in_progress(),
         ) {
@@ -180,7 +182,7 @@ impl CoreRuntime {
 
         let advance = match reason {
             WaitReason::Timed { input, .. } => {
-                if timed_wait_accepts_click(input, clicked) {
+                if timed_wait_accepts_click(input, advance_requested) {
                     self.timed_remaining_ms = 0;
                     true
                 } else if self.skip_active() {
@@ -217,7 +219,7 @@ impl CoreRuntime {
                 self.skip_active() || mode != 1 || self.is_text_reveal_complete()
             }
             _ => {
-                if clicked {
+                if advance_requested {
                     if !self.is_text_reveal_complete() {
                         self.reveal_text_now();
                         false
@@ -478,6 +480,15 @@ fn stop_wait_accepts_scripted_decide(scripted_decide: bool) -> bool {
     scripted_decide
 }
 
+fn automode_stop_by_stop_wait(reason: &WaitReason) -> bool {
+    match reason {
+        WaitReason::Stop { reason } => !reason.as_deref().is_some_and(|reason| {
+            reason == "video" || reason == "trans" || reason.starts_with("tween:")
+        }),
+        _ => false,
+    }
+}
+
 /// 转场等待期间是否应尝试用输入提前结束转场。
 ///
 /// 仅当处于转场等待（`is_trans_wait`）、有转场正在进行（`transition_in_progress`）、
@@ -506,8 +517,8 @@ fn wait_reason_is_input_wait(reason: Option<&WaitReason>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        settle_inline_event_frame, stop_wait_accepts_scripted_decide, timed_wait_accepts_click,
-        trans_input_skip_requested, wait_reason_is_input_wait,
+        automode_stop_by_stop_wait, settle_inline_event_frame, stop_wait_accepts_scripted_decide,
+        timed_wait_accepts_click, trans_input_skip_requested, wait_reason_is_input_wait,
     };
     use crate::runtime::InlineEventFrame;
     use asb_interpreter::event::WaitReason;
@@ -526,6 +537,22 @@ mod tests {
     fn stop_wait_only_accepts_a_scripted_decide_edge() {
         assert!(stop_wait_accepts_scripted_decide(true));
         assert!(!stop_wait_accepts_scripted_decide(false));
+    }
+
+    #[test]
+    fn automode_stopbystop_ignores_internal_media_and_transition_waits() {
+        assert!(automode_stop_by_stop_wait(&WaitReason::Stop {
+            reason: None
+        }));
+        assert!(automode_stop_by_stop_wait(&WaitReason::Stop {
+            reason: Some("menu".into())
+        }));
+        for reason in ["video", "trans", "tween:mw"] {
+            assert!(!automode_stop_by_stop_wait(&WaitReason::Stop {
+                reason: Some(reason.into())
+            }));
+        }
+        assert!(!automode_stop_by_stop_wait(&WaitReason::Generic));
     }
 
     #[test]

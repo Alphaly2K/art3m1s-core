@@ -158,8 +158,11 @@ impl Default for RuntimeControlState {
 
 impl RuntimeControlState {
     pub(super) fn skip_active(&self) -> bool {
-        self.skip_allowed
-            && (self.skip_active || (self.control_skip_active && !self.control_skip_blocked))
+        (self.skip_allowed && self.skip_active) || self.control_skip_effective()
+    }
+
+    fn control_skip_effective(&self) -> bool {
+        self.skip_allowed && self.control_skip_active && !self.control_skip_blocked
     }
 
     pub(super) fn control_skip_active(&self) -> bool {
@@ -347,11 +350,13 @@ impl CoreRuntime {
     pub(super) fn apply_skip_config(&mut self, allow: Option<bool>, skip_unread: Option<bool>) {
         if let Some(allow) = allow {
             let was_skipping = self.control.skip_active();
+            let was_control_skipping = self.control.control_skip_effective();
             if !allow && self.control.skip_active {
                 self.set_skip_mode(false);
             }
             self.control.skip_allowed = allow;
             let is_skipping = self.control.skip_active();
+            let is_control_skipping = self.control.control_skip_effective();
             if was_skipping != is_skipping {
                 self.control.reset_auto_wait();
                 self.audio.set_skipping(is_skipping);
@@ -361,6 +366,7 @@ impl CoreRuntime {
                     self.reveal_text_now();
                 }
             }
+            self.enqueue_control_skip_transition(was_control_skipping, is_control_skipping);
         }
         if let Some(skip_unread) = skip_unread {
             self.control.skip_unread = skip_unread;
@@ -624,16 +630,18 @@ impl CoreRuntime {
 
     // ── controlskip：按住临时跳过 ─────────────────────────────────────
 
-    /// 临时跳过按键状态切换：进入/退出时派发 controlskipin/out 并同步
-    /// s.status.controlskip。实际跳过仍与普通 Skip 一样受 [skip allow=]
-    /// 和已读状态约束。
+    /// 临时跳过按键状态切换。`s.status.controlskip` 暴露物理按键状态；
+    /// controlskipin/out 只在通过 [skip allow=] 与未读门控后真正进入/退出
+    /// 临时跳过时派发，避免脚本处理器绕过引擎门控自行开启 skip。
     pub(super) fn set_control_skip(&mut self, active: bool) {
         if self.control.control_skip_active == active {
             return;
         }
         let was_skipping = self.control.skip_active();
+        let was_control_skipping = self.control.control_skip_effective();
         self.control.set_control_skip_pressed(active);
         let is_skipping = self.control.skip_active();
+        let is_control_skipping = self.control.control_skip_effective();
         self.control.reset_auto_wait();
         self.audio.set_skipping(is_skipping);
         self.sync_control_status_variables();
@@ -642,11 +650,7 @@ impl CoreRuntime {
             // 与 commandskip 退出一致：立即揭示当前文本，避免卡在初始进度。
             self.reveal_text_now();
         }
-        self.enqueue_control_handler(if active {
-            "controlskipin"
-        } else {
-            "controlskipout"
-        });
+        self.enqueue_control_skip_transition(was_control_skipping, is_control_skipping);
     }
 
     /// 未读剧情按普通 Skip 语义终止当前跳过。Ctrl 是按住触发，因此还需
@@ -656,14 +660,23 @@ impl CoreRuntime {
             self.set_skip_mode(false);
         }
         let was_skipping = self.control.skip_active();
+        let was_control_skipping = self.control.control_skip_effective();
         self.control.block_control_skip_until_release();
         let is_skipping = self.control.skip_active();
+        let is_control_skipping = self.control.control_skip_effective();
         if was_skipping && !is_skipping {
             self.control.reset_auto_wait();
             self.control.was_skipping = true;
             self.audio.set_skipping(false);
             self.sync_control_status_variables();
             self.reveal_text_now();
+        }
+        self.enqueue_control_skip_transition(was_control_skipping, is_control_skipping);
+    }
+
+    fn enqueue_control_skip_transition(&mut self, was_active: bool, is_active: bool) {
+        if let Some(event_name) = control_skip_transition_event(was_active, is_active) {
+            self.enqueue_control_handler(event_name);
         }
     }
 
@@ -972,11 +985,19 @@ fn exec_input_route(command: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
+fn control_skip_transition_event(was_active: bool, is_active: bool) -> Option<&'static str> {
+    match (was_active, is_active) {
+        (false, true) => Some("controlskipin"),
+        (true, false) => Some("controlskipout"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ROLE_ADVANCE, ROLE_AVOID_IN, ROLE_AVOID_OUT, ROLE_CONTROL_SKIP, ROLE_HIDE_IN, ROLE_SKIP_IN,
-        RuntimeControlState, exec_input_route, parse_keyconfig,
+        RuntimeControlState, control_skip_transition_event, exec_input_route, parse_keyconfig,
     };
     use std::collections::HashMap;
 
@@ -1027,7 +1048,23 @@ mod tests {
             ..RuntimeControlState::default()
         };
         assert!(!control.skip_active());
+        assert!(!control.control_skip_effective());
         assert!(control.control_skip_active());
+    }
+
+    #[test]
+    fn control_skip_handlers_follow_the_effective_skip_transition() {
+        assert_eq!(
+            control_skip_transition_event(false, true),
+            Some("controlskipin")
+        );
+        assert_eq!(
+            control_skip_transition_event(true, false),
+            Some("controlskipout")
+        );
+        // Ctrl 在不可跳区域按下/释放时，物理状态虽变化，但不派发脚本跳过回调。
+        assert_eq!(control_skip_transition_event(false, false), None);
+        assert_eq!(control_skip_transition_event(true, true), None);
     }
 
     #[test]
