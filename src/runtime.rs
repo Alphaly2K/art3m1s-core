@@ -451,6 +451,8 @@ impl CoreRuntime {
     }
 
     pub fn set_profiler_enabled(&self, enabled: bool) {
+        self.renderer.set_profile_enabled(enabled);
+        self.texture_provider.set_profile_enabled(enabled);
         self.profiler.set_enabled(enabled);
     }
 
@@ -474,6 +476,17 @@ impl CoreRuntime {
         profile.host_ffi_calls = io.calls;
         profile.host_ffi_ns = io.elapsed_ns;
         profile.host_ffi_bytes = io.bytes;
+        let uploads = self.texture_provider.take_profile_uploads();
+        profile.texture_upload_ns = uploads.elapsed_ns;
+        profile.uploaded_bytes = uploads.bytes;
+        profile.video_upload_ns = uploads.video_elapsed_ns;
+        profile.video_uploaded_bytes = uploads.video_bytes;
+        profile.video_uploaded_frames = uploads.video_frames;
+        let render = self.renderer.take_profile_stats();
+        profile.draw_calls = render.draw_calls;
+        profile.vertices = render.vertices;
+        profile.texture_binds = render.texture_binds;
+        profile.dynamic_mesh_uploaded_bytes = render.dynamic_mesh_uploaded_bytes;
         let (texture_count, gpu_bytes, cpu_bytes) = self.texture_provider.profile_memory();
         profile.texture_count = texture_count as u64;
         profile.texture_gpu_bytes = gpu_bytes;

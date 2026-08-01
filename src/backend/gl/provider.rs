@@ -11,9 +11,11 @@
 
 use crate::render_pipeline::draw::{TextureId, TextureInfo, TextureProvider};
 use glow::HasContext;
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::rc::Rc;
+use std::time::Instant;
 
 /// 资源名 → 原始字节的来源。返回 `None` 表示该资源不存在（将回退占位）。
 pub type AssetSource = dyn Fn(&str) -> Option<Vec<u8>>;
@@ -25,6 +27,15 @@ pub enum PlaceholderKind {
     Checker,
     /// 纯色块（RGBA）。
     Solid([u8; 4]),
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct TextureUploadProfile {
+    pub elapsed_ns: u64,
+    pub bytes: u64,
+    pub video_elapsed_ns: u64,
+    pub video_bytes: u64,
+    pub video_frames: u64,
 }
 
 enum PixelStorage {
@@ -118,6 +129,12 @@ pub struct GlTextureProvider {
     texture_revisions: HashMap<TextureId, u64>,
     /// Texture handles whose uploaded pixels are known to have alpha 255.
     opaque_textures: HashSet<TextureId>,
+    profiling_enabled: Cell<bool>,
+    profile_upload_elapsed_ns: Cell<u64>,
+    profile_upload_bytes: Cell<u64>,
+    profile_video_elapsed_ns: Cell<u64>,
+    profile_video_bytes: Cell<u64>,
+    profile_video_frames: Cell<u64>,
 }
 
 impl GlTextureProvider {
@@ -132,7 +149,56 @@ impl GlTextureProvider {
             content_revision: 0,
             texture_revisions: HashMap::new(),
             opaque_textures: HashSet::new(),
+            profiling_enabled: Cell::new(false),
+            profile_upload_elapsed_ns: Cell::new(0),
+            profile_upload_bytes: Cell::new(0),
+            profile_video_elapsed_ns: Cell::new(0),
+            profile_video_bytes: Cell::new(0),
+            profile_video_frames: Cell::new(0),
         }
+    }
+
+    pub(crate) fn set_profile_enabled(&self, enabled: bool) {
+        self.profiling_enabled.set(enabled);
+        let _ = self.take_profile_uploads();
+    }
+
+    pub(crate) fn take_profile_uploads(&self) -> TextureUploadProfile {
+        TextureUploadProfile {
+            elapsed_ns: self.profile_upload_elapsed_ns.replace(0),
+            bytes: self.profile_upload_bytes.replace(0),
+            video_elapsed_ns: self.profile_video_elapsed_ns.replace(0),
+            video_bytes: self.profile_video_bytes.replace(0),
+            video_frames: self.profile_video_frames.replace(0),
+        }
+    }
+
+    fn profile_mark(&self) -> Option<Instant> {
+        self.profiling_enabled.get().then(Instant::now)
+    }
+
+    fn record_upload(&self, started: Option<Instant>, bytes: usize) {
+        let Some(started) = started else { return };
+        self.profile_upload_elapsed_ns.set(
+            self.profile_upload_elapsed_ns
+                .get()
+                .saturating_add(elapsed_ns(started)),
+        );
+        self.profile_upload_bytes
+            .set(self.profile_upload_bytes.get().saturating_add(bytes as u64));
+    }
+
+    fn record_video_upload(&self, started: Option<Instant>, bytes: usize) {
+        let Some(started) = started else { return };
+        self.profile_video_elapsed_ns.set(
+            self.profile_video_elapsed_ns
+                .get()
+                .saturating_add(elapsed_ns(started)),
+        );
+        self.profile_video_bytes
+            .set(self.profile_video_bytes.get().saturating_add(bytes as u64));
+        self.profile_video_frames
+            .set(self.profile_video_frames.get().saturating_add(1));
     }
 
     /// Changes whenever an upload can alter pixels sampled by a draw command.
@@ -303,6 +369,7 @@ impl GlTextureProvider {
             return None;
         }
 
+        let upload_started = self.profile_mark();
         self.remove_if_cached(name);
         let texture = unsafe { self.gl.create_texture().ok()? };
         unsafe {
@@ -350,6 +417,7 @@ impl GlTextureProvider {
         );
         self.cache.insert(name.to_string(), entry);
         self.mark_texture_changed(entry.0);
+        self.record_upload(upload_started, data.len());
         Some(entry)
     }
 
@@ -378,6 +446,7 @@ impl GlTextureProvider {
             return None;
         }
 
+        let upload_started = self.profile_mark();
         self.remove_if_cached(name);
         let texture = unsafe { self.gl.create_texture().ok()? };
         unsafe {
@@ -425,12 +494,14 @@ impl GlTextureProvider {
         );
         self.cache.insert(name.to_string(), entry);
         self.mark_texture_changed(entry.0);
+        self.record_upload(upload_started, data.len());
         Some(entry)
     }
 
     /// Upload one host-decoded RGBA video frame without retaining a CPU copy.
     /// Reuses the GL texture while the frame dimensions stay unchanged.
     pub fn upload_video_rgba(&mut self, name: &str, width: u32, height: u32, rgba: &[u8]) -> bool {
+        let video_started = self.profile_mark();
         let Some(expected_len) = (width as usize)
             .checked_mul(height as usize)
             .and_then(|pixels| pixels.checked_mul(4))
@@ -447,6 +518,7 @@ impl GlTextureProvider {
             && info.height == height
             && let Some(raw) = NonZeroU32::new(texture.0 as u32)
         {
+            let upload_started = self.profile_mark();
             unsafe {
                 self.gl
                     .bind_texture(glow::TEXTURE_2D, Some(glow::NativeTexture(raw)));
@@ -466,6 +538,8 @@ impl GlTextureProvider {
             self.cpu_pixels.remove(&texture);
             self.opaque_textures.insert(texture);
             self.mark_texture_changed(texture);
+            self.record_upload(upload_started, rgba.len());
+            self.record_video_upload(video_started, rgba.len());
             return true;
         }
 
@@ -492,6 +566,7 @@ impl GlTextureProvider {
         self.cpu_pixels.remove(&entry.0);
         self.opaque_textures.insert(entry.0);
         self.mark_texture_changed(entry.0);
+        self.record_video_upload(video_started, rgba.len());
         true
     }
 
@@ -519,6 +594,7 @@ impl GlTextureProvider {
         height: u32,
         rgba: &[u8],
     ) -> Option<(TextureId, TextureInfo)> {
+        let upload_started = self.profile_mark();
         let gl = &self.gl;
         unsafe {
             let tex = match gl.create_texture() {
@@ -564,6 +640,7 @@ impl GlTextureProvider {
 
             // glow 的 NativeTexture 内部是 NonZeroU32；取出原始 id 存进句柄。
             let raw = tex.0.get();
+            self.record_upload(upload_started, rgba.len());
             Some((TextureId(raw as u64), TextureInfo { width, height }))
         }
     }
@@ -796,6 +873,10 @@ impl TextureProvider for GlTextureProvider {
             }
         }
     }
+}
+
+fn elapsed_ns(started: Instant) -> u64 {
+    started.elapsed().as_nanos().min(u64::MAX as u128) as u64
 }
 
 fn rgba_is_opaque(rgba: &[u8]) -> bool {

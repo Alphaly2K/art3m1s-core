@@ -24,6 +24,7 @@ use crate::render_pipeline::draw::{
     TextureInfo,
 };
 use glow::HasContext;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::rc::Rc;
@@ -34,6 +35,14 @@ mod shader;
 
 pub use crate::render_pipeline::ShaderProfile;
 pub use provider::{AssetSource, GlTextureProvider, PlaceholderKind};
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct RenderProfile {
+    pub draw_calls: u64,
+    pub vertices: u64,
+    pub texture_binds: u64,
+    pub dynamic_mesh_uploaded_bytes: u64,
+}
 
 fn next_shader_group(
     frame: &DrawList,
@@ -103,6 +112,11 @@ pub struct GlRenderer {
     /// 烘进持久 FBO 后污染后续局部帧。
     last_damage_overlay: Option<RenderRegion>,
     damage_flash_index: usize,
+    profiling_enabled: Cell<bool>,
+    profile_draw_calls: Cell<u64>,
+    profile_vertices: Cell<u64>,
+    profile_texture_binds: Cell<u64>,
+    profile_dynamic_mesh_uploaded_bytes: Cell<u64>,
 }
 
 impl GlRenderer {
@@ -237,6 +251,11 @@ impl GlRenderer {
                 viewport_height: stage_height as i32,
                 last_damage_overlay: None,
                 damage_flash_index: 0,
+                profiling_enabled: Cell::new(false),
+                profile_draw_calls: Cell::new(0),
+                profile_vertices: Cell::new(0),
+                profile_texture_binds: Cell::new(0),
+                profile_dynamic_mesh_uploaded_bytes: Cell::new(0),
             };
             Ok(renderer)
         }
@@ -268,6 +287,35 @@ impl GlRenderer {
         self.stage_width = width as f32;
         self.stage_height = height as f32;
         self.last_damage_overlay = None;
+    }
+
+    pub(crate) fn set_profile_enabled(&self, enabled: bool) {
+        self.profiling_enabled.set(enabled);
+        let _ = self.take_profile_stats();
+    }
+
+    pub(crate) fn take_profile_stats(&self) -> RenderProfile {
+        RenderProfile {
+            draw_calls: self.profile_draw_calls.replace(0),
+            vertices: self.profile_vertices.replace(0),
+            texture_binds: self.profile_texture_binds.replace(0),
+            dynamic_mesh_uploaded_bytes: self.profile_dynamic_mesh_uploaded_bytes.replace(0),
+        }
+    }
+
+    fn record_draw(&self, vertices: u64, texture_binds: u64) {
+        if !self.profiling_enabled.get() {
+            return;
+        }
+        self.profile_draw_calls
+            .set(self.profile_draw_calls.get().saturating_add(1));
+        self.profile_vertices
+            .set(self.profile_vertices.get().saturating_add(vertices));
+        self.profile_texture_binds.set(
+            self.profile_texture_binds
+                .get()
+                .saturating_add(texture_binds),
+        );
     }
 
     /// Register one Artemis `[lyshader]` HLSL effect under its script id.
@@ -618,6 +666,10 @@ impl GlRenderer {
             }
 
             self.set_blend(cmd.blend);
+            self.record_draw(
+                mesh_range.map_or(6, |(_, count)| count.max(0) as u64),
+                if custom_program.is_some() { 4 } else { 1 },
+            );
 
             // transform: glam::Affine2 → mat3（列主序）。
             let m = cmd.transform.matrix2;
@@ -860,6 +912,13 @@ impl GlRenderer {
                     bytemuck_cast(floats),
                     glow::DYNAMIC_DRAW,
                 );
+                if self.profiling_enabled.get() {
+                    self.profile_dynamic_mesh_uploaded_bytes.set(
+                        self.profile_dynamic_mesh_uploaded_bytes
+                            .get()
+                            .saturating_add(std::mem::size_of_val(floats) as u64),
+                    );
+                }
             }
             gl.bind_vertex_array(Some(self.vao));
 
@@ -975,6 +1034,7 @@ impl GlRenderer {
             gl.uniform_1_i32(self.program_bindings.sampler.as_ref(), 0);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            self.record_draw(6, 1);
             gl.draw_arrays(glow::TRIANGLES, 0, 6);
             gl.flush();
 

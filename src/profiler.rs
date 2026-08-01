@@ -1,11 +1,15 @@
 use serde::Serialize;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-const WINDOW: Duration = Duration::from_millis(500);
+const PUBLISH_INTERVAL: Duration = Duration::from_millis(500);
+const SAMPLE_WINDOW: Duration = Duration::from_secs(10);
 const QUEUE_CAPACITY: usize = 256;
+const MAX_WINDOW_SAMPLES: usize = 4096;
+const TIMING_COUNT: usize = 18;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct FrameProfile {
@@ -21,7 +25,10 @@ pub(crate) struct FrameProfile {
     pub compositor_ns: u64,
     pub text_ns: u64,
     pub frame_build_ns: u64,
+    pub damage_compute_ns: u64,
     pub transition_capture_ns: u64,
+    pub texture_upload_ns: u64,
+    pub video_upload_ns: u64,
     pub gpu_submit_ns: u64,
     pub present_ns: u64,
     pub readback_ns: u64,
@@ -32,6 +39,13 @@ pub(crate) struct FrameProfile {
     pub damage_pixels: u64,
     pub stage_pixels: u64,
     pub draw_calls: u64,
+    pub vertices: u64,
+    pub texture_binds: u64,
+    pub draw_list_commands: u64,
+    pub uploaded_bytes: u64,
+    pub video_uploaded_bytes: u64,
+    pub video_uploaded_frames: u64,
+    pub dynamic_mesh_uploaded_bytes: u64,
     pub texture_count: u64,
     pub texture_gpu_bytes: u64,
     pub texture_cpu_bytes: u64,
@@ -75,7 +89,10 @@ pub struct ProfileTimings {
     pub compositor_ms: f64,
     pub text_ms: f64,
     pub frame_build_ms: f64,
+    pub damage_compute_ms: f64,
     pub transition_capture_ms: f64,
+    pub texture_upload_ms: f64,
+    pub video_upload_ms: f64,
     pub gpu_submit_ms: f64,
     pub present_ms: f64,
     pub readback_ms: f64,
@@ -85,15 +102,32 @@ pub struct ProfileTimings {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ProfilerSnapshot {
     pub enabled: bool,
+    /// Kept for older hosts; equivalent to `session_ms`.
     pub window_ms: u64,
+    pub session_ms: u64,
+    pub sample_window_ms: u64,
+    pub sample_count: u64,
     pub tick_hz: f64,
     pub rendered_fps: f64,
+    pub current: ProfileTimings,
     pub average: ProfileTimings,
+    pub one_percent: ProfileTimings,
+    /// Compatibility alias for old hosts. It now contains `one_percent`.
     pub maximum: ProfileTimings,
     pub damage_percent: f64,
-    pub draw_calls: f64,
+    pub current_rendered: bool,
+    pub draw_calls: u64,
+    pub vertices: u64,
+    pub texture_binds: u64,
+    pub draw_list_commands: u64,
+    pub rendered_frames: u64,
+    pub skipped_frames: u64,
     pub host_ffi_calls_per_second: f64,
     pub host_ffi_mib_per_second: f64,
+    pub uploaded_mib_per_second: f64,
+    pub video_uploaded_mib_per_second: f64,
+    pub video_uploaded_frames_per_second: f64,
+    pub dynamic_mesh_uploaded_mib_per_second: f64,
     pub texture_count: u64,
     pub texture_gpu_mib: f64,
     pub texture_cpu_mib: f64,
@@ -141,7 +175,9 @@ impl RuntimeProfiler {
         self.dropped.store(0, Ordering::Relaxed);
         crate::ffi::set_profile_io_enabled(enabled);
         if let Some(sender) = &self.sender {
-            let _ = sender.try_send(Message::Reset(enabled));
+            // Toggling is a cold UI path. Delivering the reset reliably is
+            // more important than avoiding a short wait behind queued frames.
+            let _ = sender.send(Message::Reset(enabled));
         }
         if let Ok(mut snapshot) = self.snapshot.write() {
             snapshot.enabled = enabled;
@@ -189,63 +225,130 @@ impl Drop for RuntimeProfiler {
     }
 }
 
-#[derive(Default)]
-struct WindowAccumulator {
-    frames: u64,
-    rendered: u64,
-    sums: [u128; 15],
-    maxima: [u64; 15],
-    damage_pixels: u128,
-    stage_pixels: u128,
-    draw_calls: u128,
-    host_ffi_calls: u128,
-    host_ffi_bytes: u128,
-    latest: FrameProfile,
+#[derive(Clone, Copy)]
+struct TimedFrame {
+    captured_at: Instant,
+    profile: FrameProfile,
 }
 
-impl WindowAccumulator {
+#[derive(Default)]
+struct RollingWindow {
+    samples: VecDeque<TimedFrame>,
+}
+
+impl RollingWindow {
     fn push(&mut self, frame: FrameProfile) {
-        let values = timing_values(&frame);
-        self.frames += 1;
-        self.rendered += u64::from(frame.rendered);
-        for (index, value) in values.into_iter().enumerate() {
-            self.sums[index] += value as u128;
-            self.maxima[index] = self.maxima[index].max(value);
-        }
-        if frame.rendered {
-            self.damage_pixels += frame.damage_pixels as u128;
-            self.stage_pixels += frame.stage_pixels as u128;
-            self.draw_calls += frame.draw_calls as u128;
-        }
-        self.host_ffi_calls += frame.host_ffi_calls as u128;
-        self.host_ffi_bytes += frame.host_ffi_bytes as u128;
-        self.latest = frame;
+        self.push_at(Instant::now(), frame);
     }
 
-    fn snapshot(&self, elapsed: Duration, enabled: bool, dropped: u64) -> ProfilerSnapshot {
-        let seconds = elapsed.as_secs_f64().max(0.001);
-        let frame_divisor = self.frames.max(1) as f64;
-        let render_divisor = self.rendered.max(1) as f64;
+    fn push_at(&mut self, captured_at: Instant, frame: FrameProfile) {
+        self.samples.push_back(TimedFrame {
+            captured_at,
+            profile: frame,
+        });
+        self.trim(captured_at);
+    }
+
+    fn trim(&mut self, now: Instant) {
+        while self
+            .samples
+            .front()
+            .is_some_and(|sample| now.saturating_duration_since(sample.captured_at) > SAMPLE_WINDOW)
+        {
+            self.samples.pop_front();
+        }
+        while self.samples.len() > MAX_WINDOW_SAMPLES {
+            self.samples.pop_front();
+        }
+    }
+
+    fn snapshot(
+        &mut self,
+        now: Instant,
+        session_elapsed: Duration,
+        enabled: bool,
+        dropped: u64,
+    ) -> ProfilerSnapshot {
+        self.trim(now);
+        let profiles = self
+            .samples
+            .iter()
+            .map(|sample| sample.profile)
+            .collect::<Vec<_>>();
+        let latest = profiles.last().copied().unwrap_or_default();
+        let frame_count = profiles.len() as u64;
+        let rendered_frames = profiles.iter().filter(|frame| frame.rendered).count() as u64;
+        let sample_elapsed = session_elapsed.min(SAMPLE_WINDOW);
+        let seconds = sample_elapsed.as_secs_f64().max(0.001);
+        let sums = profiles
+            .iter()
+            .fold([0u128; TIMING_COUNT], |mut sums, frame| {
+                for (index, value) in timing_values(frame).into_iter().enumerate() {
+                    sums[index] += value as u128;
+                }
+                sums
+            });
+        let divisor = frame_count.max(1) as f64;
+        let average_values = sums.map(|value| value as f64 / divisor);
+        let one_percent_values = std::array::from_fn(|index| {
+            slowest_one_percent_average(profiles.iter().map(|frame| timing_values(frame)[index]))
+        });
+        let current = timings_from_values(timing_values(&latest).map(|value| value as f64));
+        let average = timings_from_values(average_values);
+        let one_percent = timings_from_values(one_percent_values);
+        let sum_counter = |read: fn(&FrameProfile) -> u64| -> u128 {
+            profiles.iter().map(|frame| read(frame) as u128).sum()
+        };
+        let session_ms = duration_ms(session_elapsed);
         ProfilerSnapshot {
             enabled,
-            window_ms: elapsed.as_millis().min(u64::MAX as u128) as u64,
-            tick_hz: self.frames as f64 / seconds,
-            rendered_fps: self.rendered as f64 / seconds,
-            average: timings_from_values(self.sums.map(|value| value as f64 / frame_divisor)),
-            maximum: timings_from_values(self.maxima.map(|value| value as f64)),
-            damage_percent: if self.stage_pixels == 0 {
+            window_ms: session_ms,
+            session_ms,
+            sample_window_ms: duration_ms(sample_elapsed),
+            sample_count: frame_count,
+            tick_hz: frame_count as f64 / seconds,
+            rendered_fps: rendered_frames as f64 / seconds,
+            current,
+            average,
+            one_percent: one_percent.clone(),
+            maximum: one_percent,
+            damage_percent: if latest.stage_pixels == 0 {
                 0.0
             } else {
-                self.damage_pixels as f64 * 100.0 / self.stage_pixels as f64
+                latest.damage_pixels as f64 * 100.0 / latest.stage_pixels as f64
             },
-            draw_calls: self.draw_calls as f64 / render_divisor,
-            host_ffi_calls_per_second: self.host_ffi_calls as f64 / seconds,
-            host_ffi_mib_per_second: self.host_ffi_bytes as f64 / (1024.0 * 1024.0) / seconds,
-            texture_count: self.latest.texture_count,
-            texture_gpu_mib: mib(self.latest.texture_gpu_bytes),
-            texture_cpu_mib: mib(self.latest.texture_cpu_bytes),
-            emote_layers: self.latest.emote_layers,
-            emote_source_mib: mib(self.latest.emote_source_bytes),
+            current_rendered: latest.rendered,
+            draw_calls: latest.draw_calls,
+            vertices: latest.vertices,
+            texture_binds: latest.texture_binds,
+            draw_list_commands: latest.draw_list_commands,
+            rendered_frames,
+            skipped_frames: frame_count.saturating_sub(rendered_frames),
+            host_ffi_calls_per_second: sum_counter(|frame| frame.host_ffi_calls) as f64 / seconds,
+            host_ffi_mib_per_second: bytes_per_second_to_mib(
+                sum_counter(|frame| frame.host_ffi_bytes),
+                seconds,
+            ),
+            uploaded_mib_per_second: bytes_per_second_to_mib(
+                sum_counter(|frame| frame.uploaded_bytes),
+                seconds,
+            ),
+            video_uploaded_mib_per_second: bytes_per_second_to_mib(
+                sum_counter(|frame| frame.video_uploaded_bytes),
+                seconds,
+            ),
+            video_uploaded_frames_per_second: sum_counter(|frame| frame.video_uploaded_frames)
+                as f64
+                / seconds,
+            dynamic_mesh_uploaded_mib_per_second: bytes_per_second_to_mib(
+                sum_counter(|frame| frame.dynamic_mesh_uploaded_bytes),
+                seconds,
+            ),
+            texture_count: latest.texture_count,
+            texture_gpu_mib: mib(latest.texture_gpu_bytes),
+            texture_cpu_mib: mib(latest.texture_cpu_bytes),
+            emote_layers: latest.emote_layers,
+            emote_source_mib: mib(latest.emote_source_bytes),
             dropped_samples: dropped,
         }
     }
@@ -259,7 +362,7 @@ fn aggregate(
     let mut enabled = false;
     let mut session_started = Instant::now();
     let mut refresh_started = Instant::now();
-    let mut accumulator = WindowAccumulator::default();
+    let mut window = RollingWindow::default();
     loop {
         if !enabled {
             match receiver.recv() {
@@ -267,44 +370,43 @@ fn aggregate(
                     enabled = value;
                     session_started = Instant::now();
                     refresh_started = session_started;
-                    accumulator = WindowAccumulator::default();
+                    window = RollingWindow::default();
                     continue;
                 }
                 Ok(Message::Frame(_)) => continue,
                 Err(_) => break,
             }
         }
-        let timeout = WINDOW.saturating_sub(refresh_started.elapsed());
+        let timeout = PUBLISH_INTERVAL.saturating_sub(refresh_started.elapsed());
         match receiver.recv_timeout(timeout) {
-            Ok(Message::Frame(frame)) if enabled => accumulator.push(frame),
+            Ok(Message::Frame(frame)) if enabled => window.push(frame),
             Ok(Message::Frame(_)) => {}
             Ok(Message::Reset(value)) => {
                 enabled = value;
                 session_started = Instant::now();
                 refresh_started = session_started;
-                accumulator = WindowAccumulator::default();
+                window = RollingWindow::default();
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
-        if refresh_started.elapsed() >= WINDOW {
-            let value = accumulator.snapshot(
-                session_started.elapsed(),
+        if refresh_started.elapsed() >= PUBLISH_INTERVAL {
+            let now = Instant::now();
+            let value = window.snapshot(
+                now,
+                now.saturating_duration_since(session_started),
                 enabled,
                 dropped.load(Ordering::Relaxed),
             );
             if let Ok(mut output) = snapshot.write() {
                 *output = value;
             }
-            // Only the publication clock rolls forward. The accumulator is
-            // intentionally session-long so average values converge and peak
-            // values remain visible until profiling is explicitly restarted.
-            refresh_started = Instant::now();
+            refresh_started = now;
         }
     }
 }
 
-fn timing_values(frame: &FrameProfile) -> [u64; 15] {
+fn timing_values(frame: &FrameProfile) -> [u64; TIMING_COUNT] {
     [
         frame.ffi_call_ns,
         frame.logic_ns,
@@ -316,7 +418,10 @@ fn timing_values(frame: &FrameProfile) -> [u64; 15] {
         frame.compositor_ns,
         frame.text_ns,
         frame.frame_build_ns,
+        frame.damage_compute_ns,
         frame.transition_capture_ns,
+        frame.texture_upload_ns,
+        frame.video_upload_ns,
         frame.gpu_submit_ns,
         frame.present_ns,
         frame.readback_ns,
@@ -324,7 +429,7 @@ fn timing_values(frame: &FrameProfile) -> [u64; 15] {
     ]
 }
 
-fn timings_from_values(values: [f64; 15]) -> ProfileTimings {
+fn timings_from_values(values: [f64; TIMING_COUNT]) -> ProfileTimings {
     let ms = |value: f64| value / 1_000_000.0;
     ProfileTimings {
         ffi_call_ms: ms(values[0]),
@@ -337,12 +442,37 @@ fn timings_from_values(values: [f64; 15]) -> ProfileTimings {
         compositor_ms: ms(values[7]),
         text_ms: ms(values[8]),
         frame_build_ms: ms(values[9]),
-        transition_capture_ms: ms(values[10]),
-        gpu_submit_ms: ms(values[11]),
-        present_ms: ms(values[12]),
-        readback_ms: ms(values[13]),
-        host_ffi_ms: ms(values[14]),
+        damage_compute_ms: ms(values[10]),
+        transition_capture_ms: ms(values[11]),
+        texture_upload_ms: ms(values[12]),
+        video_upload_ms: ms(values[13]),
+        gpu_submit_ms: ms(values[14]),
+        present_ms: ms(values[15]),
+        readback_ms: ms(values[16]),
+        host_ffi_ms: ms(values[17]),
     }
+}
+
+fn slowest_one_percent_average(values: impl Iterator<Item = u64>) -> f64 {
+    let mut values = values.collect::<Vec<_>>();
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.sort_unstable_by(|left, right| right.cmp(left));
+    let tail = values.len().div_ceil(100).max(1);
+    values[..tail]
+        .iter()
+        .map(|value| *value as u128)
+        .sum::<u128>() as f64
+        / tail as f64
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    duration.as_millis().min(u64::MAX as u128) as u64
+}
+
+fn bytes_per_second_to_mib(bytes: u128, seconds: f64) -> f64 {
+    bytes as f64 / (1024.0 * 1024.0) / seconds
 }
 
 fn mib(bytes: u64) -> f64 {
@@ -354,42 +484,78 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accumulator_keeps_interpreter_separate_from_host_ffi() {
-        let mut accumulator = WindowAccumulator::default();
-        accumulator.push(FrameProfile {
-            enabled: true,
-            interpreter_ns: 2_000_000,
-            host_ffi_ns: 500_000,
-            host_ffi_calls: 2,
-            rendered: true,
-            damage_pixels: 25,
-            stage_pixels: 100,
-            ..FrameProfile::default()
-        });
-        let snapshot = accumulator.snapshot(Duration::from_secs(1), true, 0);
-        assert_eq!(snapshot.average.interpreter_ms, 2.0);
-        assert_eq!(snapshot.average.host_ffi_ms, 0.5);
+    fn rolling_window_keeps_current_state_separate_from_timing_averages() {
+        let now = Instant::now();
+        let mut window = RollingWindow::default();
+        window.push_at(
+            now - Duration::from_secs(1),
+            FrameProfile {
+                enabled: true,
+                interpreter_ns: 2_000_000,
+                host_ffi_ns: 500_000,
+                host_ffi_calls: 2,
+                rendered: true,
+                damage_pixels: 100,
+                stage_pixels: 100,
+                draw_calls: 10,
+                ..FrameProfile::default()
+            },
+        );
+        window.push_at(
+            now,
+            FrameProfile {
+                enabled: true,
+                interpreter_ns: 4_000_000,
+                damage_pixels: 25,
+                stage_pixels: 100,
+                draw_calls: 3,
+                ..FrameProfile::default()
+            },
+        );
+        let snapshot = window.snapshot(now, Duration::from_secs(1), true, 0);
+        assert_eq!(snapshot.current.interpreter_ms, 4.0);
+        assert_eq!(snapshot.average.interpreter_ms, 3.0);
+        assert_eq!(snapshot.average.host_ffi_ms, 0.25);
         assert_eq!(snapshot.host_ffi_calls_per_second, 2.0);
         assert_eq!(snapshot.damage_percent, 25.0);
+        assert_eq!(snapshot.draw_calls, 3);
     }
 
     #[test]
-    fn accumulator_keeps_session_average_and_peak() {
-        let mut accumulator = WindowAccumulator::default();
-        accumulator.push(FrameProfile {
-            enabled: true,
-            interpreter_ns: 1_000_000,
-            ..FrameProfile::default()
+    fn slowest_one_percent_averages_the_tail_instead_of_one_peak() {
+        let values = (0..200).map(|index| match index {
+            198 => 10,
+            199 => 20,
+            _ => 1,
         });
-        accumulator.push(FrameProfile {
-            enabled: true,
-            interpreter_ns: 5_000_000,
-            ..FrameProfile::default()
-        });
+        assert_eq!(slowest_one_percent_average(values), 15.0);
+    }
 
-        let snapshot = accumulator.snapshot(Duration::from_secs(2), true, 0);
-        assert_eq!(snapshot.average.interpreter_ms, 3.0);
-        assert_eq!(snapshot.maximum.interpreter_ms, 5.0);
-        assert_eq!(snapshot.window_ms, 2_000);
+    #[test]
+    fn rolling_window_evicts_startup_spikes() {
+        let now = Instant::now();
+        let mut window = RollingWindow::default();
+        window.push_at(
+            now - SAMPLE_WINDOW - Duration::from_millis(1),
+            FrameProfile {
+                enabled: true,
+                interpreter_ns: 100_000_000,
+                ..FrameProfile::default()
+            },
+        );
+        window.push_at(
+            now,
+            FrameProfile {
+                enabled: true,
+                interpreter_ns: 1_000_000,
+                ..FrameProfile::default()
+            },
+        );
+
+        let snapshot = window.snapshot(now, Duration::from_secs(30), true, 0);
+        assert_eq!(snapshot.sample_window_ms, 10_000);
+        assert_eq!(snapshot.sample_count, 1);
+        assert_eq!(snapshot.average.interpreter_ms, 1.0);
+        assert_eq!(snapshot.one_percent.interpreter_ms, 1.0);
     }
 }

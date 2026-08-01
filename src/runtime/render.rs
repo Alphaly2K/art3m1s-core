@@ -74,7 +74,7 @@ impl CoreRuntime {
 
         let (frame, _, _) = self.build_bound_scene(true, None);
         profile.frame_build_ns = crate::profiler::FrameProfile::elapsed(build_started);
-        profile.draw_calls = (frame.commands.len() + frame.mask_commands.len()) as u64;
+        profile.draw_list_commands = (frame.commands.len() + frame.mask_commands.len()) as u64;
         let texture_revision = self.texture_provider.content_revision();
         let changed_textures = self
             .texture_provider
@@ -106,8 +106,8 @@ impl CoreRuntime {
             .filter(|&texture| self.texture_provider.texture_is_opaque(texture))
             .collect::<std::collections::HashSet<_>>();
         let visualize_damage = crate::ffi::damage_visualization_enabled();
-        let gpu_started = profile.mark();
-        let repaint_region = match frame_damage(
+        let damage_started = profile.mark();
+        let damage_decision = frame_damage(
             self.last_submitted_frame.as_ref(),
             self.last_submitted_texture_revision,
             &frame,
@@ -116,7 +116,10 @@ impl CoreRuntime {
             &opaque_textures,
             self.stage_w,
             self.stage_h,
-        ) {
+        );
+        profile.damage_compute_ns = crate::profiler::FrameProfile::elapsed(damage_started);
+        let gpu_started = profile.mark();
+        let repaint_region = match damage_decision {
             DamageDecision::Skip => {
                 let gpu_started = profile.mark();
                 let cleared_debug_overlay = self.renderer.clear_damage_overlay(&frame);
