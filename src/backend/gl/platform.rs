@@ -753,9 +753,7 @@ fn create_egl(
                 // Load libEGL。Linux 没有独立 ANGLE 时走 mesa libEGL，需要
                 // RTLD_GLOBAL 让 EGL/GL 跨库共享符号。
                 let egl_candidates = if cfg!(target_os = "ios") {
-                    vec![crate::ffi::angle_lib_path(
-                        "MetalANGLE.framework/MetalANGLE",
-                    )]
+                    vec![crate::ffi::angle_lib_path("libEGL.framework/libEGL")]
                 } else if cfg!(target_os = "macos") {
                     vec![crate::ffi::angle_lib_path("libEGL.dylib")]
                 } else if cfg!(target_os = "android") {
@@ -977,9 +975,7 @@ fn create_egl(
                 // Load GLESv2 for glow. Linux 必须用 RTLD_GLOBAL 让 mesa 的
                 // dispatch 层找到已预加载的 libGL 桌面符号。
                 let gles_candidates = if cfg!(target_os = "ios") {
-                    vec![crate::ffi::angle_lib_path(
-                        "MetalANGLE.framework/MetalANGLE",
-                    )]
+                    vec![crate::ffi::angle_lib_path("libGLESv2.framework/libGLESv2")]
                 } else if cfg!(target_os = "macos") {
                     vec![crate::ffi::angle_lib_path("libGLESv2.dylib")]
                 } else if cfg!(target_os = "android") {
