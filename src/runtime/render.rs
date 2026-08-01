@@ -50,15 +50,23 @@ impl CoreRuntime {
         let pipeline = RenderPipeline::new(&self.compositor);
         if pipeline.needs_trans_capture() {
             let capture_started = profile.mark();
-            let pixels = unsafe {
-                platform::read_pixels(&self.gl, self.stage_w as i32, self.stage_h as i32)
-            };
-            pipeline.capture_trans_texture(
-                &pixels,
+            if let Some((texture, info)) = self.texture_provider.copy_bound_framebuffer_render_only(
+                "__trans_capture__",
                 self.stage_w,
                 self.stage_h,
-                &mut self.texture_provider,
-            );
+            ) {
+                pipeline.capture_trans_gpu_texture(texture, info);
+            } else {
+                let pixels = unsafe {
+                    platform::read_pixels(&self.gl, self.stage_w as i32, self.stage_h as i32)
+                };
+                pipeline.capture_trans_texture(
+                    &pixels,
+                    self.stage_w,
+                    self.stage_h,
+                    &mut self.texture_provider,
+                );
+            }
             profile.transition_capture_ns = crate::profiler::FrameProfile::elapsed(capture_started);
         }
 

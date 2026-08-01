@@ -24,6 +24,7 @@ pub(crate) struct TransitionState {
     duration_ms: u64,
     captured_texture: Option<TextureId>,
     captured_info: Option<TextureInfo>,
+    captured_flipped_y: bool,
     needs_capture: bool,
     /// type=2 的规则灰度图路径（type 0/1 忽略）。
     rule: Option<String>,
@@ -49,6 +50,7 @@ pub(crate) fn start(
         duration_ms: request.time.unwrap_or(1000),
         captured_texture: None,
         captured_info: None,
+        captured_flipped_y: false,
         needs_capture: true,
         rule: request.rule.map(str::to_string),
         vague: request.vague,
@@ -135,9 +137,30 @@ pub(crate) fn capture_texture(
     {
         transition.captured_texture = Some(texture);
         transition.captured_info = Some(info);
+        transition.captured_flipped_y = false;
         transition.needs_capture = false;
         transition.start_ms = clock_ms;
     }
+}
+
+pub(crate) fn capture_gpu_texture(
+    slot: &RefCell<Option<TransitionState>>,
+    clock_ms: u64,
+    texture: TextureId,
+    info: TextureInfo,
+) {
+    let mut state = slot.borrow_mut();
+    let Some(transition) = state.as_mut() else {
+        return;
+    };
+    if !transition.needs_capture {
+        return;
+    }
+    transition.captured_texture = Some(texture);
+    transition.captured_info = Some(info);
+    transition.captured_flipped_y = true;
+    transition.needs_capture = false;
+    transition.start_ms = clock_ms;
 }
 
 pub(crate) fn retained_files(slot: &RefCell<Option<TransitionState>>) -> Vec<String> {
@@ -177,6 +200,11 @@ pub(crate) fn overlay_old_frame(
 
     let elapsed = clock_ms.saturating_sub(transition.start_ms);
     let progress = (elapsed as f32 / transition.duration_ms as f32).clamp(0.0, 1.0);
+    let mut capture_clip = ClipRect::full(info);
+    if transition.captured_flipped_y {
+        capture_clip.uv_offset[1] = 1.0;
+        capture_clip.uv_scale[1] = -1.0;
+    }
 
     // type=2 且 rule 可解析时用规则溶解 shader；rule 缺失/解析失败时
     // 退化为交叉淡化（比瞬切更贴近脚本意图）。
@@ -215,7 +243,7 @@ pub(crate) fn overlay_old_frame(
                 opacity: 1.0,
                 blend: BlendMode::Alpha,
                 color: ColorFilter::default(),
-                clip: ClipRect::full(info),
+                clip: capture_clip,
                 clip_bounds: None,
                 shader: Some(effect),
                 mesh: None,
@@ -231,7 +259,7 @@ pub(crate) fn overlay_old_frame(
                 opacity: 1.0 - progress,
                 blend: BlendMode::Alpha,
                 color: ColorFilter::default(),
-                clip: ClipRect::full(info),
+                clip: capture_clip,
                 clip_bounds: None,
                 shader: None,
                 mesh: None,
@@ -313,6 +341,37 @@ mod tests {
         let cmd = &frame.commands[0];
         assert!(cmd.shader.is_none());
         assert!((cmd.opacity - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn gpu_capture_flips_framebuffer_rows_when_sampled() {
+        let slot = RefCell::new(None);
+        let mut provider = MockProvider::new();
+        start(
+            &slot,
+            0,
+            TransitionRequest {
+                trans_type: 1,
+                time: Some(1000),
+                rule: None,
+                vague: None,
+                input: 1,
+            },
+        );
+        capture_gpu_texture(
+            &slot,
+            0,
+            TextureId(7),
+            TextureInfo {
+                width: 1600,
+                height: 900,
+            },
+        );
+
+        let mut frame = DrawList::new();
+        overlay_old_frame(&slot, 0, &mut frame, &mut provider);
+        assert_eq!(frame.commands[0].clip.uv_offset, [0.0, 1.0]);
+        assert_eq!(frame.commands[0].clip.uv_scale, [1.0, -1.0]);
     }
 
     #[test]

@@ -109,6 +109,15 @@ impl<'a> RenderPipeline<'a> {
         );
     }
 
+    pub fn capture_trans_gpu_texture(&self, texture: TextureId, info: TextureInfo) {
+        transition::capture_gpu_texture(
+            &self.compositor.trans_state,
+            self.compositor.clock_ms,
+            texture,
+            info,
+        );
+    }
+
     pub fn retained_files(&self) -> Vec<String> {
         let mut files = transition::retained_files(&self.compositor.trans_state);
         // [lyedit] 生成的加工后纹理不在场景 file 列表里，显式保活。

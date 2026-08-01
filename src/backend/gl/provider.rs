@@ -334,6 +334,70 @@ impl GlTextureProvider {
         Some(entry)
     }
 
+    /// Copies the currently bound framebuffer into a renderer-only texture.
+    ///
+    /// Unlike `read_pixels` followed by `upload_rgba_render_only`, this stays
+    /// entirely on the GPU and avoids a synchronous driver readback. The
+    /// resulting texture keeps OpenGL's bottom-left row order; callers must
+    /// sample it with vertically flipped UVs when drawing in stage space.
+    pub(crate) fn copy_bound_framebuffer_render_only(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+    ) -> Option<(TextureId, TextureInfo)> {
+        if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 {
+            return None;
+        }
+        self.remove_if_cached(name);
+        let texture = unsafe { self.gl.create_texture().ok()? };
+        unsafe {
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR as i32,
+            );
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::LINEAR as i32,
+            );
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_S,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            self.gl.copy_tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA,
+                0,
+                0,
+                width as i32,
+                height as i32,
+                0,
+            );
+            self.gl.bind_texture(glow::TEXTURE_2D, None);
+            if self.gl.get_error() != glow::NO_ERROR {
+                self.gl.delete_texture(texture);
+                return None;
+            }
+        }
+        let entry = (
+            TextureId(texture.0.get() as u64),
+            TextureInfo { width, height },
+        );
+        self.cache.insert(name.to_owned(), entry);
+        self.mark_texture_changed(entry.0);
+        Some(entry)
+    }
+
     fn upload_dxt5_render_only(
         &mut self,
         name: &str,
