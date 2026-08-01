@@ -134,6 +134,9 @@ pub struct CoreRuntime {
     scenario_text_shown: bool,
     /// 已读记录自上次持久化后是否有新增（syssave 时落 aread.dat）。
     read_dirty: bool,
+    /// Saved host GL context while libmpv is rendering directly into a
+    /// runtime-owned video-layer FBO. Leases are explicit and non-nestable.
+    video_gl_saved_context: Option<platform::SavedGlContext>,
     profiler: crate::profiler::RuntimeProfiler,
     /// Must drop after every GL-owned field. Runtime destruction first makes
     /// this context current, then renderer/provider drops can release objects.
@@ -237,6 +240,7 @@ impl CoreRuntime {
             was_click_wait: false,
             scenario_text_shown: false,
             read_dirty: false,
+            video_gl_saved_context: None,
             profiler: crate::profiler::RuntimeProfiler::new(),
             gl_ctx,
         })

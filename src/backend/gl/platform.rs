@@ -8,6 +8,13 @@ use glow::HasContext;
 pub trait GLPlatformContext: Send {
     fn make_current(&self) -> bool;
 
+    /// Resolves a GL entry point from the same implementation backing this
+    /// context. External renderers such as libmpv must not load a different
+    /// system GL when the runtime is using ANGLE.
+    fn get_proc_address(&self, _name: &str) -> *const std::ffi::c_void {
+        std::ptr::null()
+    }
+
     /// 保存当前线程的 GL 上下文并把我们的上下文设为 current，返回保存的句柄。
     /// 调用方稍后必须把句柄传给 [`GLPlatformContext::restore`] 以恢复原上下文。
     fn bind_save(&self) -> SavedGlContext;
@@ -158,12 +165,19 @@ fn create_cgl() -> Result<(Rc<glow::Context>, Box<dyn GLPlatformContext>), Strin
 
         pub struct Ctx {
             h: CGLContextObj,
+            gl_library: *mut c_void,
         }
         unsafe impl Send for Ctx {}
 
         impl GLPlatformContext for Ctx {
             fn make_current(&self) -> bool {
                 unsafe { CGLSetCurrentContext(self.h) == 0 }
+            }
+            fn get_proc_address(&self, name: &str) -> *const c_void {
+                let Ok(name) = CString::new(name) else {
+                    return std::ptr::null();
+                };
+                unsafe { dlsym(self.gl_library, name.as_ptr()) }
             }
             fn bind_save(&self) -> super::SavedGlContext {
                 let prev = unsafe { CGLGetCurrentContext() };
@@ -223,7 +237,7 @@ fn create_cgl() -> Result<(Rc<glow::Context>, Box<dyn GLPlatformContext>), Strin
                     let cs = CString::new(s).unwrap();
                     dlsym(fw, cs.as_ptr())
                 });
-                Ok((Rc::new(gl), Ctx { h }))
+                Ok((Rc::new(gl), Ctx { h, gl_library: fw }))
             }
         }
     }
@@ -256,6 +270,7 @@ fn create_egl(
         type EGLContext = *mut c_void;
         type EGLSurface = *mut c_void;
         type EGLint = i32;
+        type EglGetProcAddress = unsafe extern "C" fn(*const c_char) -> *const c_void;
 
         const EGL_NONE: EGLint = 0x3038;
         const EGL_RENDERABLE_TYPE: EGLint = 0x3040;
@@ -402,6 +417,7 @@ fn create_egl(
             get_error: unsafe extern "C" fn() -> EGLint,
             iosurface_texture_target: EGLint,
             external_surface: Mutex<Option<ExternalSurface>>,
+            get_proc_address: Option<EglGetProcAddress>,
             _egl_library: Library,
             _gles_library: Library,
             _desktop_gl_library: Option<Library>,
@@ -491,6 +507,18 @@ fn create_egl(
                 unsafe {
                     (self.make_current)(self.display, self.pbuffer, self.pbuffer, self.ctx) != 0
                 }
+            }
+            fn get_proc_address(&self, name: &str) -> *const c_void {
+                let Ok(name) = CString::new(name) else {
+                    return std::ptr::null();
+                };
+                if let Some(get_proc_address) = self.get_proc_address {
+                    let address = unsafe { get_proc_address(name.as_ptr()) };
+                    if !address.is_null() {
+                        return address;
+                    }
+                }
+                unsafe { symbol_address(&self._gles_library, &name) }
             }
             fn bind_save(&self) -> super::SavedGlContext {
                 // 先记录当前线程的 EGL 上下文（宿主如 Flutter 的），然后切到我们的。
@@ -1020,7 +1048,6 @@ fn create_egl(
                 // EGL 标准提供 eglGetProcAddress 取 GLES 函数；对桌面 GL 扩展符号
                 // mesa 可能返回 NULL，此时退回 dlsym(gles_lib)。
                 // macOS/ANGLE 上 dlsym 已经够用，保留原路径。
-                type EglGetProcAddress = unsafe extern "C" fn(*const c_char) -> *const c_void;
                 let egl_get_proc_addr: Option<EglGetProcAddress> =
                     optional_symbol(&egl_lib, "eglGetProcAddress");
 
@@ -1070,6 +1097,7 @@ fn create_egl(
                         get_error: egl_get_error,
                         iosurface_texture_target,
                         external_surface: Mutex::new(None),
+                        get_proc_address: egl_get_proc_addr,
                         _egl_library: egl_lib,
                         _gles_library: gles_lib,
                         _desktop_gl_library: desktop_gl_library,

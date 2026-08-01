@@ -349,6 +349,66 @@ impl CoreRuntime {
         uploaded
     }
 
+    /// Resolves GL symbols from the exact implementation used by this
+    /// runtime. This matters for ANGLE, where loading system OpenGL symbols
+    /// would create an incompatible render context for libmpv.
+    pub fn video_gl_proc_address(&self, name: &str) -> *const std::ffi::c_void {
+        self.gl_ctx.get_proc_address(name)
+    }
+
+    /// Makes the runtime GL context current for a short external render pass.
+    /// Calls are intentionally non-nestable; every successful begin must be
+    /// paired with `end_video_gl_render` even when the external renderer fails.
+    pub fn begin_video_gl_render(&mut self) -> Result<(), String> {
+        if self.video_gl_saved_context.is_some() {
+            return Err("video GL render lease is already active".into());
+        }
+        let saved = self.gl_ctx.bind_save();
+        if !self.gl_ctx.make_current() {
+            self.gl_ctx.restore(saved);
+            return Err("failed to make runtime GL context current".into());
+        }
+        self.video_gl_saved_context = Some(saved);
+        Ok(())
+    }
+
+    pub fn video_layer_gl_framebuffer(
+        &mut self,
+        id: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<u32, String> {
+        if self.video_gl_saved_context.is_none() {
+            return Err("video GL render lease is not active".into());
+        }
+        let is_playing = self
+            .video
+            .video_state()
+            .video_layers
+            .get(id)
+            .is_some_and(|channel| channel.playing);
+        if !is_playing {
+            return Err(format!("video layer is not playing: {id}"));
+        }
+        let texture_name = video_layer_texture_name(id);
+        self.texture_provider
+            .ensure_video_render_target(&texture_name, width, height)
+    }
+
+    pub fn commit_video_layer_gl_frame(&mut self, id: &str) -> bool {
+        if self.video_gl_saved_context.is_none() {
+            return false;
+        }
+        self.texture_provider
+            .commit_video_render_target(&video_layer_texture_name(id))
+    }
+
+    pub fn end_video_gl_render(&mut self) {
+        if let Some(saved) = self.video_gl_saved_context.take() {
+            self.gl_ctx.restore(saved);
+        }
+    }
+
     fn bind_video_layer_texture(&mut self, id: &str) {
         self.compositor
             .set_layer_file(id, Some(video_layer_texture_name(id)));

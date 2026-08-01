@@ -1190,6 +1190,97 @@ pub unsafe extern "C" fn art3m1s_runtime_notify_video_finished(
     rt.notify_video_finished(id);
 }
 
+/// libmpv OpenGL resolver callback. `ctx` must be the runtime pointer supplied
+/// as `mpv_opengl_init_params.get_proc_address_ctx` by the host.
+#[cfg(feature = "gl-backend")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_video_gl_get_proc_address(
+    ctx: *mut std::ffi::c_void,
+    name: *const c_char,
+) -> *mut std::ffi::c_void {
+    if ctx.is_null() || name.is_null() {
+        return std::ptr::null_mut();
+    }
+    let Some(name) = (unsafe { std::ffi::CStr::from_ptr(name).to_str().ok() }) else {
+        return std::ptr::null_mut();
+    };
+    let rt = unsafe { &*(ctx.cast::<CoreRuntime>()) };
+    rt.video_gl_proc_address(name).cast_mut()
+}
+
+#[cfg(feature = "gl-backend")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_video_gl_begin(rt: *mut CoreRuntime) -> c_int {
+    if rt.is_null() {
+        return 0;
+    }
+    let rt = unsafe { &mut *rt };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rt.begin_video_gl_render())) {
+        Ok(Ok(())) => 1,
+        Ok(Err(error)) => {
+            core_warn!("video GL begin failed: {error}");
+            0
+        }
+        Err(panic_info) => {
+            core_error!("video GL begin panicked: {}", panic_msg(&panic_info));
+            0
+        }
+    }
+}
+
+#[cfg(feature = "gl-backend")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_video_gl_framebuffer(
+    rt: *mut CoreRuntime,
+    id: *const c_char,
+    width: u32,
+    height: u32,
+) -> u32 {
+    if rt.is_null() || id.is_null() {
+        return 0;
+    }
+    let Some(id) = (unsafe { std::ffi::CStr::from_ptr(id).to_str().ok() }) else {
+        return 0;
+    };
+    let rt = unsafe { &mut *rt };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rt.video_layer_gl_framebuffer(id, width, height)
+            .unwrap_or(0)
+    }))
+    .unwrap_or(0)
+}
+
+#[cfg(feature = "gl-backend")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_video_gl_commit(
+    rt: *mut CoreRuntime,
+    id: *const c_char,
+) -> c_int {
+    if rt.is_null() || id.is_null() {
+        return 0;
+    }
+    let Some(id) = (unsafe { std::ffi::CStr::from_ptr(id).to_str().ok() }) else {
+        return 0;
+    };
+    let rt = unsafe { &mut *rt };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rt.commit_video_layer_gl_frame(id)
+    }))
+    .map_or(0, i32::from)
+}
+
+#[cfg(feature = "gl-backend")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_video_gl_end(rt: *mut CoreRuntime) {
+    if rt.is_null() {
+        return;
+    }
+    let rt = unsafe { &mut *rt };
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rt.end_video_gl_render();
+    }));
+}
+
 /// Upload one RGBA8 frame for a currently playing video layer.
 ///
 /// This call is synchronous. `rgba` is borrowed only for the duration of the

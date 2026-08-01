@@ -9,6 +9,7 @@
 //! 将来也可以接内存读 `.pfs` 的实现，provider 这边无需改动。样例项目暂无打包图片，
 //! 因此默认无字节源、一律回退占位，让整条绘制管线无需素材即可端到端验证。
 
+use super::platform;
 use crate::render_pipeline::draw::{TextureId, TextureInfo, TextureProvider};
 use glow::HasContext;
 use std::cell::Cell;
@@ -36,6 +37,13 @@ pub(crate) struct TextureUploadProfile {
     pub video_elapsed_ns: u64,
     pub video_bytes: u64,
     pub video_frames: u64,
+}
+
+#[derive(Clone, Copy)]
+struct VideoRenderTarget {
+    framebuffer: glow::Framebuffer,
+    texture: TextureId,
+    info: TextureInfo,
 }
 
 enum PixelStorage {
@@ -129,6 +137,7 @@ pub struct GlTextureProvider {
     texture_revisions: HashMap<TextureId, u64>,
     /// Texture handles whose uploaded pixels are known to have alpha 255.
     opaque_textures: HashSet<TextureId>,
+    video_render_targets: HashMap<String, VideoRenderTarget>,
     profiling_enabled: Cell<bool>,
     profile_upload_elapsed_ns: Cell<u64>,
     profile_upload_bytes: Cell<u64>,
@@ -149,6 +158,7 @@ impl GlTextureProvider {
             content_revision: 0,
             texture_revisions: HashMap::new(),
             opaque_textures: HashSet::new(),
+            video_render_targets: HashMap::new(),
             profiling_enabled: Cell::new(false),
             profile_upload_elapsed_ns: Cell::new(0),
             profile_upload_bytes: Cell::new(0),
@@ -171,6 +181,53 @@ impl GlTextureProvider {
             video_bytes: self.profile_video_bytes.replace(0),
             video_frames: self.profile_video_frames.replace(0),
         }
+    }
+
+    /// Ensures a color-renderable FBO whose attached texture is exposed under
+    /// the reserved video-layer texture name. The caller must have made this
+    /// provider's GL context current.
+    pub(crate) fn ensure_video_render_target(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<u32, String> {
+        if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 {
+            return Err("invalid video render target dimensions".into());
+        }
+        if let Some(target) = self.video_render_targets.get(name)
+            && target.info.width == width
+            && target.info.height == height
+        {
+            return Ok(target.framebuffer.0.get());
+        }
+
+        self.remove_if_cached(name);
+        let (framebuffer, texture) = unsafe {
+            platform::create_fbo_target(&self.gl, width as i32, height as i32)
+                .map_err(|error| format!("create video FBO failed: {error}"))?
+        };
+        let texture = TextureId(texture.0.get() as u64);
+        let info = TextureInfo { width, height };
+        self.cache.insert(name.to_owned(), (texture, info));
+        self.opaque_textures.insert(texture);
+        self.video_render_targets.insert(
+            name.to_owned(),
+            VideoRenderTarget {
+                framebuffer,
+                texture,
+                info,
+            },
+        );
+        Ok(framebuffer.0.get())
+    }
+
+    pub(crate) fn commit_video_render_target(&mut self, name: &str) -> bool {
+        let Some(target) = self.video_render_targets.get(name).copied() else {
+            return false;
+        };
+        self.mark_texture_changed(target.texture);
+        true
     }
 
     fn profile_mark(&self) -> Option<Instant> {
@@ -635,6 +692,11 @@ impl GlTextureProvider {
     }
 
     fn remove_if_cached(&mut self, name: &str) {
+        if let Some(target) = self.video_render_targets.remove(name) {
+            unsafe {
+                self.gl.delete_framebuffer(target.framebuffer);
+            }
+        }
         if let Some((id, _)) = self.cache.remove(name) {
             self.cpu_pixels.remove(&id);
             self.texture_revisions.remove(&id);
@@ -741,6 +803,11 @@ impl GlTextureProvider {
 
 impl Drop for GlTextureProvider {
     fn drop(&mut self) {
+        for target in self.video_render_targets.drain().map(|(_, target)| target) {
+            unsafe {
+                self.gl.delete_framebuffer(target.framebuffer);
+            }
+        }
         for (id, _) in self.cache.drain().map(|(_, entry)| entry) {
             if let Some(raw) = NonZeroU32::new(id.0 as u32) {
                 unsafe {
