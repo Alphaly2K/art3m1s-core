@@ -265,6 +265,22 @@ impl CoreRuntime {
         self.input.lock().unwrap().scripted_down_edge()
     }
 
+    /// Dispatch a script-registered global mode callback through the same
+    /// event-filter path as physical input. A callback that was actually
+    /// queued interrupts the current scenario and receives an inline frame.
+    pub(super) fn enqueue_mode_input_handler(&mut self, event_name: &str) {
+        let dispatch = enqueue_input_handler(
+            &self.interpreter,
+            &self.compositor,
+            event_name,
+            "",
+            &[("type", event_name)],
+        );
+        if dispatch.queued {
+            self.begin_inline_event_frame();
+        }
+    }
+
     pub(super) fn begin_inline_event_frame(&mut self) {
         self.refresh_inline_event_frame();
         if self.active_inline_event_frame.is_some() {
@@ -366,6 +382,7 @@ impl CoreRuntime {
         HandlerDispatch {
             handled: true,
             needs_return_frame: dispatch.needs_return_frame,
+            queued: dispatch.queued,
         }
     }
 
@@ -395,6 +412,7 @@ impl CoreRuntime {
         HandlerDispatch {
             handled: true,
             needs_return_frame: dispatch.needs_return_frame,
+            queued: dispatch.queued,
         }
     }
 
@@ -456,6 +474,7 @@ impl CoreRuntime {
         HandlerDispatch {
             handled: true,
             needs_return_frame: dispatch.needs_return_frame,
+            queued: dispatch.queued,
         }
     }
 }
@@ -498,6 +517,7 @@ pub(super) fn detach_inline_event_marker(
 struct HandlerDispatch {
     handled: bool,
     needs_return_frame: bool,
+    queued: bool,
 }
 
 fn is_mouse_button(key: u32) -> bool {
@@ -579,8 +599,8 @@ fn event_dispatch_layers(
 #[cfg(test)]
 mod tests {
     use super::{
-        InlineEventFrame, dispatch_handler, event_dispatch_layers, forced_drag_state,
-        global_push_absorbs_default_click, inline_event_marker_is_active,
+        InlineEventFrame, dispatch_handler, enqueue_input_handler, event_dispatch_layers,
+        forced_drag_state, global_push_absorbs_default_click, inline_event_marker_is_active,
         link_area_has_jump_target, pointer_hit_test_required,
     };
     use crate::compositor::Compositor;
@@ -714,6 +734,68 @@ mod tests {
                 .get::<String>("seen_id")
                 .unwrap(),
             "button"
+        );
+    }
+
+    #[test]
+    fn control_skip_callback_uses_the_registered_event_filter() {
+        let interpreter = Interpreter::new(InterpreterConfig::default());
+        let mut compositor = Compositor::new();
+        compositor.apply_event(&Event::SetEventHandler {
+            event_name: "controlskipin".into(),
+            file: None,
+            label: Some("last".into()),
+            call: false,
+            handler: None,
+            extra_params: HashMap::new(),
+        });
+        interpreter
+            .lua()
+            .load(
+                r#"
+                __engine:setEventFilter(function(e, name, param)
+                    seen_name = name
+                    seen_label = param.label
+                    return 1
+                end)
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let dispatch = enqueue_input_handler(
+            &interpreter,
+            &compositor,
+            "controlskipin",
+            "",
+            &[("type", "controlskipin")],
+        );
+
+        assert!(dispatch.handled);
+        assert!(!dispatch.queued);
+        assert!(
+            interpreter
+                .engine_context()
+                .lock()
+                .unwrap()
+                .tag_queue
+                .is_empty()
+        );
+        assert_eq!(
+            interpreter
+                .lua()
+                .globals()
+                .get::<String>("seen_name")
+                .unwrap(),
+            "setoncontrolskipin"
+        );
+        assert_eq!(
+            interpreter
+                .lua()
+                .globals()
+                .get::<String>("seen_label")
+                .unwrap(),
+            "last"
         );
     }
 
@@ -895,6 +977,7 @@ fn dispatch_handler(
             return HandlerDispatch {
                 handled: true,
                 needs_return_frame: false,
+                queued: false,
             };
         }
         Some(2) => return HandlerDispatch::default(),
@@ -912,6 +995,7 @@ fn dispatch_handler(
     HandlerDispatch {
         handled: true,
         needs_return_frame: handler.is_some() && file.is_none() && label.is_none(),
+        queued: true,
     }
 }
 

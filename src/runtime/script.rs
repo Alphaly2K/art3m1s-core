@@ -133,12 +133,16 @@ impl CoreRuntime {
         };
         let physical_clicked = clicked;
         let scripted_decide = self.script_decide_edge();
-        let advance_requested = physical_clicked || scripted_decide;
         // stopbyclick 只响应宿主真实点击。overrideKey 注入的 decide 边沿是脚本内部
         // 推进信号，若也视作点击，自动模式会被自己的 mainloop 立即关闭。
-        if physical_clicked && self.automode_stops_on_click() {
+        let stopped_automode_by_click = physical_clicked && self.automode_stops_on_click();
+        if stopped_automode_by_click {
             self.set_automode_mode(false);
         }
+        // 停止自动模式的这次点击只负责退出。尤其在 wait input=1 下若同一帧继续
+        // 推进，会让脚本的 automode_stopcheck/flip 与 clickEnd 同时清理消息层。
+        let advance_requested =
+            wait_advance_requested(physical_clicked, scripted_decide, stopped_automode_by_click);
         if automode_stop_by_stop_wait(&reason) && self.automode_stops_on_stop() {
             self.set_automode_mode(false);
         }
@@ -480,6 +484,14 @@ fn stop_wait_accepts_scripted_decide(scripted_decide: bool) -> bool {
     scripted_decide
 }
 
+fn wait_advance_requested(
+    physical_clicked: bool,
+    scripted_decide: bool,
+    stopped_automode_by_click: bool,
+) -> bool {
+    !stopped_automode_by_click && (physical_clicked || scripted_decide)
+}
+
 fn automode_stop_by_stop_wait(reason: &WaitReason) -> bool {
     match reason {
         WaitReason::Stop { reason } => !reason.as_deref().is_some_and(|reason| {
@@ -518,7 +530,8 @@ fn wait_reason_is_input_wait(reason: Option<&WaitReason>) -> bool {
 mod tests {
     use super::{
         automode_stop_by_stop_wait, settle_inline_event_frame, stop_wait_accepts_scripted_decide,
-        timed_wait_accepts_click, trans_input_skip_requested, wait_reason_is_input_wait,
+        timed_wait_accepts_click, trans_input_skip_requested, wait_advance_requested,
+        wait_reason_is_input_wait,
     };
     use crate::runtime::InlineEventFrame;
     use asb_interpreter::event::WaitReason;
@@ -537,6 +550,14 @@ mod tests {
     fn stop_wait_only_accepts_a_scripted_decide_edge() {
         assert!(stop_wait_accepts_scripted_decide(true));
         assert!(!stop_wait_accepts_scripted_decide(false));
+    }
+
+    #[test]
+    fn automode_stop_click_does_not_advance_the_waiting_page() {
+        assert!(!wait_advance_requested(true, false, true));
+        assert!(!wait_advance_requested(true, true, true));
+        assert!(wait_advance_requested(true, false, false));
+        assert!(wait_advance_requested(false, true, false));
     }
 
     #[test]
