@@ -274,10 +274,10 @@ fn create_egl(
         const EGL_OPENGL_ES_API: EGLint = 0x30A0;
         const EGL_TEXTURE_FORMAT: EGLint = 0x3080;
         const EGL_TEXTURE_TARGET: EGLint = 0x3081;
+        const EGL_TEXTURE_2D: EGLint = 0x305F;
         const EGL_TEXTURE_RGBA: EGLint = 0x305E;
         const EGL_IOSURFACE_ANGLE: EGLint = 0x3454;
         const EGL_IOSURFACE_PLANE_ANGLE: EGLint = 0x345A;
-        const EGL_TEXTURE_RECTANGLE_ANGLE: EGLint = 0x345B;
         const EGL_TEXTURE_TYPE_ANGLE: EGLint = 0x345C;
         const EGL_TEXTURE_INTERNAL_FORMAT_ANGLE: EGLint = 0x345D;
         const EGL_MTL_TEXTURE_MGL: EGLint = 0x3456;
@@ -935,10 +935,9 @@ fn create_egl(
                     return Err("eglChooseConfig failed".into());
                 }
 
-                // EGL_ANGLE_iosurface_client_buffer requires rectangle textures.
-                // The bundled MetalANGLE validates this even on iOS and rejects
-                // EGL_TEXTURE_2D with EGL_BAD_PARAMETER.
-                let iosurface_texture_target = EGL_TEXTURE_RECTANGLE_ANGLE;
+                // Official ANGLE's Metal backend advertises EGL_TEXTURE_2D as
+                // the IOSurface config target on both macOS and iOS.
+                let iosurface_texture_target = EGL_TEXTURE_2D;
 
                 let pbuffer_attrs = [
                     EGL_WIDTH,
