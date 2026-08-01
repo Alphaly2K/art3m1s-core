@@ -9,7 +9,7 @@ const PUBLISH_INTERVAL: Duration = Duration::from_millis(500);
 const SAMPLE_WINDOW: Duration = Duration::from_secs(10);
 const QUEUE_CAPACITY: usize = 256;
 const MAX_WINDOW_SAMPLES: usize = 4096;
-const TIMING_COUNT: usize = 18;
+const TIMING_COUNT: usize = 24;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct FrameProfile {
@@ -20,6 +20,12 @@ pub(crate) struct FrameProfile {
     pub input_ns: u64,
     pub interpreter_ns: u64,
     pub events_ns: u64,
+    pub event_runtime_ns: u64,
+    pub event_media_ns: u64,
+    pub event_text_ns: u64,
+    pub event_transition_ns: u64,
+    pub event_compositor_ns: u64,
+    pub event_layer_sync_ns: u64,
     pub emote_ns: u64,
     pub audio_media_ns: u64,
     pub compositor_ns: u64,
@@ -84,6 +90,12 @@ pub struct ProfileTimings {
     pub input_ms: f64,
     pub interpreter_ms: f64,
     pub events_ms: f64,
+    pub event_runtime_ms: f64,
+    pub event_media_ms: f64,
+    pub event_text_ms: f64,
+    pub event_transition_ms: f64,
+    pub event_compositor_ms: f64,
+    pub event_layer_sync_ms: f64,
     pub emote_ms: f64,
     pub audio_media_ms: f64,
     pub compositor_ms: f64,
@@ -413,6 +425,12 @@ fn timing_values(frame: &FrameProfile) -> [u64; TIMING_COUNT] {
         frame.input_ns,
         frame.interpreter_ns,
         frame.events_ns,
+        frame.event_runtime_ns,
+        frame.event_media_ns,
+        frame.event_text_ns,
+        frame.event_transition_ns,
+        frame.event_compositor_ns,
+        frame.event_layer_sync_ns,
         frame.emote_ns,
         frame.audio_media_ns,
         frame.compositor_ns,
@@ -437,19 +455,25 @@ fn timings_from_values(values: [f64; TIMING_COUNT]) -> ProfileTimings {
         input_ms: ms(values[2]),
         interpreter_ms: ms(values[3]),
         events_ms: ms(values[4]),
-        emote_ms: ms(values[5]),
-        audio_media_ms: ms(values[6]),
-        compositor_ms: ms(values[7]),
-        text_ms: ms(values[8]),
-        frame_build_ms: ms(values[9]),
-        damage_compute_ms: ms(values[10]),
-        transition_capture_ms: ms(values[11]),
-        texture_upload_ms: ms(values[12]),
-        video_upload_ms: ms(values[13]),
-        gpu_submit_ms: ms(values[14]),
-        present_ms: ms(values[15]),
-        readback_ms: ms(values[16]),
-        host_ffi_ms: ms(values[17]),
+        event_runtime_ms: ms(values[5]),
+        event_media_ms: ms(values[6]),
+        event_text_ms: ms(values[7]),
+        event_transition_ms: ms(values[8]),
+        event_compositor_ms: ms(values[9]),
+        event_layer_sync_ms: ms(values[10]),
+        emote_ms: ms(values[11]),
+        audio_media_ms: ms(values[12]),
+        compositor_ms: ms(values[13]),
+        text_ms: ms(values[14]),
+        frame_build_ms: ms(values[15]),
+        damage_compute_ms: ms(values[16]),
+        transition_capture_ms: ms(values[17]),
+        texture_upload_ms: ms(values[18]),
+        video_upload_ms: ms(values[19]),
+        gpu_submit_ms: ms(values[20]),
+        present_ms: ms(values[21]),
+        readback_ms: ms(values[22]),
+        host_ffi_ms: ms(values[23]),
     }
 }
 
@@ -529,6 +553,31 @@ mod tests {
             _ => 1,
         });
         assert_eq!(slowest_one_percent_average(values), 15.0);
+    }
+
+    #[test]
+    fn event_dispatch_breakdown_is_preserved_in_snapshots() {
+        let timings = timings_from_values(
+            timing_values(&FrameProfile {
+                events_ns: 28_000_000,
+                event_runtime_ns: 1_000_000,
+                event_media_ns: 2_000_000,
+                event_text_ns: 3_000_000,
+                event_transition_ns: 4_000_000,
+                event_compositor_ns: 8_000_000,
+                event_layer_sync_ns: 10_000_000,
+                ..FrameProfile::default()
+            })
+            .map(|value| value as f64),
+        );
+
+        assert_eq!(timings.events_ms, 28.0);
+        assert_eq!(timings.event_runtime_ms, 1.0);
+        assert_eq!(timings.event_media_ms, 2.0);
+        assert_eq!(timings.event_text_ms, 3.0);
+        assert_eq!(timings.event_transition_ms, 4.0);
+        assert_eq!(timings.event_compositor_ms, 8.0);
+        assert_eq!(timings.event_layer_sync_ms, 10.0);
     }
 
     #[test]

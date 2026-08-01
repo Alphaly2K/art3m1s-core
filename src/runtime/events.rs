@@ -11,8 +11,14 @@ impl CoreRuntime {
         events.drain(..).collect()
     }
 
-    pub(super) fn dispatch_events(&mut self, events: &[Event]) {
+    pub(super) fn dispatch_events(
+        &mut self,
+        events: &[Event],
+        profile: &mut crate::profiler::FrameProfile,
+    ) {
+        let mut compositor_changed = false;
         for event in events {
+            let runtime_started = profile.mark();
             if matches!(event, Event::Exit) {
                 crate::core_info!("[runtime] Event::Exit received");
                 self.exit_requested.store(true, Ordering::SeqCst);
@@ -394,8 +400,17 @@ impl CoreRuntime {
                 }
                 _ => {}
             }
+            profile.event_runtime_ns = profile
+                .event_runtime_ns
+                .saturating_add(crate::profiler::FrameProfile::elapsed(runtime_started));
 
+            let media_started = profile.mark();
             self.apply_media_event(event);
+            profile.event_media_ns = profile
+                .event_media_ns
+                .saturating_add(crate::profiler::FrameProfile::elapsed(media_started));
+
+            let text_started = profile.mark();
             if let Some(pending) = self.apply_text_event(event) {
                 self.begin_text_translation(pending);
             }
@@ -403,6 +418,9 @@ impl CoreRuntime {
             if matches!(event, Event::ScenarioText { .. }) {
                 self.scenario_text_shown = true;
             }
+            profile.event_text_ns = profile
+                .event_text_ns
+                .saturating_add(crate::profiler::FrameProfile::elapsed(text_started));
             // `[trans]` 捕获的是它之前所有图层事件已经生效的场景。事件派发会在
             // 一帧内连续执行，必须在这里先提交一次，否则帧末会抓到旧 FBO，
             // 已隐藏的消息文字便作为转场旧画面继续残留。
@@ -413,14 +431,33 @@ impl CoreRuntime {
                     ..
                 } if *trans_type != 0
             ) {
+                let transition_started = profile.mark();
                 self.refresh_transition_source_frame();
+                profile.event_transition_ns = profile
+                    .event_transition_ns
+                    .saturating_add(crate::profiler::FrameProfile::elapsed(transition_started));
                 crate::core_debug!("[runtime] transition source refreshed before Trans");
             }
+
+            let compositor_started = profile.mark();
             if let Some(event) = CompositorEvent::from_interpreter(event) {
                 self.compositor.apply_event(event);
-                self.sync_layer_info_all();
+                compositor_changed = true;
             }
+            profile.event_compositor_ns = profile
+                .event_compositor_ns
+                .saturating_add(crate::profiler::FrameProfile::elapsed(compositor_started));
             crate::core_debug!("[event] {}", event_summary(event));
+        }
+
+        // Lua only runs before or after this batch, never between two queued
+        // events. Refreshing the get_layer_info snapshot after every visual
+        // event therefore performs O(events * layers) duplicate work during
+        // scene changes without making any additional state observable.
+        if compositor_changed {
+            let sync_started = profile.mark();
+            self.sync_layer_info_all();
+            profile.event_layer_sync_ns = crate::profiler::FrameProfile::elapsed(sync_started);
         }
     }
 

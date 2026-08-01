@@ -397,7 +397,7 @@ impl CoreRuntime {
 
         let events_started = profile.mark();
         let collected = self.drain_events();
-        self.dispatch_events(&collected);
+        self.dispatch_events(&collected, profile);
         // 已读跟踪 + 未读停跳：在文本展示后的点击等待处标记已读，
         // 已读跳过遇未读剧情时停止跳过（[alreadyread]/[skip unread=] 语义）。
         self.track_read_and_stop_skip_on_unread();
