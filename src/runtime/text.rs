@@ -177,9 +177,12 @@ impl CoreRuntime {
             .unwrap_or((0.0, 0.0, 0.0));
     }
 
-    pub(super) fn advance_text(&mut self, delta_ms: u64) {
+    /// Advances reveal animation and returns whether its visible output may
+    /// have changed during this tick.
+    pub(super) fn advance_text(&mut self, delta_ms: u64) -> bool {
         let skip_active = self.skip_active();
         let was_skipping = self.was_skipping();
+        let was_reveal_complete = self.is_text_reveal_complete();
         let mut reveal_complete = false;
         if let Some(renderer) = self.text_renderer.as_mut() {
             renderer.advance_reveal(delta_ms);
@@ -193,6 +196,7 @@ impl CoreRuntime {
         if was_skipping && reveal_complete {
             self.clear_was_skipping();
         }
+        !was_reveal_complete || skip_active || was_skipping
     }
 
     pub(super) fn reveal_text_now(&mut self) {
@@ -465,10 +469,10 @@ impl CoreRuntime {
 
     /// 网络结果只在目标层逐字显示结束后落入字形缓冲，避免替换长度变化使
     /// reveal_index 跳跃。页面已切换的结果直接丢弃视觉更新，宿主缓存仍保留。
-    pub(super) fn apply_ready_text_translations(&mut self) {
+    pub(super) fn apply_ready_text_translations(&mut self) -> bool {
         let Some(renderer) = self.text_renderer.as_ref() else {
             self.pending_text_translations.clear();
-            return;
+            return false;
         };
         let state = renderer.font_state();
         let mut expired = Vec::new();
@@ -490,9 +494,11 @@ impl CoreRuntime {
         for serial in expired {
             self.pending_text_translations.remove(&serial);
         }
+        let changed = !ready.is_empty();
         for serial in ready {
             self.apply_ready_text_translation(serial);
         }
+        changed
     }
 
     fn apply_ready_text_translation(&mut self, serial: u64) {
@@ -568,20 +574,22 @@ impl CoreRuntime {
     ///
     /// `page_end`=false 为行末等待（用 glyph 的 layer + left/top），true 为页末
     /// 等待（用 rplayer + rpleft/rptop）。未配置图标图层或当前层无文本时不显示。
-    pub(super) fn enter_click_wait_icon(&mut self, page_end: bool) {
+    pub(super) fn enter_click_wait_icon(&mut self, page_end: bool) -> bool {
         let placement = self
             .text_renderer
             .as_ref()
             .and_then(|renderer| renderer.click_wait_icon_placement(page_end));
         if let Some(p) = placement {
-            self.compositor
+            return self
+                .compositor
                 .show_click_wait_icon(&p.layer_id, p.left, p.top, p.homing);
         }
+        false
     }
 
     /// 退出点击等待时隐藏等待图标。
-    pub(super) fn exit_click_wait_icon(&mut self) {
-        self.compositor.hide_click_wait_icon();
+    pub(super) fn exit_click_wait_icon(&mut self) -> bool {
+        self.compositor.hide_click_wait_icon()
     }
 
     fn load_script_font(&mut self, face: &str) {

@@ -429,7 +429,21 @@ impl Compositor {
     ///
     /// `left`/`top` 为最后一个字符位置加 glyph 偏移后的目标坐标（由文本子系统的
     /// `click_wait_icon_placement` 计算）；`homing=false` 时只切可见性、不动坐标。
-    pub fn show_click_wait_icon(&mut self, layer_id: &str, left: f32, top: f32, homing: bool) {
+    pub fn show_click_wait_icon(
+        &mut self,
+        layer_id: &str,
+        left: f32,
+        top: f32,
+        homing: bool,
+    ) -> bool {
+        if self.active_wait_icon.as_deref() == Some(layer_id)
+            && self.scene.get(layer_id).is_some_and(|layer| {
+                layer.props.visible == Some(true)
+                    && (!homing || (layer.props.left == Some(left) && layer.props.top == Some(top)))
+            })
+        {
+            return false;
+        }
         if let Some(prev) = self.active_wait_icon.take()
             && prev != layer_id
         {
@@ -443,13 +457,17 @@ impl Compositor {
         }
         self.scene.set_props(layer_id, &raw);
         self.active_wait_icon = Some(layer_id.to_string());
+        true
     }
 
     /// 离开点击等待（用户点击继续/换页完成）时隐藏等待图标图层。
-    pub fn hide_click_wait_icon(&mut self) {
+    pub fn hide_click_wait_icon(&mut self) -> bool {
         if let Some(id) = self.active_wait_icon.take() {
             let raw = HashMap::from([("visible".to_string(), "0".to_string())]);
             self.scene.set_props(&id, &raw);
+            true
+        } else {
+            false
         }
     }
 
@@ -1560,15 +1578,20 @@ mod tests {
         c.apply_event(&create("90", "glyph0"));
 
         // homing=1：移动并显示。
-        c.show_click_wait_icon("90", 320.0, 240.0, true);
+        assert!(c.show_click_wait_icon("90", 320.0, 240.0, true));
         let layer = c.scene().get("90").unwrap();
         assert_eq!(layer.props.visible, Some(true));
         assert_eq!(layer.props.left, Some(320.0));
         assert_eq!(layer.props.top, Some(240.0));
         assert_eq!(c.active_wait_icon(), Some("90"));
+        assert!(
+            !c.show_click_wait_icon("90", 320.0, 240.0, true),
+            "stable waits must not rewrite identical layer properties every frame"
+        );
 
         // 隐藏。
-        c.hide_click_wait_icon();
+        assert!(c.hide_click_wait_icon());
+        assert!(!c.hide_click_wait_icon());
         assert_eq!(c.scene().get("90").unwrap().props.visible, Some(false));
         assert_eq!(c.active_wait_icon(), None);
 

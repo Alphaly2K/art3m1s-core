@@ -89,6 +89,9 @@ pub struct CoreRuntime {
     /// Static ticks reuse the previous snapshot instead of allocating one
     /// property map per scene layer at 60 Hz.
     layer_info_dirty: bool,
+    /// Conservative per-tick invalidation for CPU-side frame construction.
+    /// Texture revisions are checked separately immediately before rendering.
+    frame_visual_dirty: bool,
     emote: emote::SharedEmoteState,
 
     stage_w: u32,
@@ -201,6 +204,7 @@ impl CoreRuntime {
             magic_paths: Arc::clone(&magic_paths),
             layer_info: Arc::clone(&layer_info),
             layer_info_dirty: true,
+            frame_visual_dirty: true,
             emote,
             stage_w: stage_width,
             stage_h: stage_height,
@@ -385,6 +389,7 @@ impl CoreRuntime {
 
     fn advance_logic(&mut self, delta_ms: u64, profile: &mut crate::profiler::FrameProfile) {
         let logic_started = profile.mark();
+        self.frame_visual_dirty = false;
         let input_started = profile.mark();
         // isPush 的按键重复语义依赖每键按下时间戳，逐帧维护。
         self.input
@@ -403,6 +408,7 @@ impl CoreRuntime {
         let events_started = profile.mark();
         let event_drain_started = profile.mark();
         let collected = self.drain_events();
+        self.frame_visual_dirty |= !collected.is_empty();
         profile.event_drain_ns = crate::profiler::FrameProfile::elapsed(event_drain_started);
         self.dispatch_events(&collected, profile);
         let event_post_started = profile.mark();
@@ -433,7 +439,10 @@ impl CoreRuntime {
         profile.audio_media_ns = crate::profiler::FrameProfile::elapsed(audio_started);
 
         let compositor_started = profile.mark();
+        let transition_was_active = crate::render_pipeline::RenderPipeline::new(&self.compositor)
+            .is_transition_in_progress();
         let layer_info_clock_changed = self.compositor.advance(delta_ms);
+        self.frame_visual_dirty |= layer_info_clock_changed || transition_was_active;
         // get_layer_info 必须反映本帧缓动后的实际位置，而不是缓动开始前的
         // 静态 LayerProps。下一帧输入回调执行 Lua 前会读取这份快照。
         if self.layer_info_dirty || layer_info_clock_changed {
@@ -443,14 +452,17 @@ impl CoreRuntime {
         profile.compositor_ns = crate::profiler::FrameProfile::elapsed(compositor_started);
 
         let emote_started = profile.mark();
-        self.emote.lock().unwrap().advance(delta_ms);
+        let mut emote = self.emote.lock().unwrap();
+        self.frame_visual_dirty |= !emote.is_empty();
+        emote.advance(delta_ms);
+        drop(emote);
         profile.emote_ns = profile
             .emote_ns
             .saturating_add(crate::profiler::FrameProfile::elapsed(emote_started));
 
         let text_started = profile.mark();
-        self.advance_text(delta_ms);
-        self.apply_ready_text_translations();
+        self.frame_visual_dirty |= self.advance_text(delta_ms);
+        self.frame_visual_dirty |= self.apply_ready_text_translations();
         profile.text_ns = crate::profiler::FrameProfile::elapsed(text_started);
 
         let media_started = profile.mark();

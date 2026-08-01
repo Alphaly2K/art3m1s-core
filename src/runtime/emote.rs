@@ -61,6 +61,10 @@ struct EmoteTextureState {
 }
 
 impl EmoteState {
+    pub fn is_empty(&self) -> bool {
+        self.layers.is_empty()
+    }
+
     pub(super) fn profile_memory(&self) -> (usize, u64) {
         let mut instances = 0usize;
         let mut source_bytes = 0u64;

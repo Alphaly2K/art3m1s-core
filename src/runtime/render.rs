@@ -69,21 +69,41 @@ impl CoreRuntime {
             }
             profile.transition_capture_ns = crate::profiler::FrameProfile::elapsed(capture_started);
         }
+        drop(pipeline);
 
         let build_started = profile.mark();
-        // backlog / message-tags 查询快照：每帧从 text_renderer 抽取再现标签刷新，
-        // 供解释器 var system=get_backlog_* / get_message_tags 的宿主查询钩子读取。
-        self.sync_backlog_snapshot();
-
         // glyph 点击等待图标：进入点击等待（Generic/Generic0）且文本已全部显出时，
         // 把等待图标图层移动到最后一个字符旁并显示；否则隐藏。每帧驱动，避免依赖
         // script.rs 的 wait 建立/退出路径（那不在本任务白名单内）。
-        self.drive_click_wait_icon();
+        self.frame_visual_dirty |= self.drive_click_wait_icon();
+
+        let texture_revision = self.texture_provider.content_revision();
+        if !self.frame_visual_dirty
+            && self.last_submitted_frame.is_some()
+            && self.last_submitted_texture_revision == texture_revision
+            && !RenderPipeline::new(&self.compositor).is_transition_in_progress()
+        {
+            let frame = self.last_submitted_frame.as_ref().unwrap();
+            let gpu_started = profile.mark();
+            let cleared_debug_overlay = self.renderer.clear_damage_overlay(frame);
+            profile.gpu_submit_ns = crate::profiler::FrameProfile::elapsed(gpu_started);
+            if let Some(region) = cleared_debug_overlay {
+                record_render_region(profile, region, self.stage_w, self.stage_h);
+            }
+            unsafe {
+                self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            }
+            return cleared_debug_overlay;
+        }
+
+        // Backlog and text metrics can only change along the full visual path.
+        // Static ticks keep the previous snapshot instead of cloning every
+        // message page and reproduction tag at display refresh rate.
+        self.sync_backlog_snapshot();
 
         let (frame, _, _) = self.build_bound_scene(true, None);
         profile.frame_build_ns = crate::profiler::FrameProfile::elapsed(build_started);
         profile.draw_list_commands = (frame.commands.len() + frame.mask_commands.len()) as u64;
-        let texture_revision = self.texture_provider.content_revision();
         let changed_textures = self
             .texture_provider
             .changed_texture_ids_since(self.last_submitted_texture_revision);
@@ -278,13 +298,13 @@ impl CoreRuntime {
     /// page_end 判定：解释器目前不区分行末/页末等待（两者都是 Generic），此处一律
     /// 按行末处理（page_end=false，用 [glyph] 的 layer）。精确的页末检测需解释器透传
     /// rp 换页信号，见任务 skipped 说明。
-    fn drive_click_wait_icon(&mut self) {
+    fn drive_click_wait_icon(&mut self) -> bool {
         let show =
             wait_reason_is_click_wait(self.wait_reason.as_ref()) && self.is_text_reveal_complete();
         if show {
-            self.enter_click_wait_icon(false);
+            self.enter_click_wait_icon(false)
         } else {
-            self.exit_click_wait_icon();
+            self.exit_click_wait_icon()
         }
     }
 }

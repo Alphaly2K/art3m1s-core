@@ -100,7 +100,7 @@ impl CoreRuntime {
 
         // 文本内联链接（[link]）：鼠标移动刷新 hover 强调；点击命中链接则以其
         // file/label 触发 jump 并吞掉该次点击（不再推进剧情）。
-        self.update_link_hover(mouse_x, mouse_y);
+        self.frame_visual_dirty |= self.update_link_hover(mouse_x, mouse_y);
         if left_down_edge && self.handle_link_click(mouse_x, mouse_y) {
             return false;
         }
