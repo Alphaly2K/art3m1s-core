@@ -256,7 +256,14 @@ impl Compositor {
     }
 
     /// 推进合成器时钟。宿主每帧用累计的真实时间调用一次。
-    pub fn advance(&mut self, delta_ms: u64) {
+    pub fn advance(&mut self, delta_ms: u64) -> bool {
+        // Capture this before garbage collection so the final tween/anime
+        // state is exported once on the tick where it finishes.
+        let layer_info_clock_changed = !self.anime_states.is_empty()
+            || self
+                .scene
+                .all_layers()
+                .any(|layer| !layer.tweens.is_empty());
         self.clock_ms = self.clock_ms.saturating_add(delta_ms);
 
         transition::clear_finished(&self.trans_state, self.clock_ms);
@@ -266,6 +273,7 @@ impl Compositor {
             &mut self.pending_tween_events,
         );
         anim::update_anime_frames(&mut self.scene, &mut self.anime_states, self.clock_ms);
+        layer_info_clock_changed
     }
     ///
     /// 宿主在每帧 `advance` 之后调用，将返回到的 [`TweenHandler`] 交回解释器
@@ -973,6 +981,7 @@ mod tests {
     fn tween_event_drives_value_then_settles() {
         let mut c = Compositor::new();
         c.apply_event(&create("1", "a"));
+        assert!(!c.advance(16), "static scenes do not invalidate layer info");
         c.apply_event(&Event::LayerTween {
             id: "1".into(),
             param: "alpha".into(),
@@ -992,15 +1001,16 @@ mod tests {
         });
 
         // 推进到中点，缓动仍在进行。
-        c.advance(500);
+        assert!(c.advance(500));
         let mut provider = MockProvider::new();
         let frame = crate::render_pipeline::RenderPipeline::new(&c).build(&mut provider);
         assert!((frame.commands[0].opacity - 0.5).abs() < 0.02);
 
         // 推进到结束，缓动被回收且终值固化到属性。
-        c.advance(600);
+        assert!(c.advance(600));
         assert!(c.scene().get("1").unwrap().tweens.is_empty());
         assert_eq!(c.scene().get("1").unwrap().props.alpha, Some(255));
+        assert!(!c.advance(16), "finished tweens return to the static path");
     }
 
     #[test]

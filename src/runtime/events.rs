@@ -445,6 +445,7 @@ impl CoreRuntime {
             let compositor_started = profile.mark();
             if let Some(event) = CompositorEvent::from_interpreter(event) {
                 self.compositor.apply_event(event);
+                self.layer_info_dirty = true;
             }
             profile.event_compositor_ns = profile
                 .event_compositor_ns
@@ -544,7 +545,7 @@ impl CoreRuntime {
         }
     }
 
-    pub(super) fn sync_layer_info_all(&self) {
+    pub(super) fn sync_layer_info_all(&mut self) {
         let now_ms = self.compositor.clock_ms();
         let mut out = HashMap::new();
         for layer in self.compositor.scene().all_layers() {
@@ -558,6 +559,7 @@ impl CoreRuntime {
             );
         }
         *self.layer_info.lock().unwrap() = out;
+        self.layer_info_dirty = false;
     }
 
     pub(super) fn sync_layer_info(&self, id: &str) {

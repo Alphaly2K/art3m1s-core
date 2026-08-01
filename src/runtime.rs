@@ -85,6 +85,10 @@ pub struct CoreRuntime {
     script_status: Arc<AtomicU8>,
     magic_paths: Arc<magic_path::MagicPathTable>,
     layer_info: callbacks::LayerInfoTable,
+    /// Whether interpreter-visible `get_layer_info` data must be rebuilt.
+    /// Static ticks reuse the previous snapshot instead of allocating one
+    /// property map per scene layer at 60 Hz.
+    layer_info_dirty: bool,
     emote: emote::SharedEmoteState,
 
     stage_w: u32,
@@ -196,6 +200,7 @@ impl CoreRuntime {
             script_status,
             magic_paths: Arc::clone(&magic_paths),
             layer_info: Arc::clone(&layer_info),
+            layer_info_dirty: true,
             emote,
             stage_w: stage_width,
             stage_h: stage_height,
@@ -428,10 +433,12 @@ impl CoreRuntime {
         profile.audio_media_ns = crate::profiler::FrameProfile::elapsed(audio_started);
 
         let compositor_started = profile.mark();
-        self.compositor.advance(delta_ms);
+        let layer_info_clock_changed = self.compositor.advance(delta_ms);
         // get_layer_info 必须反映本帧缓动后的实际位置，而不是缓动开始前的
         // 静态 LayerProps。下一帧输入回调执行 Lua 前会读取这份快照。
-        self.sync_layer_info_all();
+        if self.layer_info_dirty || layer_info_clock_changed {
+            self.sync_layer_info_all();
+        }
         self.dispatch_tween_handlers();
         profile.compositor_ns = crate::profiler::FrameProfile::elapsed(compositor_started);
 
