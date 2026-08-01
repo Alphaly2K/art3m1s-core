@@ -54,6 +54,9 @@ pub(super) struct RuntimeControlState {
     control_skip_active: bool,
     /// Ctrl 跳过遇到不可跳的未读剧情后保持阻断，直到按键释放。
     control_skip_blocked: bool,
+    /// 当前等待页在本次显示前是否已经读过。Ctrl 在等待期间按下时用它做
+    /// 触发判定，避免绕过文本出现帧已经完成的未读检查。
+    current_scenario_was_read: Option<bool>,
     // ── hide：临时隐藏消息窗 ──
     hide_allowed: bool,
     /// [hide window=] 配置的同时隐藏的图层 ID 列表
@@ -137,6 +140,7 @@ impl Default for RuntimeControlState {
             was_skipping: false,
             control_skip_active: false,
             control_skip_blocked: false,
+            current_scenario_was_read: None,
             hide_allowed: true,
             hide_window: Vec::new(),
             hide_active: false,
@@ -165,8 +169,8 @@ impl RuntimeControlState {
         self.skip_allowed && self.control_skip_active && !self.control_skip_blocked
     }
 
-    pub(super) fn control_skip_active(&self) -> bool {
-        self.control_skip_active
+    fn command_skip_effective(&self) -> bool {
+        self.skip_allowed && self.skip_active
     }
 
     fn block_control_skip_until_release(&mut self) {
@@ -177,9 +181,19 @@ impl RuntimeControlState {
 
     fn set_control_skip_pressed(&mut self, active: bool) {
         self.control_skip_active = active;
-        if !active {
+        if active && (!self.skip_allowed || self.current_unread_blocks_control_skip()) {
+            self.control_skip_blocked = true;
+        } else if !active {
             self.control_skip_blocked = false;
         }
+    }
+
+    fn current_unread_blocks_control_skip(&self) -> bool {
+        !self.skip_unread && self.current_scenario_was_read == Some(false)
+    }
+
+    pub(super) fn clear_current_scenario_read_state(&mut self) {
+        self.current_scenario_was_read = None;
     }
 
     pub(super) fn hide_active(&self) -> bool {
@@ -261,6 +275,7 @@ impl RuntimeControlState {
         self.was_skipping = false;
         self.control_skip_active = false;
         self.control_skip_blocked = false;
+        self.current_scenario_was_read = None;
         // 隐藏态是运行时瞬态：读档恢复的场景不再包含被隐藏的可见性覆盖。
         self.hide_active = false;
         self.hidden_layers.clear();
@@ -350,11 +365,16 @@ impl CoreRuntime {
     pub(super) fn apply_skip_config(&mut self, allow: Option<bool>, skip_unread: Option<bool>) {
         if let Some(allow) = allow {
             let was_skipping = self.control.skip_active();
+            let was_control_skipping = self.control.control_skip_effective();
             if !allow && self.control.skip_active {
                 self.set_skip_mode(false);
             }
+            if !allow {
+                self.control.block_control_skip_until_release();
+            }
             self.control.skip_allowed = allow;
             let is_skipping = self.control.skip_active();
+            let is_control_skipping = self.control.control_skip_effective();
             if was_skipping != is_skipping {
                 self.control.reset_auto_wait();
                 self.audio.set_skipping(is_skipping);
@@ -364,6 +384,7 @@ impl CoreRuntime {
                     self.reveal_text_now();
                 }
             }
+            self.enqueue_control_skip_transition(was_control_skipping, is_control_skipping);
         }
         if let Some(skip_unread) = skip_unread {
             self.control.skip_unread = skip_unread;
@@ -437,6 +458,7 @@ impl CoreRuntime {
 
         // 本行在「此前的访问/会话」是否已读 —— 必须在本次标记之前取值。
         let was_read = self.control.is_read(&script, line);
+        self.control.current_scenario_was_read = Some(was_read);
         // 暴露给脚本：s.status.alreadyread（当前执行行此前是否已读，1/0）。
         self.interpreter.set_variable(
             "s.status.alreadyread",
@@ -444,11 +466,13 @@ impl CoreRuntime {
         );
 
         // 已读跳过遇未读剧情：仅在启用判定(mode!=0)时停跳（[skip unread=0] 即不跳未读）。
-        if self.control.already_read_enabled
-            && self.skip_active()
-            && self.control.unread_stops_skip()
-            && !was_read
-        {
+        let command_skip_hits_unread =
+            self.control.command_skip_effective() && self.control.unread_stops_skip() && !was_read;
+        // 用户可见的 Ctrl 行为与普通 Skip 使用同一 unread 配置。即便游戏通过
+        // alreadyread mode=0 自行维护命令 Skip，Ctrl 也不能绕过当前/下一未读页。
+        let control_skip_hits_unread =
+            self.control.control_skip_effective() && !self.control.skip_unread && !was_read;
+        if command_skip_hits_unread || control_skip_hits_unread {
             self.stop_skip_on_unread();
         }
         // 标记本段剧情已读（始终维护，使 s.status.alreadyread 跨访问准确）；
@@ -596,7 +620,7 @@ impl CoreRuntime {
         );
         self.interpreter.set_variable(
             "s.status.controlskip",
-            Value::Int(if self.control.control_skip_active() {
+            Value::Int(if self.control.control_skip_effective() {
                 1
             } else {
                 0
@@ -606,15 +630,26 @@ impl CoreRuntime {
 
     // ── controlskip：按住临时跳过 ─────────────────────────────────────
 
-    /// role 14 的物理按键状态切换。按下/松开时分别派发脚本通过
-    /// setoncontrolskipin/out 注册的回调；实际剧情推进由控制状态独立门控。
+    /// role 14 的物理按键状态切换。只有触发判定通过后才进入有效强制跳过并
+    /// 派发脚本注册的 controlskipin；退出有效状态时派发 controlskipout。
     pub(super) fn set_control_skip(&mut self, active: bool) {
         if self.control.control_skip_active == active {
             return;
         }
         let was_skipping = self.control.skip_active();
+        let was_control_skipping = self.control.control_skip_effective();
         self.control.set_control_skip_pressed(active);
         let is_skipping = self.control.skip_active();
+        let is_control_skipping = self.control.control_skip_effective();
+        crate::core_debug!(
+            "[controlskip] pressed={} allow={} skip_unread={} current_read={:?} blocked={} effective={}",
+            active,
+            self.control.skip_allowed,
+            self.control.skip_unread,
+            self.control.current_scenario_was_read,
+            self.control.control_skip_blocked,
+            is_control_skipping
+        );
         self.control.reset_auto_wait();
         self.audio.set_skipping(is_skipping);
         self.sync_control_status_variables();
@@ -623,11 +658,7 @@ impl CoreRuntime {
             // 与 commandskip 退出一致：立即揭示当前文本，避免卡在初始进度。
             self.reveal_text_now();
         }
-        self.enqueue_control_handler(if active {
-            "controlskipin"
-        } else {
-            "controlskipout"
-        });
+        self.enqueue_control_skip_transition(was_control_skipping, is_control_skipping);
     }
 
     /// 未读剧情按普通 Skip 语义终止当前跳过。Ctrl 是按住触发，因此还需
@@ -637,14 +668,26 @@ impl CoreRuntime {
             self.set_skip_mode(false);
         }
         let was_skipping = self.control.skip_active();
+        let was_control_skipping = self.control.control_skip_effective();
         self.control.block_control_skip_until_release();
         let is_skipping = self.control.skip_active();
+        let is_control_skipping = self.control.control_skip_effective();
+        if was_control_skipping && !is_control_skipping {
+            crate::core_debug!("[controlskip] stopped at unread scenario text");
+        }
         if was_skipping && !is_skipping {
             self.control.reset_auto_wait();
             self.control.was_skipping = true;
             self.audio.set_skipping(false);
             self.sync_control_status_variables();
             self.reveal_text_now();
+        }
+        self.enqueue_control_skip_transition(was_control_skipping, is_control_skipping);
+    }
+
+    fn enqueue_control_skip_transition(&mut self, was_active: bool, is_active: bool) {
+        if let Some(event_name) = control_skip_transition_event(was_active, is_active) {
+            self.enqueue_control_handler(event_name);
         }
     }
 
@@ -953,11 +996,19 @@ fn exec_input_route(command: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
+fn control_skip_transition_event(was_active: bool, is_active: bool) -> Option<&'static str> {
+    match (was_active, is_active) {
+        (false, true) => Some("controlskipin"),
+        (true, false) => Some("controlskipout"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ROLE_ADVANCE, ROLE_AVOID_IN, ROLE_AVOID_OUT, ROLE_CONTROL_SKIP, ROLE_HIDE_IN, ROLE_SKIP_IN,
-        RuntimeControlState, exec_input_route, parse_keyconfig,
+        RuntimeControlState, control_skip_transition_event, exec_input_route, parse_keyconfig,
     };
     use std::collections::HashMap;
 
@@ -982,7 +1033,7 @@ mod tests {
         assert_eq!(control.auto_wait_elapsed_ms, 0);
         assert!(!control.skip_wait_revealed);
         assert!(!control.was_skipping);
-        assert!(!control.control_skip_active());
+        assert!(!control.control_skip_active);
         assert!(!control.hide_active());
         assert!(control.hidden_layers.is_empty());
     }
@@ -1009,7 +1060,41 @@ mod tests {
         };
         assert!(!control.skip_active());
         assert!(!control.control_skip_effective());
-        assert!(control.control_skip_active());
+        assert!(control.control_skip_active);
+    }
+
+    #[test]
+    fn control_skip_trigger_rejects_the_current_unread_page_until_release() {
+        let mut control = RuntimeControlState {
+            skip_allowed: true,
+            skip_unread: false,
+            already_read_enabled: false,
+            current_scenario_was_read: Some(false),
+            ..RuntimeControlState::default()
+        };
+
+        control.set_control_skip_pressed(true);
+        assert!(control.control_skip_active);
+        assert!(!control.control_skip_effective());
+
+        control.set_control_skip_pressed(false);
+        control.current_scenario_was_read = Some(true);
+        control.set_control_skip_pressed(true);
+        assert!(control.control_skip_effective());
+    }
+
+    #[test]
+    fn control_skip_callbacks_follow_effective_transitions() {
+        assert_eq!(
+            control_skip_transition_event(false, true),
+            Some("controlskipin")
+        );
+        assert_eq!(
+            control_skip_transition_event(true, false),
+            Some("controlskipout")
+        );
+        assert_eq!(control_skip_transition_event(false, false), None);
+        assert_eq!(control_skip_transition_event(true, true), None);
     }
 
     #[test]
@@ -1025,7 +1110,7 @@ mod tests {
 
         control.block_control_skip_until_release();
         assert!(!control.skip_active());
-        assert!(control.control_skip_active());
+        assert!(control.control_skip_active);
 
         control.set_control_skip_pressed(false);
         control.set_control_skip_pressed(true);
@@ -1048,7 +1133,7 @@ mod tests {
 
         assert!(!control.skip_active());
         assert!(!control.skip_active);
-        assert!(control.control_skip_active());
+        assert!(control.control_skip_active);
     }
 
     #[test]

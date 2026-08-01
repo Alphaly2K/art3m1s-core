@@ -246,6 +246,7 @@ impl CoreRuntime {
     pub(super) fn advance_wait_line(&mut self) {
         self.wait_reason = None;
         self.reset_control_wait_flags();
+        self.control.clear_current_scenario_read_state();
         self.interpreter.advance_line();
     }
 
