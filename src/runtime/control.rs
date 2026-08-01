@@ -189,11 +189,7 @@ impl RuntimeControlState {
     }
 
     fn current_unread_blocks_control_skip(&self) -> bool {
-        !self.skip_unread && self.current_scenario_was_read == Some(false)
-    }
-
-    pub(super) fn clear_current_scenario_read_state(&mut self) {
-        self.current_scenario_was_read = None;
+        self.current_scenario_was_read != Some(true)
     }
 
     pub(super) fn hide_active(&self) -> bool {
@@ -468,10 +464,9 @@ impl CoreRuntime {
         // 已读跳过遇未读剧情：仅在启用判定(mode!=0)时停跳（[skip unread=0] 即不跳未读）。
         let command_skip_hits_unread =
             self.control.command_skip_effective() && self.control.unread_stops_skip() && !was_read;
-        // 用户可见的 Ctrl 行为与普通 Skip 使用同一 unread 配置。即便游戏通过
-        // alreadyread mode=0 自行维护命令 Skip，Ctrl 也不能绕过当前/下一未读页。
-        let control_skip_hits_unread =
-            self.control.control_skip_effective() && !self.control.skip_unread && !was_read;
+        // Ctrl 是按住触发的临时跳过，必须独立遵守当前剧情页的已读判定。
+        // [skip unread=1] 是命令 Skip 的配置，不能授权 Ctrl 跳过未读文本。
+        let control_skip_hits_unread = self.control.control_skip_effective() && !was_read;
         if command_skip_hits_unread || control_skip_hits_unread {
             self.stop_skip_on_unread();
         }
@@ -642,10 +637,9 @@ impl CoreRuntime {
         let is_skipping = self.control.skip_active();
         let is_control_skipping = self.control.control_skip_effective();
         crate::core_debug!(
-            "[controlskip] pressed={} allow={} skip_unread={} current_read={:?} blocked={} effective={}",
+            "[controlskip] pressed={} allow={} current_read={:?} blocked={} effective={}",
             active,
             self.control.skip_allowed,
-            self.control.skip_unread,
             self.control.current_scenario_was_read,
             self.control.control_skip_blocked,
             is_control_skipping
@@ -1064,10 +1058,10 @@ mod tests {
     }
 
     #[test]
-    fn control_skip_trigger_rejects_the_current_unread_page_until_release() {
+    fn control_skip_trigger_requires_a_known_read_page_until_release() {
         let mut control = RuntimeControlState {
             skip_allowed: true,
-            skip_unread: false,
+            skip_unread: true,
             already_read_enabled: false,
             current_scenario_was_read: Some(false),
             ..RuntimeControlState::default()
@@ -1081,6 +1075,21 @@ mod tests {
         control.current_scenario_was_read = Some(true);
         control.set_control_skip_pressed(true);
         assert!(control.control_skip_effective());
+    }
+
+    #[test]
+    fn control_skip_trigger_rejects_an_unknown_current_page() {
+        let mut control = RuntimeControlState {
+            skip_allowed: true,
+            skip_unread: true,
+            current_scenario_was_read: None,
+            ..RuntimeControlState::default()
+        };
+
+        control.set_control_skip_pressed(true);
+
+        assert!(control.control_skip_active);
+        assert!(!control.control_skip_effective());
     }
 
     #[test]
@@ -1103,6 +1112,7 @@ mod tests {
             skip_allowed: true,
             skip_unread: false,
             control_skip_active: true,
+            current_scenario_was_read: Some(true),
             ..RuntimeControlState::default()
         };
         assert!(control.skip_active());
@@ -1113,6 +1123,7 @@ mod tests {
         assert!(control.control_skip_active);
 
         control.set_control_skip_pressed(false);
+        control.current_scenario_was_read = Some(true);
         control.set_control_skip_pressed(true);
         assert!(control.skip_active());
     }
