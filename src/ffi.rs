@@ -12,6 +12,51 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 static DEBUG: AtomicBool = AtomicBool::new(false);
 static DAMAGE_VISUALIZATION: AtomicBool = AtomicBool::new(false);
+static PROFILE_IO: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct HostFfiProfile {
+    pub calls: u64,
+    pub elapsed_ns: u64,
+    pub bytes: u64,
+}
+
+thread_local! {
+    static HOST_FFI_PROFILE: std::cell::Cell<HostFfiProfile> =
+        const { std::cell::Cell::new(HostFfiProfile { calls: 0, elapsed_ns: 0, bytes: 0 }) };
+}
+
+pub(crate) fn set_profile_io_enabled(enabled: bool) {
+    PROFILE_IO.store(enabled, Ordering::Relaxed);
+    if !enabled {
+        let _ = take_profile_io_counters();
+    }
+}
+
+pub(crate) fn take_profile_io_counters() -> HostFfiProfile {
+    HOST_FFI_PROFILE.with(|cell| cell.replace(HostFfiProfile::default()))
+}
+
+fn begin_profile_io() -> Option<std::time::Instant> {
+    PROFILE_IO
+        .load(Ordering::Relaxed)
+        .then(std::time::Instant::now)
+}
+
+fn finish_profile_io(started: Option<std::time::Instant>, bytes: usize) {
+    let Some(started) = started else {
+        return;
+    };
+    HOST_FFI_PROFILE.with(|cell| {
+        let mut value = cell.get();
+        value.calls = value.calls.saturating_add(1);
+        value.elapsed_ns = value
+            .elapsed_ns
+            .saturating_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64);
+        value.bytes = value.bytes.saturating_add(bytes as u64);
+        cell.set(value);
+    });
+}
 
 // ── 脚本 [debug] 标签的日志模式/级别 ───────────────────────────
 //
@@ -372,7 +417,9 @@ pub fn request_write(path: &str, data: &[u8]) -> Result<(), String> {
         .unwrap()
         .ok_or_else(|| "file writer not registered".to_string())?;
     let c_path = CString::new(path).map_err(|e| e.to_string())?;
+    let started = begin_profile_io();
     let n = unsafe { cb(c_path.as_ptr(), data.as_ptr(), data.len() as c_int) };
+    finish_profile_io(started, n.max(0) as usize);
     if n < 0 {
         return Err(format!("write failed: {path}"));
     }
@@ -392,7 +439,9 @@ pub fn request_delete(path: &str) -> Result<(), String> {
         .unwrap()
         .ok_or_else(|| "file delete not registered".to_string())?;
     let c_path = CString::new(path).map_err(|e| e.to_string())?;
+    let started = begin_profile_io();
     let r = unsafe { cb(c_path.as_ptr()) };
+    finish_profile_io(started, 0);
     if r < 0 {
         return Err(format!("delete failed: {path}"));
     }
@@ -422,7 +471,9 @@ pub fn request_file_mtime(path: &str) -> Option<[i64; 6]> {
     let cb = (*FILE_STAT.lock().unwrap())?;
     let c_path = CString::new(path).ok()?;
     let mut out = [0i64; 6];
+    let started = begin_profile_io();
     let n = unsafe { cb(c_path.as_ptr(), out.as_mut_ptr(), out.len() as c_int) };
+    finish_profile_io(started, n.max(0) as usize * std::mem::size_of::<i64>());
     if n >= 6 { Some(out) } else { None }
 }
 
@@ -519,13 +570,16 @@ pub fn save_dir() -> Option<&'static str> {
 fn query_size(path: &str) -> Option<u64> {
     let cb = FILE_READER.lock().unwrap().clone()?;
     let c_path = CString::new(path).ok()?;
+    let started = begin_profile_io();
     let size = unsafe { cb(c_path.as_ptr(), std::ptr::null_mut(), 0, -1) };
+    finish_profile_io(started, 0);
     if size >= 0 { Some(size as u64) } else { None }
 }
 
 fn read_chunk(path: &str, offset: u64, buf: &mut [u8]) -> Option<usize> {
     let cb = FILE_READER.lock().unwrap().clone()?;
     let c_path = CString::new(path).ok()?;
+    let started = begin_profile_io();
     let n = unsafe {
         cb(
             c_path.as_ptr(),
@@ -534,6 +588,7 @@ fn read_chunk(path: &str, offset: u64, buf: &mut [u8]) -> Option<usize> {
             offset as c_longlong,
         )
     };
+    finish_profile_io(started, n.max(0) as usize);
     if n >= 0 { Some(n as usize) } else { None }
 }
 
@@ -1056,6 +1111,47 @@ pub unsafe extern "C" fn art3m1s_runtime_advance_and_present(
             -1
         }
     }
+}
+
+/// Enables the per-runtime asynchronous profiler. The render thread only
+/// records timestamps and performs a non-blocking queue send; aggregation is
+/// performed by a dedicated worker.
+#[cfg(feature = "gl-backend")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_set_profiler_enabled(
+    rt: *const CoreRuntime,
+    enabled: c_int,
+) {
+    if !rt.is_null() {
+        unsafe { &*rt }.set_profiler_enabled(enabled != 0);
+    }
+}
+
+/// Copies the latest profiler snapshot as UTF-8 JSON. With a null/zero buffer,
+/// returns the required byte count. A too-small buffer returns the negated
+/// required count, so hosts can retry without imposing a fixed ABI struct.
+#[cfg(feature = "gl-backend")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_profiler_snapshot(
+    rt: *const CoreRuntime,
+    out: *mut u8,
+    capacity: u32,
+) -> i32 {
+    if rt.is_null() {
+        return -1;
+    }
+    let json = unsafe { &*rt }.profiler_snapshot_json();
+    let required = i32::try_from(json.len()).unwrap_or(i32::MAX);
+    if out.is_null() || capacity == 0 {
+        return required;
+    }
+    if (capacity as usize) < json.len() {
+        return -required;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(json.as_ptr(), out, json.len());
+    }
+    required
 }
 
 #[cfg(feature = "gl-backend")]

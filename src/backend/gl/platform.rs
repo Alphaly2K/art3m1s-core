@@ -274,11 +274,13 @@ fn create_egl(
         const EGL_TEXTURE_FORMAT: EGLint = 0x3080;
         const EGL_TEXTURE_TARGET: EGLint = 0x3081;
         const EGL_TEXTURE_RGBA: EGLint = 0x305E;
+        const EGL_TEXTURE_2D: EGLint = 0x305F;
         const EGL_IOSURFACE_ANGLE: EGLint = 0x3454;
         const EGL_IOSURFACE_PLANE_ANGLE: EGLint = 0x345A;
         const EGL_TEXTURE_RECTANGLE_ANGLE: EGLint = 0x345B;
         const EGL_TEXTURE_TYPE_ANGLE: EGLint = 0x345C;
         const EGL_TEXTURE_INTERNAL_FORMAT_ANGLE: EGLint = 0x345D;
+        const EGL_BIND_TO_TEXTURE_TARGET_ANGLE: EGLint = 0x348D;
         const GL_BGRA_EXT: EGLint = 0x80E1;
         const GL_UNSIGNED_BYTE: EGLint = 0x1401;
 
@@ -364,6 +366,8 @@ fn create_egl(
                 *const EGLint,
             ) -> EGLSurface,
             swap_buffers: unsafe extern "C" fn(EGLDisplay, EGLSurface) -> EGLBoolean,
+            get_error: unsafe extern "C" fn() -> EGLint,
+            iosurface_texture_target: EGLint,
             external_surface: Mutex<Option<ExternalSurface>>,
             _egl_library: Library,
             _gles_library: Library,
@@ -448,7 +452,7 @@ fn create_egl(
                                 EGL_IOSURFACE_PLANE_ANGLE,
                                 0,
                                 EGL_TEXTURE_TARGET,
-                                EGL_TEXTURE_RECTANGLE_ANGLE,
+                                self.iosurface_texture_target,
                                 EGL_TEXTURE_FORMAT,
                                 EGL_TEXTURE_RGBA,
                                 EGL_TEXTURE_TYPE_ANGLE,
@@ -469,7 +473,10 @@ fn create_egl(
                     }
                 };
                 if surface.is_null() {
-                    return Err(format!("failed to create EGL external surface kind {kind}"));
+                    return Err(format!(
+                        "failed to create EGL external surface kind {kind}: EGL {:#x}",
+                        unsafe { (self.get_error)() }
+                    ));
                 }
                 *self.external_surface.lock().unwrap() = Some(ExternalSurface {
                     surface,
@@ -501,7 +508,10 @@ fn create_egl(
                     (self.make_current)(self.display, output.surface, output.surface, self.ctx)
                 } == 0
                 {
-                    return Err("eglMakeCurrent(external surface) failed".into());
+                    return Err(format!(
+                        "eglMakeCurrent(external surface) failed: EGL {:#x}",
+                        unsafe { (self.get_error)() }
+                    ));
                 }
                 Ok(())
             }
@@ -517,7 +527,10 @@ fn create_egl(
                 };
                 let restored = self.make_current();
                 if !swap_result {
-                    return Err("eglSwapBuffers(external surface) failed".into());
+                    return Err(format!(
+                        "eglSwapBuffers(external surface) failed: EGL {:#x}",
+                        unsafe { (self.get_error)() }
+                    ));
                 }
                 if !restored {
                     return Err("failed to restore internal EGL pbuffer".into());
@@ -696,6 +709,13 @@ fn create_egl(
                     load!(egl_lib, "eglTerminate");
                 let egl_swap_buffers: unsafe extern "C" fn(EGLDisplay, EGLSurface) -> EGLBoolean =
                     load!(egl_lib, "eglSwapBuffers");
+                let egl_get_error: unsafe extern "C" fn() -> EGLint = load!(egl_lib, "eglGetError");
+                let egl_get_config_attrib: unsafe extern "C" fn(
+                    EGLDisplay,
+                    EGLConfig,
+                    EGLint,
+                    *mut EGLint,
+                ) -> EGLBoolean = load!(egl_lib, "eglGetConfigAttrib");
                 // 查询当前线程的 EGL 上下文（bind_save/restore 用来保存/恢复宿主上下文）。
                 let egl_get_current_display: unsafe extern "C" fn() -> EGLDisplay =
                     load!(egl_lib, "eglGetCurrentDisplay");
@@ -721,7 +741,7 @@ fn create_egl(
 
                 let config_attrs = [
                     EGL_RENDERABLE_TYPE,
-                    if cfg!(target_os = "ios") {
+                    if cfg!(any(target_os = "ios", target_os = "android")) {
                         EGL_OPENGL_ES3_BIT
                     } else {
                         EGL_OPENGL_ES2_BIT
@@ -754,6 +774,24 @@ fn create_egl(
                     || num_configs == 0
                 {
                     return Err("eglChooseConfig failed".into());
+                }
+
+                // EGL_ANGLE_iosurface_client_buffer exposes the target accepted by
+                // this config. MetalANGLE reports TEXTURE_2D on iOS and
+                // TEXTURE_RECTANGLE on macOS; hard-coding the desktop value makes
+                // every iOS client-buffer pbuffer fail with EGL_BAD_ATTRIBUTE.
+                let mut iosurface_texture_target = if cfg!(target_os = "ios") {
+                    EGL_TEXTURE_2D
+                } else {
+                    EGL_TEXTURE_RECTANGLE_ANGLE
+                };
+                if cfg!(any(target_os = "ios", target_os = "macos")) {
+                    let _ = egl_get_config_attrib(
+                        display,
+                        config,
+                        EGL_BIND_TO_TEXTURE_TARGET_ANGLE,
+                        &mut iosurface_texture_target,
+                    );
                 }
 
                 let pbuffer_attrs = [
@@ -852,6 +890,8 @@ fn create_egl(
                         create_window_surface: egl_create_window_surface,
                         create_pbuffer_from_client_buffer: egl_create_pbuffer_from_client_buffer,
                         swap_buffers: egl_swap_buffers,
+                        get_error: egl_get_error,
+                        iosurface_texture_target,
                         external_surface: Mutex::new(None),
                         _egl_library: egl_lib,
                         _gles_library: gles_lib,

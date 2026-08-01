@@ -134,6 +134,7 @@ feature 自动决定后端。
 | `art3m1s_runtime_set_external_surface` / `clear_external_surface` | 绑定或解绑 Android `ANativeWindow` / Apple `IOSurface` |
 | `art3m1s_runtime_advance_and_present` | 推进一帧并直接提交到宿主纹理，静止画面不重复提交 |
 | `art3m1s_runtime_advance_without_render` | 显示链繁忙时仅推进逻辑，保持 `onEnterFrame` 时序 |
+| `art3m1s_runtime_set_profiler_enabled` / `profiler_snapshot` | 开启异步性能采样并读取 JSON 快照 |
 | `art3m1s_runtime_feed_mouse` | 更新鼠标坐标 |
 | `art3m1s_runtime_feed_mouse_button` | 发送鼠标左右键状态变化 |
 | `art3m1s_runtime_feed_touch` | 发送触摸阶段 |

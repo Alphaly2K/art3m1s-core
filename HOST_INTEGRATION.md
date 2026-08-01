@@ -28,6 +28,11 @@
 | `art3m1s_runtime_submit_http_result(rt, status:int, body:*u8, len:int)->int` | 回填 httpget/httppost 结果，解除脚本挂起。收到 ui_command `http_request` 后异步请求，完成时调用 |
 | `art3m1s_runtime_set_string_variable(rt, name:*c_char, value:*c_char)` | 宿主向脚本回写字符串变量（http/native 结果等） |
 
+Profiler 为可选接口：宿主用 `art3m1s_runtime_set_profiler_enabled` 开关采样，并以
+`art3m1s_runtime_profiler_snapshot` 异步、低频读取 UTF-8 JSON。渲染线程仅写入有界队列；
+解释器、事件、E-Mote、合成器、DrawList、GPU 提交、present/readback 与宿主文件 FFI
+分别计时，后台线程每约 500ms 聚合一次。
+
 ## 三、仍属宿主 UI 职责（引擎已提供全部数据/通道）
 
 - **回想（backlog）历史界面**：引擎经 `var system=get_backlog_size/get_backlog_tags` 提供

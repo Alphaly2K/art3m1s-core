@@ -87,6 +87,14 @@ impl CpuTexturePixels {
             PixelStorage::Opaque | PixelStorage::Alpha(_) => None,
         }
     }
+
+    fn allocated_bytes(&self) -> usize {
+        match &self.storage {
+            PixelStorage::Opaque => 0,
+            PixelStorage::Alpha(alpha) => alpha.len(),
+            PixelStorage::Rgba(rgba) => rgba.len(),
+        }
+    }
 }
 
 /// 把资源名解析为 GL 纹理并缓存的提供者。
@@ -188,6 +196,20 @@ impl GlTextureProvider {
     /// width/height/clip 的图片层应报告素材本身的尺寸。
     pub fn cached_info(&self, name: &str) -> Option<TextureInfo> {
         self.cache.get(name).map(|(_, info)| *info)
+    }
+
+    /// Lightweight profiler counters. GPU bytes are an RGBA8-equivalent
+    /// estimate because compressed texture allocation sizes are not exposed by
+    /// GLES; CPU bytes count allocations actually retained for hit testing or
+    /// pixel editing.
+    pub(crate) fn profile_memory(&self) -> (usize, u64, u64) {
+        let gpu = self.cache.values().fold(0u64, |total, (_, info)| {
+            total.saturating_add(info.width as u64 * info.height as u64 * 4)
+        });
+        let cpu = self.cpu_pixels.values().fold(0u64, |total, pixels| {
+            total.saturating_add(pixels.allocated_bytes() as u64)
+        });
+        (self.cache.len(), gpu, cpu)
     }
 
     /// Immediately releases cached textures in a private runtime namespace.

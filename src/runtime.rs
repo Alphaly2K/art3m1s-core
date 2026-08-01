@@ -124,6 +124,7 @@ pub struct CoreRuntime {
     scenario_text_shown: bool,
     /// 已读记录自上次持久化后是否有新增（syssave 时落 aread.dat）。
     read_dirty: bool,
+    profiler: crate::profiler::RuntimeProfiler,
     /// Must drop after every GL-owned field. Runtime destruction first makes
     /// this context current, then renderer/provider drops can release objects.
     gl_ctx: Box<dyn platform::GLPlatformContext>,
@@ -221,6 +222,7 @@ impl CoreRuntime {
             was_click_wait: false,
             scenario_text_shown: false,
             read_dirty: false,
+            profiler: crate::profiler::RuntimeProfiler::new(),
             gl_ctx,
         })
     }
@@ -256,14 +258,18 @@ impl CoreRuntime {
             return 0;
         }
 
+        let mut profile = self.begin_profile_frame();
         // 抢占当前线程的 GL 上下文前，先保存宿主（Flutter）的上下文；
         // 渲染完后必须 restore，否则宿主后续的 GL 调用全打到我们的离屏 FBO，
         // 宿主窗口就黑了。
         let saved_ctx = self.gl_ctx.bind_save();
 
-        self.advance_logic(delta_ms);
-        let written = if self.render_current_frame().is_some() {
-            self.read_current_frame_into(out_pixels)
+        self.advance_logic(delta_ms, &mut profile);
+        let written = if self.render_current_frame(&mut profile).is_some() {
+            let started = profile.mark();
+            let written = self.read_current_frame_into(out_pixels);
+            profile.readback_ns = crate::profiler::FrameProfile::elapsed(started);
+            written
         } else {
             0
         };
@@ -271,6 +277,7 @@ impl CoreRuntime {
 
         // 渲染完毕，把 GL 上下文还给宿主。
         self.gl_ctx.restore(saved_ctx);
+        self.finish_profile_frame(&mut profile);
 
         written
     }
@@ -312,27 +319,41 @@ impl CoreRuntime {
     /// Advances logic and presents a changed frame through the host texture.
     /// Returns `Ok(false)` when no visual update was necessary.
     pub fn advance_and_present(&mut self, delta_ms: u64) -> Result<bool, String> {
+        let mut profile = self.begin_profile_frame();
         let saved_ctx = self.gl_ctx.bind_save();
-        self.advance_logic(delta_ms);
-        let repaint = self.render_current_frame();
+        self.advance_logic(delta_ms, &mut profile);
+        let repaint = self.render_current_frame(&mut profile);
         let result = if let Some(repaint) = repaint {
             (|| {
                 let (width, height) = self
                     .external_surface_size
                     .ok_or_else(|| "external surface is not configured".to_string())?;
                 let top_left_memory = self.external_surface_kind == Some(2);
+                // Android ANativeWindow rotates through a BufferQueue. Without
+                // EGL_EXT_buffer_age, untouched pixels in the next back buffer
+                // are not guaranteed to contain the previous frame. Keep the
+                // internal FBO damage-aware, but copy its complete final image
+                // to Android window surfaces. IOSurface is single-buffered and
+                // can safely retain untouched regions.
+                let present_damage = if self.external_surface_kind == Some(1) {
+                    None
+                } else {
+                    repaint.damage()
+                };
+                let present_started = profile.mark();
                 self.gl_ctx.bind_external_surface()?;
                 if let Err(error) = self.renderer.present_texture(
                     self.fbo_tex,
                     width,
                     height,
-                    repaint.damage(),
+                    present_damage,
                     top_left_memory,
                 ) {
                     let _ = self.gl_ctx.restore_internal_surface();
                     return Err(error);
                 }
                 self.gl_ctx.present_external_surface()?;
+                profile.present_ns = crate::profiler::FrameProfile::elapsed(present_started);
                 Ok(true)
             })()
         } else {
@@ -340,6 +361,7 @@ impl CoreRuntime {
         };
         self.clear_input_edges();
         self.gl_ctx.restore(saved_ctx);
+        self.finish_profile_frame(&mut profile);
         result
     }
 
@@ -348,13 +370,17 @@ impl CoreRuntime {
     /// such as E-Mote lip sync on the audio clock without paying for a GPU
     /// readback whose pixels cannot be displayed yet.
     pub fn advance_without_render(&mut self, delta_ms: u64) {
+        let mut profile = self.begin_profile_frame();
         let saved_ctx = self.gl_ctx.bind_save();
-        self.advance_logic(delta_ms);
+        self.advance_logic(delta_ms, &mut profile);
         self.clear_input_edges();
         self.gl_ctx.restore(saved_ctx);
+        self.finish_profile_frame(&mut profile);
     }
 
-    fn advance_logic(&mut self, delta_ms: u64) {
+    fn advance_logic(&mut self, delta_ms: u64, profile: &mut crate::profiler::FrameProfile) {
+        let logic_started = profile.mark();
+        let input_started = profile.mark();
         // isPush 的按键重复语义依赖每键按下时间戳，逐帧维护。
         self.input
             .lock()
@@ -363,8 +389,13 @@ impl CoreRuntime {
         // getScriptStatus 的引擎状态自动迁移 + setScriptStatus(0) 的唤醒语义。
         self.sync_script_status();
         let clicked = self.process_pointer_handlers();
-        self.advance_script(clicked, delta_ms);
+        profile.input_ns = crate::profiler::FrameProfile::elapsed(input_started);
 
+        let interpreter_started = profile.mark();
+        self.advance_script(clicked, delta_ms);
+        profile.interpreter_ns = crate::profiler::FrameProfile::elapsed(interpreter_started);
+
+        let events_started = profile.mark();
         let collected = self.drain_events();
         self.dispatch_events(&collected);
         // 已读跟踪 + 未读停跳：在文本展示后的点击等待处标记已读，
@@ -372,8 +403,13 @@ impl CoreRuntime {
         self.track_read_and_stop_skip_on_unread();
         // 点击等待进入/退出边沿：触发 e:setEventHandler{onClickWaitIn/Out}。
         self.sync_click_wait_handlers();
-        self.sync_emote_scene();
+        profile.events_ns = crate::profiler::FrameProfile::elapsed(events_started);
 
+        let emote_started = profile.mark();
+        self.sync_emote_scene();
+        profile.emote_ns = crate::profiler::FrameProfile::elapsed(emote_started);
+
+        let audio_started = profile.mark();
         self.apply_system_audio_volume();
         let pending_volumes: Vec<(String, f32)> = {
             let mut pending = self.volumes.lock().unwrap();
@@ -385,16 +421,68 @@ impl CoreRuntime {
         for (kind, value) in pending_volumes {
             self.set_volume(&kind, value);
         }
+        profile.audio_media_ns = crate::profiler::FrameProfile::elapsed(audio_started);
 
+        let compositor_started = profile.mark();
         self.compositor.advance(delta_ms);
         // get_layer_info 必须反映本帧缓动后的实际位置，而不是缓动开始前的
         // 静态 LayerProps。下一帧输入回调执行 Lua 前会读取这份快照。
         self.sync_layer_info_all();
         self.dispatch_tween_handlers();
+        profile.compositor_ns = crate::profiler::FrameProfile::elapsed(compositor_started);
+
+        let emote_started = profile.mark();
         self.emote.lock().unwrap().advance(delta_ms);
+        profile.emote_ns = profile
+            .emote_ns
+            .saturating_add(crate::profiler::FrameProfile::elapsed(emote_started));
+
+        let text_started = profile.mark();
         self.advance_text(delta_ms);
         self.apply_ready_text_translations();
+        profile.text_ns = crate::profiler::FrameProfile::elapsed(text_started);
+
+        let media_started = profile.mark();
         self.advance_media_and_enqueue_finish_handlers(delta_ms);
+        profile.audio_media_ns = profile
+            .audio_media_ns
+            .saturating_add(crate::profiler::FrameProfile::elapsed(media_started));
+        profile.logic_ns = crate::profiler::FrameProfile::elapsed(logic_started);
+    }
+
+    pub fn set_profiler_enabled(&self, enabled: bool) {
+        self.profiler.set_enabled(enabled);
+    }
+
+    pub fn profiler_snapshot_json(&self) -> String {
+        self.profiler.snapshot_json()
+    }
+
+    fn begin_profile_frame(&self) -> crate::profiler::FrameProfile {
+        let profile = self.profiler.begin_frame();
+        if profile.enabled {
+            let _ = crate::ffi::take_profile_io_counters();
+        }
+        profile
+    }
+
+    fn finish_profile_frame(&self, profile: &mut crate::profiler::FrameProfile) {
+        if !profile.enabled {
+            return;
+        }
+        let io = crate::ffi::take_profile_io_counters();
+        profile.host_ffi_calls = io.calls;
+        profile.host_ffi_ns = io.elapsed_ns;
+        profile.host_ffi_bytes = io.bytes;
+        let (texture_count, gpu_bytes, cpu_bytes) = self.texture_provider.profile_memory();
+        profile.texture_count = texture_count as u64;
+        profile.texture_gpu_bytes = gpu_bytes;
+        profile.texture_cpu_bytes = cpu_bytes;
+        let (emote_layers, emote_source_bytes) = self.emote.lock().unwrap().profile_memory();
+        profile.emote_layers = emote_layers as u64;
+        profile.emote_source_bytes = emote_source_bytes;
+        profile.finish();
+        self.profiler.submit(*profile);
     }
 
     pub fn is_exit_requested(&self) -> bool {

@@ -21,6 +21,8 @@ pub mod host_media;
     all(target_os = "macos", target_arch = "aarch64")
 ))]
 mod mobile_astc;
+#[cfg(feature = "gl-backend")]
+pub mod profiler;
 pub mod render_pipeline;
 #[cfg(feature = "gl-backend")]
 pub mod runtime;

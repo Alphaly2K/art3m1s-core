@@ -61,6 +61,25 @@ struct EmoteTextureState {
 }
 
 impl EmoteState {
+    pub(super) fn profile_memory(&self) -> (usize, u64) {
+        let mut instances = 0usize;
+        let mut source_bytes = 0u64;
+        for slots in self.layers.values() {
+            for instance in [&slots.active, &slots.pending].into_iter().flatten() {
+                instances += 1;
+                let live_sources = instance
+                    .textures
+                    .values()
+                    .filter_map(|texture| texture.source.as_ref())
+                    .map(|source| source.as_bytes().len() as u64)
+                    .sum::<u64>();
+                source_bytes = source_bytes
+                    .saturating_add((instance.texture_source_bytes as u64).max(live_sources));
+            }
+        }
+        (instances, source_bytes)
+    }
+
     pub fn create_layer(
         &mut self,
         id: &str,

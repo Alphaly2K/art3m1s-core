@@ -37,7 +37,10 @@ impl CoreRuntime {
 
     /// Renders the current logical scene into the persistent internal FBO.
     /// Returns the actual repaint region, or `None` when no pixels changed.
-    pub(super) fn render_current_frame(&mut self) -> Option<RenderRegion> {
+    pub(super) fn render_current_frame(
+        &mut self,
+        profile: &mut crate::profiler::FrameProfile,
+    ) -> Option<RenderRegion> {
         // 绑定 FBO，渲染到纹理而不是默认帧缓冲
         unsafe {
             self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
@@ -46,6 +49,7 @@ impl CoreRuntime {
         // 转场捕获：在渲染新帧前，若合成器需要捕捉旧画面，则从当前 FBO 读取
         let pipeline = RenderPipeline::new(&self.compositor);
         if pipeline.needs_trans_capture() {
+            let capture_started = profile.mark();
             let pixels = unsafe {
                 platform::read_pixels(&self.gl, self.stage_w as i32, self.stage_h as i32)
             };
@@ -55,8 +59,10 @@ impl CoreRuntime {
                 self.stage_h,
                 &mut self.texture_provider,
             );
+            profile.transition_capture_ns = crate::profiler::FrameProfile::elapsed(capture_started);
         }
 
+        let build_started = profile.mark();
         // backlog / message-tags 查询快照：每帧从 text_renderer 抽取再现标签刷新，
         // 供解释器 var system=get_backlog_* / get_message_tags 的宿主查询钩子读取。
         self.sync_backlog_snapshot();
@@ -67,6 +73,8 @@ impl CoreRuntime {
         self.drive_click_wait_icon();
 
         let (frame, _, _) = self.build_bound_scene(true, None);
+        profile.frame_build_ns = crate::profiler::FrameProfile::elapsed(build_started);
+        profile.draw_calls = (frame.commands.len() + frame.mask_commands.len()) as u64;
         let texture_revision = self.texture_provider.content_revision();
         let changed_textures = self
             .texture_provider
@@ -77,7 +85,12 @@ impl CoreRuntime {
             &frame,
             texture_revision,
         ) {
+            let gpu_started = profile.mark();
             let cleared_debug_overlay = self.renderer.clear_damage_overlay(&frame);
+            profile.gpu_submit_ns = crate::profiler::FrameProfile::elapsed(gpu_started);
+            if let Some(region) = cleared_debug_overlay {
+                record_render_region(profile, region, self.stage_w, self.stage_h);
+            }
             unsafe {
                 self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             }
@@ -93,6 +106,7 @@ impl CoreRuntime {
             .filter(|&texture| self.texture_provider.texture_is_opaque(texture))
             .collect::<std::collections::HashSet<_>>();
         let visualize_damage = crate::ffi::damage_visualization_enabled();
+        let gpu_started = profile.mark();
         let repaint_region = match frame_damage(
             self.last_submitted_frame.as_ref(),
             self.last_submitted_texture_revision,
@@ -104,7 +118,12 @@ impl CoreRuntime {
             self.stage_h,
         ) {
             DamageDecision::Skip => {
+                let gpu_started = profile.mark();
                 let cleared_debug_overlay = self.renderer.clear_damage_overlay(&frame);
+                profile.gpu_submit_ns = crate::profiler::FrameProfile::elapsed(gpu_started);
+                if let Some(region) = cleared_debug_overlay {
+                    record_render_region(profile, region, self.stage_w, self.stage_h);
+                }
                 self.last_submitted_frame = Some(frame);
                 self.last_submitted_texture_revision = texture_revision;
                 self.last_rendered_scene = Some(self.compositor.scene_snapshot());
@@ -124,6 +143,8 @@ impl CoreRuntime {
                 RenderRegion::Full
             }
         };
+        profile.gpu_submit_ns = crate::profiler::FrameProfile::elapsed(gpu_started);
+        record_render_region(profile, repaint_region, self.stage_w, self.stage_h);
         self.last_submitted_frame = Some(frame);
         self.last_submitted_texture_revision = texture_revision;
         self.last_rendered_scene = Some(self.compositor.scene_snapshot());
@@ -255,6 +276,24 @@ impl CoreRuntime {
             self.exit_click_wait_icon();
         }
     }
+}
+
+fn record_render_region(
+    profile: &mut crate::profiler::FrameProfile,
+    region: RenderRegion,
+    stage_w: u32,
+    stage_h: u32,
+) {
+    profile.rendered = true;
+    profile.stage_pixels = stage_w as u64 * stage_h as u64;
+    profile.damage_pixels = match region {
+        RenderRegion::Full => profile.stage_pixels,
+        RenderRegion::Rect([_, _, width, height]) => {
+            let width = width.max(0.0).min(stage_w as f32);
+            let height = height.max(0.0).min(stage_h as f32);
+            (width * height).round() as u64
+        }
+    };
 }
 
 /// 是否处于点击等待（行末/页末点击继续）。[wt]/[wt0] 建立 Generic/Generic0；
