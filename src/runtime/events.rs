@@ -18,7 +18,6 @@ impl CoreRuntime {
     ) {
         const EVENT_TRACE_LIMIT: usize = 24;
 
-        let mut compositor_changed = false;
         let mut trace = crate::ffi::debug_enabled()
             .then(|| Vec::with_capacity(events.len().min(EVENT_TRACE_LIMIT)));
         for event in events {
@@ -446,7 +445,6 @@ impl CoreRuntime {
             let compositor_started = profile.mark();
             if let Some(event) = CompositorEvent::from_interpreter(event) {
                 self.compositor.apply_event(event);
-                compositor_changed = true;
             }
             profile.event_compositor_ns = profile
                 .event_compositor_ns
@@ -456,16 +454,6 @@ impl CoreRuntime {
             {
                 trace.push(event_summary(event));
             }
-        }
-
-        // Lua only runs before or after this batch, never between two queued
-        // events. Refreshing the get_layer_info snapshot after every visual
-        // event therefore performs O(events * layers) duplicate work during
-        // scene changes without making any additional state observable.
-        if compositor_changed {
-            let sync_started = profile.mark();
-            self.sync_layer_info_all();
-            profile.event_layer_sync_ns = crate::profiler::FrameProfile::elapsed(sync_started);
         }
 
         let log_started = profile.mark();
