@@ -343,7 +343,7 @@ impl CoreRuntime {
                 let (width, height) = self
                     .external_surface_size
                     .ok_or_else(|| "external surface is not configured".to_string())?;
-                let top_left_memory = self.external_surface_kind == Some(2);
+                let top_left_memory = matches!(self.external_surface_kind, Some(2 | 3));
                 // Android ANativeWindow rotates through a BufferQueue. Without
                 // EGL_EXT_buffer_age, untouched pixels in the next back buffer
                 // are not guaranteed to contain the previous frame. Keep the

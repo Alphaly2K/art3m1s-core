@@ -16,7 +16,8 @@ pub trait GLPlatformContext: Send {
     fn restore(&self, saved: SavedGlContext);
 
     /// Binds a host-owned platform surface as the zero-copy presentation target.
-    /// Kind 1 is an Android `ANativeWindow`; kind 2 is an Apple `IOSurface`.
+    /// Kind 1 is an Android `ANativeWindow`; kind 2 is an Apple `IOSurface`;
+    /// kind 3 is a Metal `MTLTexture` imported through an EGL image.
     fn set_external_surface(
         &self,
         _kind: i32,
@@ -279,12 +280,25 @@ fn create_egl(
         const EGL_TEXTURE_RECTANGLE_ANGLE: EGLint = 0x345B;
         const EGL_TEXTURE_TYPE_ANGLE: EGLint = 0x345C;
         const EGL_TEXTURE_INTERNAL_FORMAT_ANGLE: EGLint = 0x345D;
+        const EGL_MTL_TEXTURE_MGL: EGLint = 0x3456;
         const GL_BGRA_EXT: EGLint = 0x80E1;
         const GL_UNSIGNED_BYTE: EGLint = 0x1401;
+        const GL_TEXTURE_2D: u32 = 0x0DE1;
+        const GL_FRAMEBUFFER: u32 = 0x8D40;
+        const GL_COLOR_ATTACHMENT0: u32 = 0x8CE0;
+        const GL_FRAMEBUFFER_COMPLETE: u32 = 0x8CD5;
+        const GL_NO_ERROR: u32 = 0;
 
-        struct ExternalSurface {
-            surface: EGLSurface,
-            swap_on_present: bool,
+        enum ExternalSurface {
+            Surface {
+                surface: EGLSurface,
+                swap_on_present: bool,
+            },
+            Texture {
+                image: *mut c_void,
+                texture: u32,
+                framebuffer: u32,
+            },
         }
 
         macro_rules! load {
@@ -363,6 +377,27 @@ fn create_egl(
                 EGLConfig,
                 *const EGLint,
             ) -> EGLSurface,
+            create_image: Option<
+                unsafe extern "C" fn(
+                    EGLDisplay,
+                    EGLContext,
+                    EGLint,
+                    *mut c_void,
+                    *const EGLint,
+                ) -> *mut c_void,
+            >,
+            destroy_image: Option<unsafe extern "C" fn(EGLDisplay, *mut c_void) -> EGLBoolean>,
+            gl_gen_textures: unsafe extern "C" fn(i32, *mut u32),
+            gl_delete_textures: unsafe extern "C" fn(i32, *const u32),
+            gl_bind_texture: unsafe extern "C" fn(u32, u32),
+            gl_egl_image_target_texture_2d: Option<unsafe extern "C" fn(u32, *mut c_void)>,
+            gl_gen_framebuffers: unsafe extern "C" fn(i32, *mut u32),
+            gl_delete_framebuffers: unsafe extern "C" fn(i32, *const u32),
+            gl_bind_framebuffer: unsafe extern "C" fn(u32, u32),
+            gl_framebuffer_texture_2d: unsafe extern "C" fn(u32, u32, u32, u32, i32),
+            gl_check_framebuffer_status: unsafe extern "C" fn(u32) -> u32,
+            gl_flush: unsafe extern "C" fn(),
+            gl_get_error: unsafe extern "C" fn() -> u32,
             swap_buffers: unsafe extern "C" fn(EGLDisplay, EGLSurface) -> EGLBoolean,
             get_error: unsafe extern "C" fn() -> EGLint,
             iosurface_texture_target: EGLint,
@@ -373,6 +408,83 @@ fn create_egl(
         }
 
         unsafe impl Send for EglCtx {}
+
+        impl EglCtx {
+            unsafe fn create_metal_texture_target(
+                &self,
+                handle: *mut c_void,
+            ) -> Result<ExternalSurface, String> {
+                unsafe {
+                    let create_image = self
+                        .create_image
+                        .ok_or("EGL image import is unavailable in this ANGLE build")?;
+                    let destroy_image = self
+                        .destroy_image
+                        .ok_or("EGL image destruction is unavailable in this ANGLE build")?;
+                    let bind_image = self
+                        .gl_egl_image_target_texture_2d
+                        .ok_or("GL_OES_EGL_image is unavailable in this ANGLE build")?;
+                    let image = create_image(
+                        self.display,
+                        std::ptr::null_mut(),
+                        EGL_MTL_TEXTURE_MGL,
+                        handle,
+                        [EGL_NONE].as_ptr(),
+                    );
+                    if image.is_null() {
+                        return Err(format!(
+                            "failed to import MTLTexture as EGLImage: EGL {:#x}",
+                            (self.get_error)()
+                        ));
+                    }
+
+                    while (self.gl_get_error)() != GL_NO_ERROR {}
+                    let mut texture = 0;
+                    (self.gl_gen_textures)(1, &mut texture);
+                    (self.gl_bind_texture)(GL_TEXTURE_2D, texture);
+                    bind_image(GL_TEXTURE_2D, image);
+                    let image_error = (self.gl_get_error)();
+                    if texture == 0 || image_error != GL_NO_ERROR {
+                        if texture != 0 {
+                            (self.gl_delete_textures)(1, &texture);
+                        }
+                        destroy_image(self.display, image);
+                        return Err(format!(
+                            "failed to bind EGLImage to GL texture: GL {image_error:#x}"
+                        ));
+                    }
+
+                    let mut framebuffer = 0;
+                    (self.gl_gen_framebuffers)(1, &mut framebuffer);
+                    (self.gl_bind_framebuffer)(GL_FRAMEBUFFER, framebuffer);
+                    (self.gl_framebuffer_texture_2d)(
+                        GL_FRAMEBUFFER,
+                        GL_COLOR_ATTACHMENT0,
+                        GL_TEXTURE_2D,
+                        texture,
+                        0,
+                    );
+                    let status = (self.gl_check_framebuffer_status)(GL_FRAMEBUFFER);
+                    (self.gl_bind_framebuffer)(GL_FRAMEBUFFER, 0);
+                    if framebuffer == 0 || status != GL_FRAMEBUFFER_COMPLETE {
+                        if framebuffer != 0 {
+                            (self.gl_delete_framebuffers)(1, &framebuffer);
+                        }
+                        (self.gl_delete_textures)(1, &texture);
+                        destroy_image(self.display, image);
+                        return Err(format!(
+                            "MTLTexture framebuffer is incomplete: GL {status:#x}"
+                        ));
+                    }
+
+                    Ok(ExternalSurface::Texture {
+                        image,
+                        texture,
+                        framebuffer,
+                    })
+                }
+            }
+        }
 
         impl GLPlatformContext for EglCtx {
             fn make_current(&self) -> bool {
@@ -433,14 +545,17 @@ fn create_egl(
                     return Err("invalid external surface handle or dimensions".into());
                 }
                 self.clear_external_surface();
-                let surface = unsafe {
+                let external = unsafe {
                     match kind {
-                        1 => (self.create_window_surface)(
-                            self.display,
-                            self.config,
-                            handle,
-                            [EGL_NONE].as_ptr(),
-                        ),
+                        1 => ExternalSurface::Surface {
+                            surface: (self.create_window_surface)(
+                                self.display,
+                                self.config,
+                                handle,
+                                [EGL_NONE].as_ptr(),
+                            ),
+                            swap_on_present: true,
+                        },
                         2 => {
                             let attrs = [
                                 EGL_WIDTH,
@@ -459,18 +574,24 @@ fn create_egl(
                                 GL_BGRA_EXT,
                                 EGL_NONE,
                             ];
-                            (self.create_pbuffer_from_client_buffer)(
-                                self.display,
-                                EGL_IOSURFACE_ANGLE,
-                                handle,
-                                self.config,
-                                attrs.as_ptr(),
-                            )
+                            ExternalSurface::Surface {
+                                surface: (self.create_pbuffer_from_client_buffer)(
+                                    self.display,
+                                    EGL_IOSURFACE_ANGLE,
+                                    handle,
+                                    self.config,
+                                    attrs.as_ptr(),
+                                ),
+                                swap_on_present: false,
+                            }
                         }
+                        3 => self.create_metal_texture_target(handle)?,
                         _ => return Err(format!("unknown external surface kind {kind}")),
                     }
                 };
-                if surface.is_null() {
+                if let ExternalSurface::Surface { surface, .. } = &external
+                    && surface.is_null()
+                {
                     return Err(format!(
                         "failed to create EGL external surface kind {kind}: EGL {:#x} (target={:#x}, size={}x{})",
                         unsafe { (self.get_error)() },
@@ -479,23 +600,34 @@ fn create_egl(
                         height,
                     ));
                 }
-                *self.external_surface.lock().unwrap() = Some(ExternalSurface {
-                    surface,
-                    // Window surfaces are double buffered. IOSurface client-buffer
-                    // pbuffers are single-buffered shared storage; glFlush from the
-                    // renderer is the commit and swapping them is unnecessary.
-                    swap_on_present: kind == 1,
-                });
+                *self.external_surface.lock().unwrap() = Some(external);
                 Ok(())
             }
 
             fn clear_external_surface(&self) {
                 if let Some(surface) = self.external_surface.lock().unwrap().take() {
                     unsafe {
-                        if (self.get_current_surface)(0x305A /* EGL_DRAW */) == surface.surface {
-                            let _ = self.make_current();
+                        match surface {
+                            ExternalSurface::Surface { surface, .. } => {
+                                if (self.get_current_surface)(0x305A /* EGL_DRAW */) == surface {
+                                    let _ = self.make_current();
+                                }
+                                (self.destroy_surface)(self.display, surface);
+                            }
+                            ExternalSurface::Texture {
+                                image,
+                                texture,
+                                framebuffer,
+                            } => {
+                                let _ = self.make_current();
+                                (self.gl_bind_framebuffer)(GL_FRAMEBUFFER, 0);
+                                (self.gl_delete_framebuffers)(1, &framebuffer);
+                                (self.gl_delete_textures)(1, &texture);
+                                if let Some(destroy_image) = self.destroy_image {
+                                    destroy_image(self.display, image);
+                                }
+                            }
                         }
-                        (self.destroy_surface)(self.display, surface.surface);
                     }
                 }
             }
@@ -505,14 +637,24 @@ fn create_egl(
                 let output = guard
                     .as_ref()
                     .ok_or_else(|| "external surface is not configured".to_string())?;
-                if unsafe {
-                    (self.make_current)(self.display, output.surface, output.surface, self.ctx)
-                } == 0
-                {
-                    return Err(format!(
-                        "eglMakeCurrent(external surface) failed: EGL {:#x}",
-                        unsafe { (self.get_error)() }
-                    ));
+                match output {
+                    ExternalSurface::Surface { surface, .. } => {
+                        if unsafe {
+                            (self.make_current)(self.display, *surface, *surface, self.ctx)
+                        } == 0
+                        {
+                            return Err(format!(
+                                "eglMakeCurrent(external surface) failed: EGL {:#x}",
+                                unsafe { (self.get_error)() }
+                            ));
+                        }
+                    }
+                    ExternalSurface::Texture { framebuffer, .. } => unsafe {
+                        if !self.make_current() {
+                            return Err("failed to make Metal texture context current".into());
+                        }
+                        (self.gl_bind_framebuffer)(GL_FRAMEBUFFER, *framebuffer);
+                    },
                 }
                 Ok(())
             }
@@ -523,8 +665,22 @@ fn create_egl(
                     let output = guard
                         .as_ref()
                         .ok_or_else(|| "external surface is not configured".to_string())?;
-                    !output.swap_on_present
-                        || unsafe { (self.swap_buffers)(self.display, output.surface) != 0 }
+                    match output {
+                        ExternalSurface::Surface {
+                            surface,
+                            swap_on_present,
+                        } => {
+                            !swap_on_present
+                                || unsafe { (self.swap_buffers)(self.display, *surface) != 0 }
+                        }
+                        ExternalSurface::Texture { .. } => {
+                            unsafe {
+                                (self.gl_flush)();
+                                (self.gl_bind_framebuffer)(GL_FRAMEBUFFER, 0);
+                            }
+                            true
+                        }
+                    }
                 };
                 let restored = self.make_current();
                 if !swap_result {
@@ -536,6 +692,14 @@ fn create_egl(
                 if !restored {
                     return Err("failed to restore internal EGL pbuffer".into());
                 }
+                Ok(())
+            }
+
+            fn restore_internal_surface(&self) -> Result<(), String> {
+                if !self.make_current() {
+                    return Err("failed to restore internal EGL pbuffer".into());
+                }
+                unsafe { (self.gl_bind_framebuffer)(GL_FRAMEBUFFER, 0) };
                 Ok(())
             }
         }
@@ -686,6 +850,8 @@ fn create_egl(
                     *const EGLint,
                 )
                     -> EGLSurface = load!(egl_lib, "eglCreatePbufferFromClientBuffer");
+                let egl_create_image = optional_symbol(&egl_lib, "eglCreateImageKHR");
+                let egl_destroy_image = optional_symbol(&egl_lib, "eglDestroyImageKHR");
                 let egl_create_context: unsafe extern "C" fn(
                     EGLDisplay,
                     EGLConfig,
@@ -834,6 +1000,27 @@ fn create_egl(
                 )
                 .map_err(|error| format!("libGLESv2 not found: {error}"))?;
 
+                let gl_gen_textures: unsafe extern "C" fn(i32, *mut u32) =
+                    load!(gles_lib, "glGenTextures");
+                let gl_delete_textures: unsafe extern "C" fn(i32, *const u32) =
+                    load!(gles_lib, "glDeleteTextures");
+                let gl_bind_texture: unsafe extern "C" fn(u32, u32) =
+                    load!(gles_lib, "glBindTexture");
+                let gl_egl_image_target_texture_2d =
+                    optional_symbol(&gles_lib, "glEGLImageTargetTexture2DOES");
+                let gl_gen_framebuffers: unsafe extern "C" fn(i32, *mut u32) =
+                    load!(gles_lib, "glGenFramebuffers");
+                let gl_delete_framebuffers: unsafe extern "C" fn(i32, *const u32) =
+                    load!(gles_lib, "glDeleteFramebuffers");
+                let gl_bind_framebuffer: unsafe extern "C" fn(u32, u32) =
+                    load!(gles_lib, "glBindFramebuffer");
+                let gl_framebuffer_texture_2d: unsafe extern "C" fn(u32, u32, u32, u32, i32) =
+                    load!(gles_lib, "glFramebufferTexture2D");
+                let gl_check_framebuffer_status: unsafe extern "C" fn(u32) -> u32 =
+                    load!(gles_lib, "glCheckFramebufferStatus");
+                let gl_flush: unsafe extern "C" fn() = load!(gles_lib, "glFlush");
+                let gl_get_error: unsafe extern "C" fn() -> u32 = load!(gles_lib, "glGetError");
+
                 // ── GL 函数指针加载 ────────────────────────────────────
                 // EGL 标准提供 eglGetProcAddress 取 GLES 函数；对桌面 GL 扩展符号
                 // mesa 可能返回 NULL，此时退回 dlsym(gles_lib)。
@@ -871,6 +1058,19 @@ fn create_egl(
                         get_current_context: egl_get_current_context,
                         create_window_surface: egl_create_window_surface,
                         create_pbuffer_from_client_buffer: egl_create_pbuffer_from_client_buffer,
+                        create_image: egl_create_image,
+                        destroy_image: egl_destroy_image,
+                        gl_gen_textures,
+                        gl_delete_textures,
+                        gl_bind_texture,
+                        gl_egl_image_target_texture_2d,
+                        gl_gen_framebuffers,
+                        gl_delete_framebuffers,
+                        gl_bind_framebuffer,
+                        gl_framebuffer_texture_2d,
+                        gl_check_framebuffer_status,
+                        gl_flush,
+                        gl_get_error,
                         swap_buffers: egl_swap_buffers,
                         get_error: egl_get_error,
                         iosurface_texture_target,

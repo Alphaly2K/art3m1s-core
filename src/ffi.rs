@@ -1040,7 +1040,8 @@ pub unsafe extern "C" fn art3m1s_runtime_advance_without_render(
 }
 
 /// Attaches a host platform texture to the runtime.
-/// `kind`: 1 = Android ANativeWindow, 2 = Apple IOSurface.
+/// `kind`: 1 = Android ANativeWindow, 2 = Apple IOSurface,
+/// 3 = Apple MTLTexture imported through EGLImage.
 #[cfg(feature = "gl-backend")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_set_external_surface(
