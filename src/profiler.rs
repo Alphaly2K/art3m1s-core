@@ -257,14 +257,16 @@ fn aggregate(
     dropped: Arc<AtomicU64>,
 ) {
     let mut enabled = false;
-    let mut started = Instant::now();
+    let mut session_started = Instant::now();
+    let mut refresh_started = Instant::now();
     let mut accumulator = WindowAccumulator::default();
     loop {
         if !enabled {
             match receiver.recv() {
                 Ok(Message::Reset(value)) => {
                     enabled = value;
-                    started = Instant::now();
+                    session_started = Instant::now();
+                    refresh_started = session_started;
                     accumulator = WindowAccumulator::default();
                     continue;
                 }
@@ -272,26 +274,32 @@ fn aggregate(
                 Err(_) => break,
             }
         }
-        let timeout = WINDOW.saturating_sub(started.elapsed());
+        let timeout = WINDOW.saturating_sub(refresh_started.elapsed());
         match receiver.recv_timeout(timeout) {
             Ok(Message::Frame(frame)) if enabled => accumulator.push(frame),
             Ok(Message::Frame(_)) => {}
             Ok(Message::Reset(value)) => {
                 enabled = value;
-                started = Instant::now();
+                session_started = Instant::now();
+                refresh_started = session_started;
                 accumulator = WindowAccumulator::default();
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
-        let elapsed = started.elapsed();
-        if elapsed >= WINDOW {
-            let value = accumulator.snapshot(elapsed, enabled, dropped.load(Ordering::Relaxed));
+        if refresh_started.elapsed() >= WINDOW {
+            let value = accumulator.snapshot(
+                session_started.elapsed(),
+                enabled,
+                dropped.load(Ordering::Relaxed),
+            );
             if let Ok(mut output) = snapshot.write() {
                 *output = value;
             }
-            started = Instant::now();
-            accumulator = WindowAccumulator::default();
+            // Only the publication clock rolls forward. The accumulator is
+            // intentionally session-long so average values converge and peak
+            // values remain visible until profiling is explicitly restarted.
+            refresh_started = Instant::now();
         }
     }
 }
@@ -363,5 +371,25 @@ mod tests {
         assert_eq!(snapshot.average.host_ffi_ms, 0.5);
         assert_eq!(snapshot.host_ffi_calls_per_second, 2.0);
         assert_eq!(snapshot.damage_percent, 25.0);
+    }
+
+    #[test]
+    fn accumulator_keeps_session_average_and_peak() {
+        let mut accumulator = WindowAccumulator::default();
+        accumulator.push(FrameProfile {
+            enabled: true,
+            interpreter_ns: 1_000_000,
+            ..FrameProfile::default()
+        });
+        accumulator.push(FrameProfile {
+            enabled: true,
+            interpreter_ns: 5_000_000,
+            ..FrameProfile::default()
+        });
+
+        let snapshot = accumulator.snapshot(Duration::from_secs(2), true, 0);
+        assert_eq!(snapshot.average.interpreter_ms, 3.0);
+        assert_eq!(snapshot.maximum.interpreter_ms, 5.0);
+        assert_eq!(snapshot.window_ms, 2_000);
     }
 }

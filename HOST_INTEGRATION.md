@@ -31,7 +31,8 @@
 Profiler 为可选接口：宿主用 `art3m1s_runtime_set_profiler_enabled` 开关采样，并以
 `art3m1s_runtime_profiler_snapshot` 异步、低频读取 UTF-8 JSON。渲染线程仅写入有界队列；
 解释器、事件、E-Mote、合成器、DrawList、GPU 提交、present/readback 与宿主文件 FFI
-分别计时，后台线程每约 500ms 聚合一次。
+分别计时。后台线程每约 500ms 发布一次快照，但平均值、峰值和吞吐率在本次 Profiler
+开启期间持续累计；关闭后重新开启时重置。
 
 ## 三、仍属宿主 UI 职责（引擎已提供全部数据/通道）
 
