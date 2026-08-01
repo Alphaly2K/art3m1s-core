@@ -599,9 +599,14 @@ impl CoreRuntime {
         let Some(renderer) = self.text_renderer.as_mut() else {
             return;
         };
+        if renderer.select_cached_font(face) {
+            self.loaded_font_face = Some(face.to_string());
+            return;
+        }
         let mut errors = Vec::new();
         for candidate in std::iter::once(face.to_string()).chain(font_fallback_candidates(face)) {
-            match crate::load_font_ffi(&candidate).and_then(|bytes| renderer.set_font_bytes(bytes))
+            match crate::load_font_ffi(&candidate)
+                .and_then(|bytes| renderer.set_named_font_bytes(face, bytes))
             {
                 Ok(()) => {
                     if candidate == face {

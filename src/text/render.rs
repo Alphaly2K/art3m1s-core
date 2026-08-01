@@ -1015,6 +1015,16 @@ pub trait TextRenderer {
     /// 切换当前用于光栅化的字体文件。
     fn set_font_bytes(&mut self, bytes: Vec<u8>) -> Result<(), String>;
 
+    /// 切换到此前以同一逻辑 face 加载的字体。返回 false 表示尚未缓存。
+    fn select_cached_font(&mut self, _face: &str) -> bool {
+        false
+    }
+
+    /// 加载并缓存一个带逻辑 face 的字体。默认实现保持第三方 renderer 兼容。
+    fn set_named_font_bytes(&mut self, _face: &str, bytes: Vec<u8>) -> Result<(), String> {
+        self.set_font_bytes(bytes)
+    }
+
     /// 当前消息层的逻辑字体文件，用于消息层/字体栈恢复后同步光栅化字体。
     fn active_font_face(&self) -> Option<&str>;
 

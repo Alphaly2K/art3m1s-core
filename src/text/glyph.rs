@@ -85,6 +85,8 @@ pub struct GlyphTextRenderer {
     state: FontState,
     font: Option<FontArc>,
     font_generation: u64,
+    next_font_generation: u64,
+    fonts: HashMap<String, (FontArc, u64)>,
     atlases: Vec<Atlas>,
     cache: HashMap<(u64, u16, u32), (usize, u32, u32, u32, u32)>,
     /// atlas 里的纯白小块（link type=0 hover 强调的白色方形板用），惰性分配
@@ -393,6 +395,8 @@ impl GlyphTextRenderer {
             state: FontState::new(),
             font: None,
             font_generation: 0,
+            next_font_generation: 0,
+            fonts: HashMap::new(),
             atlases: vec![Atlas::new(0)],
             cache: HashMap::new(),
             white_patch: None,
@@ -404,7 +408,8 @@ impl GlyphTextRenderer {
 
     pub fn set_font_owned(&mut self, bytes: Vec<u8>) -> Result<(), String> {
         self.font = Some(FontArc::try_from_vec(bytes).map_err(|e| format!("{e}"))?);
-        self.font_generation = self.font_generation.wrapping_add(1);
+        self.next_font_generation = self.next_font_generation.wrapping_add(1);
+        self.font_generation = self.next_font_generation;
         Ok(())
     }
 
@@ -508,6 +513,25 @@ impl TextRenderer for GlyphTextRenderer {
 
     fn set_font_bytes(&mut self, bytes: Vec<u8>) -> Result<(), String> {
         self.set_font_owned(bytes)
+    }
+
+    fn select_cached_font(&mut self, face: &str) -> bool {
+        let Some((font, generation)) = self.fonts.get(face) else {
+            return false;
+        };
+        self.font = Some(font.clone());
+        self.font_generation = *generation;
+        true
+    }
+
+    fn set_named_font_bytes(&mut self, face: &str, bytes: Vec<u8>) -> Result<(), String> {
+        let font = FontArc::try_from_vec(bytes).map_err(|e| format!("{e}"))?;
+        self.next_font_generation = self.next_font_generation.wrapping_add(1);
+        self.font_generation = self.next_font_generation;
+        self.font = Some(font.clone());
+        self.fonts
+            .insert(face.to_string(), (font, self.font_generation));
+        Ok(())
     }
 
     fn active_font_face(&self) -> Option<&str> {
