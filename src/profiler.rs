@@ -9,7 +9,7 @@ const PUBLISH_INTERVAL: Duration = Duration::from_millis(500);
 const SAMPLE_WINDOW: Duration = Duration::from_secs(10);
 const QUEUE_CAPACITY: usize = 256;
 const MAX_WINDOW_SAMPLES: usize = 4096;
-const TIMING_COUNT: usize = 24;
+const TIMING_COUNT: usize = 27;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct FrameProfile {
@@ -26,6 +26,9 @@ pub(crate) struct FrameProfile {
     pub event_transition_ns: u64,
     pub event_compositor_ns: u64,
     pub event_layer_sync_ns: u64,
+    pub event_drain_ns: u64,
+    pub event_log_ns: u64,
+    pub event_post_ns: u64,
     pub emote_ns: u64,
     pub audio_media_ns: u64,
     pub compositor_ns: u64,
@@ -96,6 +99,9 @@ pub struct ProfileTimings {
     pub event_transition_ms: f64,
     pub event_compositor_ms: f64,
     pub event_layer_sync_ms: f64,
+    pub event_drain_ms: f64,
+    pub event_log_ms: f64,
+    pub event_post_ms: f64,
     pub emote_ms: f64,
     pub audio_media_ms: f64,
     pub compositor_ms: f64,
@@ -431,6 +437,9 @@ fn timing_values(frame: &FrameProfile) -> [u64; TIMING_COUNT] {
         frame.event_transition_ns,
         frame.event_compositor_ns,
         frame.event_layer_sync_ns,
+        frame.event_drain_ns,
+        frame.event_log_ns,
+        frame.event_post_ns,
         frame.emote_ns,
         frame.audio_media_ns,
         frame.compositor_ns,
@@ -461,19 +470,22 @@ fn timings_from_values(values: [f64; TIMING_COUNT]) -> ProfileTimings {
         event_transition_ms: ms(values[8]),
         event_compositor_ms: ms(values[9]),
         event_layer_sync_ms: ms(values[10]),
-        emote_ms: ms(values[11]),
-        audio_media_ms: ms(values[12]),
-        compositor_ms: ms(values[13]),
-        text_ms: ms(values[14]),
-        frame_build_ms: ms(values[15]),
-        damage_compute_ms: ms(values[16]),
-        transition_capture_ms: ms(values[17]),
-        texture_upload_ms: ms(values[18]),
-        video_upload_ms: ms(values[19]),
-        gpu_submit_ms: ms(values[20]),
-        present_ms: ms(values[21]),
-        readback_ms: ms(values[22]),
-        host_ffi_ms: ms(values[23]),
+        event_drain_ms: ms(values[11]),
+        event_log_ms: ms(values[12]),
+        event_post_ms: ms(values[13]),
+        emote_ms: ms(values[14]),
+        audio_media_ms: ms(values[15]),
+        compositor_ms: ms(values[16]),
+        text_ms: ms(values[17]),
+        frame_build_ms: ms(values[18]),
+        damage_compute_ms: ms(values[19]),
+        transition_capture_ms: ms(values[20]),
+        texture_upload_ms: ms(values[21]),
+        video_upload_ms: ms(values[22]),
+        gpu_submit_ms: ms(values[23]),
+        present_ms: ms(values[24]),
+        readback_ms: ms(values[25]),
+        host_ffi_ms: ms(values[26]),
     }
 }
 
@@ -566,6 +578,9 @@ mod tests {
                 event_transition_ns: 4_000_000,
                 event_compositor_ns: 8_000_000,
                 event_layer_sync_ns: 10_000_000,
+                event_drain_ns: 500_000,
+                event_log_ns: 750_000,
+                event_post_ns: 250_000,
                 ..FrameProfile::default()
             })
             .map(|value| value as f64),
@@ -578,6 +593,9 @@ mod tests {
         assert_eq!(timings.event_transition_ms, 4.0);
         assert_eq!(timings.event_compositor_ms, 8.0);
         assert_eq!(timings.event_layer_sync_ms, 10.0);
+        assert_eq!(timings.event_drain_ms, 0.5);
+        assert_eq!(timings.event_log_ms, 0.75);
+        assert_eq!(timings.event_post_ms, 0.25);
     }
 
     #[test]

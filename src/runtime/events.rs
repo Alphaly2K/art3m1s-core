@@ -16,7 +16,11 @@ impl CoreRuntime {
         events: &[Event],
         profile: &mut crate::profiler::FrameProfile,
     ) {
+        const EVENT_TRACE_LIMIT: usize = 24;
+
         let mut compositor_changed = false;
+        let mut trace = crate::ffi::debug_enabled()
+            .then(|| Vec::with_capacity(events.len().min(EVENT_TRACE_LIMIT)));
         for event in events {
             let runtime_started = profile.mark();
             if matches!(event, Event::Exit) {
@@ -447,7 +451,11 @@ impl CoreRuntime {
             profile.event_compositor_ns = profile
                 .event_compositor_ns
                 .saturating_add(crate::profiler::FrameProfile::elapsed(compositor_started));
-            crate::core_debug!("[event] {}", event_summary(event));
+            if let Some(trace) = trace.as_mut()
+                && trace.len() < EVENT_TRACE_LIMIT
+            {
+                trace.push(event_summary(event));
+            }
         }
 
         // Lua only runs before or after this batch, never between two queued
@@ -459,6 +467,28 @@ impl CoreRuntime {
             self.sync_layer_info_all();
             profile.event_layer_sync_ns = crate::profiler::FrameProfile::elapsed(sync_started);
         }
+
+        let log_started = profile.mark();
+        if let Some(trace) = trace
+            && !trace.is_empty()
+        {
+            if events.len() == 1 {
+                crate::core_debug!("[event] {}", trace[0]);
+            } else {
+                let omitted = events.len().saturating_sub(trace.len());
+                crate::core_debug!(
+                    "[event] batch count={}{} | {}",
+                    events.len(),
+                    if omitted == 0 {
+                        String::new()
+                    } else {
+                        format!(" shown={} omitted={omitted}", trace.len())
+                    },
+                    trace.join(" | ")
+                );
+            }
+        }
+        profile.event_log_ns = crate::profiler::FrameProfile::elapsed(log_started);
     }
 
     fn handle_shader_load(&mut self, params: &HashMap<String, String>) {

@@ -396,13 +396,17 @@ impl CoreRuntime {
         profile.interpreter_ns = crate::profiler::FrameProfile::elapsed(interpreter_started);
 
         let events_started = profile.mark();
+        let event_drain_started = profile.mark();
         let collected = self.drain_events();
+        profile.event_drain_ns = crate::profiler::FrameProfile::elapsed(event_drain_started);
         self.dispatch_events(&collected, profile);
+        let event_post_started = profile.mark();
         // 已读跟踪 + 未读停跳：在文本展示后的点击等待处标记已读，
         // 已读跳过遇未读剧情时停止跳过（[alreadyread]/[skip unread=] 语义）。
         self.track_read_and_stop_skip_on_unread();
         // 点击等待进入/退出边沿：触发 e:setEventHandler{onClickWaitIn/Out}。
         self.sync_click_wait_handlers();
+        profile.event_post_ns = crate::profiler::FrameProfile::elapsed(event_post_started);
         profile.events_ns = crate::profiler::FrameProfile::elapsed(events_started);
 
         let emote_started = profile.mark();
