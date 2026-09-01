@@ -317,7 +317,7 @@ impl ElunaWorker {
         let _ = self
             .pending_ms
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
-                Some(pending.saturating_add(delta_ms).min(100))
+                Some(pending.saturating_add(delta_ms))
             });
     }
 
@@ -356,7 +356,11 @@ fn run_eluna_worker(
             }
         }
         let update = if delta_ms != 0 {
-            runtime.progress_milliseconds_capped(delta_ms as f32)
+            // Scene evaluation can take longer than one host frame. Advance
+            // directly to the newest model time and build only that scene;
+            // the capped SDK helper would otherwise discard all but 100 ms
+            // and make animation speed depend on evaluator performance.
+            runtime.progress_ticks(eluna::milliseconds_to_emote_ticks(delta_ms as f32))
         } else if had_commands {
             runtime.rebuild_scene()
         } else {
@@ -651,4 +655,26 @@ fn rgb565(value: u16) -> [u8; 3] {
         (green << 2) | (green >> 4),
         (blue << 3) | (blue >> 2),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_accumulates_elapsed_time_while_scene_evaluation_is_busy() {
+        let (command_tx, _command_rx) = mpsc::channel();
+        let pending_ms = Arc::new(AtomicU64::new(0));
+        let worker = ElunaWorker {
+            command_tx,
+            pending_ms: pending_ms.clone(),
+            latest_scene: Arc::new(Mutex::new(None)),
+        };
+
+        worker.advance(16);
+        worker.advance(500);
+        worker.advance(250);
+
+        assert_eq!(pending_ms.load(Ordering::Relaxed), 766);
+    }
 }
