@@ -242,6 +242,36 @@ impl ElunaEmoteInstance {
     ) -> Option<DrawCommand> {
         let texture = self.textures.get(&sprite.texture_resource_index)?;
         let (texture_id, texture_info) = texture.gpu?;
+        let has_mesh = sprite.mesh.is_some();
+        // `world_transform` is the complete Eluna layer transform for this
+        // sprite. Keep it in the DrawCommand transform and leave mesh points
+        // in the sprite's local icon space; the GL backend applies the command
+        // transform exactly once.
+        let sprite_transform = sprite_affine(sprite);
+        let (transform, clip, mesh) = if has_mesh {
+            (
+                layer_transform * sprite_transform,
+                ClipRect {
+                    uv_offset: [0.0, 0.0],
+                    uv_scale: [1.0, 1.0],
+                    quad_size: [1.0, 1.0],
+                },
+                Some(sprite_mesh(sprite)),
+            )
+        } else {
+            (
+                layer_transform * sprite_transform,
+                ClipRect {
+                    uv_offset: [sprite.uv_left, sprite.uv_top],
+                    uv_scale: [
+                        sprite.uv_right - sprite.uv_left,
+                        sprite.uv_bottom - sprite.uv_top,
+                    ],
+                    quad_size: [sprite.width, sprite.height],
+                },
+                None,
+            )
+        };
         let mask_labels = sprite
             .draw_frame_info
             .parent_mask_path
@@ -253,14 +283,16 @@ impl ElunaEmoteInstance {
         Some(DrawCommand {
             texture: texture_id,
             size: texture_info,
-            transform: layer_transform,
+            transform,
+            // Sprite opacity is already folded into NativeEmoteMaterial corner
+            // alpha; keeping command opacity at 1 avoids multiplying it twice.
             opacity: 1.0,
             blend: eluna_blend(sprite.blend_mode),
             color: ColorFilter::default(),
-            clip: ClipRect::full(texture_info),
+            clip,
             clip_bounds: None,
             shader: None,
-            mesh: Some(sprite_mesh(sprite)),
+            mesh,
             stencil: Some(StencilMetadata {
                 namespace: self.generation,
                 source_label: sprite.draw_frame_info.path.clone(),
@@ -447,30 +479,16 @@ fn apply_worker_command(
 }
 
 fn sprite_mesh(sprite: &EmoteStaticSprite) -> DrawMesh {
-    let division_x = sprite
-        .mesh
-        .as_ref()
-        .map_or(1, |mesh| mesh.division_x.max(1)) as usize;
-    let division_y = sprite
-        .mesh
-        .as_ref()
-        .map_or(1, |mesh| mesh.division_y.max(1)) as usize;
-    let left = sprite.center_x - sprite.width * 0.5;
-    let top = sprite.center_y - sprite.height * 0.5;
+    let (division_x, division_y) = sprite.mesh_divisions();
+    let division_x = division_x as usize;
+    let division_y = division_y as usize;
     let vertex = |x: usize, y: usize| {
         let u = x as f32 / division_x as f32;
         let v = y as f32 / division_y as f32;
-        let point = sprite
-            .mesh
-            .as_ref()
-            .map_or([u, v], |mesh| mesh.sample(u, v));
-        let position = transform_sprite_point(
-            sprite,
-            [
-                left + point[0] * sprite.width,
-                top + point[1] * sprite.height,
-            ],
-        );
+        // Mesh vertices are local pixels. `draw_command` supplies the full
+        // sprite/world affine separately; baking world coordinates here would
+        // make the GL backend apply parent transforms a second time.
+        let position = sprite.local_point(u, v);
         [
             position[0],
             position[1],
@@ -497,6 +515,21 @@ fn sprite_mesh(sprite: &EmoteStaticSprite) -> DrawMesh {
         }
     }
     DrawMesh { vertices }
+}
+
+fn sprite_affine(sprite: &EmoteStaticSprite) -> Affine2 {
+    let left = sprite.left();
+    let top = sprite.top();
+    let origin = transform_sprite_point(sprite, [left, top]);
+    let x_axis = {
+        let p = transform_sprite_point(sprite, [left + sprite.width, top]);
+        Vec2::new(p[0] - origin[0], p[1] - origin[1]) / sprite.width.max(1.0)
+    };
+    let y_axis = {
+        let p = transform_sprite_point(sprite, [left, top + sprite.height]);
+        Vec2::new(p[0] - origin[0], p[1] - origin[1]) / sprite.height.max(1.0)
+    };
+    Affine2::from_cols(x_axis, y_axis, Vec2::new(origin[0], origin[1]))
 }
 
 fn transform_sprite_point(sprite: &EmoteStaticSprite, point: [f32; 2]) -> [f32; 2] {

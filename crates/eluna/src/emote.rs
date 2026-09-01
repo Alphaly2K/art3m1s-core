@@ -352,6 +352,10 @@ pub struct EmoteStaticSprite {
     pub uv_right: f32,
     pub uv_bottom: f32,
     pub mesh: Option<EmoteMeshPatch>,
+    /// Mesh deformers inherited from outer layers, ordered outermost first.
+    /// Rendering applies them in reverse order (innermost first), matching the
+    /// native nested deformer walk.
+    pub mesh_deformer_chain: Vec<EmoteMeshPatch>,
     pub draw_frame_info: EmoteDrawFrameInfo,
 }
 
@@ -455,6 +459,7 @@ pub struct EmoteStepFrameLayerState {
     /// this coordinate. It is rebuilt from `raw_position` after Anchor.
     pub position: [f32; 3],
     pub(crate) mesh_chain: Vec<EmoteMeshPatch>,
+    pub(crate) mesh_deformer_chain: Vec<EmoteMeshPatch>,
     pub(crate) frame_offset: [f32; 2],
     /// Current decoded local frame, retained only for the native specialized
     /// pass sequence (Camera/Model/Particle/Feedback). It is intentionally not
@@ -741,21 +746,85 @@ impl EmoteStaticSprite {
         self.center_y + self.height * 0.5
     }
 
+    pub fn local_point(&self, u: f32, v: f32) -> [f32; 2] {
+        let source = [self.left() + u * self.width, self.top() + v * self.height];
+        let mut point = source;
+        if let Some(mesh) = &self.mesh {
+            point = self.deform_local_point(mesh, point);
+        }
+        point
+    }
+
+    fn deform_local_point(&self, mesh: &EmoteMeshPatch, point: [f32; 2]) -> [f32; 2] {
+        if let Some([left, top, width, height]) = mesh.domain {
+            if width.is_finite()
+                && height.is_finite()
+                && width.abs() > f32::EPSILON
+                && height.abs() > f32::EPSILON
+            {
+                let mapped = mesh.sample((point[0] - left) / width, (point[1] - top) / height);
+                return [left + mapped[0] * width, top + mapped[1] * height];
+            }
+        }
+        let u = (point[0] - self.left()) / self.width;
+        let v = (point[1] - self.top()) / self.height;
+        let mapped = mesh.sample(u, v);
+        [
+            self.left() + mapped[0] * self.width,
+            self.top() + mapped[1] * self.height,
+        ]
+    }
+
+    pub fn mesh_divisions(&self) -> (u32, u32) {
+        self.mesh
+            .map(|mesh| (mesh.division_x.max(1), mesh.division_y.max(1)))
+            .unwrap_or((1, 1))
+    }
+
     pub fn bounds_rect(&self) -> (f32, f32, f32, f32) {
-        let (left, top, right, bottom) = if let Some(mesh) = &self.mesh {
-            let (min_u, min_v, max_u, max_v) = mesh.control_bounds();
-            let left = self.left();
-            let top = self.top();
-            (
-                left + min_u * self.width,
-                top + min_v * self.height,
-                left + max_u * self.width,
-                top + max_v * self.height,
-            )
-        } else {
-            (self.left(), self.top(), self.right(), self.bottom())
-        };
-        bounds_after_sprite_transform(self, left, top, right, bottom)
+        if self.mesh_deformer_chain.is_empty() {
+            if let Some(mesh) = &self.mesh {
+                if mesh.domain.is_some() {
+                    let points = [
+                        self.local_point(0.0, 0.0),
+                        self.local_point(0.0, 1.0),
+                        self.local_point(1.0, 0.0),
+                        self.local_point(1.0, 1.0),
+                    ];
+                    let mut bounds = {
+                        let p = transform_emote_sprite_point(self, points[0]);
+                        (p[0], p[1], p[0], p[1])
+                    };
+                    for point in &points[1..] {
+                        let p = transform_emote_sprite_point(self, *point);
+                        bounds.0 = bounds.0.min(p[0]);
+                        bounds.1 = bounds.1.min(p[1]);
+                        bounds.2 = bounds.2.max(p[0]);
+                        bounds.3 = bounds.3.max(p[1]);
+                    }
+                    return bounds;
+                }
+                let (min_u, min_v, max_u, max_v) = mesh.control_bounds();
+                return bounds_after_sprite_transform(
+                    self,
+                    self.left() + min_u * self.width,
+                    self.top() + min_v * self.height,
+                    self.left() + max_u * self.width,
+                    self.top() + max_v * self.height,
+                );
+            }
+            return bounds_after_sprite_transform(
+                self,
+                self.left(),
+                self.top(),
+                self.right(),
+                self.bottom(),
+            );
+        }
+        // Parent deformer chains are retained for diagnostics and the native
+        // Shape/Camera position pass. Sprite bounds use the resolved rectangle
+        // until each ancestor's translation/rotation is represented.
+        bounds_after_sprite_transform(self, self.left(), self.top(), self.right(), self.bottom())
     }
 }
 
@@ -772,17 +841,14 @@ fn bounds_after_sprite_transform(
         transform_emote_sprite_point(sprite, [right, top]),
         transform_emote_sprite_point(sprite, [right, bottom]),
     ];
-    let mut min_x = points[0][0];
-    let mut min_y = points[0][1];
-    let mut max_x = points[0][0];
-    let mut max_y = points[0][1];
-    for p in &points[1..] {
-        min_x = min_x.min(p[0]);
-        min_y = min_y.min(p[1]);
-        max_x = max_x.max(p[0]);
-        max_y = max_y.max(p[1]);
+    let mut bounds = (points[0][0], points[0][1], points[0][0], points[0][1]);
+    for point in &points[1..] {
+        bounds.0 = bounds.0.min(point[0]);
+        bounds.1 = bounds.1.min(point[1]);
+        bounds.2 = bounds.2.max(point[0]);
+        bounds.3 = bounds.3.max(point[1]);
     }
-    (min_x, min_y, max_x, max_y)
+    bounds
 }
 
 fn transform_emote_sprite_point(sprite: &EmoteStaticSprite, point: [f32; 2]) -> [f32; 2] {
@@ -1970,6 +2036,9 @@ struct TravelContext {
     /// the flattened traversal reproduce layerInfo+706/+708 without retaining
     /// raw native pointers.
     mesh_combine_candidate_start: usize,
+    /// Shape-sync deformers retained for sprite tessellation. Unlike
+    /// `mesh_chain`, these preserve each authored patch domain independently.
+    mesh_deformer_chain: Vec<EmoteMeshPatch>,
     mesh_parameters: BTreeSet<String>,
 }
 
@@ -2048,6 +2117,7 @@ impl Default for TravelContext {
             mesh_patch: None,
             mesh_chain: Vec::new(),
             mesh_combine_candidate_start: 0,
+            mesh_deformer_chain: Vec::new(),
             mesh_parameters: BTreeSet::new(),
         }
     }
@@ -2112,6 +2182,16 @@ fn enter_layer_context(
     ctx.mesh_sync_child = layer.field_i64("meshSyncChildMask").unwrap_or(0);
     ctx.join_target = layer.field_i64("joinTarget").unwrap_or(0) != 0;
     ctx.inherit_mask = layer.field_i64("inheritMask");
+    // Match the native renderer's deformer suspension rule: a layer with
+    // inheritShape disabled does not receive ancestor deformers, but any
+    // deformer authored on this layer is still propagated to its children.
+    let inherit_shape = layer
+        .field_i64("inheritMask")
+        .map(|mask| (mask & (1 << 25)) != 0)
+        .unwrap_or(true);
+    if !inherit_shape {
+        ctx.mesh_deformer_chain.clear();
+    }
     // sub_10331060: opacity inheritance is independent from the linear
     // channels.  A layer multiplies the selected inheritance source only when
     // bit 0x400 is set; otherwise its local opacity starts from the player/root
@@ -2337,6 +2417,7 @@ fn layer_state_from_ctx(label: Option<String>, ctx: &TravelContext) -> EmoteStep
         raw_position,
         position: raw_position,
         mesh_chain: ctx.mesh_chain.clone(),
+        mesh_deformer_chain: ctx.mesh_deformer_chain.clone(),
         frame_offset: ctx.frame_offset,
         specialized_frame: None,
         transform: ctx.transform.as_array(),
@@ -2996,8 +3077,8 @@ fn build_sprite(
     label: Option<String>,
     motion_name: &str,
     base: [f32; 3],
-    ox: f32,
-    oy: f32,
+    _ox: f32,
+    _oy: f32,
     scale_x: f32,
     scale_y: f32,
     rotation_degrees: f32,
@@ -3013,21 +3094,18 @@ fn build_sprite(
     let width = icon.resolved_width();
     let height = icon.resolved_height();
 
-    // FreeMote's win-path static painter applies this subtraction only for
-    // MeshTransform.None. Keep that static behavior here. Dynamic traversal
-    // evaluates recovered mesh deformation and child-mesh-sync semantics; this
-    // static preview path does not re-evaluate parameterized mesh state.
-    let subtract_icon_origin = ctx.mesh_transform == 0;
-    let center_x = if subtract_icon_origin {
-        ox - icon.origin_x
-    } else {
-        ox
-    };
-    let center_y = if subtract_icon_origin {
-        oy - icon.origin_y
-    } else {
-        oy
-    };
+    // A DrawCommand quad is authored in the icon's pixel rectangle, with its
+    // local origin at the rectangle's top-left corner.  The E-Mote icon
+    // origin is the pivot *inside* that rectangle, so the corresponding
+    // rectangle center is `(width / 2 - origin_x, height / 2 - origin_y)`.
+    //
+    // `ox`/`oy` are frame offsets used by the native mesh/shape passes; they
+    // are not an additional sprite translation.  Folding them into
+    // `center_x/y` shifts every ordinary (non-mesh) icon by half its size (and
+    // was the reason body parts such as skirts appeared beside the model).
+    // The world translation is already carried by `ctx.transform`.
+    let center_x = width * 0.5 - icon.origin_x;
+    let center_y = height * 0.5 - icon.origin_y;
 
     Some(EmoteStaticSprite {
         label: label.clone(),
@@ -3058,6 +3136,7 @@ fn build_sprite(
         uv_right: (icon.left + width) / texture.width as f32,
         uv_bottom: (icon.top + height) / texture.height as f32,
         mesh: ctx.mesh_patch,
+        mesh_deformer_chain: ctx.mesh_deformer_chain.clone(),
         draw_frame_info: draw_frame_info(label, ctx),
     })
 }
@@ -3110,6 +3189,7 @@ fn build_feedback_history_sprite(
         uv_right: if width < 0.0 { 0.0 } else { 1.0 },
         uv_bottom: if height < 0.0 { 0.0 } else { 1.0 },
         mesh: None,
+        mesh_deformer_chain: Vec::new(),
         draw_frame_info: state.draw_frame_info.clone(),
     })
 }
@@ -4497,14 +4577,14 @@ fn merge_frame_content(state: &mut DynamicFrameState, content: &PsbValue) {
 
 fn parse_mesh_domain_icon(icon: &str) -> Option<[f32; 4]> {
     let mut parts = icon.split(':');
-    let x = parts.next()?.parse::<f32>().ok()?;
-    let y = parts.next()?.parse::<f32>().ok()?;
-    let half_w = parts.next()?.parse::<f32>().ok()?;
-    let half_h = parts.next()?.parse::<f32>().ok()?;
-    if parts.next().is_some() || half_w <= 0.0 || half_h <= 0.0 {
+    let width = parts.next()?.parse::<f32>().ok()?;
+    let height = parts.next()?.parse::<f32>().ok()?;
+    let origin_x = parts.next()?.parse::<f32>().ok()?;
+    let origin_y = parts.next()?.parse::<f32>().ok()?;
+    if parts.next().is_some() || width <= 0.0 || height <= 0.0 {
         return None;
     }
-    Some([x - half_w, y - half_h, half_w * 2.0, half_h * 2.0])
+    Some([-origin_x, -origin_y, width, height])
 }
 
 #[derive(Debug, Clone)]
@@ -4796,6 +4876,10 @@ fn travel_layer_at<'a>(
     );
     let mut draw_ctx = ctx.clone();
     let mut child_ctx = ctx.clone();
+    // `mesh_patch` is local to this layer. Inherited shape deformers live in
+    // `mesh_deformer_chain` so patches with different domains remain distinct.
+    draw_ctx.mesh_patch = None;
+    child_ctx.mesh_patch = None;
     let sync_child_shape = (ctx.mesh_sync_child & 0x8) != 0;
     let layer_mesh_parameter = if sync_child_shape {
         layer_parameter_id(&layer, parameter_table)
@@ -4972,6 +5056,13 @@ fn travel_layer_at<'a>(
             None
         };
         prepare_child_inherit_source(&mut child_ctx, current_mesh_sync);
+
+        // Make this layer's shape-sync patch available to both regular
+        // descendants and nested motion contexts before either traversal
+        // path captures `child_ctx`.
+        if let Some(mesh) = child_ctx.mesh_patch.take() {
+            child_ctx.mesh_deformer_chain.push(mesh);
+        }
 
         if let Some(src) = state.src.as_deref().filter(|src| !src.is_empty()) {
             let visible = draw_ctx.ready_to_draw
@@ -6527,6 +6618,7 @@ fn particle_child_context(
     ctx.inherit_source = root;
     ctx.motion_root = root;
     ctx.mesh_chain = emitter.mesh_chain.clone();
+    ctx.mesh_deformer_chain = emitter.mesh_deformer_chain.clone();
     ctx.parent_mask_path = emitter.draw_frame_info.parent_mask_path.clone();
     ctx
 }
@@ -7249,6 +7341,41 @@ fn decode_raw_mesh_list(raw: &[u8], mesh_count: usize, is_delta: bool) -> Option
 mod tests {
     use super::*;
 
+    #[test]
+    fn mesh_domain_icon_uses_size_and_origin() {
+        assert_eq!(
+            parse_mesh_domain_icon("172:157:86:78"),
+            Some([-86.0, -78.0, 172.0, 157.0])
+        );
+        assert_eq!(parse_mesh_domain_icon("0:157:86:78"), None);
+        assert_eq!(parse_mesh_domain_icon("172:157:86:78:1"), None);
+    }
+
+    #[test]
+    fn sprite_samples_parent_mesh_in_parent_domain() {
+        let mut sprite = test_runtime_sprite("face/eye", &[0], "eye");
+        sprite.center_x = 20.0;
+        sprite.center_y = 30.0;
+        sprite.width = 20.0;
+        sprite.height = 10.0;
+        let mut mesh = EmoteMeshPatch::identity(1, 1);
+        mesh.domain = Some([0.0, 0.0, 100.0, 100.0]);
+        for point in &mut mesh.control_points {
+            point[0] += 0.1;
+            point[1] -= 0.2;
+        }
+        sprite.mesh = Some(mesh);
+
+        let point = sprite.local_point(0.5, 0.5);
+        assert!((point[0] - 30.0).abs() < 1.0e-4);
+        assert!((point[1] - 10.0).abs() < 1.0e-4);
+        let bounds = sprite.bounds_rect();
+        assert!((bounds.0 - 20.0).abs() < 1.0e-4);
+        assert!((bounds.1 - 5.0).abs() < 1.0e-4);
+        assert!((bounds.2 - 40.0).abs() < 1.0e-4);
+        assert!((bounds.3 - 15.0).abs() < 1.0e-4);
+    }
+
     fn test_layer(label: &str, children: Vec<PsbValue>) -> PsbValue {
         let mut fields = vec![("label".to_owned(), PsbValue::String(label.to_owned()))];
         if !children.is_empty() {
@@ -7323,6 +7450,7 @@ mod tests {
             uv_right: 1.0,
             uv_bottom: 1.0,
             mesh: None,
+            mesh_deformer_chain: Vec::new(),
             draw_frame_info: draw_frame_info(Some(label.to_owned()), ctx),
         }
     }
@@ -8377,6 +8505,7 @@ mod tests {
             uv_right: 1.0,
             uv_bottom: 1.0,
             mesh: None,
+            mesh_deformer_chain: Vec::new(),
             draw_frame_info: draw_frame_info(None, TravelContext::default()),
         };
         let b = compute_bounds(&[sprite]).unwrap();
