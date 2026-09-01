@@ -112,6 +112,8 @@ pub struct BgmCrossfade<'a> {
     pub gain: Option<i32>,
     pub pan: Option<i32>,
     pub time_ms: u64,
+    pub loop_file: Option<&'a str>,
+    pub resolved_loop_file: Option<&'a str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -153,6 +155,8 @@ pub struct VoicePlay<'a> {
     pub id: &'a str,
     pub file: &'a str,
     pub resolved_file: Option<&'a str>,
+    #[serde(rename = "loop")]
+    pub loop_play: bool,
     pub gain: Option<i32>,
     pub pan: Option<i32>,
     pub fade_ms: u64,
@@ -205,6 +209,23 @@ mod tests {
     }
 
     #[test]
+    fn bgm_crossfade_payload_carries_ab_loop_segment() {
+        let value = serde_json::to_value(BgmCrossfade {
+            file: "bgm/foo_a.ogg",
+            resolved_file: Some("sound/bgm/foo_a.ogg"),
+            loop_play: true,
+            gain: None,
+            pan: None,
+            time_ms: 500,
+            loop_file: Some("bgm/foo_b.ogg"),
+            resolved_loop_file: Some("sound/bgm/foo_b.ogg"),
+        })
+        .unwrap();
+        assert_eq!(value["loop_file"], "bgm/foo_b.ogg");
+        assert_eq!(value["resolved_loop_file"], "sound/bgm/foo_b.ogg");
+    }
+
+    #[test]
     fn pan_wire_payloads_carry_fade_time() {
         // [span]/[sepan] 的 time 参数经 time_ms 字段透传给宿主渐变
         let value = serde_json::to_value(BgmPan {
@@ -224,6 +245,21 @@ mod tests {
         assert_eq!(value["id"], "1.80");
         assert_eq!(value["pan"], 1000);
         assert_eq!(value["time_ms"], 0);
+    }
+
+    #[test]
+    fn voice_payload_preserves_loop_mode() {
+        let value = serde_json::to_value(VoicePlay {
+            id: "voice01",
+            file: "voice/line.ogg",
+            resolved_file: Some("sound/voice/line.ogg"),
+            loop_play: true,
+            gain: None,
+            pan: None,
+            fade_ms: 0,
+        })
+        .unwrap();
+        assert_eq!(value["loop"], true);
     }
 
     #[test]

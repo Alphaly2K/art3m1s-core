@@ -201,34 +201,36 @@ impl AudioBackend for AudioStateBackend {
     }
 
     fn stop_se(&mut self, id: &str, fade_time_ms: u64) -> bool {
-        let Some(channel) = self.state.se_channels.get_mut(id) else {
-            return false;
-        };
-
-        if !channel.playing {
-            return false;
+        let mut stopped = false;
+        for channels in [&mut self.state.se_channels, &mut self.state.voice_channels] {
+            if let Some(channel) = channels.get_mut(id)
+                && channel.playing
+            {
+                apply_channel_fade_out(channel, fade_time_ms, self.state.clock_ms);
+                stopped = true;
+            }
+            if fade_time_ms == 0 {
+                channels.remove(id);
+            }
         }
-
-        apply_channel_fade_out(channel, fade_time_ms, self.state.clock_ms);
-
-        if fade_time_ms == 0 {
-            self.state.se_channels.remove(id);
-        }
-
-        true
+        stopped
     }
 
     fn fade_se_gain(&mut self, id: &str, target_gain_raw: i32, time_ms: u64) {
-        if let Some(channel) = self.state.se_channels.get_mut(id) {
-            if channel.playing {
+        for channels in [&mut self.state.se_channels, &mut self.state.voice_channels] {
+            if let Some(channel) = channels.get_mut(id)
+                && channel.playing
+            {
                 apply_channel_gain_fade(channel, target_gain_raw, time_ms, self.state.clock_ms);
             }
         }
     }
 
     fn pan_se(&mut self, id: &str, target_pan_raw: i32, time_ms: u64) {
-        if let Some(channel) = self.state.se_channels.get_mut(id) {
-            if channel.playing {
+        for channels in [&mut self.state.se_channels, &mut self.state.voice_channels] {
+            if let Some(channel) = channels.get_mut(id)
+                && channel.playing
+            {
                 apply_channel_pan_fade(channel, target_pan_raw, time_ms, self.state.clock_ms);
             }
         }
@@ -449,6 +451,21 @@ mod tests {
 
         a.stop_se("se01", 0);
         assert!(!a.is_se_playing("se01"));
+    }
+
+    #[test]
+    fn se_controls_also_target_voice_ids() {
+        let mut a = AudioStateBackend::new();
+        a.play_voice("voice01", "line.ogg", &SeConfig::default());
+
+        a.fade_se_gain("voice01", 500, 100);
+        a.pan_se("voice01", -1000, 100);
+        let voice = &a.audio_state().voice_channels["voice01"];
+        assert_eq!(voice.raw_gain, 500);
+        assert_eq!(voice.raw_pan, -1000);
+
+        assert!(a.stop_se("voice01", 0));
+        assert!(!a.audio_state().voice_channels.contains_key("voice01"));
     }
 
     #[test]

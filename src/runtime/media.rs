@@ -142,6 +142,7 @@ impl CoreRuntime {
                     id: &voice.id,
                     file: &voice.file,
                     resolved_file: Some(&resolved_file),
+                    loop_play: voice.loop_play,
                     gain: Some(voice.gain),
                     pan: Some(voice.pan),
                     fade_ms: 0,
@@ -521,6 +522,13 @@ impl CoreRuntime {
                         buffer_size: None,
                     },
                 );
+                let loop_file = loop_play.then(|| ab_loop_file(file)).flatten();
+                if let Some(channel) = &mut self.audio.audio_state_mut().bgm_channel {
+                    channel.loop_file = loop_file.clone();
+                }
+                let resolved_loop_file = loop_file
+                    .as_deref()
+                    .map(|f| self.resolve_magic_media_path(f));
                 hm::emit(
                     Kind::AudioBgmCrossfade,
                     hm::BgmCrossfade {
@@ -530,6 +538,8 @@ impl CoreRuntime {
                         gain: *gain,
                         pan: *pan,
                         time_ms: *time,
+                        loop_file: loop_file.as_deref(),
+                        resolved_loop_file: resolved_loop_file.as_deref(),
                     },
                 );
                 true
@@ -645,6 +655,7 @@ impl CoreRuntime {
                         id: &voice_id,
                         file,
                         resolved_file: Some(&resolved_file),
+                        loop_play: *loop_play,
                         gain: *gain,
                         pan: *pan,
                         fade_ms: fade_time.unwrap_or(0),
