@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 mod callbacks;
 mod control;
 mod dialog;
-mod emote;
+pub(crate) mod emote;
 mod events;
 mod input;
 mod magic_path;

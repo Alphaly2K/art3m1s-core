@@ -8,6 +8,7 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 art3m1s-emote = { path = "crates/art3m1s-emote" }
+eluna = { package = "eluna_rs", git = "https://github.com/xmoezzz/eluna.git", rev = "12e4d2fa03b64714a83a0363eaadf26a125d9fe6", optional = true }
 pfs-upk-rust = { path = "crates/pfs-upk-rust" }
 encoding_rs = "0.8"
 glam = "0.30"
@@ -34,6 +35,7 @@ asb-interpreter = { path = "crates/asb-interpreter", default-features = false, f
 [features]
 default = ["gl-backend"]
 gl-backend = ["dep:glow", "dep:image", "dep:libloading"]
+experimental-eluna = ["dep:eluna"]
 
 [dev-dependencies]
 # 离屏像素回读测试需要在 macOS 上创建一个 CGL headless 上下文。

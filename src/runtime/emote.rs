@@ -13,19 +13,54 @@ use crate::render_pipeline::draw::{
     TextureInfo, TextureProvider,
 };
 
+#[cfg(feature = "experimental-eluna")]
+mod eluna;
+
 pub(super) type SharedEmoteState = Arc<Mutex<EmoteState>>;
 
-#[derive(Default)]
 pub(super) struct EmoteState {
     layers: BTreeMap<String, LayerSlots>,
     next_generation: u64,
+    backend: EmoteBackend,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum EmoteBackend {
+    #[default]
+    Builtin,
+    ElunaExperimental,
+}
+
+impl EmoteBackend {
+    pub(crate) fn from_int(value: i32) -> Self {
+        match value {
+            1 => Self::ElunaExperimental,
+            _ => Self::Builtin,
+        }
+    }
+}
+
+impl Default for EmoteState {
+    fn default() -> Self {
+        Self {
+            layers: BTreeMap::new(),
+            next_generation: 0,
+            backend: EmoteBackend::Builtin,
+        }
+    }
 }
 
 #[derive(Default)]
 struct LayerSlots {
-    active: Option<EmoteInstance>,
-    pending: Option<EmoteInstance>,
+    active: Option<EmoteInstanceSlot>,
+    pending: Option<EmoteInstanceSlot>,
     attach_to_scene: bool,
+}
+
+enum EmoteInstanceSlot {
+    Builtin(EmoteInstance),
+    #[cfg(feature = "experimental-eluna")]
+    Eluna(eluna::ElunaEmoteInstance),
 }
 
 struct EmoteInstance {
@@ -65,20 +100,21 @@ impl EmoteState {
         self.layers.is_empty()
     }
 
+    pub(super) fn set_backend(&mut self, backend: EmoteBackend) -> usize {
+        if self.backend == backend {
+            return 0;
+        }
+        self.backend = backend;
+        self.clear()
+    }
+
     pub(super) fn profile_memory(&self) -> (usize, u64) {
         let mut instances = 0usize;
         let mut source_bytes = 0u64;
         for slots in self.layers.values() {
             for instance in [&slots.active, &slots.pending].into_iter().flatten() {
                 instances += 1;
-                let live_sources = instance
-                    .textures
-                    .values()
-                    .filter_map(|texture| texture.source.as_ref())
-                    .map(|source| source.as_bytes().len() as u64)
-                    .sum::<u64>();
-                source_bytes = source_bytes
-                    .saturating_add((instance.texture_source_bytes as u64).max(live_sources));
+                source_bytes = source_bytes.saturating_add(instance.source_bytes());
             }
         }
         (instances, source_bytes)
@@ -101,55 +137,27 @@ impl EmoteState {
             .into_iter()
             .next()
             .ok_or_else(|| format!("E-Mote layer {id} has no model file"))?;
-        let document = PsbDocument::from_bytes(bytes)
-            .map_err(|error| format!("failed to parse E-Mote model {path}: {error}"))?;
-        let mut model = EmoteModel::from_document(document)
-            .map_err(|error| format!("failed to load E-Mote model {path}: {error}"))?;
-        let (texture_source_bytes, mut texture_data) = model
-            .take_texture_data()
-            .map_err(|error| format!("failed to detach E-Mote textures {path}: {error}"))?;
-
         self.next_generation = self.next_generation.wrapping_add(1);
         let generation = self.next_generation;
-        let mut textures = BTreeMap::new();
-        for (texture_id, texture) in model.atlas().textures() {
-            textures.insert(
-                texture_id.clone(),
-                EmoteTextureState {
-                    name: format!(":emote/{generation}/{texture_id}"),
-                    width: texture.width,
-                    height: texture.height,
-                    gpu: None,
-                    source: texture_data.remove(texture_id),
-                },
-            );
-        }
-
-        let eye_blinks = model
-            .eye_controls()
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(index, control)| {
-                let salt = (index as u32 + 1).wrapping_mul(0x9e37_79b9);
-                EmoteEyeBlink::new(control, generation as u32 ^ salt)
-            })
-            .collect();
-        let instance = EmoteInstance {
-            generation,
-            width,
-            height,
-            model,
-            player: EmotePlayer::default(),
-            eye_blinks,
-            textures,
-            texture_source_bytes,
-            #[cfg(any(
-                target_os = "android",
-                target_os = "ios",
-                all(target_os = "macos", target_arch = "aarch64")
-            ))]
-            astc_encoder: None,
+        let instance = match self.backend {
+            EmoteBackend::Builtin => EmoteInstanceSlot::Builtin(EmoteInstance::new(
+                generation, &path, bytes, width, height,
+            )?),
+            EmoteBackend::ElunaExperimental => {
+                #[cfg(feature = "experimental-eluna")]
+                {
+                    EmoteInstanceSlot::Eluna(eluna::ElunaEmoteInstance::new(
+                        generation, &path, &bytes, width, height,
+                    )?)
+                }
+                #[cfg(not(feature = "experimental-eluna"))]
+                {
+                    return Err(
+                        "Eluna E-Mote backend is unavailable in this core build; enable the experimental-eluna Cargo feature"
+                            .to_owned(),
+                    );
+                }
+            }
         };
         let slots = self.layers.entry(id.to_string()).or_default();
         slots.attach_to_scene = true;
@@ -198,41 +206,7 @@ impl EmoteState {
             )
         })?;
 
-        match command {
-            EmoteLayerCommand::SetScale {
-                scale,
-                origin_x,
-                origin_y,
-            } => instance.player.set_scale(scale, origin_x, origin_y),
-            EmoteLayerCommand::SetCoord { x, y, z, angle } => {
-                instance.player.set_coord(x, y, z, angle)
-            }
-            EmoteLayerCommand::SetVariable {
-                label,
-                value,
-                frames,
-                easing,
-            } => instance.player.set_variable(label, value, frames, easing),
-            EmoteLayerCommand::PlayTimeline { label, flags } => instance
-                .player
-                .play_model_timeline(&instance.model, label, flags),
-            EmoteLayerCommand::FadeInTimeline {
-                label,
-                frames,
-                easing,
-            } => instance.player.fade_in_timeline(label, frames, easing),
-            EmoteLayerCommand::FadeOutTimeline {
-                label,
-                frames,
-                easing,
-            } => instance.player.fade_out_timeline(label, frames, easing),
-            EmoteLayerCommand::StopTimeline { label } => instance.player.stop_timeline(label),
-            EmoteLayerCommand::Pass => instance.player.pass(),
-            EmoteLayerCommand::Step => instance.player.step(),
-            EmoteLayerCommand::Skip => instance.player.skip(),
-        }
-        instance.player.take_commands().for_each(drop);
-        Ok(())
+        instance.command(command)
     }
 
     pub fn advance(&mut self, delta_ms: u64) {
@@ -242,7 +216,7 @@ impl EmoteState {
                 .into_iter()
                 .flatten()
             {
-                instance.advance(frames);
+                instance.advance(delta_ms, frames);
             }
         }
     }
@@ -287,6 +261,162 @@ impl EmoteState {
             }
         }
         (commands, retained)
+    }
+}
+
+impl EmoteInstanceSlot {
+    #[cfg(test)]
+    fn as_builtin(&self) -> &EmoteInstance {
+        match self {
+            Self::Builtin(instance) => instance,
+            #[cfg(feature = "experimental-eluna")]
+            Self::Eluna(_) => panic!("expected built-in E-Mote instance"),
+        }
+    }
+
+    fn source_bytes(&self) -> u64 {
+        match self {
+            Self::Builtin(instance) => instance.source_bytes(),
+            #[cfg(feature = "experimental-eluna")]
+            Self::Eluna(instance) => instance.source_bytes(),
+        }
+    }
+
+    fn command(&mut self, command: EmoteLayerCommand) -> Result<(), String> {
+        match self {
+            Self::Builtin(instance) => {
+                instance.command(command);
+                Ok(())
+            }
+            #[cfg(feature = "experimental-eluna")]
+            Self::Eluna(instance) => instance.command(command),
+        }
+    }
+
+    fn advance(&mut self, _delta_ms: u64, builtin_frames: f32) {
+        match self {
+            Self::Builtin(instance) => instance.advance(builtin_frames),
+            #[cfg(feature = "experimental-eluna")]
+            Self::Eluna(instance) => {
+                if let Err(error) = instance.advance(_delta_ms) {
+                    crate::core_debug!("[E-Mote:Eluna] advance failed: {error}");
+                }
+            }
+        }
+    }
+
+    fn build_commands(
+        &mut self,
+        provider: &mut dyn TextureProvider,
+        retained: &mut HashSet<String>,
+    ) -> Result<Vec<DrawCommand>, String> {
+        match self {
+            Self::Builtin(instance) => instance.build_commands(provider, retained),
+            #[cfg(feature = "experimental-eluna")]
+            Self::Eluna(instance) => instance.build_commands(provider, retained),
+        }
+    }
+}
+
+impl EmoteInstance {
+    fn new(
+        generation: u64,
+        path: &str,
+        bytes: Vec<u8>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, String> {
+        let document = PsbDocument::from_bytes(bytes)
+            .map_err(|error| format!("failed to parse E-Mote model {path}: {error}"))?;
+        let mut model = EmoteModel::from_document(document)
+            .map_err(|error| format!("failed to load E-Mote model {path}: {error}"))?;
+        let (texture_source_bytes, mut texture_data) = model
+            .take_texture_data()
+            .map_err(|error| format!("failed to detach E-Mote textures {path}: {error}"))?;
+        let mut textures = BTreeMap::new();
+        for (texture_id, texture) in model.atlas().textures() {
+            textures.insert(
+                texture_id.clone(),
+                EmoteTextureState {
+                    name: format!(":emote/{generation}/{texture_id}"),
+                    width: texture.width,
+                    height: texture.height,
+                    gpu: None,
+                    source: texture_data.remove(texture_id),
+                },
+            );
+        }
+        let eye_blinks = model
+            .eye_controls()
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, control)| {
+                let salt = (index as u32 + 1).wrapping_mul(0x9e37_79b9);
+                EmoteEyeBlink::new(control, generation as u32 ^ salt)
+            })
+            .collect();
+        Ok(Self {
+            generation,
+            width,
+            height,
+            model,
+            player: EmotePlayer::default(),
+            eye_blinks,
+            textures,
+            texture_source_bytes,
+            #[cfg(any(
+                target_os = "android",
+                target_os = "ios",
+                all(target_os = "macos", target_arch = "aarch64")
+            ))]
+            astc_encoder: None,
+        })
+    }
+
+    fn source_bytes(&self) -> u64 {
+        let live_sources = self
+            .textures
+            .values()
+            .filter_map(|texture| texture.source.as_ref())
+            .map(|source| source.as_bytes().len() as u64)
+            .sum::<u64>();
+        (self.texture_source_bytes as u64).max(live_sources)
+    }
+
+    fn command(&mut self, command: EmoteLayerCommand) {
+        match command {
+            EmoteLayerCommand::SetScale {
+                scale,
+                origin_x,
+                origin_y,
+            } => self.player.set_scale(scale, origin_x, origin_y),
+            EmoteLayerCommand::SetCoord { x, y, z, angle } => self.player.set_coord(x, y, z, angle),
+            EmoteLayerCommand::SetVariable {
+                label,
+                value,
+                frames,
+                easing,
+            } => self.player.set_variable(label, value, frames, easing),
+            EmoteLayerCommand::PlayTimeline { label, flags } => {
+                self.player.play_model_timeline(&self.model, label, flags)
+            }
+            EmoteLayerCommand::FadeInTimeline {
+                label,
+                frames,
+                easing,
+            } => self.player.fade_in_timeline(label, frames, easing),
+            EmoteLayerCommand::FadeOutTimeline {
+                label,
+                frames,
+                easing,
+            } => self.player.fade_out_timeline(label, frames, easing),
+            EmoteLayerCommand::StopTimeline { label } => self.player.stop_timeline(label),
+            EmoteLayerCommand::Pass => self.player.pass(),
+            EmoteLayerCommand::Step => self.player.step(),
+            EmoteLayerCommand::Skip => self.player.skip(),
+        }
+        self.player.take_commands().for_each(drop);
     }
 }
 
@@ -698,6 +828,20 @@ fn draw_mesh(points: Option<&[f32]>, width: f32, height: f32) -> Option<DrawMesh
 }
 
 impl CoreRuntime {
+    pub(crate) fn set_emote_backend(&mut self, backend: EmoteBackend) {
+        let cleared = self.emote.lock().unwrap().set_backend(backend);
+        let textures = if self.gl_ctx.make_current() {
+            self.texture_provider.evict_prefix(":emote/")
+        } else {
+            crate::core_warn!("[E-Mote] GL context unavailable while changing backend");
+            0
+        };
+        crate::core_info!(
+            "[E-Mote] backend={backend:?}; cleared {cleared} layer(s) and {textures} texture(s)"
+        );
+        self.last_submitted_frame = None;
+    }
+
     pub(super) fn clear_emote_state(&mut self, reason: &str) {
         let layers = self.emote.lock().unwrap().clear();
         let textures = if self.gl_ctx.make_current() {
@@ -837,7 +981,7 @@ mod tests {
                 .create_layer("1.0", vec![(path.display().to_string(), bytes)], 1600, 1350,)
                 .unwrap()
         );
-        let instance = state.layers["1.0"].active.as_ref().unwrap();
+        let instance = state.layers["1.0"].active.as_ref().unwrap().as_builtin();
         assert!(instance.model.source_document().is_none());
         assert!(
             instance
@@ -846,7 +990,7 @@ mod tests {
                 .all(|texture| texture.source.is_some())
         );
         {
-            let instance = state.layers["1.0"].active.as_ref().unwrap();
+            let instance = state.layers["1.0"].active.as_ref().unwrap().as_builtin();
             let items = EmoteMotionEvaluator::new(&instance.model)
                 .evaluate_base(&EmoteRenderState {
                     motion_time: 0.0,
@@ -895,6 +1039,7 @@ mod tests {
                 .active
                 .as_ref()
                 .unwrap()
+                .as_builtin()
                 .model
                 .source_document()
                 .is_none()
@@ -904,6 +1049,7 @@ mod tests {
                 .active
                 .as_ref()
                 .unwrap()
+                .as_builtin()
                 .textures
                 .values()
                 .all(|texture| texture.source.is_none())
@@ -923,5 +1069,39 @@ mod tests {
         );
         assert_eq!(state.clear(), 1);
         assert!(state.layers.is_empty());
+    }
+
+    #[cfg(feature = "experimental-eluna")]
+    #[test]
+    fn builds_nekomiko_draw_commands_with_eluna_when_fixture_is_available() {
+        let Ok(root) = std::env::var("NEKOMIKO_DIR") else {
+            return;
+        };
+        let path = std::path::Path::new(&root).join("image/fhd/fg/aya/tay_0.psb");
+        let bytes = std::fs::read(&path).unwrap();
+        let mut state = EmoteState::default();
+        state.set_backend(super::EmoteBackend::ElunaExperimental);
+        assert!(
+            !state
+                .create_layer("1.0", vec![(path.display().to_string(), bytes)], 1600, 1350,)
+                .unwrap()
+        );
+        state
+            .command(
+                "1.0",
+                false,
+                EmoteLayerCommand::SetScale {
+                    scale: 0.6,
+                    origin_x: 0.0,
+                    origin_y: 0.0,
+                },
+            )
+            .unwrap();
+        state.advance(16);
+        let mut provider = MockProvider::new();
+        let (commands, retained) = state.build_commands(&mut provider);
+        assert!(!commands["1.0"].is_empty());
+        assert!(!retained.is_empty());
+        assert!(commands["1.0"].iter().all(|command| command.mesh.is_some()));
     }
 }

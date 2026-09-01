@@ -129,6 +129,7 @@ feature 自动决定后端。
 | 函数 | 用途 |
 |---|---|
 | `art3m1s_runtime_create` / `destroy` | 创建和销毁 runtime |
+| `art3m1s_runtime_set_emote_backend` | 在项目加载前选择内置或实验性 Eluna E-Mote 后端 |
 | `art3m1s_runtime_load_project` | 读取 `system.ini` 并启动项目 |
 | `art3m1s_runtime_advance_and_render` | 推进一帧并返回 RGBA |
 | `art3m1s_runtime_set_external_surface` / `clear_external_surface` | 绑定或解绑 Android `ANativeWindow` / Apple `IOSurface` |
@@ -181,6 +182,23 @@ cargo build --release
 ```bash
 cargo build --no-default-features
 ```
+
+### 实验性 Eluna E-Mote 后端
+
+除默认的 `art3m1s-emote` 外，core 可以选择性编译
+[`xmoezzz/eluna`](https://github.com/xmoezzz/eluna) 适配器：
+
+```bash
+cargo build --release --features experimental-eluna
+```
+
+该依赖固定到 commit `12e4d2fa03b64714a83a0363eaadf26a125d9fe6`，通过 Cargo
+git dependency 直接使用，不复制或修改上游源码。此 feature 默认关闭，运行时也默认
+使用内置后端；宿主必须在加载项目之前显式调用
+`art3m1s_runtime_set_emote_backend(..., 1)` 才会切换。
+
+Eluna 仓库当前没有附带许可证正文，虽然 crate metadata 声明了 `MPL-2.0`，但在上游
+补全可核验的许可证文件前，本路径只用于本地兼容性试验，不应进入正式分发构建。
 
 Flutter 和 iOS 打包方式见宿主仓库。iOS 构建会自动选择 Luau，桌面和 Android 构建
 会选择 Lua 5.1。
