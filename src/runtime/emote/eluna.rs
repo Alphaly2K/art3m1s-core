@@ -5,6 +5,9 @@ use eluna::{
 };
 use glam::{Affine2, Vec2};
 use std::collections::{BTreeMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
 
 use crate::render_pipeline::draw::{
     BlendMode, ClipRect, ColorFilter, DrawCommand, DrawMesh, StencilMetadata, TextureId,
@@ -15,7 +18,8 @@ pub(super) struct ElunaEmoteInstance {
     generation: u64,
     width: u32,
     height: u32,
-    runtime: EmoteRuntime,
+    worker: ElunaWorker,
+    scene: Arc<EmoteStaticScene>,
     transform: ElunaLayerTransform,
     textures: BTreeMap<u32, ElunaTextureState>,
     source_bytes: u64,
@@ -43,6 +47,13 @@ struct ElunaTextureState {
     width: u32,
     height: u32,
     gpu: Option<(TextureId, TextureInfo)>,
+    data: Arc<[u8]>,
+}
+
+struct ElunaWorker {
+    command_tx: mpsc::Sender<EmoteLayerCommand>,
+    pending_ms: Arc<AtomicU64>,
+    latest_scene: Arc<Mutex<Option<Arc<EmoteStaticScene>>>>,
 }
 
 impl ElunaEmoteInstance {
@@ -57,7 +68,7 @@ impl ElunaEmoteInstance {
             autoplay_timeline: false,
             ..EmoteLoadOptions::default()
         };
-        let runtime = match EmoteRuntime::from_bytes(bytes, options.clone()) {
+        let mut runtime = match EmoteRuntime::from_bytes(bytes, options.clone()) {
             Ok(runtime) => runtime,
             Err(first_error) => {
                 let Some(key) = infer_emote_header_key(bytes) else {
@@ -73,16 +84,20 @@ impl ElunaEmoteInstance {
             }
         };
 
+        // A portable Eluna physics tick rebuilds the complete PSB scene twice.
+        // Keep that work away from the host render thread; physics stays off on
+        // this experimental path until Eluna provides incremental evaluation.
+        runtime.set_physics_enabled(false);
         let mut source_bytes = 0u64;
         let textures = runtime
             .texture_sources()
             .values()
             .map(|source| {
-                source_bytes = source_bytes.saturating_add(
-                    runtime
-                        .texture_bytes(source.resource_index)
-                        .map_or(0, |data| data.len() as u64),
-                );
+                let data: Arc<[u8]> = runtime
+                    .texture_bytes(source.resource_index)
+                    .unwrap_or_default()
+                    .into();
+                source_bytes = source_bytes.saturating_add(data.len() as u64);
                 (
                     source.resource_index,
                     ElunaTextureState {
@@ -90,16 +105,20 @@ impl ElunaEmoteInstance {
                         width: source.width,
                         height: source.height,
                         gpu: None,
+                        data,
                     },
                 )
             })
             .collect();
+        let scene = Arc::new(runtime.scene().clone());
+        let worker = ElunaWorker::spawn(runtime, path, scene.clone())?;
 
         Ok(Self {
             generation,
             width,
             height,
-            runtime,
+            worker,
+            scene,
             transform: ElunaLayerTransform::default(),
             textures,
             source_bytes,
@@ -119,72 +138,24 @@ impl ElunaEmoteInstance {
             } => {
                 self.transform.scale = scale;
                 self.transform.origin = [origin_x, origin_y];
+                return Ok(());
             }
             EmoteLayerCommand::SetCoord { x, y, z, angle } => {
                 self.transform.coord = [x, y, z, angle];
+                return Ok(());
             }
-            EmoteLayerCommand::SetVariable {
-                label,
-                value,
-                frames,
-                easing,
-            } => {
-                if frames <= 0.0 {
-                    self.runtime
-                        .set_variable_immediate(&label, value)
-                        .map_err(|error| error.to_string())?;
-                } else {
-                    self.runtime
-                        .set_variable_timed(&label, value, frames, easing as f32);
-                    self.runtime
-                        .rebuild_scene()
-                        .map_err(|error| error.to_string())?;
-                }
-            }
-            EmoteLayerCommand::PlayTimeline { label, flags } => self
-                .runtime
-                .play_timeline(&label, TimelinePlayMode::from_flags(flags))
-                .map_err(|error| error.to_string())?,
-            EmoteLayerCommand::FadeInTimeline {
-                label,
-                frames,
-                easing,
-            } => self
-                .runtime
-                .fade_in_timeline(&label, frames, easing as f32)
-                .map_err(|error| error.to_string())?,
-            EmoteLayerCommand::FadeOutTimeline {
-                label,
-                frames,
-                easing,
-            } => self
-                .runtime
-                .fade_out_timeline(&label, frames, easing as f32)
-                .map_err(|error| error.to_string())?,
-            EmoteLayerCommand::StopTimeline { label } => self
-                .runtime
-                .stop_timeline(&label)
-                .map_err(|error| error.to_string())?,
-            EmoteLayerCommand::Pass => {
-                self.runtime.pass().map_err(|error| error.to_string())?;
-            }
-            EmoteLayerCommand::Step => {
-                self.runtime.step().map_err(|error| error.to_string())?;
-            }
-            EmoteLayerCommand::Skip => {
-                self.runtime.inner_player_mut().skip();
-                self.runtime
-                    .rebuild_scene()
-                    .map_err(|error| error.to_string())?;
-            }
+            command => self.worker.send(command)?,
         }
         Ok(())
     }
 
-    pub(super) fn advance(&mut self, delta_ms: u64) -> Result<(), String> {
-        self.runtime
-            .progress_milliseconds_capped(delta_ms as f32)
-            .map_err(|error| error.to_string())
+    pub(super) fn advance(&mut self, delta_ms: u64) -> bool {
+        self.worker.advance(delta_ms);
+        let Some(scene) = self.worker.take_latest_scene() else {
+            return false;
+        };
+        self.scene = scene;
+        true
     }
 
     pub(super) fn build_commands(
@@ -194,7 +165,7 @@ impl ElunaEmoteInstance {
     ) -> Result<Vec<DrawCommand>, String> {
         self.upload_textures(provider, retained)?;
         let layer_transform = self.layer_transform();
-        let scene = self.runtime.scene();
+        let scene = &self.scene;
         Ok(scene
             .sprites
             .iter()
@@ -221,10 +192,7 @@ impl ElunaEmoteInstance {
             if texture.gpu.is_some() {
                 continue;
             }
-            let data = self
-                .runtime
-                .texture_bytes(*resource_index)
-                .ok_or_else(|| format!("Eluna texture resource {resource_index} is unavailable"))?;
+            let data = &texture.data;
             texture.gpu = provider.upload_dxt5_render_only(
                 &texture.name,
                 texture.width,
@@ -303,6 +271,153 @@ impl ElunaEmoteInstance {
             }),
         })
     }
+}
+
+impl ElunaWorker {
+    fn spawn(
+        runtime: EmoteRuntime,
+        path: &str,
+        initial_scene: Arc<EmoteStaticScene>,
+    ) -> Result<Self, String> {
+        let (command_tx, command_rx) = mpsc::channel();
+        let pending_ms = Arc::new(AtomicU64::new(0));
+        let latest_scene = Arc::new(Mutex::new(None));
+        let worker_pending_ms = pending_ms.clone();
+        let worker_latest_scene = latest_scene.clone();
+        let thread_name = format!(
+            "art3m1s-eluna-{}",
+            path.rsplit('/').next().unwrap_or("model")
+        );
+        std::thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || {
+                run_eluna_worker(
+                    runtime,
+                    command_rx,
+                    worker_pending_ms,
+                    worker_latest_scene,
+                    initial_scene,
+                );
+            })
+            .map_err(|error| format!("failed to start Eluna worker for {path}: {error}"))?;
+        Ok(Self {
+            command_tx,
+            pending_ms,
+            latest_scene,
+        })
+    }
+
+    fn send(&self, command: EmoteLayerCommand) -> Result<(), String> {
+        self.command_tx
+            .send(command)
+            .map_err(|_| "Eluna worker stopped".to_owned())
+    }
+
+    fn advance(&self, delta_ms: u64) {
+        let _ = self
+            .pending_ms
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
+                Some(pending.saturating_add(delta_ms).min(100))
+            });
+    }
+
+    fn take_latest_scene(&self) -> Option<Arc<EmoteStaticScene>> {
+        self.latest_scene.lock().ok()?.take()
+    }
+}
+
+fn run_eluna_worker(
+    mut runtime: EmoteRuntime,
+    command_rx: mpsc::Receiver<EmoteLayerCommand>,
+    pending_ms: Arc<AtomicU64>,
+    latest_scene: Arc<Mutex<Option<Arc<EmoteStaticScene>>>>,
+    initial_scene: Arc<EmoteStaticScene>,
+) {
+    if let Ok(mut slot) = latest_scene.lock() {
+        *slot = Some(initial_scene);
+    }
+    loop {
+        let first_command = match command_rx.recv_timeout(Duration::from_millis(33)) {
+            Ok(command) => Some(command),
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        let mut commands = first_command.into_iter().collect::<Vec<_>>();
+        commands.extend(command_rx.try_iter());
+        let delta_ms = pending_ms.swap(0, Ordering::Relaxed);
+        if commands.is_empty() && delta_ms == 0 {
+            continue;
+        }
+
+        let had_commands = !commands.is_empty();
+        for command in commands {
+            if let Err(error) = apply_worker_command(&mut runtime, command) {
+                crate::core_warn!("[E-Mote:Eluna] worker command failed: {error}");
+            }
+        }
+        let update = if delta_ms != 0 {
+            runtime.progress_milliseconds_capped(delta_ms as f32)
+        } else if had_commands {
+            runtime.rebuild_scene()
+        } else {
+            continue;
+        };
+        if let Err(error) = update {
+            crate::core_warn!("[E-Mote:Eluna] worker update failed: {error}");
+            continue;
+        }
+        runtime.clear_modified();
+        if let Ok(mut slot) = latest_scene.lock() {
+            *slot = Some(Arc::new(runtime.scene().clone()));
+        }
+    }
+}
+
+fn apply_worker_command(
+    runtime: &mut EmoteRuntime,
+    command: EmoteLayerCommand,
+) -> Result<(), String> {
+    match command {
+        EmoteLayerCommand::SetVariable {
+            label,
+            value,
+            frames,
+            easing,
+        } => {
+            if frames <= 0.0 {
+                runtime
+                    .set_variable_immediate(&label, value)
+                    .map_err(|error| error.to_string())?;
+            } else {
+                runtime.set_variable_timed(&label, value, frames, easing as f32);
+            }
+        }
+        EmoteLayerCommand::PlayTimeline { label, flags } => runtime
+            .play_timeline(&label, TimelinePlayMode::from_flags(flags))
+            .map_err(|error| error.to_string())?,
+        EmoteLayerCommand::FadeInTimeline {
+            label,
+            frames,
+            easing,
+        } => runtime
+            .fade_in_timeline(&label, frames, easing as f32)
+            .map_err(|error| error.to_string())?,
+        EmoteLayerCommand::FadeOutTimeline {
+            label,
+            frames,
+            easing,
+        } => runtime
+            .fade_out_timeline(&label, frames, easing as f32)
+            .map_err(|error| error.to_string())?,
+        EmoteLayerCommand::StopTimeline { label } => runtime
+            .stop_timeline(&label)
+            .map_err(|error| error.to_string())?,
+        EmoteLayerCommand::Pass => runtime.pass().map_err(|error| error.to_string())?,
+        EmoteLayerCommand::Step => runtime.step().map_err(|error| error.to_string())?,
+        EmoteLayerCommand::Skip => runtime.inner_player_mut().skip(),
+        EmoteLayerCommand::SetScale { .. } | EmoteLayerCommand::SetCoord { .. } => {}
+    }
+    Ok(())
 }
 
 fn sprite_mesh(sprite: &EmoteStaticSprite) -> DrawMesh {

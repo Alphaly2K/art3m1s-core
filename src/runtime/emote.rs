@@ -96,10 +96,6 @@ struct EmoteTextureState {
 }
 
 impl EmoteState {
-    pub fn is_empty(&self) -> bool {
-        self.layers.is_empty()
-    }
-
     pub(super) fn set_backend(&mut self, backend: EmoteBackend) -> usize {
         if self.backend == backend {
             return 0;
@@ -209,16 +205,18 @@ impl EmoteState {
         instance.command(command)
     }
 
-    pub fn advance(&mut self, delta_ms: u64) {
+    pub fn advance(&mut self, delta_ms: u64) -> bool {
         let frames = delta_ms as f32 * 60.0 / 1000.0;
+        let mut changed = false;
         for slots in self.layers.values_mut() {
             for instance in [&mut slots.active, &mut slots.pending]
                 .into_iter()
                 .flatten()
             {
-                instance.advance(delta_ms, frames);
+                changed |= instance.advance(delta_ms, frames);
             }
         }
+        changed
     }
 
     pub fn take_scene_attachments(&mut self) -> Vec<String> {
@@ -293,15 +291,14 @@ impl EmoteInstanceSlot {
         }
     }
 
-    fn advance(&mut self, _delta_ms: u64, builtin_frames: f32) {
+    fn advance(&mut self, _delta_ms: u64, builtin_frames: f32) -> bool {
         match self {
-            Self::Builtin(instance) => instance.advance(builtin_frames),
-            #[cfg(feature = "experimental-eluna")]
-            Self::Eluna(instance) => {
-                if let Err(error) = instance.advance(_delta_ms) {
-                    crate::core_debug!("[E-Mote:Eluna] advance failed: {error}");
-                }
+            Self::Builtin(instance) => {
+                instance.advance(builtin_frames);
+                true
             }
+            #[cfg(feature = "experimental-eluna")]
+            Self::Eluna(instance) => instance.advance(_delta_ms),
         }
     }
 
@@ -1097,7 +1094,12 @@ mod tests {
                 },
             )
             .unwrap();
+        let advance_started = std::time::Instant::now();
         state.advance(16);
+        assert!(
+            advance_started.elapsed() < std::time::Duration::from_millis(100),
+            "Eluna scene evaluation must not block the host frame"
+        );
         let mut provider = MockProvider::new();
         let (commands, retained) = state.build_commands(&mut provider);
         assert!(!commands["1.0"].is_empty());

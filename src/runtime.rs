@@ -470,8 +470,7 @@ impl CoreRuntime {
 
         let emote_started = profile.mark();
         let mut emote = self.emote.lock().unwrap();
-        self.frame_visual_dirty |= !emote.is_empty();
-        emote.advance(delta_ms);
+        self.frame_visual_dirty |= emote.advance(delta_ms);
         drop(emote);
         profile.emote_ns = profile
             .emote_ns
