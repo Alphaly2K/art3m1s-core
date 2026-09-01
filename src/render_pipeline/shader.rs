@@ -84,6 +84,7 @@ uniform vec2 u_uv_offset;   // normalized UV origin
 uniform vec2 u_uv_scale;    // normalized UV span
 
 out vec2 v_uv;
+out vec2 v_model_position;
 
 void main() {
     vec2 local = a_pos * u_size;
@@ -91,11 +92,13 @@ void main() {
     vec3 ndc = u_projection * vec3(world.xy, 1.0);
     gl_Position = vec4(ndc.xy, 0.0, 1.0);
     v_uv = u_uv_offset + a_uv * u_uv_scale;
+    v_model_position = a_pos;
 }
 "#;
 
 const SPRITE_FRAGMENT_BODY: &str = r#"
 in vec2 v_uv;
+in vec2 v_model_position;
 out vec4 frag_color;
 
 uniform sampler2D u_sampler;
@@ -103,9 +106,52 @@ uniform float u_opacity;
 uniform vec3 u_multiply;
 uniform int u_grayscale;
 uniform int u_negative;
+uniform int u_emote_enabled;
+uniform vec4 u_emote_uv_rect;
+uniform vec4 u_emote_color_tl;
+uniform vec4 u_emote_color_tr;
+uniform vec4 u_emote_color_bl;
+uniform vec4 u_emote_color_br;
+uniform int u_emote_blend_mode;
+uniform vec4 u_emote_clip_rect;
+uniform vec3 u_emote_wipe;
 
 void main() {
     vec4 c = texture(u_sampler, v_uv);
+    if (u_emote_enabled != 0) {
+        if (v_model_position.x < u_emote_clip_rect.x ||
+            v_model_position.y < u_emote_clip_rect.y ||
+            v_model_position.x > u_emote_clip_rect.z ||
+            v_model_position.y > u_emote_clip_rect.w) {
+            discard;
+        }
+        vec2 uv_span = u_emote_uv_rect.zw - u_emote_uv_rect.xy;
+        vec2 local_uv = clamp(
+            (v_uv - u_emote_uv_rect.xy) /
+                vec2(abs(uv_span.x) > 0.000001 ? uv_span.x : 1.0,
+                     abs(uv_span.y) > 0.000001 ? uv_span.y : 1.0),
+            vec2(0.0),
+            vec2(1.0)
+        );
+        vec4 top = mix(u_emote_color_tl, u_emote_color_tr, local_uv.x);
+        vec4 bottom = mix(u_emote_color_bl, u_emote_color_br, local_uv.x);
+        c *= mix(top, bottom, local_uv.y);
+        if (u_emote_wipe.z > 0.5) {
+            c.a = clamp(c.a * u_emote_wipe.x + u_emote_wipe.y, 0.0, 1.0);
+        }
+        if ((u_emote_blend_mode & 0xF0) == 0x10) {
+            c.rgb = clamp(c.rgb * 2.0, vec3(0.0), vec3(1.0));
+        }
+        int native_mode = u_emote_blend_mode & 0x0F;
+        if (native_mode == 3 || native_mode == 4) {
+            c.rgb *= c.a;
+        } else if (native_mode == 5) {
+            c.rgb = vec3(1.0) - c.rgb;
+        }
+        if (c.a <= 0.003) {
+            discard;
+        }
+    }
     c.rgb *= u_multiply;
     if (u_grayscale != 0) {
         float g = dot(c.rgb, vec3(0.299, 0.587, 0.114));

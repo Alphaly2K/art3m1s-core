@@ -537,6 +537,7 @@ impl GlRenderer {
                         shader: Some(effect),
                         mesh: None,
                         stencil: None,
+                        native_emote: None,
                     },
                     None,
                     top_left_target,
@@ -590,6 +591,7 @@ impl GlRenderer {
         let gl = &self.gl;
         unsafe {
             gl.enable(glow::BLEND);
+            gl.blend_equation_separate(glow::FUNC_ADD, glow::FUNC_ADD);
             match blend {
                 BlendMode::Alpha => {
                     gl.blend_func_separate(
@@ -618,6 +620,29 @@ impl GlRenderer {
                 }
                 BlendMode::Multiply => {
                     gl.blend_func(glow::DST_COLOR, glow::ONE_MINUS_SRC_ALPHA);
+                }
+                BlendMode::NativeAdd => {
+                    gl.blend_func_separate(glow::SRC_ALPHA, glow::ONE, glow::ZERO, glow::ONE);
+                }
+                BlendMode::NativeReverseSubtract => {
+                    gl.blend_equation_separate(glow::FUNC_REVERSE_SUBTRACT, glow::FUNC_ADD);
+                    gl.blend_func_separate(glow::SRC_ALPHA, glow::ONE, glow::ZERO, glow::ONE);
+                }
+                BlendMode::NativeMultiply => {
+                    gl.blend_func_separate(
+                        glow::DST_COLOR,
+                        glow::ONE_MINUS_SRC_ALPHA,
+                        glow::ZERO,
+                        glow::ONE,
+                    );
+                }
+                BlendMode::NativeScreen => {
+                    gl.blend_func_separate(
+                        glow::ONE_MINUS_DST_COLOR,
+                        glow::ONE,
+                        glow::ZERO,
+                        glow::ONE,
+                    );
                 }
             }
         }
@@ -709,6 +734,36 @@ impl GlRenderer {
             );
             gl.uniform_1_i32(bindings.grayscale.as_ref(), c.grayscale as i32);
             gl.uniform_1_i32(bindings.negative.as_ref(), c.negative as i32);
+            gl.uniform_1_i32(
+                bindings.emote_enabled.as_ref(),
+                cmd.native_emote.is_some() as i32,
+            );
+            if let Some(material) = cmd.native_emote {
+                let uv = material.uv_rect;
+                gl.uniform_4_f32(bindings.emote_uv_rect.as_ref(), uv[0], uv[1], uv[2], uv[3]);
+                for (location, color) in [
+                    (&bindings.emote_color_tl, material.corner_colors[0]),
+                    (&bindings.emote_color_tr, material.corner_colors[1]),
+                    (&bindings.emote_color_bl, material.corner_colors[2]),
+                    (&bindings.emote_color_br, material.corner_colors[3]),
+                ] {
+                    gl.uniform_4_f32(location.as_ref(), color[0], color[1], color[2], color[3]);
+                }
+                gl.uniform_1_i32(
+                    bindings.emote_blend_mode.as_ref(),
+                    material.blend_mode as i32,
+                );
+                let clip = material.clip_rect;
+                gl.uniform_4_f32(
+                    bindings.emote_clip_rect.as_ref(),
+                    clip[0],
+                    clip[1],
+                    clip[2],
+                    clip[3],
+                );
+                let wipe = material.wipe;
+                gl.uniform_3_f32(bindings.emote_wipe.as_ref(), wipe[0], wipe[1], wipe[2]);
+            }
 
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, texture_from_id(cmd.texture));
@@ -835,6 +890,7 @@ impl GlRenderer {
                     shader: None,
                     mesh: None,
                     stencil: None,
+                    native_emote: None,
                 },
                 None,
                 true,
@@ -1154,6 +1210,15 @@ struct ProgramBindings {
     multiply: Option<glow::UniformLocation>,
     grayscale: Option<glow::UniformLocation>,
     negative: Option<glow::UniformLocation>,
+    emote_enabled: Option<glow::UniformLocation>,
+    emote_uv_rect: Option<glow::UniformLocation>,
+    emote_color_tl: Option<glow::UniformLocation>,
+    emote_color_tr: Option<glow::UniformLocation>,
+    emote_color_bl: Option<glow::UniformLocation>,
+    emote_color_br: Option<glow::UniformLocation>,
+    emote_blend_mode: Option<glow::UniformLocation>,
+    emote_clip_rect: Option<glow::UniformLocation>,
+    emote_wipe: Option<glow::UniformLocation>,
     sampler: Option<glow::UniformLocation>,
     texture_back: Option<glow::UniformLocation>,
     texture_fore: Option<glow::UniformLocation>,
@@ -1176,6 +1241,15 @@ impl ProgramBindings {
             multiply: get("u_multiply"),
             grayscale: get("u_grayscale"),
             negative: get("u_negative"),
+            emote_enabled: get("u_emote_enabled"),
+            emote_uv_rect: get("u_emote_uv_rect"),
+            emote_color_tl: get("u_emote_color_tl"),
+            emote_color_tr: get("u_emote_color_tr"),
+            emote_color_bl: get("u_emote_color_bl"),
+            emote_color_br: get("u_emote_color_br"),
+            emote_blend_mode: get("u_emote_blend_mode"),
+            emote_clip_rect: get("u_emote_clip_rect"),
+            emote_wipe: get("u_emote_wipe"),
             sampler: get("u_sampler"),
             texture_back: get("u_texture_back"),
             texture_fore: get("u_texture_fore"),

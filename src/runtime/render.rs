@@ -978,6 +978,7 @@ mod tests {
             shader: None,
             mesh: None,
             stencil: None,
+            native_emote: None,
         }
     }
 

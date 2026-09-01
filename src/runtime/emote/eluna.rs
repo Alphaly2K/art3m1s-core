@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use crate::render_pipeline::draw::{
-    BlendMode, ClipRect, ColorFilter, DrawCommand, DrawMesh, StencilMetadata, TextureId,
-    TextureInfo, TextureProvider,
+    BlendMode, ClipRect, ColorFilter, DrawCommand, DrawMesh, NativeEmoteMaterial, StencilMetadata,
+    TextureId, TextureInfo, TextureProvider,
 };
 
 pub(super) struct ElunaEmoteInstance {
@@ -240,7 +240,6 @@ impl ElunaEmoteInstance {
     ) -> Option<DrawCommand> {
         let texture = self.textures.get(&sprite.texture_resource_index)?;
         let (texture_id, texture_info) = texture.gpu?;
-        let (multiply, alpha) = sprite_color(sprite);
         let mask_labels = sprite
             .draw_frame_info
             .parent_mask_path
@@ -253,13 +252,9 @@ impl ElunaEmoteInstance {
             texture: texture_id,
             size: texture_info,
             transform: layer_transform,
-            opacity: sprite.opacity * alpha,
+            opacity: 1.0,
             blend: eluna_blend(sprite.blend_mode),
-            color: ColorFilter {
-                multiply,
-                grayscale: false,
-                negative: false,
-            },
+            color: ColorFilter::default(),
             clip: ClipRect::full(texture_info),
             clip_bounds: None,
             shader: None,
@@ -269,6 +264,7 @@ impl ElunaEmoteInstance {
                 source_label: sprite.draw_frame_info.path.clone(),
                 mask_labels,
             }),
+            native_emote: Some(native_emote_material(sprite)),
         })
     }
 }
@@ -478,11 +474,25 @@ fn sprite_mesh(sprite: &EmoteStaticSprite) -> DrawMesh {
 }
 
 fn transform_sprite_point(sprite: &EmoteStaticSprite, point: [f32; 2]) -> [f32; 2] {
-    let angle = sprite.rotation_degrees.to_radians();
+    let scale_x = if sprite.scale_x.is_finite() {
+        sprite.scale_x
+    } else {
+        1.0
+    };
+    let scale_y = if sprite.scale_y.is_finite() {
+        sprite.scale_y
+    } else {
+        1.0
+    };
+    let angle = if sprite.rotation_degrees.is_finite() {
+        sprite.rotation_degrees.to_radians()
+    } else {
+        0.0
+    };
     let cos = angle.cos();
     let sin = angle.sin();
-    let dx = (point[0] - sprite.center_x) * sprite.scale_x;
-    let dy = (point[1] - sprite.center_y) * sprite.scale_y;
+    let dx = (point[0] - sprite.center_x) * scale_x;
+    let dy = (point[1] - sprite.center_y) * scale_y;
     let local = [
         sprite.center_x + dx * cos - dy * sin,
         sprite.center_y + dx * sin + dy * cos,
@@ -494,31 +504,41 @@ fn transform_sprite_point(sprite: &EmoteStaticSprite, point: [f32; 2]) -> [f32; 
     ]
 }
 
-fn sprite_color(sprite: &EmoteStaticSprite) -> ([f32; 3], f32) {
-    let mut rgba = [0.0f32; 4];
-    for packed in sprite.corner_colors {
-        rgba[0] += ((packed >> 24) & 0xff) as f32 / 255.0;
-        rgba[1] += ((packed >> 16) & 0xff) as f32 / 255.0;
-        rgba[2] += ((packed >> 8) & 0xff) as f32 / 255.0;
-        rgba[3] += (packed & 0xff) as f32 / 255.0;
+fn native_emote_material(sprite: &EmoteStaticSprite) -> NativeEmoteMaterial {
+    NativeEmoteMaterial {
+        corner_colors: sprite.corner_colors.map(|packed| {
+            [
+                ((packed >> 24) & 0xff) as f32 / 255.0,
+                ((packed >> 16) & 0xff) as f32 / 255.0,
+                ((packed >> 8) & 0xff) as f32 / 255.0,
+                ((packed & 0xff) as f32 / 255.0 * sprite.opacity).clamp(0.0, 1.0),
+            ]
+        }),
+        uv_rect: [
+            sprite.uv_left,
+            sprite.uv_top,
+            sprite.uv_right,
+            sprite.uv_bottom,
+        ],
+        blend_mode: sprite.blend_mode,
+        clip_rect: sprite
+            .draw_frame_info
+            .clip_rect
+            .unwrap_or([-1.0e30, -1.0e30, 1.0e30, 1.0e30]),
+        wipe: [
+            sprite.draw_frame_info.stencil_wipe_scale,
+            sprite.draw_frame_info.stencil_wipe_bias,
+            sprite.draw_frame_info.stencil_wipe_enabled as u8 as f32,
+        ],
     }
-    for value in &mut rgba {
-        *value *= 0.25;
-    }
-    if sprite.blend_mode & 0xf0 == 0x10 {
-        rgba[0] = (rgba[0] * 2.0).min(1.0);
-        rgba[1] = (rgba[1] * 2.0).min(1.0);
-        rgba[2] = (rgba[2] * 2.0).min(1.0);
-    }
-    ([rgba[0], rgba[1], rgba[2]], rgba[3])
 }
 
 fn eluna_blend(mode: u32) -> BlendMode {
     match mode & 0x0f {
-        1 => BlendMode::Add,
-        3 => BlendMode::Multiply,
-        4 => BlendMode::Screen,
-        2 | 5 => BlendMode::Multiply,
+        1 => BlendMode::NativeAdd,
+        2 | 5 => BlendMode::NativeReverseSubtract,
+        3 => BlendMode::NativeMultiply,
+        4 => BlendMode::NativeScreen,
         _ => BlendMode::Alpha,
     }
 }

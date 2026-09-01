@@ -248,6 +248,7 @@ pub(crate) fn overlay_old_frame(
                 shader: Some(effect),
                 mesh: None,
                 stencil: None,
+                native_emote: None,
             });
         }
         // 交叉淡化（type=1，以及 rule 不可用时 type=2 的回退）。
@@ -264,6 +265,7 @@ pub(crate) fn overlay_old_frame(
                 shader: None,
                 mesh: None,
                 stencil: None,
+                native_emote: None,
             });
         }
         _ => {}

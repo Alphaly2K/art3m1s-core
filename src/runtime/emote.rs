@@ -671,6 +671,7 @@ impl EmoteInstance {
                 source_label: item.layer_label,
                 mask_labels: item.stencil_mask_layers,
             }),
+            native_emote: None,
         })
     }
 }
@@ -1105,5 +1106,10 @@ mod tests {
         assert!(!commands["1.0"].is_empty());
         assert!(!retained.is_empty());
         assert!(commands["1.0"].iter().all(|command| command.mesh.is_some()));
+        assert!(
+            commands["1.0"]
+                .iter()
+                .all(|command| command.native_emote.is_some())
+        );
     }
 }

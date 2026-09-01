@@ -181,6 +181,7 @@ fn visit(
                 shader: command_shader.clone(),
                 mesh: None,
                 stencil: None,
+                native_emote: None,
             },
         );
     } else if effective_file.is_none_or(str::is_empty)
@@ -220,6 +221,7 @@ fn visit(
                 shader: command_shader.clone(),
                 mesh: None,
                 stencil: None,
+                native_emote: None,
             },
         );
     }
@@ -570,6 +572,7 @@ mod tests {
             shader: None,
             mesh: None,
             stencil: None,
+            native_emote: None,
         };
         let mut content_for = |id: &str| {
             if id == "1" {

@@ -140,6 +140,14 @@ pub enum BlendMode {
     Add,
     Screen,
     Multiply,
+    /// Native E-Mote additive mode while preserving destination alpha.
+    NativeAdd,
+    /// Native E-Mote reverse-subtract blend (destination - source * alpha).
+    NativeReverseSubtract,
+    /// Native E-Mote multiply mode while preserving destination alpha.
+    NativeMultiply,
+    /// Native E-Mote screen mode while preserving destination alpha.
+    NativeScreen,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -207,6 +215,20 @@ pub struct StencilMetadata {
     pub mask_labels: Vec<String>,
 }
 
+/// Per-sprite fixed-function state used by the native E-Mote renderer.
+///
+/// Keeping this optional preserves the compact generic sprite path while
+/// allowing E-Mote's authored corner colors, model-space clipping and wipe
+/// operation to reach the backend without flattening them into one tint.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NativeEmoteMaterial {
+    pub corner_colors: [[f32; 4]; 4],
+    pub uv_rect: [f32; 4],
+    pub blend_mode: u32,
+    pub clip_rect: [f32; 4],
+    pub wipe: [f32; 3],
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct DrawCommand {
     pub texture: TextureId,
@@ -220,6 +242,7 @@ pub struct DrawCommand {
     pub shader: Option<ShaderEffect>,
     pub mesh: Option<DrawMesh>,
     pub stencil: Option<StencilMetadata>,
+    pub native_emote: Option<NativeEmoteMaterial>,
 }
 
 /// Stable compositor identity for matching draw commands across frames.
