@@ -8,7 +8,7 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 art3m1s-emote = { path = "crates/art3m1s-emote" }
-eluna = { package = "eluna_rs", git = "https://github.com/xmoezzz/eluna.git", rev = "12e4d2fa03b64714a83a0363eaadf26a125d9fe6", optional = true }
+eluna = { package = "eluna_rs", path = "crates/eluna", optional = true }
 pfs-upk-rust = { path = "crates/pfs-upk-rust" }
 encoding_rs = "0.8"
 glam = "0.30"

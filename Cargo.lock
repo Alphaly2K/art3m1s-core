@@ -193,7 +193,6 @@ checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
 [[package]]
 name = "eluna_rs"
 version = "0.1.0"
-source = "git+https://github.com/xmoezzz/eluna.git?rev=12e4d2fa03b64714a83a0363eaadf26a125d9fe6#12e4d2fa03b64714a83a0363eaadf26a125d9fe6"
 dependencies = [
  "flate2",
  "lz4_flex",
