@@ -2,25 +2,51 @@
 
 本文档记录 `art3m1s-core` 的重要变更。
 
-项目尽可能遵循语义化版本。由于 0.2 之前没有持续使用 release tag，0.2.0 条目描述
-当前发布树，而不是严格的 tag-to-tag diff。
+## [0.3.0] - 2026-09-01
+
+### 新增
+
+- 新增移动端侧 ASTC 纹理压缩支持。
+- 新增 DXT5 纹理压缩支持。
+- 新增静止帧跳过重新渲染机制。
+- 新增脏区渲染更新机制。
+- 调试模式新增 Profiler 功能。
+- 新增 libmpv 解码器预热以加速视频解码播放。
+- 新增 E-Mote 纹理缓存和释放机制。
+- 新增字体纹理缓存机制。
+
+### 变更
+
+- 将 ANGLE 实现统一为 Google 官方分支。
+- 画面输出路径更改为系统共享纹理。
+
+### 修复
+
+- 修复了 skip mode 相关 bug。
+- 修复了 E-mote 播放计时器和游戏渲染时序不同步的问题。
+- 修复了由于自定义参数丢失而造成的逐字动画示例文本无法显示的问题。
+
+### 已知边界
+
+- HLSL 仍只兼容已验证游戏使用的 Artemis shader 子集。
+- E-Mote 对少量未验证的 PSB model variant 和私有 motion 语义仍可能不完整，将在下个版本中提供实验性路径扩展对 E-mote 的支持。
 
 ## [0.2.2] - 2026-07-31
 
-### Added
+### 新增
 
 - 增加 intermediate-render 图层组的独立合成阶段，支持组级 alpha、颜色、混合模式、
   mask 和 shader 结果。
 - 图层信息查询可返回缓动中的实时位置，并在脚本未指定尺寸时回退到纹理逻辑尺寸。
 - BGM 事件支持 Artemis `*_a` 引导段与 `*_b` 循环段的分段播放信息。
 
-### Changed
+### 变更
 
 - 跳过模式不再为每页固定停留三帧；当前页完整显示一帧后即可继续推进。
 - 文本排版按脚本的 `spacetop`、`spacemiddle`、`spacebottom`、逐行对齐和字距语义计算。
 - 事件过滤器接收注册标签的完整参数，并区分“假装成功”和“假装失败”。
 
-### Fixed
+### 修复
 
 - 修复隐藏或删除消息窗父图层、切换 UI、返回标题和转场时剧情文本仍残留的问题。
 - 修复侧边浮窗缓动期间 `get_layer_info` 返回旧坐标，导致展开后无法按脚本收回的问题。
@@ -29,7 +55,7 @@
 - 修复居中/右对齐换行、Ruby 行高和脚本字距没有按 Artemis 排版参数生效的问题。
 - 修复若干预处理器、系统变量、输入事件参数和消息层恢复语义的兼容性缺口。
 
-### Known limitations
+### 已知边界
 
 - HLSL 仍只兼容已验证游戏使用的 Artemis shader 子集。
 - E-Mote 对少量未验证的 PSB model variant 和私有 motion 语义仍可能不完整。
@@ -37,16 +63,16 @@
 
 ## [0.2.1] - 2026-07-27
 
-### Added
+### 新增
 
 - 增加独立/分层消息图层模式，兼容脚本通过 `chgmsg` 切换文本承载层。
 - 字形缓存支持多页 atlas，并在同一字体族中自动寻找缺失字符。
 
-### Changed
+### 变更
 
 - `pfs-upk-rust` 作为固定提交的 Git submodule 接入，构建前需递归初始化 submodule。
 
-### Fixed
+### 修复
 
 - 修复嵌套 shader group 没有按场景树顺序递归合成，导致部分品牌页和标题画面纹理缺失。
 - 修复切换字体后错误复用旧 glyph，以及单页 atlas 填满后文字突然消失的问题。
@@ -55,7 +81,7 @@
 
 ## [0.2.0] - 2026-07-27
 
-### Added
+### 新增
 
 - 将 `asb-interpreter`、`art3m1s-emote` 作为支持 crate 并入仓库；
   常规构建不再依赖缺失的 Git submodule 或 sibling repository。
@@ -66,11 +92,11 @@
 - 增加触摸、右键、hover、变换后的拖动和基于 alpha 的 hit-test。
 - 分离系统存档与编号存档，并扩充 scene、interpreter 和 audio snapshot。
 
-### Changed
+### 变更
 
 - 重构文本渲染、backlog 和 glyph 状态，让 UI 切换与译文复用同一套 scenario text 生命周期。
 
-### Fixed
+### 修复
 
 - 编号存档不再序列化或恢复持久化 `g.*`/`s.*` 状态，避免读取旧档后抹掉较新的存档槽。
 - 修复 stop/wait、queued tag 和 inline event-frame bookkeeping 引起的
@@ -81,7 +107,7 @@
 - 修复图层视频完成通知、重复启动和 24 FPS 视频锁定游戏渲染循环。
 - 修复 E-Mote 部件位置、动作插值、口型、眼球/眨眼与多处 visibility/alpha 交互。
 
-### Known limitations
+### 已知边界
 
 - HLSL 只兼容测试游戏中观察到的 Artemis shader 子集，不支持任意 HLSL。
 - E-Mote 对部分私有 easing/pass 语义、外部纹理和未测试 PSB model variant 的支持仍不完整。
