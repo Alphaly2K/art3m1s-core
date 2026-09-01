@@ -5,9 +5,7 @@ use eluna::{
 };
 use glam::{Affine2, Vec2};
 use std::collections::{BTreeMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::Duration;
 
 use crate::render_pipeline::draw::{
     BlendMode, ClipRect, ColorFilter, DrawCommand, DrawMesh, NativeEmoteMaterial, StencilMetadata,
@@ -51,9 +49,13 @@ struct ElunaTextureState {
 }
 
 struct ElunaWorker {
-    command_tx: mpsc::Sender<EmoteLayerCommand>,
-    pending_ms: Arc<AtomicU64>,
+    message_tx: mpsc::Sender<ElunaWorkerMessage>,
     latest_scene: Arc<Mutex<Option<Arc<EmoteStaticScene>>>>,
+}
+
+enum ElunaWorkerMessage {
+    Command(EmoteLayerCommand),
+    Advance(u64),
 }
 
 impl ElunaEmoteInstance {
@@ -275,10 +277,8 @@ impl ElunaWorker {
         path: &str,
         initial_scene: Arc<EmoteStaticScene>,
     ) -> Result<Self, String> {
-        let (command_tx, command_rx) = mpsc::channel();
-        let pending_ms = Arc::new(AtomicU64::new(0));
+        let (message_tx, message_rx) = mpsc::channel();
         let latest_scene = Arc::new(Mutex::new(None));
-        let worker_pending_ms = pending_ms.clone();
         let worker_latest_scene = latest_scene.clone();
         let thread_name = format!(
             "art3m1s-eluna-{}",
@@ -287,34 +287,26 @@ impl ElunaWorker {
         std::thread::Builder::new()
             .name(thread_name)
             .spawn(move || {
-                run_eluna_worker(
-                    runtime,
-                    command_rx,
-                    worker_pending_ms,
-                    worker_latest_scene,
-                    initial_scene,
-                );
+                run_eluna_worker(runtime, message_rx, worker_latest_scene, initial_scene);
             })
             .map_err(|error| format!("failed to start Eluna worker for {path}: {error}"))?;
         Ok(Self {
-            command_tx,
-            pending_ms,
+            message_tx,
             latest_scene,
         })
     }
 
     fn send(&self, command: EmoteLayerCommand) -> Result<(), String> {
-        self.command_tx
-            .send(command)
+        self.message_tx
+            .send(ElunaWorkerMessage::Command(command))
             .map_err(|_| "Eluna worker stopped".to_owned())
     }
 
     fn advance(&self, delta_ms: u64) {
-        let _ = self
-            .pending_ms
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
-                Some(pending.saturating_add(delta_ms))
-            });
+        // Advance is both elapsed time and the host-frame commit marker. Keeping
+        // it in the channel preserves every delayed tick while waking the worker
+        // immediately instead of capping animation output with a fixed timeout.
+        let _ = self.message_tx.send(ElunaWorkerMessage::Advance(delta_ms));
     }
 
     fn take_latest_scene(&self) -> Option<Arc<EmoteStaticScene>> {
@@ -324,23 +316,19 @@ impl ElunaWorker {
 
 fn run_eluna_worker(
     mut runtime: EmoteRuntime,
-    command_rx: mpsc::Receiver<EmoteLayerCommand>,
-    pending_ms: Arc<AtomicU64>,
+    message_rx: mpsc::Receiver<ElunaWorkerMessage>,
     latest_scene: Arc<Mutex<Option<Arc<EmoteStaticScene>>>>,
     initial_scene: Arc<EmoteStaticScene>,
 ) {
     if let Ok(mut slot) = latest_scene.lock() {
         *slot = Some(initial_scene);
     }
+    let mut deferred_commands = Vec::new();
     loop {
-        let first_command = match command_rx.recv_timeout(Duration::from_millis(33)) {
-            Ok(command) => Some(command),
-            Err(mpsc::RecvTimeoutError::Timeout) => None,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        let Some((commands, delta_ms)) = receive_worker_batch(&message_rx, &mut deferred_commands)
+        else {
+            break;
         };
-        let mut commands = first_command.into_iter().collect::<Vec<_>>();
-        commands.extend(command_rx.try_iter());
-        let delta_ms = pending_ms.swap(0, Ordering::Relaxed);
         if commands.is_empty() && delta_ms == 0 {
             continue;
         }
@@ -373,6 +361,37 @@ fn run_eluna_worker(
     }
 }
 
+fn receive_worker_batch(
+    message_rx: &mpsc::Receiver<ElunaWorkerMessage>,
+    deferred_commands: &mut Vec<EmoteLayerCommand>,
+) -> Option<(Vec<EmoteLayerCommand>, u64)> {
+    let mut commands = std::mem::take(deferred_commands);
+    let mut delta_ms = 0u64;
+    // Advance is the host-frame commit point. Commands commonly arrive as a
+    // pass/play/fade/step sequence; evaluating before that sequence is complete
+    // produces redundant full scene builds and exposes transient face states.
+    let mut committed_commands = loop {
+        match message_rx.recv().ok()? {
+            ElunaWorkerMessage::Command(command) => commands.push(command),
+            ElunaWorkerMessage::Advance(delta) => {
+                delta_ms = delta_ms.saturating_add(delta);
+                break commands.len();
+            }
+        }
+    };
+    for message in message_rx.try_iter() {
+        match message {
+            ElunaWorkerMessage::Command(command) => commands.push(command),
+            ElunaWorkerMessage::Advance(delta) => {
+                delta_ms = delta_ms.saturating_add(delta);
+                committed_commands = commands.len();
+            }
+        }
+    }
+    *deferred_commands = commands.split_off(committed_commands);
+    Some((commands, delta_ms))
+}
+
 fn apply_worker_command(
     runtime: &mut EmoteRuntime,
     command: EmoteLayerCommand,
@@ -386,34 +405,41 @@ fn apply_worker_command(
         } => {
             if frames <= 0.0 {
                 runtime
-                    .set_variable_immediate(&label, value)
-                    .map_err(|error| error.to_string())?;
+                    .inner_player_mut()
+                    .set_variable_immediate(&label, value);
             } else {
-                runtime.set_variable_timed(&label, value, frames, easing as f32);
+                runtime
+                    .inner_player_mut()
+                    .set_variable_timed(&label, value, frames, easing as f32);
             }
         }
-        EmoteLayerCommand::PlayTimeline { label, flags } => runtime
-            .play_timeline(&label, TimelinePlayMode::from_flags(flags))
-            .map_err(|error| error.to_string())?,
+        EmoteLayerCommand::PlayTimeline { label, flags } => {
+            if !runtime.inner_player().timelines().contains_key(&label) {
+                return Err(format!("timeline '{label}' does not exist"));
+            }
+            runtime
+                .inner_player_mut()
+                .play_timeline(&label, TimelinePlayMode::from_flags(flags));
+        }
         EmoteLayerCommand::FadeInTimeline {
             label,
             frames,
             easing,
         } => runtime
-            .fade_in_timeline(&label, frames, easing as f32)
-            .map_err(|error| error.to_string())?,
+            .inner_player_mut()
+            .fade_in_timeline(&label, frames, easing as f32),
         EmoteLayerCommand::FadeOutTimeline {
             label,
             frames,
             easing,
         } => runtime
-            .fade_out_timeline(&label, frames, easing as f32)
-            .map_err(|error| error.to_string())?,
-        EmoteLayerCommand::StopTimeline { label } => runtime
-            .stop_timeline(&label)
-            .map_err(|error| error.to_string())?,
-        EmoteLayerCommand::Pass => runtime.pass().map_err(|error| error.to_string())?,
-        EmoteLayerCommand::Step => runtime.step().map_err(|error| error.to_string())?,
+            .inner_player_mut()
+            .fade_out_timeline(&label, frames, easing as f32),
+        EmoteLayerCommand::StopTimeline { label } => {
+            runtime.inner_player_mut().stop_timeline(&label)
+        }
+        EmoteLayerCommand::Pass => runtime.inner_player_mut().pass(),
+        EmoteLayerCommand::Step => runtime.inner_player_mut().step(),
         EmoteLayerCommand::Skip => runtime.inner_player_mut().skip(),
         EmoteLayerCommand::SetScale { .. } | EmoteLayerCommand::SetCoord { .. } => {}
     }
@@ -682,12 +708,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn worker_accumulates_elapsed_time_while_scene_evaluation_is_busy() {
-        let (command_tx, _command_rx) = mpsc::channel();
-        let pending_ms = Arc::new(AtomicU64::new(0));
+    fn worker_accumulates_elapsed_time_and_wakes_for_each_host_batch() {
+        let (message_tx, message_rx) = mpsc::channel();
         let worker = ElunaWorker {
-            command_tx,
-            pending_ms: pending_ms.clone(),
+            message_tx,
             latest_scene: Arc::new(Mutex::new(None)),
         };
 
@@ -695,6 +719,59 @@ mod tests {
         worker.advance(500);
         worker.advance(250);
 
-        assert_eq!(pending_ms.load(Ordering::Relaxed), 766);
+        assert_eq!(
+            receive_worker_batch(&message_rx, &mut Vec::new()),
+            Some((Vec::new(), 766))
+        );
+    }
+
+    #[test]
+    fn worker_batches_face_commands_until_the_host_frame_commit() {
+        let (message_tx, message_rx) = mpsc::channel();
+        let worker = ElunaWorker {
+            message_tx,
+            latest_scene: Arc::new(Mutex::new(None)),
+        };
+        let play = EmoteLayerCommand::PlayTimeline {
+            label: "face".to_owned(),
+            flags: 1,
+        };
+        let fade = EmoteLayerCommand::FadeInTimeline {
+            label: "idle".to_owned(),
+            frames: 0.0,
+            easing: 0,
+        };
+
+        worker.send(EmoteLayerCommand::Pass).unwrap();
+        worker.send(play.clone()).unwrap();
+        worker.send(fade.clone()).unwrap();
+        worker.advance(16);
+
+        assert_eq!(
+            receive_worker_batch(&message_rx, &mut Vec::new()),
+            Some((vec![EmoteLayerCommand::Pass, play, fade], 16))
+        );
+    }
+
+    #[test]
+    fn worker_defers_next_frame_commands_until_their_commit() {
+        let (message_tx, message_rx) = mpsc::channel();
+        message_tx.send(ElunaWorkerMessage::Advance(16)).unwrap();
+        message_tx
+            .send(ElunaWorkerMessage::Command(EmoteLayerCommand::Pass))
+            .unwrap();
+
+        let mut deferred = Vec::new();
+        assert_eq!(
+            receive_worker_batch(&message_rx, &mut deferred),
+            Some((Vec::new(), 16))
+        );
+        assert_eq!(deferred, vec![EmoteLayerCommand::Pass]);
+
+        message_tx.send(ElunaWorkerMessage::Advance(17)).unwrap();
+        assert_eq!(
+            receive_worker_batch(&message_rx, &mut deferred),
+            Some((vec![EmoteLayerCommand::Pass], 17))
+        );
     }
 }
