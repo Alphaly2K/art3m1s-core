@@ -292,6 +292,9 @@ impl CoreRuntime {
         } else {
             0
         };
+        // A render attempt consumes all visual invalidations accumulated by
+        // earlier logic-only ticks, even when the rebuilt draw list is equal.
+        self.frame_visual_dirty = false;
         self.clear_input_edges();
 
         // 渲染完毕，把 GL 上下文还给宿主。
@@ -378,6 +381,9 @@ impl CoreRuntime {
         } else {
             Ok(false)
         };
+        if result.is_ok() {
+            self.frame_visual_dirty = false;
+        }
         self.clear_input_edges();
         self.gl_ctx.restore(saved_ctx);
         self.finish_profile_frame(&mut profile);
@@ -399,7 +405,6 @@ impl CoreRuntime {
 
     fn advance_logic(&mut self, delta_ms: u64, profile: &mut crate::profiler::FrameProfile) {
         let logic_started = profile.mark();
-        self.frame_visual_dirty = false;
         let input_started = profile.mark();
         // isPush 的按键重复语义依赖每键按下时间戳，逐帧维护。
         self.input
@@ -751,11 +756,20 @@ mod tests {
         runtime.advance_without_render(17);
         assert_eq!(runtime.compositor.clock_ms(), 17);
         assert!(runtime.last_submitted_frame.is_none());
+        assert!(runtime.frame_visual_dirty);
         assert_eq!(
             runtime.advance_and_render_into(0, &mut pixels),
             pixels.len()
         );
         assert_eq!(runtime.advance_and_render_into(17, &mut pixels), 0);
+        assert!(!runtime.frame_visual_dirty);
+
+        runtime.frame_visual_dirty = true;
+        runtime.advance_without_render(17);
+        assert!(
+            runtime.frame_visual_dirty,
+            "logic-only ticks must preserve pending visual invalidation"
+        );
     }
 
     #[cfg(all(target_os = "macos", feature = "gl-backend"))]

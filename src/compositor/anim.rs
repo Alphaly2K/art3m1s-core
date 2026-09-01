@@ -285,6 +285,8 @@ pub struct TweenHandler {
     pub label: Option<String>,
     pub call: bool,
     pub handler: Option<String>,
+    #[serde(default)]
+    pub extra_params: HashMap<String, String>,
 }
 
 /// 单个数值属性的缓动。
@@ -434,6 +436,7 @@ pub(crate) struct TweenRequest<'a> {
     pub(crate) handler_file: Option<&'a str>,
     pub(crate) handler_label: Option<&'a str>,
     pub(crate) handler_handler: Option<&'a str>,
+    pub(crate) extra_params: &'a HashMap<String, String>,
     /// 所属 `[tweenset]` 组编号；组内 tween 不做同参数替换（同图层同参数
     /// 允许多段依次排队）。
     pub(crate) set_id: Option<u64>,
@@ -536,6 +539,7 @@ pub(crate) fn apply_tween(scene: &mut Scene, clock_ms: u64, request: TweenReques
                 label: request.handler_label.map(str::to_string),
                 call: false,
                 handler: request.handler_handler.map(str::to_string),
+                extra_params: request.extra_params.clone(),
             })
         } else {
             None

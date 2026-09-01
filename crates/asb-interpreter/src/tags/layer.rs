@@ -52,6 +52,30 @@ impl TagHandler for LytweenHandler {
         let handler_file = ctx.instruction.get("file").map(|s| s.to_string());
         let handler_label = ctx.instruction.get("label").map(|s| s.to_string());
         let handler_handler = ctx.instruction.get("handler").map(|s| s.to_string());
+        let known = [
+            "id",
+            "param",
+            "from",
+            "to",
+            "ease",
+            "time",
+            "delay",
+            "loop",
+            "yoyo",
+            "loopdelay",
+            "sync",
+            "delete",
+            "file",
+            "label",
+            "handler",
+        ];
+        let extra_params = ctx
+            .instruction
+            .params
+            .iter()
+            .filter(|(key, _)| !known.contains(&key.as_str()))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
 
         Ok(TagResult::Emit(Event::LayerTween {
             id,
@@ -69,6 +93,7 @@ impl TagHandler for LytweenHandler {
             handler_file,
             handler_label,
             handler_handler,
+            extra_params,
         }))
     }
 }
@@ -362,6 +387,37 @@ mod tests {
             extra_params.get("out").map(String::as_str),
             Some("mwarea_out")
         );
+    }
+
+    #[test]
+    fn lytween_forwards_custom_handler_params() {
+        let TagResult::Emit(Event::LayerTween {
+            handler_handler,
+            extra_params,
+            ..
+        }) = exec(
+            &LytweenHandler,
+            "lytween",
+            &[
+                ("id", "500.z.zz"),
+                ("param", "alpha"),
+                ("from", "254"),
+                ("to", "255"),
+                ("time", "300"),
+                ("handler", "calllua"),
+                ("function", "config_sampletext"),
+            ],
+        )
+        else {
+            panic!("lytween should produce a tween event");
+        };
+
+        assert_eq!(handler_handler.as_deref(), Some("calllua"));
+        assert_eq!(
+            extra_params.get("function").map(String::as_str),
+            Some("config_sampletext")
+        );
+        assert!(!extra_params.contains_key("time"));
     }
 
     /// 用给定参数执行单个标签处理器，返回 TagResult

@@ -471,6 +471,8 @@ pub enum Event {
         handler_file: Option<String>,
         handler_label: Option<String>,
         handler_handler: Option<String>,
+        /// `function` 等由完成回调原样接收的脚本自定义参数。
+        extra_params: std::collections::HashMap<String, String>,
     },
     /// 强制完成图层缓动 [lytweendel]
     LayerTweenDelete { id: String },

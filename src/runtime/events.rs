@@ -539,7 +539,7 @@ impl CoreRuntime {
                 h.file.as_deref(),
                 h.label.as_deref(),
                 h.call,
-                &HashMap::new(),
+                &h.extra_params,
                 &[],
             );
         }
@@ -1193,6 +1193,7 @@ mod tests {
             handler_file: None,
             handler_label: None,
             handler_handler: None,
+            extra_params: std::collections::HashMap::new(),
         });
 
         // 缓动进行中：不可恢复。
@@ -1230,6 +1231,7 @@ mod tests {
             handler_file: None,
             handler_label: None,
             handler_handler: None,
+            extra_params: std::collections::HashMap::new(),
         });
 
         c.advance(750);

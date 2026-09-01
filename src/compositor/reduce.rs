@@ -80,6 +80,7 @@ struct PendingSetTween {
     handler_file: Option<String>,
     handler_label: Option<String>,
     handler_handler: Option<String>,
+    extra_params: HashMap<String, String>,
 }
 
 /// 后端无关的合成器：场景树 + 时钟 + 事件归约。
@@ -506,6 +507,7 @@ impl Compositor {
                 handler_file,
                 handler_label,
                 handler_handler,
+                extra_params,
             } => {
                 // [tweenset] 收集中：先入队，等 [/tweenset] 统一按顺序启动。
                 if let Some(pending) = self.tween_set_pending.as_mut() {
@@ -525,6 +527,7 @@ impl Compositor {
                         handler_file: handler_file.map(str::to_string),
                         handler_label: handler_label.map(str::to_string),
                         handler_handler: handler_handler.map(str::to_string),
+                        extra_params: extra_params.clone(),
                     });
                     return;
                 }
@@ -547,6 +550,7 @@ impl Compositor {
                         handler_file,
                         handler_label,
                         handler_handler,
+                        extra_params,
                         set_id: None,
                     },
                 )
@@ -592,6 +596,7 @@ impl Compositor {
                             handler_file: item.handler_file.as_deref(),
                             handler_label: item.handler_label.as_deref(),
                             handler_handler: item.handler_handler.as_deref(),
+                            extra_params: &item.extra_params,
                             set_id: Some(set_id),
                         },
                     );
@@ -1016,6 +1021,7 @@ mod tests {
             handler_file: None,
             handler_label: None,
             handler_handler: None,
+            extra_params: HashMap::new(),
         });
 
         // 推进到中点，缓动仍在进行。
@@ -1330,6 +1336,7 @@ mod tests {
             handler_file: None,
             handler_label: None,
             handler_handler: None,
+            extra_params: HashMap::new(),
         }
     }
 
@@ -1652,9 +1659,43 @@ mod tests {
             handler_file: None,
             handler_label: None,
             handler_handler: None,
+            extra_params: HashMap::new(),
         });
         let t = &c.scene().get("1").unwrap().tweens[0];
         assert_eq!(t.from, 100.0);
         assert_eq!(t.to, 0.0);
+    }
+
+    #[test]
+    fn tween_completion_preserves_custom_handler_params() {
+        let mut c = Compositor::new();
+        c.apply_event(&create("500.z.zz", "white"));
+        c.apply_event(&Event::LayerTween {
+            id: "500.z.zz".into(),
+            param: "alpha".into(),
+            from: Some("254".into()),
+            to: Some("255".into()),
+            ease: None,
+            time: Some(300),
+            delay: None,
+            loop_count: None,
+            yoyo: None,
+            loop_delay: None,
+            sync: false,
+            delete: false,
+            handler_file: None,
+            handler_label: None,
+            handler_handler: Some("calllua".into()),
+            extra_params: HashMap::from([("function".into(), "config_sampletext".into())]),
+        });
+
+        c.advance(300);
+        let handlers = c.poll_tween_events();
+        assert_eq!(handlers.len(), 1);
+        assert_eq!(handlers[0].handler.as_deref(), Some("calllua"));
+        assert_eq!(
+            handlers[0].extra_params.get("function").map(String::as_str),
+            Some("config_sampletext")
+        );
     }
 }

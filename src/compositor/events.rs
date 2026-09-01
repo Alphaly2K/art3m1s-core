@@ -30,6 +30,7 @@ pub enum CompositorEvent<'a> {
         handler_file: Option<&'a str>,
         handler_label: Option<&'a str>,
         handler_handler: Option<&'a str>,
+        extra_params: &'a HashMap<String, String>,
     },
     LayerTweenDelete {
         id: &'a str,
@@ -110,6 +111,7 @@ impl<'a> CompositorEvent<'a> {
                 handler_file,
                 handler_label,
                 handler_handler,
+                extra_params,
             } => Some(Self::LayerTween {
                 id,
                 param,
@@ -126,6 +128,7 @@ impl<'a> CompositorEvent<'a> {
                 handler_file: handler_file.as_deref(),
                 handler_label: handler_label.as_deref(),
                 handler_handler: handler_handler.as_deref(),
+                extra_params,
             }),
             Event::LayerTweenDelete { id } => Some(Self::LayerTweenDelete { id }),
             Event::LayerEventHandler {
