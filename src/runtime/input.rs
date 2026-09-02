@@ -599,15 +599,99 @@ fn event_dispatch_layers(
 #[cfg(test)]
 mod tests {
     use super::{
-        InlineEventFrame, dispatch_handler, enqueue_input_handler, event_dispatch_layers,
-        forced_drag_state, global_push_absorbs_default_click, inline_event_marker_is_active,
-        link_area_has_jump_target, pointer_hit_test_required,
+        InlineEventFrame, dispatch_handler, enqueue_input_handler, enqueue_layer_handler,
+        event_dispatch_layers, forced_drag_state, global_push_absorbs_default_click,
+        inline_event_marker_is_active, link_area_has_jump_target, pointer_hit_test_required,
     };
     use crate::compositor::Compositor;
     use crate::text::render::LinkHitArea;
     use asb_interpreter::event::{Event, WaitReason};
     use asb_interpreter::{CallFrame, Interpreter, InterpreterConfig};
     use std::collections::HashMap;
+
+    #[test]
+    fn loaded_scene_keeps_two_stage_button_dispatch() {
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter
+            .lua()
+            .load(
+                r#"
+                clicked_button = nil
+                action_count = 0
+                function mark_button(e, p)
+                    clicked_button = p.key
+                end
+                function dispatch_button(e, p)
+                    if p.key == '1' and clicked_button == 'save' then
+                        action_count = action_count + 1
+                        clicked_button = nil
+                    end
+                end
+                "#,
+            )
+            .exec()
+            .unwrap();
+        let mut compositor = Compositor::new();
+        compositor.ensure_layer("mw.save");
+        compositor.apply_event(&Event::LayerEventHandler {
+            id: "mw.save".into(),
+            event_type: "click".into(),
+            mode: "init".into(),
+            file: None,
+            label: None,
+            call: false,
+            handler: Some("calllua".into()),
+            penetration: false,
+            extra_params: HashMap::from([
+                ("function".into(), "mark_button".into()),
+                ("key".into(), "save".into()),
+            ]),
+        });
+        compositor.apply_event(&Event::SetEventHandler {
+            event_name: "push".into(),
+            file: None,
+            label: None,
+            call: false,
+            handler: Some("calllua".into()),
+            extra_params: HashMap::from([
+                ("function".into(), "dispatch_button".into()),
+                ("key".into(), "1".into()),
+            ]),
+        });
+        let saved_scene = compositor.scene_snapshot();
+        compositor.reset_for_load();
+        compositor.restore_scene(saved_scene);
+
+        let click = enqueue_layer_handler(
+            &interpreter,
+            &compositor,
+            "mw.save",
+            "click",
+            &[("click", "1")],
+        );
+        assert!(click.queued);
+        let push = enqueue_input_handler(
+            &interpreter,
+            &compositor,
+            "push",
+            "1",
+            &[("key", "1"), ("type", "click")],
+        );
+        assert!(
+            push.queued,
+            "load must not unregister the global key dispatcher"
+        );
+        interpreter.flush_pending_tags().unwrap();
+        assert_eq!(
+            interpreter
+                .lua()
+                .globals()
+                .get::<i32>("action_count")
+                .unwrap(),
+            1,
+            "the layer marker must reach the global dispatcher exactly once"
+        );
+    }
 
     #[test]
     fn stationary_pointer_reuses_hit_test_until_an_input_changes() {

@@ -183,11 +183,11 @@ impl Compositor {
         self.pending_tween_events.clear();
     }
 
-    /// 读档是全局状态切换边界：旧画面和旧 UI 输入处理器不能穿透到新存档。
-    /// 随后若存档携带 scene，调用方再用 `restore_scene` 覆盖。
+    /// 读档清理旧场景及其图层处理器，随后由存档或 onLoad 重建画面。
+    /// 全局 seton* 注册不属于场景：保留启动时安装的按键/窗口分发器，
+    /// 交由脚本显式 delon* 或重新注册替换。
     pub fn reset_for_load(&mut self) {
         self.scene.replace_with(Scene::new());
-        self.input_handlers.clear();
         self.pending_tween_events.clear();
         *self.trans_state.borrow_mut() = None;
         self.anime_states.clear();
@@ -1050,7 +1050,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_for_load_clears_scene_and_input() {
+    fn reset_for_load_clears_scene_but_preserves_global_handlers() {
         let mut c = Compositor::new();
         c.apply_event(&create("title", "title_bg"));
         c.apply_event(&Event::SetEventHandler {
@@ -1059,12 +1059,40 @@ mod tests {
             label: None,
             call: false,
             handler: Some("calllua".into()),
-            extra_params: HashMap::from([("key".into(), "1".into())]),
+            extra_params: HashMap::from([
+                ("key".into(), "1".into()),
+                ("function".into(), "route_key".into()),
+            ]),
+        });
+        c.apply_event(&Event::LayerEventHandler {
+            id: "title".into(),
+            event_type: "click".into(),
+            mode: "init".into(),
+            file: Some("title.ast".into()),
+            label: Some("start".into()),
+            call: false,
+            handler: None,
+            penetration: false,
+            extra_params: HashMap::new(),
         });
 
         c.reset_for_load();
 
         assert!(c.scene().is_empty());
+        let handler = c.get_input_handler("push", "1").unwrap();
+        assert_eq!(
+            handler.params.get("function").map(String::as_str),
+            Some("route_key")
+        );
+        assert_eq!(
+            handler.filter_params.get("key").map(String::as_str),
+            Some("1")
+        );
+
+        c.apply_event(&Event::DelEventHandler {
+            event_name: "push".into(),
+            key: Some("1".into()),
+        });
         assert!(c.get_input_handler("push", "1").is_none());
     }
 
