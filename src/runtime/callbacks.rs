@@ -12,7 +12,7 @@ use super::magic_path;
 use crate::ffi;
 
 pub(super) type LayerInfoTable =
-    std::sync::Arc<std::sync::Mutex<HashMap<String, HashMap<String, String>>>>;
+    std::sync::Arc<std::sync::Mutex<super::layer_info::LayerQueryState>>;
 
 /// Engine callbacks that use the FFI bridge for all file access.
 pub(super) struct FfiCallbacks {
@@ -428,18 +428,17 @@ impl EngineCallbacks for FfiCallbacks {
     }
 
     fn get_layer_info(&self, id: &str) -> Option<HashMap<String, String>> {
-        self.layer_info.lock().unwrap().get(id).cloned()
+        self.layer_info.lock().unwrap().get(id, |file| {
+            super::layer_info::asset_dimensions(&self.magic_paths, file)
+        })
     }
 
     fn get_layer_info_all(&self) -> Vec<(String, HashMap<String, String>)> {
         // get_layer_info.md：省略 id 的全图层枚举按 id 升序返回。
-        let table = self.layer_info.lock().unwrap();
-        let mut all: Vec<(String, HashMap<String, String>)> = table
-            .iter()
-            .map(|(id, info)| (id.clone(), info.clone()))
-            .collect();
-        all.sort_by(|a, b| a.0.cmp(&b.0));
-        all
+        self.layer_info
+            .lock()
+            .unwrap()
+            .all(|file| super::layer_info::asset_dimensions(&self.magic_paths, file))
     }
 
     fn get_font_list(&self, monospace: bool, vertical: bool) -> Vec<String> {
@@ -931,7 +930,7 @@ mod tests {
         let callbacks = FfiCallbacks {
             input: Arc::new(std::sync::Mutex::new(InputSnapshot::default())),
             magic_paths: Arc::clone(&magic_paths),
-            layer_info: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            layer_info: Arc::new(std::sync::Mutex::new(Default::default())),
             volumes: Arc::new(std::sync::Mutex::new(HashMap::new())),
             debug_skip_active: Arc::new(AtomicBool::new(false)),
             script_status: Arc::new(AtomicU8::new(0)),
@@ -967,7 +966,7 @@ mod tests {
             input,
             magic_paths: Arc::new(std::sync::Mutex::new(HashMap::new()))
                 as Arc<magic_path::MagicPathTable>,
-            layer_info: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            layer_info: Arc::new(std::sync::Mutex::new(Default::default())),
             volumes: Arc::new(std::sync::Mutex::new(HashMap::new())),
             debug_skip_active: Arc::new(AtomicBool::new(false)),
             script_status: Arc::new(AtomicU8::new(0)),

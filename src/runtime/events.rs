@@ -546,37 +546,22 @@ impl CoreRuntime {
     }
 
     pub(super) fn sync_layer_info_all(&mut self) {
-        let now_ms = self.compositor.clock_ms();
-        let mut out = HashMap::new();
-        for layer in self.compositor.scene().all_layers() {
-            let texture_info = layer
-                .file
-                .as_deref()
-                .and_then(|file| self.texture_provider.cached_info(file));
-            out.insert(
-                layer.id.clone(),
-                layer_info_entry(layer, now_ms, texture_info),
-            );
-        }
-        *self.layer_info.lock().unwrap() = out;
+        self.layer_info
+            .lock()
+            .unwrap()
+            .sync(&self.compositor, |file| {
+                self.texture_provider.cached_info(file)
+            });
         self.layer_info_dirty = false;
     }
 
     pub(super) fn sync_layer_info(&self, id: &str) {
-        let now_ms = self.compositor.clock_ms();
-        let mut table = self.layer_info.lock().unwrap();
-        let Some(layer) = self.compositor.scene().get(id) else {
-            table.remove(id);
-            return;
-        };
-        let texture_info = layer
-            .file
-            .as_deref()
-            .and_then(|file| self.texture_provider.cached_info(file));
-        table.insert(
-            id.to_string(),
-            layer_info_entry(layer, now_ms, texture_info),
-        );
+        self.layer_info
+            .lock()
+            .unwrap()
+            .sync_layer(&self.compositor, id, |file| {
+                self.texture_provider.cached_info(file)
+            });
     }
 
     // ── callnative / purchase：经 ui_command 转发宿主，失败兜底 ──────
@@ -979,7 +964,7 @@ fn crc32_ieee(data: &[u8]) -> u32 {
 }
 
 /// 单个图层暴露给脚本层的属性，数值使用 Artemis 原始刻度。
-fn layer_info_entry(
+pub(super) fn layer_info_entry(
     layer: &crate::compositor::Layer,
     now_ms: u64,
     texture_info: Option<crate::compositor::TextureInfo>,

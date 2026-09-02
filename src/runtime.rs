@@ -21,6 +21,7 @@ mod control;
 mod dialog;
 pub(crate) mod emote;
 mod events;
+mod layer_info;
 mod input;
 mod magic_path;
 mod media;
@@ -181,7 +182,7 @@ impl CoreRuntime {
         let debug_skip_active = Arc::new(AtomicBool::new(false));
         let script_status = Arc::new(AtomicU8::new(0));
         let magic_paths: Arc<magic_path::MagicPathTable> = Arc::new(Mutex::new(HashMap::new()));
-        let layer_info = Arc::new(Mutex::new(HashMap::new()));
+        let layer_info = Arc::new(Mutex::new(layer_info::LayerQueryState::default()));
         let emote = Arc::new(Mutex::new(emote::EmoteState::default()));
 
         Ok(Self {

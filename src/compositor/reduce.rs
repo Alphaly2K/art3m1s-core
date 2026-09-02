@@ -166,6 +166,22 @@ impl Compositor {
         self.scene.clone()
     }
 
+    /// Refresh the CPU-only projection used by synchronous script queries.
+    /// Render targets, transition captures and input callbacks are not copied.
+    pub(crate) fn sync_query_scene_from(&mut self, other: &Self) {
+        self.scene.clone_from(&other.scene);
+        self.clock_ms = other.clock_ms;
+        self.anime_states.clone_from(&other.anime_states);
+        self.tween_set_pending.clone_from(&other.tween_set_pending);
+        self.next_tween_set_id = other.next_tween_set_id;
+        self.message_layer_bindings
+            .clone_from(&other.message_layer_bindings);
+        self.deleted_message_layers
+            .clone_from(&other.deleted_message_layers);
+        self.default_message_layer
+            .clone_from(&other.default_message_layer);
+    }
+
     pub fn ensure_layer(&mut self, id: &str) {
         self.scene.ensure(id);
     }

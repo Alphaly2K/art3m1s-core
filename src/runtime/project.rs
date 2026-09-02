@@ -136,6 +136,7 @@ impl CoreRuntime {
 
     fn wire_event_callback(&mut self) {
         let events_cb = Arc::clone(&self.events);
+        let layer_info_cb = Arc::clone(&self.layer_info);
         let exit_requested_cb = Arc::clone(&self.exit_requested);
         self.interpreter.set_callback(move |e| {
             if matches!(e, Event::Exit) {
@@ -145,6 +146,9 @@ impl CoreRuntime {
             // Only fullscreen videos block script execution. Layer videos are visual effects
             // owned by the scene and may loop indefinitely.
             let pause = event_requires_host_pause(&e);
+            if super::layer_info::LayerQueryState::observes(&e) {
+                layer_info_cb.lock().unwrap().observe(&e);
+            }
             events_cb.lock().unwrap().push(e);
             if pause {
                 CallbackResult::Pause
