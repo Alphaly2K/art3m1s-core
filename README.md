@@ -60,9 +60,10 @@ core 不依赖 sibling interpreter 仓库。
 
 ### 窗口与帧
 
-`CoreRuntime::advance_and_render(delta_ms)` 每帧推进脚本和各个子系统，渲染到离屏
-FBO，最后通过 `glReadPixels` 返回 RGBA。宿主负责窗口、显示缩放、帧率调度和画面
-呈现。GL 后端会在渲染前后保存并恢复宿主的 OpenGL context。
+每次 tick 通过 `advance_and_render`、`advance_and_present` 或
+`advance_without_render` 之一推进脚本和子系统。合成结果保留在内部 FBO；支持时通过
+ANGLE 提交到宿主共享表面，否则 `glReadPixels` 回读 RGBA。静止帧可以不重绘，但仍要
+推进逻辑。宿主负责窗口、显示缩放、帧率调度和呈现。常规渲染调用保存并恢复宿主 GL context。
 
 ### 文件与存档
 
@@ -78,10 +79,10 @@ FBO，最后通过 `glReadPixels` 返回 RGBA。宿主负责窗口、显示缩�
 core 不包含 FFmpeg、mpv 或平台解码器。它只向宿主发送媒体命令，并等待对应的播放
 完成回调。
 
-全屏视频由宿主直接显示。图层视频则由宿主解码最新的 RGBA8 帧，再调用
-`art3m1s_runtime_upload_video_layer_frame`。传入指针只在该次调用期间借用；core
-会直接将其上传到动态 GL 纹理，并作为普通图层参与合成。同一 runtime 的上传和
-渲染调用必须串行执行。
+全屏视频由宿主直接显示。图层视频优先使用 `art3m1s_runtime_video_gl_*`，让宿主的
+外部 renderer 在 core 的 GL context 中直接绘制到图层 FBO，避免 RGBA 跨边界搬运。
+不支持时使用 `art3m1s_runtime_upload_video_layer_frame` 同步上传借用的 RGBA8 指针。
+两条路径都参与图层合成；同一 runtime 的上传、GL lease 和帧推进必须串行执行。
 
 ### 文本与翻译
 
@@ -130,9 +131,9 @@ feature 自动决定后端。
 |---|---|
 | `art3m1s_runtime_create` / `destroy` | 创建和销毁 runtime |
 | `art3m1s_runtime_set_emote_backend` | 在项目加载前选择内置或实验性 Eluna E-Mote 后端 |
-| `art3m1s_runtime_load_project` | 读取 `system.ini` 并启动项目 |
+| `art3m1s_runtime_load_project_bytes` / `load_project` | 从原始字节/UTF-8 内容加载 `system.ini` 并启动项目 |
 | `art3m1s_runtime_advance_and_render` | 推进一帧并返回 RGBA |
-| `art3m1s_runtime_set_external_surface` / `clear_external_surface` | 绑定或解绑 Android `ANativeWindow` / Apple `IOSurface` |
+| `art3m1s_runtime_set_external_surface` / `clear_external_surface` | 绑定或解绑 Android `ANativeWindow` / Apple `IOSurface` / `MTLTexture` |
 | `art3m1s_runtime_advance_and_present` | 推进一帧并直接提交到宿主纹理，静止画面不重复提交 |
 | `art3m1s_runtime_advance_without_render` | 显示链繁忙时仅推进逻辑，保持 `onEnterFrame` 时序 |
 | `art3m1s_runtime_set_profiler_enabled` / `profiler_snapshot` | 开启异步性能采样并读取 JSON 快照 |
@@ -143,6 +144,7 @@ feature 自动决定后端。
 | `art3m1s_runtime_notify_video_finished` | 通知宿主视频操作完成 |
 | `art3m1s_runtime_notify_sound_finished` | 通知宿主音频操作完成 |
 | `art3m1s_runtime_upload_video_layer_frame` | 上传借用的 RGBA8 图层视频帧 |
+| `art3m1s_runtime_video_gl_*` | 外部视频 renderer 借用 core GL context 并直接绘制图层 FBO |
 | `art3m1s_register_file_reader` / `writer` / `delete` | 注册宿主文件系统回调 |
 | `art3m1s_register_media_command_callback` | 接收宿主媒体命令 |
 | `art3m1s_register_ui_command_callback` | 接收对话框和平台请求 |
@@ -150,8 +152,10 @@ feature 自动决定后端。
 | `art3m1s_runtime_submit_text_translation` | 回填异步翻译结果 |
 | `art3m1s_probe_caption` | 导入资料库时无界面探测项目标题 |
 
-回调数据格式、线程约束和宿主接线状态见
-[HOST_INTEGRATION.md](HOST_INTEGRATION.md)。
+其他 Host 接入所需的生命周期、线程、指针所有权、帧循环和验收清单见
+[HOST_INTEGRATION.md](HOST_INTEGRATION.md)；完整 C 声明、返回值、媒体/UI JSON 和
+Profiler 字段见 [FFI_REFERENCE.md](FFI_REFERENCE.md)。当前回调为进程级注册，不提供
+多 runtime 的资源隔离，也没有统一 ABI 版本查询接口。
 
 ## 输入模型
 
