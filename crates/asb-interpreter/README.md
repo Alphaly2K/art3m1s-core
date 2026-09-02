@@ -1,6 +1,6 @@
 # ASB Interpreter
 
-Artemis Engine 脚本解释器库。它负责解析/执行 ASB、AST、IET 文本化脚本，提供变量、表达式、宏、Lua bridge、tag handler 和事件回调。渲染、音频、视频、文件系统和输入不在本 crate 内直接实现，而是通过 `Event` 与 `EngineCallbacks` 交给宿主 runtime。
+Artemis Engine 脚本解释器库。它负责解析/执行编译 ASB/IET 和文本 AST/IET 脚本，提供变量、表达式、宏、Lua bridge、tag handler 和事件回调。渲染、音频、视频、文件系统和输入不在本 crate 内直接实现，而是通过 `Event` 与 `EngineCallbacks` 交给宿主 runtime。
 
 生产使用方是 `https://github.com/Alphaly2K/art3m1s-core`。
 
@@ -9,6 +9,7 @@ Artemis Engine 脚本解释器库。它负责解析/执行 ASB、AST、IET 文�
 ```text
 asb-interpreter
   ├─ script.rs        Artemis 标签文本解析
+  ├─ script/binary.rs ASB 编译记录解析，保留 Lua 与指令地址
   ├─ expression.rs    $var、算术、比较、逻辑表达式
   ├─ macro.rs         macroadd/macrodel 展开
   ├─ variable.rs      local / g. / t. / s. 变量域
@@ -26,11 +27,12 @@ art3m1s-core
 
 ## 主要能力
 
-- ASB 二进制解码：通过 `asb-decrypt`。
+- ASB 二进制直接加载，不再经过反编译文本再解析；字符串按配置编码解码。
 - 文本脚本解析：label、tag、Lua block、宏。
 - 控制流：`jump`、`call`、`return`、跨脚本加载。
 - 等待：`stop`、`wait`、`exkey` 等转换为 `ExecutionResult::Wait`。
 - 变量系统：local、`g.*`、`t.*`、`s.*` 四个域。
+- 编译宏保留文件内标签和条件返回，参数按调用隔离，支持 `var_exist local=1` 和 `writelocal=1`。
 - Lua 集成：`[lua]`、`[calllua]`、Lua `tags` 表自定义标签分发。
 - Queue 语义：Lua `e:tag{}` / `e:enqueueTag{}` 进入 tag queue，由解释器按 Artemis 顺序抽干。
 - 图层/输入/音视频/存档标签：转换为 `Event`，由 runtime 消费。
@@ -45,7 +47,7 @@ art3m1s-core
 | temp | `t.tmp` | 临时变量，不序列化 |
 | system | `s.savepath`, `s.bgmvol` | 系统/宿主变量，通常由 runtime 种入或维护 |
 
-`SaveData` 的编号存档应只保存 local 域；`g.*` / `s.*` 由 runtime 的系统存档链维护，避免读旧编号档时覆盖当前存档索引和配置。
+`SaveData` 的编号存档保存 local 域及当前编译宏的参数作用域；`g.*` / `s.*` 由 runtime 的系统存档链维护，避免读旧编号档时覆盖当前存档索引和配置。宿主可用 `VariableStore::local_snapshot()` / `restore_local_snapshot()` 实现这一区分。
 
 ## Lua Bridge
 
@@ -53,11 +55,16 @@ Lua 侧注入 `__engine`，并暴露常用 Artemis API：
 
 - `e:tag{...}`：把标签排进 queue；`var` 会同步落值，保证同一 Lua 函数内 `e:var()` 可读回。
 - `e:enqueueTag{...}`：显式排队，支持控制流标签、`calllua` 和嵌套 `params`。
-- `e:var(name)`：读取共享变量，缺失时返回 `"0"`。
+- `e:var(name)`：始终以字符串读取变量，缺失时返回 `"0"`。
+- `e:getFrameNumber()`：当前逻辑帧号；`e:getScriptSize(file)`：已加载脚本的指令数，与 `getScriptBlock` 共用索引。
 - `e:file(path)` / `e:isFileExists(path)`：委托 `EngineCallbacks`。
 - `e:include(path)`：读取并在同一个 Lua VM 执行 Lua 文件。
 - `e:getMousePoint()`、`e:isPush()`、`e:isDown()`、`e:isUpEdge()` 等：委托宿主输入快照。
 - `e:setEventHandler{onEnterFrame=..., onSave=..., onLoad=...}`：注册 runtime 回调。
+
+直接集成本解释器的宿主应每个逻辑帧先调用 `begin_frame()`，再派发输入和帧回调；
+core 的 `CoreRuntime` 已负责此步骤，不需要 FFI Host 额外调用。存读档回调可通过
+`fire_save_handler_and_flush_with_params()` / `fire_load_handler_with_params()` 传入原始文件名等参数。
 
 `flush_tag_queue()` 支持 queued tag 内的 `Jump` / `Call` / `Return` / `Wait`，并记录 queue wait 来源，避免恢复等待时跳过下一条脚本指令。
 
@@ -149,7 +156,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `start(script, label)` | 从 label 启动 |
 | `run()` / `step()` | 推进执行 |
 | `advance_line()` | 外部等待完成后推进 |
-| `fire_enter_frame()` | 执行 `onEnterFrame` |
+| `begin_frame()` | 每个逻辑帧开始时调用一次，推进 `e:getFrameNumber()`，先于输入派发 |
+| `fire_enter_frame()` | 执行 `onEnterFrame`，不会额外推进帧号 |
 | `fire_save_handler()` / `fire_load_handler()` | 执行 `onSave` / `onLoad` |
 | `flush_pending_tags()` | 抽干 Lua 排队标签 |
 | `restore_variables()` / `restore_position()` | 读档恢复 |

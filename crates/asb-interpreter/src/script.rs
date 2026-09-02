@@ -5,6 +5,7 @@
 //! [`preprocess`] 模块），预处理保持行号一一对应。
 
 pub mod preprocess;
+mod binary;
 
 use crate::error::{Error, Result};
 use std::collections::HashMap;

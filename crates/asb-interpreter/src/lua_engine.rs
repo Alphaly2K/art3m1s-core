@@ -353,6 +353,8 @@ impl EngineCallbacks for DefaultEngineCallbacks {
 
 /// 共享的引擎上下文
 pub struct EngineContext {
+    /// Logical host ticks, independent of whether a frame is rendered.
+    pub(crate) frame_number: u64,
     pub callbacks: Box<dyn EngineCallbacks + Send + Sync>,
     /// 待执行的标签队列
     pub tag_queue: Vec<(String, HashMap<String, String>)>,
@@ -399,6 +401,7 @@ pub type FileReader = Arc<dyn Fn(&str) -> crate::error::Result<Vec<u8>> + Send +
 impl EngineContext {
     pub fn new(callbacks: Box<dyn EngineCallbacks + Send + Sync>) -> Self {
         Self {
+            frame_number: 0,
             callbacks,
             tag_queue: Vec::new(),
             event_handlers: HashMap::new(),
@@ -726,6 +729,9 @@ impl UserData for EngineApi {
 
         // e:now()
         methods.add_method("now", |_lua, _this, _: ()| Ok(now_millis()));
+        methods.add_method("getFrameNumber", |_lua, this, _: ()| {
+            Ok(this.ctx.lock().unwrap().frame_number)
+        });
 
         // e:include("path")
         //
@@ -761,13 +767,8 @@ impl UserData for EngineApi {
 
         // e:var("name") -> 读取共享变量存储中的变量值。
         //
-        // 按变量原始类型返回对应 Lua 值（整数/浮点/字符串/布尔）。不存在或 Null 的
-        // 变量返回字符串 "0"——这是 Artemis 的核心约定（var.txt 标注返回类型为
-        // string，从不为 nil；脚本据此写 `if e:var(..) ~= "0"`、`== "0"`，例如
-        // system/adv/fileio.lua 的 fload_pluto 靠它判断配置是否首次创建）。返回
-        // nil 会让那些判断误判，导致 boot 在"系统数据已初始化"对话框处卡死。
-        // 数值用 tn(e:var(..)) 解析时 tn("0")==0，比较与 `if .. then` 也都成立
-        // （Lua 中 "0" 为真）。
+        // docs/lua/engine/var.txt: 所有值均返回 string，包括数字和 1/0。
+        // 脚本会直接调用 :gsub() 或与 "0" 比较；不能按 Rust 存储类型返回数字。
         methods.add_method("var", |lua, this, name: String| {
             use crate::variable::Value as V;
             let ctx = this.ctx.lock().unwrap();
@@ -776,16 +777,8 @@ impl UserData for EngineApi {
             };
             let store = vars.lock().unwrap();
             match store.get(&name) {
-                Some(V::Int(n)) => Ok(lua_integer_value(*n)),
-                Some(V::Float(f)) => Ok(mlua::Value::Number(*f)),
-                // Artemis 变量系统没有独立布尔类型：比较/逻辑表达式（如 `$0==0`）
-                // 的结果在脚本里一律当整数 1/0 用，game 侧普遍写成
-                // `tn(e:var(...))`（即 tonumber）。若把 Bool 作为 Lua boolean 返回，
-                // tonumber(true) 得到 nil，cond() 会把成立的条件误判为 false
-                // （典型：brandlogo 的 `cond="s.sp==0"` 被跳过）。故在此折叠成 1/0。
-                Some(V::Bool(b)) => Ok(mlua::Value::Integer(if *b { 1 } else { 0 })),
-                Some(V::String(s)) => Ok(mlua::Value::String(lua.create_string(s)?)),
                 Some(V::Null) | None => Ok(mlua::Value::String(lua.create_string("0")?)),
+                Some(value) => Ok(mlua::Value::String(lua.create_string(value.as_string())?)),
             }
         });
 
@@ -976,6 +969,12 @@ impl UserData for EngineApi {
                 }
                 None => Ok(mlua::Value::Nil),
             }
+        });
+
+        // Same instruction-index domain as getScriptBlock, not source line count.
+        methods.add_method("getScriptSize", |_lua, this, file: String| {
+            let ctx = this.ctx.lock().unwrap();
+            Ok(ctx.scripts_view.get(&file).map_or(0, |script| script.len()))
         });
 
         // e:getScriptStack() -> { {file, index, reservedCommands={...}}, ... }
@@ -1381,21 +1380,6 @@ fn lua_value_to_key(v: &mlua::Value) -> String {
     }
 }
 
-fn lua_integer_value(value: i64) -> mlua::Value {
-    #[cfg(feature = "backend-luau")]
-    {
-        if (i32::MIN as i64..=i32::MAX as i64).contains(&value) {
-            mlua::Value::Integer(value as mlua::Integer)
-        } else {
-            mlua::Value::Number(value as f64)
-        }
-    }
-    #[cfg(not(feature = "backend-luau"))]
-    {
-        mlua::Value::Integer(value as mlua::Integer)
-    }
-}
-
 /// 编码名（sjis/euc/jis/utf8）到 encoding_rs 编码的映射。
 fn encoding_by_name(name: &str) -> Option<&'static encoding_rs::Encoding> {
     match name.to_ascii_lowercase().as_str() {
@@ -1465,6 +1449,17 @@ fn set_var_auto(store: &mut crate::variable::VariableStore, name: &str, value: S
 /// `params` 需为**已解析**的参数表（脚本 tag 路径先经表达式求值器解析
 /// `$var` 引用；Lua e:tag 路径本身就是字面量）。
 pub(crate) fn apply_system_var_query(
+    callbacks: &(dyn EngineCallbacks + Send + Sync),
+    params: &HashMap<String, String>,
+    store: &mut crate::variable::VariableStore,
+) -> Option<bool> {
+    store.with_local_writes(
+        crate::tags::var_handler::param_is_on(params.get("writelocal")),
+        |store| apply_system_var_query_inner(callbacks, params, store),
+    )
+}
+
+fn apply_system_var_query_inner(
     callbacks: &(dyn EngineCallbacks + Send + Sync),
     params: &HashMap<String, String>,
     store: &mut crate::variable::VariableStore,

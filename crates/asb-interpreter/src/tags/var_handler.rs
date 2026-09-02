@@ -68,7 +68,7 @@ fn with_host_hooks<R>(f: impl FnOnce(&HostQueryHooks) -> R) -> Option<R> {
 }
 
 /// 标签参数是否为"开"（`1`/`true`/`on`/`yes`，缺省 false）。
-fn param_is_on(value: Option<&String>) -> bool {
+pub(crate) fn param_is_on(value: Option<&String>) -> bool {
     value
         .map(|v| {
             matches!(
@@ -98,6 +98,15 @@ fn set_pseudo_array(name: &str, items: Option<&[String]>, variables: &mut Variab
 ///
 /// 表达式参数（system 变体的 source/string/... 以及简单形式的 data）在此就地解析。
 pub fn apply_var_tag(
+    params: &HashMap<String, String>,
+    variables: &mut VariableStore,
+) -> Result<()> {
+    variables.with_local_writes(param_is_on(params.get("writelocal")), |variables| {
+        apply_var_tag_inner(params, variables)
+    })
+}
+
+fn apply_var_tag_inner(
     params: &HashMap<String, String>,
     variables: &mut VariableStore,
 ) -> Result<()> {
@@ -149,10 +158,7 @@ pub fn execute_var_system(
             let local = params.get("local").map(|s| s.as_str()) == Some("1");
 
             let exists = if local {
-                variables.get(target).is_some()
-                    && !target.starts_with("g.")
-                    && !target.starts_with("t.")
-                    && !target.starts_with("s.")
+                variables.contains_macro_local(target)
             } else {
                 variables.contains(target)
             };
@@ -1081,6 +1087,7 @@ fn delete_variable_tree(variables: &mut VariableStore, name: &str) {
         .chain(variables.iter_global())
         .chain(variables.iter_temp())
         .chain(variables.iter_system())
+        .chain(variables.iter_writable_macro_local())
         .filter(|(k, _)| k.starts_with(&prefix))
         .map(|(k, _)| k.clone())
         .collect();

@@ -261,6 +261,8 @@ pub struct Interpreter {
     macros: MacroRegistry,
     /// 宏定义文件 → 该文件注册的宏名列表。[macrodel] 按文件整体反注册。
     macro_files: HashMap<String, Vec<String>>,
+    /// Compiled macros retain file-local labels and absolute branch addresses.
+    compiled_macro_files: HashMap<String, String>,
 }
 
 fn json_to_lua_value(lua: &Lua, value: serde_json::Value) -> mlua::Result<mlua::Value> {
@@ -514,6 +516,7 @@ impl Interpreter {
             executed_lua_blocks: std::collections::HashSet::new(),
             macros: MacroRegistry::new(),
             macro_files: HashMap::new(),
+            compiled_macro_files: HashMap::new(),
         }
     }
 
@@ -628,7 +631,11 @@ impl Interpreter {
         };
 
         for (idx, code) in blocks {
-            self.lua.load(&code).exec().map_err(Error::LuaError)?;
+            self.lua
+                .load(&code)
+                .set_name(name)
+                .exec()
+                .map_err(Error::LuaError)?;
             self.executed_lua_blocks.insert((name.to_string(), idx));
         }
         Ok(())
@@ -636,8 +643,9 @@ impl Interpreter {
 
     /// 加载脚本（从 ASB 二进制数据）
     pub fn load_asb(&mut self, name: &str, data: &[u8]) -> Result<()> {
-        let text = asb_decrypt::decode_asb_to_string_with_encoding(data, self.config.encoding)?;
-        self.load_script(name, &text)
+        let script = Script::parse_asb(name, data, self.config.encoding)?;
+        self.insert_script(name.to_string(), script);
+        self.run_lua_blocks_at_load(name)
     }
 
     /// 智能加载脚本（自动检测文件格式）
@@ -720,6 +728,7 @@ impl Interpreter {
         self.current_script = Some(script.to_string());
         self.current_line = line;
         self.call_stack.clear();
+        self.variables.lock().unwrap().retain_macro_scopes(0);
         // 显式定位属于「顺序到达」，清掉可能残留的跳转到达标记。
         self.arrived_by_jump = false;
 
@@ -784,7 +793,10 @@ impl Interpreter {
             // 的分支已经命中并执行完毕，剩余分支必须整段跳过到匹配的 [/if]；
             // 只有经由 if/elseif 条件为假的 Jump 到达时才进入正常求值派发
             // （见 docs/tag/script/if.md 与 tags/condition.rs）。
-            if !arrived_by_jump && (instruction.tag == "elseif" || instruction.tag == "else") {
+            if !arrived_by_jump
+                && !instruction.has("\u{b}index")
+                && (instruction.tag == "elseif" || instruction.tag == "else")
+            {
                 let endif = crate::tags::find_matching_endif(script, self.current_line)?;
                 self.current_line = endif;
                 continue;
@@ -887,7 +899,7 @@ impl Interpreter {
                     }
                 }
                 TagResult::Return => {
-                    if let Some(frame) = self.call_stack.pop() {
+                    if let Some(frame) = self.pop_call_frame() {
                         self.current_script = Some(frame.script);
                         self.current_line = frame.return_line;
                         continue;
@@ -1050,7 +1062,7 @@ impl Interpreter {
                                     continue;
                                 }
                                 TagResult::Return => {
-                                    if let Some(frame) = self.call_stack.pop() {
+                                    if let Some(frame) = self.pop_call_frame() {
                                         self.current_script = Some(frame.script);
                                         self.current_line = frame.return_line;
                                         continue;
@@ -1218,7 +1230,7 @@ impl Interpreter {
                 TagResult::Return => {
                     self.last_flush_saw_return = true;
                     self.last_flush_changed_position = true;
-                    if let Some(frame) = self.call_stack.pop() {
+                    if let Some(frame) = self.pop_call_frame() {
                         self.current_script = Some(frame.script);
                         self.current_line = frame.return_line;
                     }
@@ -1228,6 +1240,15 @@ impl Interpreter {
                 TagResult::Dynamic(_) => continue,
             }
         }
+    }
+
+    fn pop_call_frame(&mut self) -> Option<CallFrame> {
+        let frame = self.call_stack.pop();
+        self.variables
+            .lock()
+            .unwrap()
+            .retain_macro_scopes(self.call_stack.len());
+        frame
     }
 
     /// 把当前调用栈 + 执行位置镜像进 [`EngineContext::script_stack`]。
@@ -1272,6 +1293,10 @@ impl Interpreter {
                 return_line: *index,
             })
             .collect();
+        self.variables
+            .lock()
+            .unwrap()
+            .retain_macro_scopes(self.call_stack.len());
         if !self.scripts.contains_key(top_file) {
             self.load_external_script(top_file)?;
         }
@@ -1329,15 +1354,25 @@ impl Interpreter {
         } else {
             return Err(Error::ScriptNotFound(file.to_string()));
         };
-        let text = if data.len() >= 4 && &data[0..4] == b"ASB\x00" {
-            asb_decrypt::decode_asb_to_string_with_encoding(&data, self.config.encoding)?
+        let compiled = data.starts_with(b"ASB\0");
+        let script = if compiled {
+            if !self.scripts.contains_key(file) {
+                self.load_asb(file, &data)?;
+            }
+            Arc::clone(&self.scripts[file])
         } else {
             let (text, _, _) = self.config.encoding.decode(&data);
-            text.into_owned()
+            Arc::new(Script::parse(file, &text)?)
         };
-        let script = Script::parse(file, &text)?;
         let names: Vec<String> = script.labels.keys().cloned().collect();
         let count = self.macros.load_from_script(&script)?;
+        for name in &names {
+            if compiled {
+                self.compiled_macro_files.insert(name.clone(), file.into());
+            } else {
+                self.compiled_macro_files.remove(name);
+            }
+        }
         self.macro_files.insert(file.to_string(), names);
         Ok(count)
     }
@@ -1348,6 +1383,7 @@ impl Interpreter {
         if let Some(names) = self.macro_files.remove(file) {
             for name in names {
                 self.macros.macros.remove(&name);
+                self.compiled_macro_files.remove(&name);
             }
         }
     }
@@ -1357,7 +1393,7 @@ impl Interpreter {
         &self.macros
     }
 
-    /// 以「call 进合成脚本」的方式展开并执行宏。
+    /// 编译宏调用原文件标签；文本宏沿用展开后的合成脚本。
     ///
     /// docs/spec/macro.md：宏实参自动展开为变量（宏体内 `$param`、
     /// `var_exist target="param"` 都按变量取用）；同时经
@@ -1381,15 +1417,32 @@ impl Interpreter {
             }
             args
         };
-        let expanded = self.macros.expand(&instruction.tag, &args)?;
-
-        // 实参落为同名变量：宏体内的 $param / estimate 求值依赖它们。
+        let compiled_file = self.compiled_macro_files.get(&instruction.tag).cloned();
+        // Compiled macro parameters are local to this invocation. A nested
+        // macro must not inherit optional arguments from its caller.
         {
             let mut store = self.variables.lock().unwrap();
-            for (key, value) in &args {
-                store.set(key, Value::String(value.clone()));
+            if compiled_file.is_some() {
+                store.push_macro_scope(self.call_stack.len() + 1, &args);
+            } else {
+                for (key, value) in &args {
+                    store.set(key, Value::String(value.clone()));
+                }
             }
         }
+
+        // Binary macros can branch to another label in their own file and
+        // return from inside a condition. Do not slice them at the first return
+        // or move absolute compiler targets into a synthetic script.
+        if let Some(file) = compiled_file {
+            return Ok(TagResult::Call {
+                file: Some(file),
+                label: instruction.tag.clone(),
+                return_line: current_line + 1,
+                return_script: script_name.to_string(),
+            });
+        }
+        let expanded = self.macros.expand(&instruction.tag, &args)?;
 
         // 合成脚本名带调用深度，避免同名宏递归调用时互相覆写返回帧内容。
         let synth_name = format!("__macro__{}@{}", instruction.tag, self.call_stack.len());
@@ -1425,6 +1478,16 @@ impl Interpreter {
     ) -> Result<TagResult> {
         let script_name = self.current_script.clone().unwrap_or_default();
         let current_line = self.current_line;
+        if instruction.tag == "\u{b}goto" {
+            return instruction
+                .get("\u{b}index")
+                .and_then(|s| s.parse().ok())
+                .map(TagResult::Jump)
+                .ok_or_else(|| Error::RuntimeError {
+                    line: instruction.line,
+                    message: "invalid compiled goto target".into(),
+                });
+        }
         let has_builtin = self.tag_registry.contains(&instruction.tag);
 
         if apply_tag_filter {
@@ -1698,8 +1761,12 @@ impl Interpreter {
 
         // 构造 param 表
         let param_table = self.lua.create_table()?;
-        for (k, v) in params {
-            param_table.set(k.as_str(), v.as_str())?;
+        {
+            let variables = self.variables.lock().unwrap();
+            let evaluator = ExpressionEvaluator::new(&variables);
+            for (k, v) in params {
+                param_table.set(k.as_str(), evaluator.resolve_param_str(v)?)?;
+            }
         }
 
         // 获取 engine 对象
@@ -1720,6 +1787,13 @@ impl Interpreter {
     /// 持续执行直到完成或等待
     pub fn run(&mut self) -> Result<ExecutionResult> {
         self.step()
+    }
+
+    /// Start a logical host tick before dispatching input or Lua callbacks.
+    /// Rendering skips and repeated script runs must not change this counter.
+    pub fn begin_frame(&mut self) {
+        let mut ctx = self.engine_ctx.lock().unwrap();
+        ctx.frame_number = ctx.frame_number.saturating_add(1);
     }
 
     /// 触发注册在 `onEnterFrame` 上的每帧回调（Artemis 约定 `e:setEventHandler{
@@ -1753,13 +1827,20 @@ impl Interpreter {
     ///
     /// 与 [`Self::fire_enter_frame`] 同样的约束：先取出 handler 名释放锁再调用 Lua。
     pub fn fire_save_handler(&mut self) -> Result<()> {
+        self.fire_save_handler_with_params(&HashMap::new())
+    }
+
+    pub fn fire_save_handler_with_params(
+        &mut self,
+        params: &HashMap<String, String>,
+    ) -> Result<()> {
         let handler = {
             let ctx = self.engine_ctx.lock().unwrap();
             ctx.event_handlers.get("onSave").cloned()
         };
         if let Some(func) = handler {
             self.sync_script_state_to_engine();
-            crate::tags::call_lua_function(self.lua(), &func, &HashMap::new())?;
+            crate::tags::call_lua_function(self.lua(), &func, params)?;
         }
         Ok(())
     }
@@ -1772,13 +1853,21 @@ impl Interpreter {
     /// stop.  Temporarily isolating the queue keeps the snapshot serialization
     /// synchronous without consuming the surrounding script flow.
     pub fn fire_save_handler_and_flush(&mut self) -> Result<()> {
+        self.fire_save_handler_and_flush_with_params(&HashMap::new())
+    }
+
+    /// Preserve the save command's file/memory context for script callbacks.
+    pub fn fire_save_handler_and_flush_with_params(
+        &mut self,
+        params: &HashMap<String, String>,
+    ) -> Result<()> {
         let pending = {
             let mut ctx = self.engine_ctx.lock().unwrap();
             std::mem::take(&mut ctx.tag_queue)
         };
 
         let result = self
-            .fire_save_handler()
+            .fire_save_handler_with_params(params)
             .and_then(|()| self.flush_tag_queue().map(|_| ()));
 
         let mut ctx = self.engine_ctx.lock().unwrap();
@@ -1795,13 +1884,20 @@ impl Interpreter {
     /// 否则即便变量已恢复，承载游戏态与存档槽位的 Lua 表仍是旧的。
     /// **必须在 [`Self::restore_variables`] 之后调用**。
     pub fn fire_load_handler(&mut self) -> Result<()> {
+        self.fire_load_handler_with_params(&HashMap::new())
+    }
+
+    pub fn fire_load_handler_with_params(
+        &mut self,
+        params: &HashMap<String, String>,
+    ) -> Result<()> {
         let handler = {
             let ctx = self.engine_ctx.lock().unwrap();
             ctx.event_handlers.get("onLoad").cloned()
         };
         if let Some(func) = handler {
             self.sync_script_state_to_engine();
-            crate::tags::call_lua_function(self.lua(), &func, &HashMap::new())?;
+            crate::tags::call_lua_function(self.lua(), &func, params)?;
         }
         Ok(())
     }
@@ -1900,6 +1996,7 @@ impl Interpreter {
             self.current_script = Some(script.to_string());
             self.current_line = 0;
             self.call_stack.clear();
+            self.variables.lock().unwrap().retain_macro_scopes(0);
             self.arrived_by_jump = false;
             return Ok(());
         };
@@ -1923,6 +2020,10 @@ impl Interpreter {
         self.current_script = Some(script.to_string());
         self.current_line = line;
         self.call_stack = stack;
+        self.variables
+            .lock()
+            .unwrap()
+            .retain_macro_scopes(self.call_stack.len());
         self.arrived_by_jump = false;
         // 重新加载目标脚本并定位到当前行
         self.load_external_script(script)?;
@@ -2014,6 +2115,147 @@ mod tests {
     use crate::{CallbackResult, Event, ExecutionResult, InterpreterConfig, Value};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn frame_number_changes_only_at_host_tick_boundary() {
+        let mut it = Interpreter::new(InterpreterConfig::default());
+        let read = |it: &Interpreter| {
+            it.lua()
+                .load("return __engine:getFrameNumber()")
+                .eval::<u64>()
+                .unwrap()
+        };
+        assert_eq!(read(&it), 0);
+        it.begin_frame();
+        assert_eq!(read(&it), 1);
+        it.lua().load("function frame_probe(e) assert(e:getFrameNumber() == 1) end; __engine:setEventHandler{onEnterFrame='frame_probe'}").exec().unwrap();
+        it.fire_enter_frame().unwrap();
+        assert_eq!(read(&it), 1);
+        it.begin_frame();
+        assert_eq!(read(&it), 2);
+    }
+
+    #[test]
+    fn script_size_matches_block_indices_not_source_lines_or_labels() {
+        let mut it = Interpreter::new(InterpreterConfig::default());
+        it.load_script(
+            "query",
+            "*first\n\n\n[var name=\"x\" data=\"1\"]\n*second\n[stop]",
+        )
+        .unwrap();
+        it.lua()
+            .load(
+                r#"
+            local e = __engine
+            assert(e:getScriptSize('query') == 2)
+            assert(e:getScriptSize('missing') == 0)
+            assert(e:getScriptBlock{file='query', index=1}.command == 'stop')
+            assert(e:getScriptBlock{file='query', index=2} == nil)
+        "#,
+            )
+            .exec()
+            .unwrap();
+    }
+
+    #[test]
+    fn save_and_load_callbacks_receive_command_parameters() {
+        let mut it = Interpreter::new(InterpreterConfig::default());
+        it.lua()
+            .load(
+                r#"
+            function before_save(e, p)
+                assert(p.file == 'autosave.dat')
+                e:tag{'var', name='saved_file', data=p.file}
+            end
+            function after_load(e, p) assert(p.file == 'autosave.dat') end
+            __engine:setEventHandler{onSave='before_save', onLoad='after_load'}
+        "#,
+            )
+            .exec()
+            .unwrap();
+        let params = HashMap::from([("file".into(), "autosave.dat".into())]);
+        it.fire_save_handler_and_flush_with_params(&params).unwrap();
+        assert_eq!(
+            it.get_variable("saved_file"),
+            Some(Value::from("autosave.dat"))
+        );
+        it.fire_load_handler_with_params(&params).unwrap();
+    }
+
+    #[test]
+    fn engine_var_returns_strings_for_every_storage_type() {
+        let mut it = Interpreter::new(InterpreterConfig::default());
+        for (key, value) in [
+            ("integer", Value::Int(123)),
+            ("large", Value::Int(4_294_967_296)),
+            ("float", Value::Float(1.25)),
+            ("boolean", Value::Bool(true)),
+            ("text", Value::String("1.80".into())),
+            ("null", Value::Null),
+        ] {
+            it.set_variable(key, value);
+        }
+        it.lua()
+            .load(
+                r#"
+            local e = __engine
+            for k, v in pairs({integer='123', large='4294967296', float='1.25',
+                               boolean='1', text='1.80', null='0', missing='0'}) do
+                assert(type(e:var(k)) == 'string')
+                assert(e:var(k) == v)
+            end
+            assert(e:var('integer'):gsub('2', 'x') == '1x3')
+        "#,
+            )
+            .exec()
+            .unwrap();
+    }
+
+    #[test]
+    fn tag_filter_receives_resolved_string_params_without_holding_variable_lock() {
+        let mut it = Interpreter::new(InterpreterConfig::default());
+        it.lua()
+            .load(
+                r#"
+            __engine:setTagFilter({weighted = function(e, p)
+                assert(p.data == '1,2,3')
+                assert(p.id == '1.80')
+                assert(e:var('weights') == p.data)
+                e:tag({'var', name='filtered', data='yes'})
+                return 1
+            end})
+        "#,
+            )
+            .exec()
+            .unwrap();
+        it.load_script("test", "[var name=\"weights\" data=\"1,2,3\"]\n[weighted data=\"$weights\" id=\"1.80\"]\n[stop]").unwrap();
+        it.start("test", "").unwrap();
+        it.run().unwrap();
+        assert_eq!(it.get_variable("filtered").unwrap().as_string(), "yes");
+    }
+
+    #[test]
+    fn call_and_jump_resolve_dynamic_files_and_labels() {
+        let mut it = Interpreter::new(InterpreterConfig::default());
+        it.load_script(
+            "sub",
+            "*target\n[var name=\"called\" data=\"yes\"]\n[return]",
+        )
+        .unwrap();
+        it.load_script(
+            "main",
+            r#"
+[var name="file" data="sub"]
+[var name="label" data="target"]
+[call file="$file" label="$label"]
+[jump file="$file" label="$label"]
+"#,
+        )
+        .unwrap();
+        it.start("main", "").unwrap();
+        it.run().unwrap();
+        assert_eq!(it.get_variable("called").unwrap().as_string(), "yes");
+    }
 
     #[test]
     fn lua_truthy_query_distinguishes_missing_false_and_true() {

@@ -405,6 +405,7 @@ impl CoreRuntime {
 
     fn advance_logic(&mut self, delta_ms: u64, profile: &mut crate::profiler::FrameProfile) {
         let logic_started = profile.mark();
+        self.interpreter.begin_frame();
         let input_started = profile.mark();
         // isPush 的按键重复语义依赖每键按下时间戳，逐帧维护。
         self.input

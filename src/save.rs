@@ -197,10 +197,7 @@ impl SaveData {
         interpreter: &mut asb_interpreter::Interpreter,
     ) -> asb_interpreter::Result<()> {
         let mut variables = interpreter.variables();
-        variables.reset();
-        for (key, value) in self.variables.iter_local() {
-            variables.set(key, value.clone());
-        }
+        variables.restore_local_snapshot(&self.variables);
         interpreter.restore_variables(variables);
         let stack: Vec<CallFrame> = self
             .call_stack
@@ -213,12 +210,7 @@ impl SaveData {
 }
 
 fn local_variable_snapshot(interpreter: &asb_interpreter::Interpreter) -> VariableStore {
-    let current = interpreter.variables();
-    let mut snapshot = VariableStore::new();
-    for (key, value) in current.iter_local() {
-        snapshot.set(key, value.clone());
-    }
-    snapshot
+    interpreter.variables().local_snapshot()
 }
 
 #[cfg(test)]

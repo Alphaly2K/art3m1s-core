@@ -403,12 +403,12 @@ impl<'a> Parser<'a> {
                 Some(Token::Eq) => {
                     self.next();
                     let right = self.parse_comparison()?;
-                    left = self.compare_values(&left, &right, |a, b| a == b);
+                    left = self.compare_values(&left, &right, Token::Eq);
                 }
                 Some(Token::Neq) => {
                     self.next();
                     let right = self.parse_comparison()?;
-                    left = self.compare_values(&left, &right, |a, b| a != b);
+                    left = self.compare_values(&left, &right, Token::Neq);
                 }
                 _ => break,
             }
@@ -426,22 +426,22 @@ impl<'a> Parser<'a> {
                 Some(Token::Lt) => {
                     self.next();
                     let right = self.parse_addition()?;
-                    left = self.compare_values(&left, &right, |a, b| a < b);
+                    left = self.compare_values(&left, &right, Token::Lt);
                 }
                 Some(Token::Le) => {
                     self.next();
                     let right = self.parse_addition()?;
-                    left = self.compare_values(&left, &right, |a, b| a <= b);
+                    left = self.compare_values(&left, &right, Token::Le);
                 }
                 Some(Token::Gt) => {
                     self.next();
                     let right = self.parse_addition()?;
-                    left = self.compare_values(&left, &right, |a, b| a > b);
+                    left = self.compare_values(&left, &right, Token::Gt);
                 }
                 Some(Token::Ge) => {
                     self.next();
                     let right = self.parse_addition()?;
-                    left = self.compare_values(&left, &right, |a, b| a >= b);
+                    left = self.compare_values(&left, &right, Token::Ge);
                 }
                 _ => break,
             }
@@ -573,13 +573,22 @@ impl<'a> Parser<'a> {
     }
 
     /// 比较两个值
-    fn compare_values<F>(&self, left: &Value, right: &Value, cmp: F) -> Value
-    where
-        F: Fn(f64, f64) -> bool,
-    {
-        let left_num = left.as_float().unwrap_or(0.0);
-        let right_num = right.as_float().unwrap_or(0.0);
-        Value::Bool(cmp(left_num, right_num))
+    fn compare_values(&self, left: &Value, right: &Value, op: Token) -> Value {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        let order = match (left.as_float(), right.as_float()) {
+            (Some(l), Some(r)) => l.partial_cmp(&r),
+            // Non-numeric values must not collapse to 0 == 0.
+            _ => Some(left.as_string().cmp(&right.as_string())),
+        };
+        Value::Bool(match op {
+            Token::Eq => order == Some(Equal),
+            Token::Neq => order != Some(Equal),
+            Token::Lt => order == Some(Less),
+            Token::Le => matches!(order, Some(Less | Equal)),
+            Token::Gt => order == Some(Greater),
+            Token::Ge => matches!(order, Some(Greater | Equal)),
+            _ => unreachable!("comparison operator"),
+        })
     }
 
     /// 加法（支持字符串连接）
@@ -684,6 +693,31 @@ mod tests {
     fn eval_with_vars(expr: &str, vars: &VariableStore) -> Result<Value> {
         let evaluator = ExpressionEvaluator::new(vars);
         evaluator.evaluate(expr)
+    }
+
+    #[test]
+    fn string_comparison_does_not_collapse_distinct_values_to_zero() {
+        for (expr, expected) in [
+            ("'onlyfullscreen' == 'onlyset'", false),
+            ("'windows' == 'webassembly'", false),
+            ("'windows' != 'webassembly'", true),
+            ("'windows' == 'windows'", true),
+            ("'file.iet' == 0", false),
+            ("'a' < 'b'", true),
+            ("'b' <= 'a'", false),
+            ("'b' > 'a'", true),
+            ("'a' >= 'a'", true),
+            ("'10' > 2", true),
+            ("'0' == 0", true),
+        ] {
+            assert_eq!(eval(expr).unwrap(), Value::Bool(expected), "{expr}");
+        }
+        let mut vars = VariableStore::new();
+        vars.set("mode", Value::String("onlyfullscreen".into()));
+        assert_eq!(
+            eval_with_vars("mode == 'onlyset' || mode == 'allset'", &vars).unwrap(),
+            Value::Bool(false)
+        );
     }
 
     #[test]

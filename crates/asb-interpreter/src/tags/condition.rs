@@ -21,6 +21,14 @@ fn evaluate_estimate(ctx: &ExecutionContext<'_>) -> Result<bool> {
 ///   ElseHandler 的无条件跳 /if 会让 else 体永不执行（历史 bug）；
 /// - `[/if]`：跳到该行本身（EndifHandler 是空操作）。
 fn false_branch_target(ctx: &ExecutionContext<'_>) -> Result<usize> {
+    if let Some(index) = ctx.instruction.get("\u{b}index") {
+        return index
+            .parse()
+            .map_err(|_| crate::error::Error::RuntimeError {
+                line: ctx.instruction.line,
+                message: "invalid compiled conditional target".into(),
+            });
+    }
     let line = ctx.find_else_elseif_or_endif()?;
     let script = ctx
         .get_script(ctx.current_script)
@@ -123,7 +131,12 @@ impl TagHandler for LoopHandler {
             Ok(TagResult::Continue)
         } else {
             // 条件为假，跳过循环体到 /loop 之后
-            Ok(TagResult::Jump(ctx.find_endloop()? + 1))
+            let target = if ctx.instruction.has("\u{b}index") {
+                false_branch_target(ctx)?
+            } else {
+                ctx.find_endloop()? + 1
+            };
+            Ok(TagResult::Jump(target))
         }
     }
 }

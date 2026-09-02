@@ -978,7 +978,7 @@ fn crc32_ieee(data: &[u8]) -> u32 {
     !crc
 }
 
-/// 单个图层暴露给脚本层的几何信息（left/top/width/height 字符串表）。
+/// 单个图层暴露给脚本层的属性，数值使用 Artemis 原始刻度。
 fn layer_info_entry(
     layer: &crate::compositor::Layer,
     now_ms: u64,
@@ -999,12 +999,52 @@ fn layer_info_entry(
         .or_else(|| clip.map(|rect| rect[3]))
         .or_else(|| texture_info.map(|info| info.height as f32))
         .unwrap_or(0.0);
-    HashMap::from([
+    let mut info = props.custom.clone();
+    info.extend([
         ("left".to_string(), trim_layer_float(left)),
         ("top".to_string(), trim_layer_float(top)),
         ("width".to_string(), trim_layer_float(width)),
         ("height".to_string(), trim_layer_float(height)),
-    ])
+        ("visible".into(), u8::from(props.is_visible()).to_string()),
+        ("alpha".into(), props.alpha.unwrap_or(255).to_string()),
+        (
+            "anchorx".into(),
+            trim_layer_float(props.anchor_x.unwrap_or(0.0)),
+        ),
+        (
+            "anchory".into(),
+            trim_layer_float(props.anchor_y.unwrap_or(0.0)),
+        ),
+        (
+            "xscale".into(),
+            trim_layer_float(props.x_scale.unwrap_or(100.0)),
+        ),
+        (
+            "yscale".into(),
+            trim_layer_float(props.y_scale.unwrap_or(100.0)),
+        ),
+        (
+            "rotate".into(),
+            trim_layer_float(props.rotate.unwrap_or(0.0)),
+        ),
+        (
+            "reversex".into(),
+            u8::from(props.reverse_x.unwrap_or(false)).to_string(),
+        ),
+        (
+            "reversey".into(),
+            u8::from(props.reverse_y.unwrap_or(false)).to_string(),
+        ),
+        (
+            "grayscale".into(),
+            u8::from(props.grayscale.unwrap_or(false)).to_string(),
+        ),
+        (
+            "negative".into(),
+            u8::from(props.negative.unwrap_or(false)).to_string(),
+        ),
+    ]);
+    info
 }
 
 fn trim_layer_float(value: f32) -> String {
@@ -1259,6 +1299,37 @@ mod tests {
         );
         assert_eq!(info["width"], "1280");
         assert_eq!(info["height"], "120");
+    }
+
+    #[test]
+    fn layer_info_reports_local_visibility_alpha_and_transform_properties() {
+        use std::collections::HashMap;
+        let mut c = Compositor::new();
+        c.apply_event(&Event::Layer(LayerEvent::Create {
+            id: "button.2".into(),
+            file: "hover.png".into(),
+        }));
+        let info = layer_info_entry(c.scene().get("button.2").unwrap(), 0, None);
+        assert_eq!(info["visible"], "1");
+        assert_eq!(info["alpha"], "255");
+        c.apply_event(&Event::Layer(LayerEvent::SetProperties {
+            id: "button.2".into(),
+            properties: HashMap::from([
+                ("alpha".into(), "0".into()),
+                ("anchorx".into(), "32".into()),
+                ("xscale".into(), "125".into()),
+                ("clickablethreshold".into(), "64".into()),
+            ]),
+        }));
+        let info = layer_info_entry(c.scene().get("button.2").unwrap(), 0, None);
+        assert_eq!(
+            info["visible"], "1",
+            "transparent hover layers remain enabled"
+        );
+        assert_eq!(info["alpha"], "0");
+        assert_eq!(info["anchorx"], "32");
+        assert_eq!(info["xscale"], "125");
+        assert_eq!(info["clickablethreshold"], "64");
     }
 
     // dispatch_events 里每个事件都过 CompositorEvent::from_interpreter 后交给

@@ -144,6 +144,16 @@ pub struct VariableStore {
     /// 不参与存档序列化——它由运行时配置决定，而非游戏进度的一部分。
     #[serde(skip)]
     platform: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    macro_scopes: Vec<MacroScope>,
+    #[serde(skip)]
+    write_macro_local: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MacroScope {
+    depth: usize,
+    values: HashMap<String, Value>,
 }
 
 impl VariableStore {
@@ -164,6 +174,13 @@ impl VariableStore {
 
     /// 获取变量值
     pub fn get(&self, name: &str) -> Option<&Value> {
+        self.macro_scopes
+            .last()
+            .and_then(|scope| scope.values.get(name))
+            .or_else(|| self.get_nonlocal(name))
+    }
+
+    fn get_nonlocal(&self, name: &str) -> Option<&Value> {
         if let Some(stripped) = name.strip_prefix("g.") {
             self.global.get(stripped)
         } else if let Some(stripped) = name.strip_prefix("t.") {
@@ -177,6 +194,12 @@ impl VariableStore {
 
     /// 设置变量值
     pub fn set(&mut self, name: &str, value: Value) {
+        if self.write_macro_local {
+            if let Some(scope) = self.macro_scopes.last_mut() {
+                scope.values.insert(name.into(), value);
+                return;
+            }
+        }
         if let Some(stripped) = name.strip_prefix("g.") {
             self.global.insert(stripped.to_string(), value);
         } else if let Some(stripped) = name.strip_prefix("t.") {
@@ -190,6 +213,11 @@ impl VariableStore {
 
     /// 删除变量
     pub fn remove(&mut self, name: &str) -> Option<Value> {
+        if self.write_macro_local {
+            if let Some(scope) = self.macro_scopes.last_mut() {
+                return scope.values.remove(name);
+            }
+        }
         if let Some(stripped) = name.strip_prefix("g.") {
             self.global.remove(stripped)
         } else if let Some(stripped) = name.strip_prefix("t.") {
@@ -206,6 +234,46 @@ impl VariableStore {
         self.get(name).is_some()
     }
 
+    pub fn contains_macro_local(&self, name: &str) -> bool {
+        self.macro_scopes.last().map_or_else(
+            || self.local.contains_key(name),
+            |scope| scope.values.contains_key(name),
+        )
+    }
+
+    pub(crate) fn push_macro_scope(&mut self, depth: usize, args: &HashMap<String, String>) {
+        self.macro_scopes.push(MacroScope {
+            depth,
+            values: args
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                .collect(),
+        });
+    }
+
+    pub(crate) fn retain_macro_scopes(&mut self, depth: usize) {
+        self.macro_scopes.retain(|scope| scope.depth <= depth);
+    }
+
+    pub(crate) fn with_local_writes<T>(
+        &mut self,
+        local: bool,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let previous = std::mem::replace(&mut self.write_macro_local, local);
+        let result = f(self);
+        self.write_macro_local = previous;
+        result
+    }
+
+    pub(crate) fn iter_writable_macro_local(&self) -> impl Iterator<Item = (&String, &Value)> {
+        self.macro_scopes
+            .last()
+            .filter(|_| self.write_macro_local)
+            .into_iter()
+            .flat_map(|scope| scope.values.iter())
+    }
+
     /// 清除临时变量
     pub fn clear_temp(&mut self) {
         self.temp.clear();
@@ -213,6 +281,7 @@ impl VariableStore {
 
     /// 清除所有变量（包括全局和系统变量）
     pub fn clear_all(&mut self) {
+        self.macro_scopes.clear();
         self.local.clear();
         self.global.clear();
         self.temp.clear();
@@ -221,8 +290,25 @@ impl VariableStore {
 
     /// 清除局部和临时变量（用于 reset）
     pub fn reset(&mut self) {
+        self.macro_scopes.clear();
         self.local.clear();
         self.temp.clear();
+    }
+
+    /// Numbered-save state, including suspended macro arguments but no global/system data.
+    pub fn local_snapshot(&self) -> Self {
+        Self {
+            local: self.local.clone(),
+            macro_scopes: self.macro_scopes.clone(),
+            ..Self::default()
+        }
+    }
+
+    /// Restore numbered-save state without rolling back global/system variables.
+    pub fn restore_local_snapshot(&mut self, snapshot: &Self) {
+        self.reset();
+        self.local.clone_from(&snapshot.local);
+        self.macro_scopes.clone_from(&snapshot.macro_scopes);
     }
 
     /// 序列化（用于存档）
@@ -308,5 +394,66 @@ mod tests {
         );
         // 临时变量不会被序列化
         assert_eq!(loaded.get("t.temp_var"), None);
+    }
+
+    #[test]
+    fn macro_scopes_survive_save_and_unwind_to_caller() {
+        let mut store = VariableStore::new();
+        store.set("id", Value::from("base"));
+        store.push_macro_scope(1, &HashMap::from([("id".into(), "outer".into())]));
+        store.push_macro_scope(3, &HashMap::from([("id".into(), "inner".into())]));
+        store.set("g.index", Value::Int(1));
+        let snapshot = VariableStore::load(&store.local_snapshot().save().unwrap()).unwrap();
+        assert!(snapshot.get("g.index").is_none());
+        let mut loaded = VariableStore::new();
+        loaded.set("g.index", Value::Int(2));
+        loaded.restore_local_snapshot(&snapshot);
+        assert_eq!(loaded.get("g.index"), Some(&Value::Int(2)));
+        assert_eq!(loaded.get("id"), Some(&Value::from("inner")));
+        loaded.retain_macro_scopes(2);
+        assert_eq!(loaded.get("id"), Some(&Value::from("outer")));
+        loaded.retain_macro_scopes(0);
+        assert_eq!(loaded.get("id"), Some(&Value::from("base")));
+
+        let old = br#"{"local":{"id":"legacy"},"global":{},"system":{}}"#;
+        let loaded = VariableStore::load(old).unwrap();
+        assert_eq!(loaded.get("id"), Some(&Value::from("legacy")));
+        assert!(loaded.macro_scopes.is_empty());
+    }
+
+    #[test]
+    fn local_host_query_overwrites_local_default_and_delete_clears_children() {
+        let mut store = VariableStore::new();
+        store.set("t.query.visible", Value::Int(9));
+        store.push_macro_scope(1, &HashMap::new());
+        store.with_local_writes(true, |store| store.set("t.query.visible", Value::Int(1)));
+        let params = HashMap::from([
+            ("system".into(), "fullscreen".into()),
+            ("name".into(), "t.query.visible".into()),
+            ("writelocal".into(), "1".into()),
+        ]);
+        assert_eq!(
+            crate::lua_engine::apply_system_var_query(
+                &crate::lua_engine::DefaultEngineCallbacks,
+                &params,
+                &mut store,
+            ),
+            Some(true)
+        );
+        assert_eq!(store.get("t.query.visible"), Some(&Value::Int(0)));
+        crate::tags::var_handler::apply_var_tag(
+            &HashMap::from([
+                ("system".into(), "delete".into()),
+                ("name".into(), "t.query".into()),
+                ("writelocal".into(), "1".into()),
+            ]),
+            &mut store,
+        )
+        .unwrap();
+        assert!(!store.contains_macro_local("t.query.visible"));
+        assert_eq!(store.get("t.query.visible"), Some(&Value::Int(9)));
+        store.set("after", Value::Int(5));
+        store.retain_macro_scopes(0);
+        assert_eq!(store.get("after"), Some(&Value::Int(5)));
     }
 }

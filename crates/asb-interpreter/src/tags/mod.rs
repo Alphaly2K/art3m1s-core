@@ -491,7 +491,9 @@ struct JumpHandler;
 
 impl TagHandler for JumpHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let label = ctx.instruction.get("label").unwrap_or("");
+        let label = ctx
+            .evaluator()
+            .resolve_param_str(ctx.instruction.get("label").unwrap_or(""))?;
 
         // 检查条件跳转
         if let Some(cond) = ctx.instruction.get("cond") {
@@ -504,19 +506,19 @@ impl TagHandler for JumpHandler {
         // 跨脚本跳转
         if let Some(file) = ctx.instruction.get("file") {
             return Ok(TagResult::JumpExternal {
-                file: file.to_string(),
-                label: label.to_string(),
+                file: ctx.evaluator().resolve_param_str(file)?,
+                label,
             });
         }
 
         // 查找标签行号
         if let Some(script) = ctx.get_script(ctx.current_script) {
-            if let Some(line) = script.get_label_line(label) {
+            if let Some(line) = script.get_label_line(&label) {
                 return Ok(TagResult::Jump(line));
             }
         }
 
-        Err(crate::error::Error::LabelNotFound(label.to_string()))
+        Err(crate::error::Error::LabelNotFound(label))
     }
 }
 
@@ -525,8 +527,14 @@ struct CallHandler;
 
 impl TagHandler for CallHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let file = ctx.instruction.get("file").map(String::from);
-        let label = ctx.instruction.get("label").unwrap_or("").to_string();
+        let file = ctx
+            .instruction
+            .get("file")
+            .map(|file| ctx.evaluator().resolve_param_str(file))
+            .transpose()?;
+        let label = ctx
+            .evaluator()
+            .resolve_param_str(ctx.instruction.get("label").unwrap_or(""))?;
 
         Ok(TagResult::Call {
             file,

@@ -58,7 +58,7 @@ impl CoreRuntime {
         // 这些 [var] 标签必须在快照前执行，但保存 UI 当时已有的返回/跳转队列
         // 必须原样保留，否则会在 Event::SaveGame 回调中重入并破坏剧情恢复位置。
         self.interpreter
-            .fire_save_handler_and_flush()
+            .fire_save_handler_and_flush_with_params(&HashMap::from([("file".into(), file.into())]))
             .map_err(|e| format!("onSave 处理器失败: {e:?}"))?;
 
         let mut data = crate::save::SaveData::from_interpreter(&self.interpreter);
@@ -209,7 +209,7 @@ impl CoreRuntime {
         // onLoad（restore）把恢复的变量经 pluto 反序列化回 sys/gscr/scr/log 等表，
         // 否则承载游戏态与存档槽位的 Lua 表仍是旧的。
         self.interpreter
-            .fire_load_handler()
+            .fire_load_handler_with_params(&HashMap::from([("file".into(), file.into())]))
             .map_err(|e| format!("onLoad 处理器失败: {e:?}"))?;
         self.sync_control_status_variables();
         self.interpreter
