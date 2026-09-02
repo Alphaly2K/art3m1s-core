@@ -116,10 +116,6 @@ impl CoreRuntime {
                 for try_path in [format!("{resolved}.png"), resolved.clone()] {
                     match crate::ffi::request_asset(&try_path) {
                         Some(bytes) => {
-                            crate::core_debug!(
-                                "[{project_name}] TEX HIT: {name} → {try_path} ({})",
-                                bytes.len()
-                            );
                             return Some(bytes);
                         }
                         None => {
