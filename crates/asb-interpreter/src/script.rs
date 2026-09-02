@@ -4,8 +4,8 @@
 //! 解析前先经过预处理器（&autoinsert / &linetag / &scpsupport，见
 //! [`preprocess`] 模块），预处理保持行号一一对应。
 
-pub mod preprocess;
 mod binary;
+pub mod preprocess;
 
 use crate::error::{Error, Result};
 use std::collections::HashMap;
@@ -77,6 +77,9 @@ impl Script {
 
     /// 从文本解析脚本，显式指定 tag.ini（绕开全局注册表；测试/宿主定制用）
     pub fn parse_with_tag_ini(name: &str, content: &str, tag_ini: Option<&TagIni>) -> Result<Self> {
+        if !content.contains("[&") {
+            return Self::parse_preprocessed(name, content);
+        }
         let pre = preprocess::preprocess(content, tag_ini);
         Self::parse_preprocessed(name, &pre)
     }

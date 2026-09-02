@@ -19,8 +19,8 @@
 //! 仍指向原始脚本行。
 //!
 //! tag.ini 的**文件加载入口**（从游戏资源读出文本）不在本模块职责内：宿主 /
-//! 解释器侧读到内容后调用 [`TagIni::parse`] + [`install_tag_ini`] 注册即可，
-//! 之后 `Script::parse` 会自动引用全局注册的表。
+//! 解释器持有各自的 [`TagIni`]；独立调用 `Script::parse` 的宿主仍可使用
+//! [`install_tag_ini`] 注册默认表。
 
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -39,7 +39,7 @@ use super::{LineSegment, split_line_segments};
 ///
 /// 解析格式（宽容处理，逐行）：
 /// - `;` / `#` / `//` 开头为注释行；
-/// - `[section]` 段头行忽略；
+/// - `[标签名]` 后的 `0=参数名`、`1=参数名` 指定位置参数；
 /// - `标签名=参数1,参数2,...`（`=` 两侧空白忽略，参数名逗号分隔）。
 #[derive(Debug, Clone, Default)]
 pub struct TagIni {
@@ -49,8 +49,9 @@ pub struct TagIni {
 impl TagIni {
     /// 从 tag.ini 文本解析
     pub fn parse(content: &str) -> Self {
-        let mut params = HashMap::new();
-        for raw in content.lines() {
+        let mut params: HashMap<String, Vec<String>> = HashMap::new();
+        let mut section = None;
+        for raw in content.trim_start_matches('\u{feff}').lines() {
             let line = raw.trim();
             if line.is_empty()
                 || line.starts_with(';')
@@ -59,13 +60,25 @@ impl TagIni {
             {
                 continue;
             }
-            // 段头行（如 [tags]）忽略
-            if line.starts_with('[') {
+            if let Some(name) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                section = Some(name.trim());
                 continue;
             }
             if let Some((name, rest)) = line.split_once('=') {
                 let name = name.trim();
                 if name.is_empty() {
+                    continue;
+                }
+                if let (Some(section), Ok(index)) = (section, name.parse::<usize>()) {
+                    // Bound sparse indices before allocating an untrusted INI's table.
+                    if index >= 4096 {
+                        continue;
+                    }
+                    let names = params.entry(section.to_string()).or_default();
+                    if names.len() <= index {
+                        names.resize(index + 1, String::new());
+                    }
+                    names[index] = rest.trim().to_string();
                     continue;
                 }
                 let names: Vec<String> = rest
@@ -371,9 +384,10 @@ impl Preprocessor {
             Some(prefix) => trimmed.strip_prefix(prefix.as_str())?.trim_start(),
             None => trimmed,
         };
-        // 行标签名以半角英数字开头；前缀后若不是（例如 @[rt]），按场景
-        // 内容原样保留。
-        if !body.chars().next()?.is_ascii_alphanumeric() {
+        let first = body.chars().next()?;
+        // The ASCII-head rule applies only without a prefix. An explicit
+        // prefix permits Japanese macro names, but not bracketed tag syntax.
+        if first == '[' || (self.linetag_prefix.is_none() && !first.is_ascii_alphanumeric()) {
             return None;
         }
         let (name, rest) = match body.split_once(char::is_whitespace) {
@@ -392,6 +406,7 @@ impl Preprocessor {
                 }
                 let key = names
                     .and_then(|ns| ns.get(i))
+                    .filter(|name| !name.is_empty())
                     .cloned()
                     .unwrap_or_else(|| i.to_string());
                 out.push(' ');
@@ -623,7 +638,7 @@ mod tests {
         assert_eq!(ls[1], "[foo a=\"bar\" b=\"hoge\"]");
         // 不带前缀 -> 场景文本（即使以半角英数字开头）
         assert_eq!(ls[2], "foo bar,hoge");
-        // 前缀后不是英数字（点击等待写法）：原样保留
+        // 前缀后是括号标签（点击等待写法）：原样保留
         assert_eq!(ls[3], "@[rt]");
     }
 
@@ -682,5 +697,32 @@ mod tests {
         );
         assert_eq!(ini.param_names("broken_line_without_eq"), None);
         assert_eq!(ini.param_names("missing"), None);
+    }
+
+    #[test]
+    fn sectioned_tag_ini_preserves_indices_and_legacy_entries() {
+        let ini = TagIni::parse(
+            "\u{feff}[chara]\n2=time\n0=old\n0=st\n1=pos\n[other]\n1=file\n999999999=id\n[tags]\nfoo=a,b\n",
+        );
+        assert_eq!(ini.param_names("chara").unwrap(), ["st", "pos", "time"]);
+        assert_eq!(ini.param_names("other").unwrap(), ["", "file"]);
+        assert_eq!(ini.param_names("foo").unwrap(), ["a", "b"]);
+        let out = preprocess("[&linetag allow=\"1\"]\nother x,y", Some(&ini));
+        assert_eq!(lines(&out)[1], "[other 0=\"x\" file=\"y\"]");
+    }
+
+    #[test]
+    fn prefixed_unicode_linetags_are_commands_not_scenario_text() {
+        let ini = TagIni::parse("[立ち絵表示]\n0=st\n1=pos\n2=time\n[立ち絵消去]\n0=st\n");
+        let src = "[&linetag allow=\"1\" prefix=\"#\"]\n[&autoinsert target=\"linehead\" command=\"[head]\"]\n#立ち絵表示 遠_姫百合,c,default\n#立ち絵消去 all\n立ち絵表示は本文\n[&linetag allow=\"1\"]\n立ち絵表示は本文\n";
+        let out = preprocess(src, Some(&ini));
+        let ls = lines(&out);
+        assert_eq!(
+            ls[2],
+            "[立ち絵表示 st=\"遠_姫百合\" pos=\"c\" time=\"default\"]"
+        );
+        assert_eq!(ls[3], "[立ち絵消去 st=\"all\"]");
+        assert_eq!(ls[4], "[head]立ち絵表示は本文");
+        assert_eq!(ls[6], "[head]立ち絵表示は本文");
     }
 }

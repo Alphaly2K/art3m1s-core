@@ -202,6 +202,8 @@ pub struct Interpreter {
     /// [`EngineContext::scripts_view`]，供 `e:getScriptBlock` 按 `{file, index}`
     /// 查询指令块而不复制脚本内容。
     scripts: HashMap<String, Arc<Script>>,
+    /// Line-tag parameter definitions belong to this game, not the process.
+    tag_ini: crate::script::TagIni,
     /// 变量存储
     ///
     /// 用 `Arc<Mutex<_>>` 持有，以便与 [`EngineContext`] 共享同一份变量，使 Lua 中的
@@ -497,6 +499,7 @@ impl Interpreter {
         Self {
             config,
             scripts: HashMap::new(),
+            tag_ini: crate::script::TagIni::default(),
             variables,
             lua,
             tag_registry: TagRegistry::new(),
@@ -576,7 +579,7 @@ impl Interpreter {
 
     /// 加载脚本（从文本）
     pub fn load_script(&mut self, name: &str, content: &str) -> Result<()> {
-        let script = Script::parse(name, content)?;
+        let script = Script::parse_with_tag_ini(name, content, Some(&self.tag_ini))?;
         self.insert_script(name.to_string(), script);
         // Artemis 语义（docs/tag/system/lua.md）：[lua] 块在**文件加载时**执行，
         // 与块在文件中的位置无关，且所有文件共享同一 Lua 环境、每块只执行一次。
@@ -588,17 +591,14 @@ impl Interpreter {
 
     /// 加载 tag.ini 文本，供 `&linetag` 行标签解析位置参数顺序使用。
     ///
-    /// `&linetag` 把「以半角英数字开头的行」当作不带参数名的行标签，
+    /// `&linetag` 把带指定前缀（未指定时以半角英数字开头）的行解析为行标签，
     /// 位置参数的对应关系（参数顺序）由 tag.ini 定义（见
     /// docs/tag/preprocessor/linetag.md）。宿主/引擎在启动阶段读到 tag.ini
-    /// 文本后调用本方法，即把 [`TagIni::parse`] 的结果装进全局预处理器，
-    /// 之后 `Script::parse` 就能在预处理阶段展开行标签。
+    /// 文本后调用本方法，在本解释器后续加载脚本时展开行标签。
     ///
-    /// 注意：这里安装的是**全局** tag.ini（`preprocess::install_tag_ini`），
-    /// 因此需在后续 `load_script`/`load_asb` 之前调用才对这些脚本生效。
+    /// 不影响其他解释器或独立的 `Script::parse` 调用。必须在脚本加载前设置。
     pub fn load_tag_ini(&mut self, content: &str) {
-        let ini = crate::script::preprocess::TagIni::parse(content);
-        crate::script::preprocess::install_tag_ini(Some(ini));
+        self.tag_ini = crate::script::TagIni::parse(content);
     }
 
     /// 登记脚本并同步共享视图（供 `e:getScriptBlock` 查询）。
@@ -1362,7 +1362,11 @@ impl Interpreter {
             Arc::clone(&self.scripts[file])
         } else {
             let (text, _, _) = self.config.encoding.decode(&data);
-            Arc::new(Script::parse(file, &text)?)
+            Arc::new(Script::parse_with_tag_ini(
+                file,
+                &text,
+                Some(&self.tag_ini),
+            )?)
         };
         let names: Vec<String> = script.labels.keys().cloned().collect();
         let count = self.macros.load_from_script(&script)?;
@@ -2358,8 +2362,17 @@ mod tests {
         assert_eq!(chara.get("x"), Some("100"));
         assert_eq!(chara.get("y"), Some("200"));
 
-        // 清理全局状态，避免影响其它测试
-        crate::script::preprocess::install_tag_ini(None);
+        let mut other = Interpreter::new(InterpreterConfig::default());
+        other.load_tag_ini("[chara]\n0=name\n");
+        other.load_script("main", content).unwrap();
+        let other_chara = &other.get_script("main").unwrap().instructions[0];
+        assert_eq!(other_chara.get("name"), Some("aya01"));
+        assert!(other_chara.get("file").is_none());
+        interpreter.load_script("again", content).unwrap();
+        assert_eq!(
+            interpreter.get_script("again").unwrap().instructions[0].get("file"),
+            Some("aya01")
+        );
     }
 
     #[test]

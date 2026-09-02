@@ -283,6 +283,8 @@ impl Project {
     /// If the FFI file reader has been registered (Flutter frontend in
     /// control), all script loading is routed through the callback.
     /// Otherwise, files are read directly from disk (standalone mode).
+    /// An optional `tag.ini` is read through the same source and decoded with
+    /// the project's CHARSET before any script is parsed.
     pub fn create_interpreter(&self) -> Interpreter {
         let root = self.root.clone();
         let mut interpreter = Interpreter::new(self.config.to_interpreter_config(Some(&self.root)));
@@ -302,6 +304,16 @@ impl Project {
                 let path = resolve_project_path(&root, name).map_err(to_interpreter_error)?;
                 std::fs::read(&path).map_err(asb_interpreter::Error::from)
             }));
+        }
+
+        let tag_ini = if crate::ffi::file_reader_registered() {
+            crate::ffi::request_file("tag.ini").ok()
+        } else {
+            self.read_file("tag.ini").ok()
+        };
+        if let Some(bytes) = tag_ini {
+            let (text, _, _) = encoding_for_charset(&self.config.charset).decode(&bytes);
+            interpreter.load_tag_ini(&text);
         }
 
         interpreter
@@ -552,6 +564,47 @@ fn to_interpreter_error(error: CoreError) -> asb_interpreter::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_loads_optional_tag_ini_with_script_charset() {
+        let root = std::env::temp_dir().join(format!(
+            "art3m1s-tag-ini-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        for charset in ["UTF-8", "Shift_JIS"] {
+            let encoding = encoding_for_charset(charset);
+            let (table, _, _) = encoding.encode("[立ち絵表示]\n0=st\n1=pos\n2=time\n");
+            let (script, _, _) = encoding.encode("*top\n[&linetag allow=\"1\" prefix=\"#\"]\n#立ち絵表示 character,c,default\n[stop]\n");
+            std::fs::write(root.join("tag.ini"), &table).unwrap();
+            std::fs::write(root.join("boot.txt"), &script).unwrap();
+            let project = Project::open_from_data(
+                &root,
+                &format!("[WINDOWS]\nWIDTH=1280\nHEIGHT=720\nBOOT=boot.txt\nCHARSET={charset}\n"),
+                "windows",
+            )
+            .unwrap();
+            let mut interpreter = project.create_interpreter();
+            project.start_boot(&mut interpreter).unwrap();
+            let picture = &interpreter.get_script("boot.txt").unwrap().instructions[0];
+            assert_eq!(picture.tag, "立ち絵表示");
+            assert_eq!(picture.get("st"), Some("character"));
+            assert_eq!(picture.get("pos"), Some("c"));
+            assert_eq!(picture.get("time"), Some("default"));
+
+            std::fs::remove_file(root.join("tag.ini")).unwrap();
+            let mut without_ini = project.create_interpreter();
+            project.start_boot(&mut without_ini).unwrap();
+            let picture = &without_ini.get_script("boot.txt").unwrap().instructions[0];
+            assert!(picture.get("st").is_none());
+            assert_eq!(picture.get("0"), Some("character"));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn caption_capture_mechanism_grabs_caption_before_stop() {

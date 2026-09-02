@@ -29,6 +29,7 @@ art3m1s-core
 
 - ASB 二进制直接加载，不再经过反编译文本再解析；字符串按配置编码解码。
 - 文本脚本解析：label、tag、Lua block、宏。
+- 行标签：支持 `tag.ini` 分节编号参数表及带前缀的非 ASCII 标签名，参数表按解释器隔离。
 - 控制流：`jump`、`call`、`return`、跨脚本加载。
 - 等待：`stop`、`wait`、`exkey` 等转换为 `ExecutionResult::Wait`。
 - 变量系统：local、`g.*`、`t.*`、`s.*` 四个域。
@@ -65,6 +66,9 @@ Lua 侧注入 `__engine`，并暴露常用 Artemis API：
 直接集成本解释器的宿主应每个逻辑帧先调用 `begin_frame()`，再派发输入和帧回调；
 core 的 `CoreRuntime` 已负责此步骤，不需要 FFI Host 额外调用。存读档回调可通过
 `fire_save_handler_and_flush_with_params()` / `fire_load_handler_with_params()` 传入原始文件名等参数。
+
+直接集成时，在加载脚本前调用 `load_tag_ini()` 设置当前游戏的位置参数表；core 的
+`Project::create_interpreter()` 已通过游戏文件源读取可选 `tag.ini`，并按 `CHARSET` 解码。
 
 `flush_tag_queue()` 支持 queued tag 内的 `Jump` / `Call` / `Return` / `Wait`，并记录 queue wait 来源，避免恢复等待时跳过下一条脚本指令。
 
