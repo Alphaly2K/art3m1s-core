@@ -33,7 +33,7 @@ ctt-astcenc = "0.5"
 asb-interpreter = { path = "crates/asb-interpreter", default-features = false, features = ["backend-lua51"] }
 
 [features]
-default = ["gl-backend"]
+default = ["gl-backend", "experimental-eluna"]
 gl-backend = ["dep:glow", "dep:image", "dep:libloading"]
 experimental-eluna = ["dep:eluna"]
 

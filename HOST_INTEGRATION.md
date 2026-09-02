@@ -22,7 +22,8 @@
 
 - 默认 `gl-backend` feature 提供全部 `art3m1s_runtime_*` 符号。关闭后只剩文件回调、
   配置、caption 探测等非运行时接口，不能通过 C ABI 创建 headless runtime。
-- `experimental-eluna` 可选；只有编入该 feature 才能选择 Eluna。
+- `experimental-eluna` 默认编入，仍可通过关闭默认 features 排除；运行时默认使用内置
+  E-Mote 后端，Host 显式选择后才启用 Eluna。
 - 动态库、ANGLE 和可选媒体库由 Host 打包/加载。媒体库应只加载一份实例，避免重复
   全局状态或 Objective-C 类。构建方式见 [README](README.md#构建)。
 - 当前没有 ABI 版本或功能位查询函数。记录 core 版本/commit；可选功能按完整符号组

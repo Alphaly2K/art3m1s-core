@@ -181,7 +181,8 @@ cargo test
 cargo build --release
 ```
 
-默认构建包含 GL 渲染器。只使用解析器或运行时逻辑时可以关闭它：
+默认构建包含 GL 渲染器和实验性 Eluna 适配器。仅使用不依赖 GPU 的核心模块时可以
+关闭全部默认 features（此时不提供 `art3m1s_runtime_*` C 接口）：
 
 ```bash
 cargo build --no-default-features
@@ -189,20 +190,21 @@ cargo build --no-default-features
 
 ### 实验性 Eluna E-Mote 后端
 
-除默认的 `art3m1s-emote` 外，core 可以选择性编译
-[`xmoezzz/eluna`](https://github.com/xmoezzz/eluna) 适配器：
+除内置的 `art3m1s-emote` 外，默认构建也包含 `experimental-eluna` feature，
+无需额外传入 `--features`。只保留 GL 渲染器和内置 E-Mote 后端时使用：
 
 ```bash
-cargo build --release --features experimental-eluna
+cargo build --release --no-default-features --features gl-backend
 ```
 
-该依赖固定到 commit `12e4d2fa03b64714a83a0363eaadf26a125d9fe6`，通过 Cargo
-git dependency 直接使用，不复制或修改上游源码。此 feature 默认关闭，运行时也默认
-使用内置后端；宿主必须在加载项目之前显式调用
+[`crates/eluna`](crates/eluna/README.md) 是基于
+[`xmoezzz/eluna`](https://github.com/xmoezzz/eluna) commit
+`12e4d2fa03b64714a83a0363eaadf26a125d9fe6` 的仓库内兼容性适配版本，包含性能和渲染修复。
+默认编入不等于默认使用：运行时仍选择内置后端，宿主必须在加载项目之前显式调用
 `art3m1s_runtime_set_emote_backend(..., 1)` 才会切换。
 
-Eluna 仓库当前没有附带许可证正文，虽然 crate metadata 声明了 `MPL-2.0`，但在上游
-补全可核验的许可证文件前，本路径只用于本地兼容性试验，不应进入正式分发构建。
+仓库内 Eluna crate 声明 `MPL-2.0`，许可证正文见
+[`crates/eluna/LICENSE`](crates/eluna/LICENSE)。
 
 Flutter 和 iOS 打包方式见宿主仓库。iOS 构建会自动选择 Luau，桌面和 Android 构建
 会选择 Lua 5.1。
