@@ -262,6 +262,55 @@ mod tests {
     }
 
     #[test]
+    fn pass_through_filters_run_registered_macros() {
+        use crate::{Interpreter, InterpreterConfig};
+        for compiled in [false, true] {
+            for result in ["0", "nil", "false", "1", "replacement"] {
+                let data = if compiled {
+                    fixture(&[
+                        ("picture", None),
+                        ("var", Some(&[("name", "t.picture"), ("data", "$file")])),
+                        ("return", Some(&[])),
+                    ])
+                } else {
+                    b"*picture\n[var name=\"t.picture\" data=\"$file\"]\n[return]\n".to_vec()
+                };
+                let mut it = Interpreter::new(InterpreterConfig::default());
+                it.set_file_loader(Box::new(move |_| Ok(data.clone())));
+                it.load_macro_file("macros").unwrap();
+                let body = if result == "replacement" {
+                    "e:enqueueTag{\"picture\", file=p.file}; return 1".into()
+                } else {
+                    format!("return {result}")
+                };
+                it.lua()
+                    .load(format!(
+                        r#"
+                    __engine:setTagFilter({{picture = function(e, p)
+                        filter_calls = (filter_calls or 0) + 1
+                        assert(p.file == "bg/room")
+                        {body}
+                    end}})
+                "#
+                    ))
+                    .exec()
+                    .unwrap();
+                it.set_variable("t.file", crate::Value::String("bg/room".into()));
+                it.load_script("main", "[picture file=\"$t.file\"]\n[stop]")
+                    .unwrap();
+                it.start("main", "").unwrap();
+                it.run().unwrap();
+                assert_eq!(it.lua().globals().get::<i32>("filter_calls").unwrap(), 1);
+                if result == "1" {
+                    assert!(it.get_variable("t.picture").is_none());
+                } else {
+                    assert_eq!(it.get_variable("t.picture").unwrap().as_string(), "bg/room");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn compiled_macro_arguments_do_not_leak_across_nested_calls() {
         use crate::{Interpreter, InterpreterConfig};
         let data = fixture(&[

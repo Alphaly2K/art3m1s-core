@@ -1498,8 +1498,12 @@ impl Interpreter {
             self.sync_script_state_to_engine();
             let filter_decision =
                 self.dispatch_lua_tag_filter(&instruction.tag, &instruction.params)?;
+            // A pass-through filter can decorate a registered macro as well
+            // as a builtin. Only filter-only tags have no default handler.
             if filter_decision == LuaTagFilterDecision::Consume
-                || (!has_builtin && filter_decision != LuaTagFilterDecision::Missing)
+                || (!has_builtin
+                    && !self.macros.contains(&instruction.tag)
+                    && filter_decision != LuaTagFilterDecision::Missing)
             {
                 return Ok(TagResult::Continue);
             }
