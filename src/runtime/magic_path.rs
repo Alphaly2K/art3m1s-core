@@ -15,10 +15,17 @@ pub type MagicPathTable = Mutex<HashMap<String, String>>;
 /// registered, Artemis image assets conventionally fall back to `image/rest`.
 pub fn resolve_path(table: &MagicPathTable, name: &str) -> String {
     if let Some(rest) = name.strip_prefix(':') {
-        let (ns, tail) = rest.split_once('/').unwrap_or((rest, ""));
+        // Artemis accepts either separator after the magic word. Keep plain
+        // paths untouched; only normalize the expanded virtual path here.
+        let rest = rest.replace('\\', "/");
+        let (ns, tail) = rest.split_once('/').unwrap_or((&rest, ""));
         let map = table.lock().unwrap();
         if let Some(prefix) = map.get(ns) {
-            return format!("{prefix}/{tail}");
+            let prefix = prefix.replace('\\', "/");
+            if tail.is_empty() {
+                return prefix;
+            }
+            return format!("{}/{tail}", prefix.trim_end_matches('/'));
         }
         return format!("image/{rest}");
     }
@@ -48,5 +55,25 @@ mod tests {
         let table = MagicPathTable::new(HashMap::new());
 
         assert_eq!(resolve_path(&table, "voice/line001"), "voice/line001");
+    }
+
+    #[test]
+    fn resolves_either_separator_without_doubling_the_join() {
+        let table = MagicPathTable::new(HashMap::from([
+            ("bg".into(), "_data\\image\\background\\".into()),
+            ("title".into(), "_data/image/title.png".into()),
+            ("root".into(), "/".into()),
+        ]));
+        assert_eq!(
+            resolve_path(&table, r":bg\day\room"),
+            "_data/image/background/day/room"
+        );
+        assert_eq!(
+            resolve_path(&table, ":bg/day/room"),
+            "_data/image/background/day/room"
+        );
+        assert_eq!(resolve_path(&table, ":title"), "_data/image/title.png");
+        assert_eq!(resolve_path(&table, ":root/image.png"), "/image.png");
+        assert_eq!(resolve_path(&table, r"plain\file.png"), r"plain\file.png");
     }
 }

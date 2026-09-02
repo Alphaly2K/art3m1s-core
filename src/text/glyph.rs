@@ -71,11 +71,17 @@ impl Atlas {
         }
     }
     fn flush(&mut self, p: &mut dyn TextureProvider) -> Option<(TextureId, TextureInfo)> {
+        // The atlas is generated, never a game asset. Before any glyph is
+        // allocated there is no texture for the provider to resolve.
+        if self.rows.is_empty() {
+            return None;
+        }
         if self.dirty {
-            if let Some(r) = p.upload_rgba_render_only(&self.name, ATLAS_SZ, ATLAS_SZ, &self.px) {
+            let uploaded = p.upload_rgba_render_only(&self.name, ATLAS_SZ, ATLAS_SZ, &self.px);
+            if uploaded.is_some() {
                 self.dirty = false;
-                return Some(r);
             }
+            return uploaded;
         }
         p.resolve(&self.name)
     }
@@ -1011,6 +1017,14 @@ impl TextRenderer for GlyphTextRenderer {
         &mut self,
         p: &mut dyn TextureProvider,
     ) -> HashMap<String, Vec<DrawCommand>> {
+        if self
+            .state
+            .layers
+            .values()
+            .all(|layer| layer.text_buffer.is_empty())
+        {
+            return HashMap::new();
+        }
         // link type=0 hover 需要白色方形板：必须在 flush 之前写入 atlas，
         // 否则当帧分配的白块要到下一帧才被上传。
         let links_enabled = self.state.links_enabled;
@@ -1562,6 +1576,39 @@ mod tests {
             renderer.retained_texture_names(),
             vec![ATLAS_NAME.to_string(), format!("{ATLAS_NAME}/1")]
         );
+    }
+
+    #[test]
+    fn empty_and_failed_atlas_uploads_never_request_game_assets() {
+        use crate::render_pipeline::draw::{TextureInfo, TextureProvider};
+        struct UploadOnly(bool);
+        impl TextureProvider for UploadOnly {
+            fn resolve(&mut self, name: &str) -> Option<(TextureId, TextureInfo)> {
+                panic!("unexpected external resource lookup: {name}");
+            }
+            fn upload_rgba(
+                &mut self,
+                _: &str,
+                width: u32,
+                height: u32,
+                _: &[u8],
+            ) -> Option<(TextureId, TextureInfo)> {
+                self.0
+                    .then_some((TextureId(1), TextureInfo { width, height }))
+            }
+        }
+        let mut renderer = GlyphTextRenderer::new();
+        let mut provider = UploadOnly(false);
+        assert!(renderer.build_text_commands(&mut provider).is_empty());
+        let atlas = &mut renderer.atlases[0];
+        assert!(atlas.flush(&mut provider).is_none());
+        let (x, y) = atlas.alloc(1, 1).unwrap();
+        atlas.write(x, y, 1, 1, &[255; 4]);
+        assert!(atlas.flush(&mut provider).is_none());
+        assert!(atlas.dirty);
+        provider.0 = true;
+        assert!(atlas.flush(&mut provider).is_some());
+        assert!(!atlas.dirty);
     }
 
     #[test]
