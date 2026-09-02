@@ -4,7 +4,7 @@
 脚本、维护游戏状态和图层树、渲染文本与特效，并通过稳定的 C FFI 向宿主输出离屏
 RGBA 帧。
 
-当前版本为 **0.2.2**。生产宿主是 Flutter 项目
+当前版本为 **0.3.0**。生产宿主是 Flutter 项目
 [Art3m1s](https://github.com/Alphaly2K/art3m1s)；core 本身不创建窗口，也不直接
 访问用户文件系统或承担音视频解码。
 
@@ -101,9 +101,6 @@ Ruby 始终保持 `RubyStart(reading) -> ScenarioText(base) -> RubyEnd` 的事�
 计算。
 
 ## ASB/IET 兼容层
-
-0.2 开发周期包含 Fable 对解释器、运行时、合成器和文本系统进行的大规模兼容性
-补全，扩展的 Artemis 功能包括：
 
 - 队列标签、跳转/调用/返回、等待、停止/恢复和内联事件栈帧；
 - 文本页、链接、backlog、已读状态、自动模式和快进；
@@ -216,7 +213,6 @@ Flutter 和 iOS 打包方式见宿主仓库。iOS 构建会自动选择 Luau，�
 - E-Mote 当前针对已测试游戏使用的 PSB/model 变体。部分私有 easing、pass/step
   行为和外部纹理格式仍未完整支持。
 - HTTP、native call、浏览器打开和振动等宿主服务只有在嵌入应用实现相应回调后才可用。
-- RGBA 回读接口以简单和跨平台为优先，目前不是零拷贝的画面呈现路径。
 
 版本详情见 [CHANGELOG.md](CHANGELOG.md)
 
