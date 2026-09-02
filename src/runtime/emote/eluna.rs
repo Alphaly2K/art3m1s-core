@@ -7,6 +7,9 @@ use glam::{Affine2, Vec2};
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex, mpsc};
 
+#[path = "eluna_mesh.rs"]
+mod mesh;
+
 use crate::render_pipeline::draw::{
     BlendMode, ClipRect, ColorFilter, DrawCommand, DrawMesh, NativeEmoteMaterial, StencilMetadata,
     TextureId, TextureInfo, TextureProvider,
@@ -240,9 +243,20 @@ impl ElunaEmoteInstance {
         sprite: &EmoteStaticSprite,
         layer_transform: Affine2,
     ) -> Option<DrawCommand> {
+        let mask_labels = sprite
+            .draw_frame_info
+            .parent_mask_path
+            .as_ref()
+            .or(sprite.draw_frame_info.stencil_parent_path.as_ref())
+            .and_then(|owner| scene.composite_mask_owners.get(owner));
+        // An existing composite owner with no active sources is an empty
+        // alpha mask, not an instruction to draw the child without a mask.
+        if mask_labels.is_some_and(Vec::is_empty) {
+            return None;
+        }
         let texture = self.textures.get(&sprite.texture_resource_index)?;
         let (texture_id, texture_info) = texture.gpu?;
-        let has_mesh = sprite.mesh.is_some();
+        let has_mesh = sprite.mesh.is_some() || !sprite.mesh_deformer_chain.is_empty();
         // `world_transform` is the complete Eluna layer transform for this
         // sprite. Keep it in the DrawCommand transform and leave mesh points
         // in the sprite's local icon space; the GL backend applies the command
@@ -256,7 +270,9 @@ impl ElunaEmoteInstance {
                     uv_scale: [1.0, 1.0],
                     quad_size: [1.0, 1.0],
                 },
-                Some(sprite_mesh(sprite)),
+                Some(DrawMesh {
+                    vertices: mesh::sprite_vertices(sprite, layer_transform * sprite_transform),
+                }),
             )
         } else {
             (
@@ -272,14 +288,6 @@ impl ElunaEmoteInstance {
                 None,
             )
         };
-        let mask_labels = sprite
-            .draw_frame_info
-            .parent_mask_path
-            .as_ref()
-            .or(sprite.draw_frame_info.stencil_parent_path.as_ref())
-            .and_then(|owner| scene.composite_mask_owners.get(owner))
-            .cloned()
-            .unwrap_or_default();
         Some(DrawCommand {
             texture: texture_id,
             size: texture_info,
@@ -296,7 +304,7 @@ impl ElunaEmoteInstance {
             stencil: Some(StencilMetadata {
                 namespace: self.generation,
                 source_label: sprite.draw_frame_info.path.clone(),
-                mask_labels,
+                mask_labels: mask_labels.cloned().unwrap_or_default(),
             }),
             native_emote: Some(native_emote_material(sprite)),
         })
@@ -478,89 +486,38 @@ fn apply_worker_command(
     Ok(())
 }
 
-fn sprite_mesh(sprite: &EmoteStaticSprite) -> DrawMesh {
-    let (division_x, division_y) = sprite.mesh_divisions();
-    let division_x = division_x as usize;
-    let division_y = division_y as usize;
-    let vertex = |x: usize, y: usize| {
-        let u = x as f32 / division_x as f32;
-        let v = y as f32 / division_y as f32;
-        // Mesh vertices are local pixels. `draw_command` supplies the full
-        // sprite/world affine separately; baking world coordinates here would
-        // make the GL backend apply parent transforms a second time.
-        let position = sprite.local_point(u, v);
-        [
-            position[0],
-            position[1],
-            sprite.uv_left + (sprite.uv_right - sprite.uv_left) * u,
-            sprite.uv_top + (sprite.uv_bottom - sprite.uv_top) * v,
-        ]
-    };
-
-    let mut vertices = Vec::with_capacity(division_x * division_y * 6);
-    for y in 0..division_y {
-        for x in 0..division_x {
-            let top_left = vertex(x, y);
-            let bottom_left = vertex(x, y + 1);
-            let top_right = vertex(x + 1, y);
-            let bottom_right = vertex(x + 1, y + 1);
-            vertices.extend_from_slice(&[
-                top_left,
-                bottom_left,
-                top_right,
-                top_right,
-                bottom_left,
-                bottom_right,
-            ]);
-        }
-    }
-    DrawMesh { vertices }
-}
-
 fn sprite_affine(sprite: &EmoteStaticSprite) -> Affine2 {
-    let left = sprite.left();
-    let top = sprite.top();
-    let origin = transform_sprite_point(sprite, [left, top]);
-    let x_axis = {
-        let p = transform_sprite_point(sprite, [left + sprite.width, top]);
-        Vec2::new(p[0] - origin[0], p[1] - origin[1]) / sprite.width.max(1.0)
-    };
-    let y_axis = {
-        let p = transform_sprite_point(sprite, [left, top + sprite.height]);
-        Vec2::new(p[0] - origin[0], p[1] - origin[1]) / sprite.height.max(1.0)
-    };
-    Affine2::from_cols(x_axis, y_axis, Vec2::new(origin[0], origin[1]))
-}
-
-fn transform_sprite_point(sprite: &EmoteStaticSprite, point: [f32; 2]) -> [f32; 2] {
-    let scale_x = if sprite.scale_x.is_finite() {
-        sprite.scale_x
-    } else {
-        1.0
-    };
-    let scale_y = if sprite.scale_y.is_finite() {
-        sprite.scale_y
-    } else {
-        1.0
-    };
+    let world = sprite.world_transform;
+    let world_affine = Affine2::from_cols(
+        Vec2::new(world[0], world[2]),
+        Vec2::new(world[1], world[3]),
+        Vec2::new(world[4], world[5]),
+    );
+    // Atlas icons are drawn from a top-left quad and pivot around originX/Y.
+    // Frame-local scale/rotation therefore acts on `(p - origin)` before the
+    // already-resolved world transform is applied.
+    let origin = Vec2::new(-sprite.left(), -sprite.top());
+    let scale = Vec2::new(
+        if sprite.scale_x.is_finite() {
+            sprite.scale_x
+        } else {
+            1.0
+        },
+        if sprite.scale_y.is_finite() {
+            sprite.scale_y
+        } else {
+            1.0
+        },
+    );
     let angle = if sprite.rotation_degrees.is_finite() {
         sprite.rotation_degrees.to_radians()
     } else {
         0.0
     };
-    let cos = angle.cos();
-    let sin = angle.sin();
-    let dx = (point[0] - sprite.center_x) * scale_x;
-    let dy = (point[1] - sprite.center_y) * scale_y;
-    let local = [
-        sprite.center_x + dx * cos - dy * sin,
-        sprite.center_y + dx * sin + dy * cos,
-    ];
-    let matrix = sprite.world_transform;
-    [
-        matrix[0] * local[0] + matrix[1] * local[1] + matrix[4],
-        matrix[2] * local[0] + matrix[3] * local[1] + matrix[5],
-    ]
+    world_affine
+        * Affine2::from_angle(angle)
+        * Affine2::from_scale(scale)
+        * Affine2::from_translation(-origin)
 }
 
 fn native_emote_material(sprite: &EmoteStaticSprite) -> NativeEmoteMaterial {
@@ -739,6 +696,133 @@ fn rgb565(value: u16) -> [u8; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "gl-backend"))]
+    #[ignore = "requires EMOTE_TEST_MODEL pointing at a NekoMiko PSB"]
+    fn model_blink_reaches_eyelids_and_renders_distinct_frames() {
+        use crate::backend::gl::{GlRenderer, GlTextureProvider, ShaderProfile, platform};
+        use crate::render_pipeline::draw::{DrawList, Renderer};
+        use glow::HasContext;
+
+        let path = std::env::var("EMOTE_TEST_MODEL").unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let mut options = EmoteLoadOptions {
+            autoplay_timeline: false,
+            ..Default::default()
+        };
+        if let Some(key) = infer_emote_header_key(&bytes) {
+            options = options.with_emote_key(key);
+        }
+        let mut runtime = EmoteRuntime::from_bytes(&bytes, options).unwrap();
+        runtime.set_physics_enabled(false);
+        let mut instance = ElunaEmoteInstance::new(1, &path, &bytes, 1024, 1024).unwrap();
+        let centers = runtime
+            .sprites()
+            .iter()
+            .filter(|s| s.label.as_deref() == Some("mabuta"))
+            .map(|s| sprite_affine(s).transform_point2(Vec2::new(s.width * 0.5, s.height * 0.5)))
+            .collect::<Vec<_>>();
+        assert_eq!(centers.len(), 2);
+        instance.transform.origin = ((centers[0] + centers[1]) * 0.5).to_array();
+        instance.transform.scale = 1.0;
+        let (gl, _context, _) =
+            platform::create_offscreen_context(platform::GfxBackend::Cgl, 1024, 1024).unwrap();
+        let mut renderer =
+            GlRenderer::new(gl.clone(), 1024, 1024, ShaderProfile::GlCore330).unwrap();
+        let mut textures = GlTextureProvider::new(gl.clone());
+        let (fbo, color) = unsafe { platform::create_fbo_target(&gl, 1024, 1024).unwrap() };
+        let mut previous_pixels = None;
+        let mut previous_icons = Vec::new();
+        let mut captures = 0;
+        for _ in 0..1200 {
+            runtime.progress_ticks(1.0).unwrap();
+            let eye = runtime.inner_player().evaluated_variable_values()["face_eye_open"];
+            let wanted = if captures == 1 { 10.0 } else { 0.0 };
+            if eye != wanted {
+                continue;
+            }
+            let lids = runtime
+                .sprites()
+                .iter()
+                .filter(|s| s.label.as_deref() == Some("mabuta"))
+                .collect::<Vec<_>>();
+            assert_eq!(lids.len(), 2);
+            assert!(
+                lids.iter()
+                    .all(|s| s.visible && s.draw_frame_info.local_time_ticks == Some(eye + 10.0))
+            );
+            let whites = runtime
+                .sprites()
+                .iter()
+                .filter(|s| s.label.as_deref() == Some("shirome"))
+                .collect::<Vec<_>>();
+            assert_eq!(whites.len(), 2);
+            assert!(whites.iter().all(|s| s.visible == (captures != 1)));
+            let icons = lids.iter().map(|s| s.icon_name.clone()).collect::<Vec<_>>();
+            if captures > 0 {
+                assert_ne!(icons, previous_icons);
+            }
+            previous_icons = icons;
+            instance.scene = Arc::new(runtime.scene().clone());
+            let mut frame = DrawList::new();
+            for command in instance
+                .build_commands(&mut textures, &mut HashSet::new())
+                .unwrap()
+            {
+                frame.push(command);
+            }
+            frame.materialize_stencil_groups(crate::render_pipeline::shader::ALPHA_MASK_SHADER);
+            assert!(
+                frame.commands.len() > 20,
+                "the rest of the model must remain visible"
+            );
+            if captures == 1 {
+                assert!(
+                    frame
+                        .commands
+                        .iter()
+                        .all(|command| command.stencil.as_ref().is_none_or(|s| {
+                            !s.source_label.ends_with("/eye_L")
+                                && !s.source_label.ends_with("/eye_R")
+                        })),
+                    "an empty white-eye mask must not expose unmasked pupils"
+                );
+            }
+            unsafe {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+            }
+            renderer.render(&frame);
+            unsafe {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+            }
+            let pixels = unsafe { platform::read_pixels(&gl, 1024, 1024) };
+            assert!(pixels.chunks_exact(4).any(|p| p[3] != 0));
+            if let Ok(output) = std::env::var("EMOTE_TEST_OUTPUT") {
+                image::save_buffer(
+                    format!("{output}/blink-{captures}.png"),
+                    &pixels,
+                    1024,
+                    1024,
+                    image::ColorType::Rgba8,
+                )
+                .unwrap();
+            }
+            if let Some(previous) = &previous_pixels {
+                assert!(&pixels != previous);
+            }
+            previous_pixels = Some(pixels);
+            captures += 1;
+            if captures == 3 {
+                break;
+            }
+        }
+        assert_eq!(captures, 3, "expected open, closed and reopened frames");
+        unsafe {
+            gl.delete_framebuffer(fbo);
+            gl.delete_texture(color);
+        }
+    }
 
     #[test]
     fn worker_accumulates_elapsed_time_and_wakes_for_each_host_batch() {

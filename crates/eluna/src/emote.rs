@@ -102,6 +102,12 @@ pub struct EmoteMeshPatch {
 }
 
 impl EmoteMeshPatch {
+    pub fn is_identity(&self) -> bool {
+        self.control_points.iter().enumerate().all(|(i, point)| {
+            *point == [(i % 4) as f32 / 3.0, (i / 4) as f32 / 3.0]
+        })
+    }
+
     pub fn identity(division_x: u32, division_y: u32) -> Self {
         let mut control_points = [[0.0; 2]; 16];
         for row in 0..4 {
@@ -752,7 +758,39 @@ impl EmoteStaticSprite {
         if let Some(mesh) = &self.mesh {
             point = self.deform_local_point(mesh, point);
         }
+        // Shape-sync meshes owned by ancestor layers are applied from the
+        // nearest ancestor outward. Their domains are authored in the
+        // ancestor's local pixel space; do not extrapolate a child point that
+        // lies outside that domain, since cubic extrapolation can throw eyes
+        // and brows far away during the first frames of a body motion.
+        for mesh in self.mesh_deformer_chain.iter().rev() {
+            point = self.deform_inherited_point(mesh, point);
+        }
         point
+    }
+
+    fn deform_inherited_point(&self, mesh: &EmoteMeshPatch, point: [f32; 2]) -> [f32; 2] {
+        let Some([left, top, width, height]) = mesh.domain else {
+            return point;
+        };
+        if !width.is_finite()
+            || !height.is_finite()
+            || width.abs() <= f32::EPSILON
+            || height.abs() <= f32::EPSILON
+        {
+            return point;
+        }
+        let u = (point[0] - left) / width;
+        let v = (point[1] - top) / height;
+        if !u.is_finite()
+            || !v.is_finite()
+            || !(0.0..=1.0).contains(&u)
+            || !(0.0..=1.0).contains(&v)
+        {
+            return point;
+        }
+        let mapped = mesh.sample(u, v);
+        [left + mapped[0] * width, top + mapped[1] * height]
     }
 
     fn deform_local_point(&self, mesh: &EmoteMeshPatch, point: [f32; 2]) -> [f32; 2] {
@@ -776,9 +814,15 @@ impl EmoteStaticSprite {
     }
 
     pub fn mesh_divisions(&self) -> (u32, u32) {
-        self.mesh
+        let mut divisions = self
+            .mesh
             .map(|mesh| (mesh.division_x.max(1), mesh.division_y.max(1)))
-            .unwrap_or((1, 1))
+            .unwrap_or((1, 1));
+        for mesh in &self.mesh_deformer_chain {
+            divisions.0 = divisions.0.max(mesh.division_x.max(1));
+            divisions.1 = divisions.1.max(mesh.division_y.max(1));
+        }
+        divisions
     }
 
     pub fn bounds_rect(&self) -> (f32, f32, f32, f32) {
@@ -821,10 +865,31 @@ impl EmoteStaticSprite {
                 self.bottom(),
             );
         }
-        // Parent deformer chains are retained for diagnostics and the native
-        // Shape/Camera position pass. Sprite bounds use the resolved rectangle
-        // until each ancestor's translation/rotation is represented.
-        bounds_after_sprite_transform(self, self.left(), self.top(), self.right(), self.bottom())
+        // Sample a small grid when ancestor shape-sync meshes are present.
+        // Four corners are insufficient for a cubic warp and can under-report
+        // the visible bounds during a body motion.
+        let mut bounds = None;
+        for y in 0..=2 {
+            for x in 0..=2 {
+                let u = x as f32 / 2.0;
+                let v = y as f32 / 2.0;
+                let point = transform_emote_sprite_point(self, self.local_point(u, v));
+                let entry = bounds.get_or_insert((point[0], point[1], point[0], point[1]));
+                entry.0 = entry.0.min(point[0]);
+                entry.1 = entry.1.min(point[1]);
+                entry.2 = entry.2.max(point[0]);
+                entry.3 = entry.3.max(point[1]);
+            }
+        }
+        bounds.unwrap_or_else(|| {
+            bounds_after_sprite_transform(
+                self,
+                self.left(),
+                self.top(),
+                self.right(),
+                self.bottom(),
+            )
+        })
     }
 }
 
@@ -1146,7 +1211,15 @@ impl EmoteModelSchema {
             .and_then(PsbValue::as_list)
             .ok_or(EmoteSchemaError::MissingBaseObject)?;
 
-        let effective_time = effective_motion_time(motion, time_ticks);
+        let effective_time = motion_sample_time(
+            motion,
+            motion
+                .field("parameter")
+                .and_then(PsbValue::as_list)
+                .or(root_parameter_table),
+            variables,
+            time_ticks,
+        );
         let mut sprites = Vec::new();
         let mut layer_states = Vec::new();
         let mut frame_runtime_states = BTreeMap::<String, DynamicFrameState>::new();
@@ -3135,8 +3208,13 @@ fn build_sprite(
         uv_top: icon.top / texture.height as f32,
         uv_right: (icon.left + width) / texture.width as f32,
         uv_bottom: (icon.top + height) / texture.height as f32,
-        mesh: ctx.mesh_patch,
-        mesh_deformer_chain: ctx.mesh_deformer_chain.clone(),
+        mesh: ctx.mesh_patch.filter(|mesh| !mesh.is_identity()),
+        mesh_deformer_chain: ctx
+            .mesh_deformer_chain
+            .iter()
+            .copied()
+            .filter(|mesh| !mesh.is_identity())
+            .collect(),
         draw_frame_info: draw_frame_info(label, ctx),
     })
 }
@@ -3686,6 +3764,19 @@ fn effective_motion_time(motion: &PsbValue, time_ticks: f32) -> f32 {
     } else {
         last_time
     }
+}
+
+fn motion_sample_time(
+    motion: &PsbValue,
+    parameters: Option<&[PsbValue]>,
+    variables: &BTreeMap<String, f32>,
+    time_ticks: f32,
+) -> f32 {
+    // Motions can bind a parameter just like individual layers. Unbound
+    // children inherit this clock (e.g. the eyelid and its white-eye mask).
+    let fallback = effective_motion_time(motion, time_ticks);
+    layer_parameter_eval(motion, parameters, variables, &[], fallback)
+        .map_or(fallback, |eval| eval.local_time_ticks)
 }
 
 fn motion_duration_ticks(motion: &PsbValue) -> Option<f32> {
@@ -4601,7 +4692,10 @@ fn layer_parameter_eval(
     _frame_list: &[PsbValue],
     fallback_time_ticks: f32,
 ) -> Option<LayerParameterEval> {
-    if let Some(parameterize) = layer.field("parameterize") {
+    if let Some(parameterize) = layer
+        .field("parameterize")
+        .filter(|value| !matches!(value, PsbValue::Null))
+    {
         let Some(parameter) = resolve_parameterize(parameterize, parameter_table) else {
             return Some(LayerParameterEval {
                 id: None,
@@ -4803,6 +4897,23 @@ fn patch_with_domain(mut patch: EmoteMeshPatch, domain: Option<[f32; 4]>) -> Emo
         patch.domain = domain;
     }
     patch
+}
+
+fn frame_mesh_domain(
+    state: &DynamicFrameState,
+    textures: &BTreeMap<String, EmoteTextureSource>,
+) -> Option<[f32; 4]> {
+    let icon_name = state.icon.as_deref()?;
+    if let Some(domain) = parse_mesh_domain_icon(icon_name) {
+        return Some(domain);
+    }
+    let icon = textures.get(state.src.as_deref()?)?.icons.get(icon_name)?;
+    Some([
+        -icon.origin_x,
+        -icon.origin_y,
+        icon.resolved_width(),
+        icon.resolved_height(),
+    ])
 }
 
 fn frame_runtime_state_key(motion_name: &str, path: &str) -> String {
@@ -5061,7 +5172,11 @@ fn travel_layer_at<'a>(
         // descendants and nested motion contexts before either traversal
         // path captures `child_ctx`.
         if let Some(mesh) = child_ctx.mesh_patch.take() {
-            child_ctx.mesh_deformer_chain.push(mesh);
+            // A textured mesh owns the same pixel domain as its atlas icon.
+            // Retain it when passing shape deformation to smaller child icons.
+            child_ctx
+                .mesh_deformer_chain
+                .push(patch_with_domain(mesh, frame_mesh_domain(&state, textures)));
         }
 
         if let Some(src) = state.src.as_deref().filter(|src| !src.is_empty()) {
@@ -5116,7 +5231,7 @@ fn travel_layer_at<'a>(
                                 1.0,
                                 1.0,
                                 0.0,
-                                visible,
+                                visible && state.serialized_frame_type != 0,
                                 255.0,
                                 state.blend_mode,
                                 state.blend_parameter,
@@ -7060,7 +7175,7 @@ fn recurse_motion_at(
         .field("parameter")
         .and_then(PsbValue::as_list)
         .or(parameter_table);
-    let effective_time = effective_motion_time(motion, time_ticks);
+    let effective_time = motion_sample_time(motion, motion_parameter_table, variables, time_ticks);
     let priority_ranks = Arc::new(motion_priority_ranks(motion, effective_time));
     let scope_start = layer_states.len();
     let sprite_scope_start = out.len();
@@ -7374,6 +7489,58 @@ mod tests {
         assert!((bounds.1 - 5.0).abs() < 1.0e-4);
         assert!((bounds.2 - 40.0).abs() < 1.0e-4);
         assert!((bounds.3 - 15.0).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn textured_shape_owner_supplies_domain_to_smaller_child() {
+        let texture = EmoteTextureSource {
+            name: "atlas".into(),
+            resource_index: 0,
+            width: 512,
+            height: 512,
+            format: None,
+            compress: None,
+            bit_count: None,
+            icons: BTreeMap::from([("lid".into(), EmoteTextureIcon {
+                texture_name: "atlas".into(),
+                name: "lid".into(),
+                left: 300.0,
+                top: 100.0,
+                width: 200.0,
+                height: 100.0,
+                origin_x: 100.0,
+                origin_y: 50.0,
+                resolution: 1.0,
+                attr: None,
+            })]),
+        };
+        let state = DynamicFrameState {
+            src: Some("atlas".into()),
+            icon: Some("lid".into()),
+            ..DynamicFrameState::default()
+        };
+        let domain = frame_mesh_domain(&state, &BTreeMap::from([("atlas".into(), texture)]));
+        assert_eq!(domain, Some([-100.0, -50.0, 200.0, 100.0]));
+        let mut mesh = EmoteMeshPatch::identity(20, 20);
+        for p in &mut mesh.control_points {
+            p[1] += 0.1;
+        }
+        let mut child = test_runtime_sprite("lid/white", &[0], "white");
+        child.width = 80.0;
+        child.height = 40.0;
+        child.mesh_deformer_chain.push(patch_with_domain(mesh, domain));
+        assert!((child.local_point(0.5, 0.5)[1] - 10.0).abs() < 1.0e-4);
+        // Out-of-domain siblings must retain the position fix's boundary guard.
+        child.center_x = 1000.0;
+        assert_eq!(child.local_point(0.5, 0.5), [1000.0, 0.0]);
+    }
+
+    #[test]
+    fn identity_detection_does_not_drop_small_authored_deformations() {
+        let mut mesh = EmoteMeshPatch::identity(20, 20);
+        assert!(mesh.is_identity());
+        mesh.control_points[5][1] += 1.0e-6;
+        assert!(!mesh.is_identity());
     }
 
     fn test_layer(label: &str, children: Vec<PsbValue>) -> PsbValue {
@@ -8047,6 +8214,41 @@ mod tests {
         assert_eq!(eval.id, None);
         assert_eq!(eval.value, None);
         assert!((eval.local_time_ticks - 37.5).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn null_parameter_binding_inherits_motion_time() {
+        let layer = PsbValue::Object(vec![("parameterize".to_owned(), PsbValue::Null)]);
+        let frames = vec![
+            test_frame(0.0, 2, test_content(vec![("icon", PsbValue::String("open".into()))])),
+            test_frame(20.0, 2, test_content(vec![("icon", PsbValue::String("closed".into()))])),
+        ];
+        let eval = layer_parameter_eval(&layer, None, &BTreeMap::new(), &frames, 20.0).unwrap();
+        assert_eq!(eval.id, None);
+        assert_eq!(eval.local_time_ticks, 20.0);
+        let frame = evaluate_frame_list(&frames, eval.local_time_ticks, None, 0, None);
+        assert_eq!(frame.icon.as_deref(), Some("closed"));
+    }
+
+    #[test]
+    fn parameterized_motion_drives_unbound_children_independently_of_wall_time() {
+        let motion = PsbValue::Object(vec![("parameterize".into(), PsbValue::Int(0))]);
+        let parameters = vec![test_content(vec![
+            ("id", PsbValue::String("blink".into())),
+            ("rangeBegin", PsbValue::Int(-10)),
+            ("rangeEnd", PsbValue::Int(50)),
+            ("division", PsbValue::Int(60)),
+        ])];
+        let layer = test_content(vec![("parameterize", PsbValue::Null)]);
+        for (value, expected) in [(0.0, 10.0), (5.0, 15.0), (10.0, 20.0), (0.0, 10.0)] {
+            let variables = BTreeMap::from([("blink".into(), value)]);
+            for wall_time in [0.0, 200.0, 1000.0] {
+                let time = motion_sample_time(&motion, Some(&parameters), &variables, wall_time);
+                assert_eq!(time, expected);
+                let sample = layer_parameter_eval(&layer, Some(&parameters), &variables, &[], time).unwrap();
+                assert_eq!(sample.local_time_ticks, expected);
+            }
+        }
     }
 
     #[test]
