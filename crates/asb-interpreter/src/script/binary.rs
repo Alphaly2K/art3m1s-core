@@ -350,4 +350,97 @@ mod tests {
         assert_eq!(it.get_variable("t.outer_id").unwrap().as_string(), "100.6");
         assert!(it.get_variable("id").is_none());
     }
+
+    #[test]
+    fn removing_event_marker_preserves_compiled_handler_arguments() {
+        use crate::{CallFrame, CallbackResult, Event, Interpreter, InterpreterConfig};
+        let data = fixture(&[
+            ("handler", None),
+            (
+                "var",
+                Some(&[("name", "t.received"), ("data", "$destination")]),
+            ),
+            ("return", Some(&[])),
+        ]);
+        let mut it = Interpreter::new(InterpreterConfig::default());
+        it.set_file_loader(Box::new(move |_| Ok(data.clone())));
+        it.load_macro_file("macros.iet").unwrap();
+        it.load_script("main", "[stop]").unwrap();
+        it.start("main", "").unwrap();
+        it.set_callback(|event| match event {
+            Event::Wait { .. } => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        it.run().unwrap();
+        it.restore_position(
+            "main",
+            0,
+            vec![CallFrame {
+                script: "main".into(),
+                return_line: 0,
+            }],
+        )
+        .unwrap();
+        it.engine_context().lock().unwrap().tag_queue.push((
+            "handler".into(),
+            std::collections::HashMap::from([("destination".into(), "settings".into())]),
+        ));
+        let drain = it.drain_queued_tags_only().unwrap();
+        assert!(drain.saw_call);
+        it.remove_call_frame(0).unwrap();
+        assert_eq!(
+            it.get_variable("destination").unwrap().as_string(),
+            "settings"
+        );
+        it.run().unwrap();
+        assert_eq!(
+            it.get_variable("t.received").unwrap().as_string(),
+            "settings"
+        );
+        assert!(it.get_variable("destination").is_none());
+        assert!(it.call_stack().is_empty());
+        assert_eq!(it.current_script(), Some("main"));
+        assert_eq!(it.current_line(), 0);
+    }
+
+    #[test]
+    fn text_from_shared_macro_keeps_each_callers_source() {
+        use crate::{CallbackResult, Event, Interpreter, InterpreterConfig};
+        use std::sync::{Arc, Mutex};
+        let data = fixture(&[
+            ("dialogue", None),
+            ("print", Some(&[("data", "$body")])),
+            ("return", Some(&[])),
+        ]);
+        let mut it = Interpreter::new(InterpreterConfig::default());
+        it.set_file_loader(Box::new(move |_| Ok(data.clone())));
+        it.load_macro_file("printing.iet").unwrap();
+        it.load_script(
+            "chapter",
+            "[dialogue body=first]\n[dialogue body=second]\n[stop]",
+        )
+        .unwrap();
+        it.start("chapter", "").unwrap();
+        let ctx = Arc::clone(it.engine_context());
+        let sources = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&sources);
+        it.set_callback(move |event| {
+            if matches!(event, Event::ScenarioText { .. }) {
+                captured
+                    .lock()
+                    .unwrap()
+                    .push(ctx.lock().unwrap().scenario_text_source.clone().unwrap());
+            }
+            if matches!(event, Event::Wait { .. }) {
+                CallbackResult::Pause
+            } else {
+                CallbackResult::Continue
+            }
+        });
+        it.run().unwrap();
+        assert_eq!(
+            *sources.lock().unwrap(),
+            vec![("chapter".into(), 0), ("chapter".into(), 1)]
+        );
+    }
 }
