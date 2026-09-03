@@ -1,6 +1,6 @@
 # `estimate` 真值表
 
-本表记录 NekoMiko 原版 Artemis 引擎探针得到的行为。测试变量为：
+本表记录原版 Artemis 引擎探针得到的行为。测试变量为：
 
 ```text
 t.probe_num = 2
@@ -25,7 +25,7 @@ estimate="1 == 2"       -> 1 -> true
 estimate="t.probe_num != 2" -> 0 -> false
 ```
 
-这解释了 MagicalCharming 中的：
+这解释了：
 
 ```text
 estimate="t.lydialog.fontarrign_default.size != 2"
