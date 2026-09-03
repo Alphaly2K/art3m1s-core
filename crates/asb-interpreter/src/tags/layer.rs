@@ -118,18 +118,30 @@ pub struct LyeventHandler;
 
 impl TagHandler for LyeventHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let id = ctx.instruction.get("id").unwrap_or("").to_string();
-        let event_type = ctx.instruction.get("type").unwrap_or("").to_string();
-        let mode = ctx.instruction.get("mode").unwrap_or("").to_string();
-        let file = ctx.instruction.get("file").map(|s| s.to_string());
-        let label = ctx.instruction.get("label").map(|s| s.to_string());
+        let id = ctx.resolve_param_str("id")?;
+        let event_type = ctx.resolve_param_str("type")?;
+        let mode = ctx.resolve_param_str("mode")?;
+        let file = ctx
+            .instruction
+            .get("file")
+            .map(|_| ctx.resolve_param_str("file"))
+            .transpose()?;
+        let label = ctx
+            .instruction
+            .get("label")
+            .map(|_| ctx.resolve_param_str("label"))
+            .transpose()?;
         let call = ctx
             .instruction
             .get("call")
             .and_then(|s| s.parse::<i32>().ok())
             .unwrap_or(0)
             != 0;
-        let handler = ctx.instruction.get("handler").map(|s| s.to_string());
+        let handler = ctx
+            .instruction
+            .get("handler")
+            .map(|_| ctx.resolve_param_str("handler"))
+            .transpose()?;
         let penetration = ctx
             .instruction
             .get("penetration")
@@ -153,7 +165,7 @@ impl TagHandler for LyeventHandler {
         let mut base_extra_params = std::collections::HashMap::new();
         for (k, v) in ctx.instruction.params.iter() {
             if !known.contains(&k.as_str()) {
-                base_extra_params.insert(k.clone(), v.clone());
+                base_extra_params.insert(k.clone(), ctx.evaluator().resolve_param_str(v)?);
             }
         }
 
@@ -182,16 +194,28 @@ fn emit_legacy_lyevent(
     event_type: &str,
     mode: &str,
 ) -> Result<TagResult> {
-    let id = ctx.instruction.get("id").unwrap_or("").to_string();
-    let file = ctx.instruction.get("file").map(|s| s.to_string());
-    let label = ctx.instruction.get("label").map(|s| s.to_string());
+    let id = ctx.resolve_param_str("id")?;
+    let file = ctx
+        .instruction
+        .get("file")
+        .map(|_| ctx.resolve_param_str("file"))
+        .transpose()?;
+    let label = ctx
+        .instruction
+        .get("label")
+        .map(|_| ctx.resolve_param_str("label"))
+        .transpose()?;
     let call = ctx
         .instruction
         .get("call")
         .and_then(|s| s.parse::<i32>().ok())
         .unwrap_or(0)
         != 0;
-    let handler = ctx.instruction.get("handler").map(|s| s.to_string());
+    let handler = ctx
+        .instruction
+        .get("handler")
+        .map(|_| ctx.resolve_param_str("handler"))
+        .transpose()?;
     let penetration = ctx
         .instruction
         .get("penetration")
@@ -203,7 +227,7 @@ fn emit_legacy_lyevent(
     let mut extra_params = std::collections::HashMap::new();
     for (k, v) in ctx.instruction.params.iter() {
         if !known.contains(&k.as_str()) {
-            extra_params.insert(k.clone(), v.clone());
+            extra_params.insert(k.clone(), ctx.evaluator().resolve_param_str(v)?);
         }
     }
 
@@ -471,6 +495,49 @@ mod tests {
         assert_eq!(id, "100.slider.7.2");
         assert_eq!(to.as_deref(), Some("384"));
         assert_eq!(time, Some(700));
+    }
+
+    #[test]
+    fn lyevent_resolves_dynamic_layer_and_handler_parameters() {
+        let lua = mlua::Lua::new();
+        let instruction = Instruction {
+            tag: "lyevent".into(),
+            params: HashMap::from([
+                ("id".into(), "$t.layer".into()),
+                ("type".into(), "click".into()),
+                ("mode".into(), "init".into()),
+                ("handler".into(), "calllua".into()),
+                ("function".into(), "$t.callback".into()),
+            ]),
+            line: 1,
+        };
+        let mut variables = VariableStore::new();
+        variables.set("t.layer", crate::Value::String("100.52.2".into()));
+        variables.set("t.callback", crate::Value::String("button_click".into()));
+        let get_script = |_name: &str| None;
+        let mut ctx = ExecutionContext {
+            variables: &mut variables,
+            lua: &lua,
+            current_script: "test",
+            current_line: 0,
+            instruction: &instruction,
+            get_script: &get_script,
+        };
+        let TagResult::Emit(Event::LayerEventHandler {
+            id,
+            handler,
+            extra_params,
+            ..
+        }) = LyeventHandler.execute(&mut ctx).unwrap()
+        else {
+            panic!("expected layer event");
+        };
+        assert_eq!(id, "100.52.2");
+        assert_eq!(handler.as_deref(), Some("calllua"));
+        assert_eq!(
+            extra_params.get("function").map(String::as_str),
+            Some("button_click")
+        );
     }
 
     /// 用给定参数执行单个标签处理器，返回 TagResult

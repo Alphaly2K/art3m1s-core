@@ -13,15 +13,27 @@ macro_rules! event_handler_struct {
 
         impl TagHandler for $name {
             fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-                let file = ctx.instruction.get("file").map(String::from);
-                let label = ctx.instruction.get("label").map(String::from);
+                let file = ctx
+                    .instruction
+                    .get("file")
+                    .map(|_| ctx.resolve_param_str("file"))
+                    .transpose()?;
+                let label = ctx
+                    .instruction
+                    .get("label")
+                    .map(|_| ctx.resolve_param_str("label"))
+                    .transpose()?;
                 let call = ctx
                     .instruction
                     .get("call")
                     .and_then(|v| v.parse::<i32>().ok())
                     .unwrap_or(0)
                     != 0;
-                let handler = ctx.instruction.get("handler").map(String::from);
+                let handler = ctx
+                    .instruction
+                    .get("handler")
+                    .map(|_| ctx.resolve_param_str("handler"))
+                    .transpose()?;
 
                 // 已知字段以外的参数（key、adv、ui、btn 等）透传给宿主，
                 // 宿主在事件触发时作为 Lua 回调的 param 表传回。
@@ -29,7 +41,7 @@ macro_rules! event_handler_struct {
                 let mut extra_params = std::collections::HashMap::new();
                 for (k, v) in &ctx.instruction.params {
                     if !known.contains(&k.as_str()) {
-                        extra_params.insert(k.clone(), v.clone());
+                        extra_params.insert(k.clone(), ctx.evaluator().resolve_param_str(v)?);
                     }
                 }
 
@@ -54,7 +66,11 @@ macro_rules! event_handler_del_struct {
         impl TagHandler for $name {
             fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
                 // 带 key 时只解除该键，不带 key 时解除整个事件类型
-                let key = ctx.instruction.get("key").map(String::from);
+                let key = ctx
+                    .instruction
+                    .get("key")
+                    .map(|_| ctx.resolve_param_str("key"))
+                    .transpose()?;
                 Ok(TagResult::Emit(Event::DelEventHandler {
                     event_name: $event_name.to_string(),
                     key,
@@ -101,28 +117,43 @@ pub struct SetOnWindowButtonHandler;
 
 impl TagHandler for SetOnWindowButtonHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let file = ctx.instruction.get("file").map(String::from);
-        let label = ctx.instruction.get("label").map(String::from);
+        let file = ctx
+            .instruction
+            .get("file")
+            .map(|_| ctx.resolve_param_str("file"))
+            .transpose()?;
+        let label = ctx
+            .instruction
+            .get("label")
+            .map(|_| ctx.resolve_param_str("label"))
+            .transpose()?;
         let call = ctx
             .instruction
             .get("call")
             .and_then(|v| v.parse::<i32>().ok())
             .unwrap_or(0)
             != 0;
-        let handler = ctx.instruction.get("handler").map(String::from);
+        let handler = ctx
+            .instruction
+            .get("handler")
+            .map(|_| ctx.resolve_param_str("handler"))
+            .transpose()?;
 
         let known = ["file", "label", "call", "handler"];
         let mut extra_params = std::collections::HashMap::new();
         for (k, v) in &ctx.instruction.params {
             if !known.contains(&k.as_str()) {
-                extra_params.insert(k.clone(), v.clone());
+                extra_params.insert(k.clone(), ctx.evaluator().resolve_param_str(v)?);
             }
         }
         // button 值作为索引 key（脚本显式给了 key 时以脚本为准）
         if !extra_params.contains_key("key")
             && let Some(button) = ctx.instruction.get("button")
         {
-            extra_params.insert("key".to_string(), button.to_string());
+            extra_params.insert(
+                "key".to_string(),
+                ctx.evaluator().resolve_param_str(button)?,
+            );
         }
 
         Ok(TagResult::Emit(Event::SetEventHandler {
@@ -210,6 +241,45 @@ mod tests {
         );
         // button 原值也保留在 extra_params 中，供宿主回调引用
         assert_eq!(extra_params.get("button").map(String::as_str), Some("0"));
+    }
+
+    #[test]
+    fn setonpush_resolves_dynamic_target_and_dispatch_parameters() {
+        let lua = mlua::Lua::new();
+        let instruction = Instruction {
+            tag: "setonpush".into(),
+            params: std::collections::HashMap::from([
+                ("file".into(), "$t.file".into()),
+                ("label".into(), "$t.label".into()),
+                ("key".into(), "$t.key".into()),
+            ]),
+            line: 1,
+        };
+        let mut variables = VariableStore::new();
+        variables.set("t.file", crate::Value::String("system/title.iet".into()));
+        variables.set("t.label", crate::Value::String("return_title".into()));
+        variables.set("t.key", crate::Value::String("27".into()));
+        let get_script = |_name: &str| None;
+        let mut ctx = ExecutionContext {
+            variables: &mut variables,
+            lua: &lua,
+            current_script: "test",
+            current_line: 0,
+            instruction: &instruction,
+            get_script: &get_script,
+        };
+        let TagResult::Emit(Event::SetEventHandler {
+            file,
+            label,
+            extra_params,
+            ..
+        }) = SetOnPushHandler.execute(&mut ctx).unwrap()
+        else {
+            panic!("expected input handler");
+        };
+        assert_eq!(file.as_deref(), Some("system/title.iet"));
+        assert_eq!(label.as_deref(), Some("return_title"));
+        assert_eq!(extra_params.get("key").map(String::as_str), Some("27"));
     }
 
     #[test]
