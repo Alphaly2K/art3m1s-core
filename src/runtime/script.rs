@@ -7,7 +7,12 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
 impl CoreRuntime {
-    pub(super) fn advance_script(&mut self, clicked: bool, delta_ms: u64) {
+    pub(super) fn advance_script(
+        &mut self,
+        clicked: bool,
+        delta_ms: u64,
+        profile: &mut crate::profiler::FrameProfile,
+    ) {
         // 安装 var system=file_*/get_sound_info 的宿主查询钩子（每 runtime 一次；
         // 放在这里保证 load_project 之后、脚本第一次执行之前完成）。
         self.ensure_host_query_hooks();
@@ -43,24 +48,24 @@ impl CoreRuntime {
         let has_tags = self.has_queued_tags();
         if has_tags {
             if let Some(reason @ WaitReason::Stop { .. }) = self.wait_reason.clone() {
-                self.drain_queued_tags_while_stopped(reason);
+                self.drain_queued_tags_while_stopped(reason, profile);
             } else if let Some(reason) = self.wait_reason.clone() {
-                self.drain_queued_tags_while_waiting(reason);
+                self.drain_queued_tags_while_waiting(reason, profile);
             } else if self.active_inline_event_frame.is_some() {
-                self.drain_inline_event_tags_without_wait();
+                self.drain_inline_event_tags_without_wait(profile);
             } else {
                 self.wait_reason = None;
             }
         }
 
         if self.wait_reason.is_none() {
-            self.run_until_wait_or_complete();
+            self.run_until_wait_or_complete(profile);
             // [autosave allow=2]：每次进入用户输入等待时自动保存。
             if wait_reason_is_input_wait(self.wait_reason.as_ref()) {
                 self.maybe_autosave_on_input_wait();
             }
         } else {
-            self.advance_wait_state(clicked, delta_ms);
+            self.advance_wait_state(clicked, delta_ms, profile);
         }
     }
 
@@ -69,9 +74,17 @@ impl CoreRuntime {
         !ctx.lock().unwrap().tag_queue.is_empty()
     }
 
-    fn run_until_wait_or_complete(&mut self) {
+    fn run_until_wait_or_complete(&mut self, profile: &mut crate::profiler::FrameProfile) {
         loop {
             match self.interpreter.run() {
+                Ok(ExecutionResult::Wait(event))
+                    if super::events::event_requires_state_sync(&event) =>
+                {
+                    // A following script expression must observe this command's
+                    // effect. Dispatch in order, without spending a display frame.
+                    self.interpreter.advance_line();
+                    self.flush_host_events(profile);
+                }
                 Ok(ExecutionResult::Wait(Event::Wait { reason })) => {
                     match &reason {
                         WaitReason::Timed { milliseconds, .. } => {
@@ -127,7 +140,12 @@ impl CoreRuntime {
         }
     }
 
-    fn advance_wait_state(&mut self, clicked: bool, delta_ms: u64) {
+    fn advance_wait_state(
+        &mut self,
+        clicked: bool,
+        delta_ms: u64,
+        profile: &mut crate::profiler::FrameProfile,
+    ) {
         let Some(reason) = self.wait_reason.clone() else {
             return;
         };
@@ -151,7 +169,7 @@ impl CoreRuntime {
         } = &reason
         {
             if stop_reason == "exskip" {
-                self.advance_exskip_stop(reason);
+                self.advance_exskip_stop(reason, profile);
                 return;
             }
         }
@@ -274,7 +292,11 @@ impl CoreRuntime {
         }
     }
 
-    fn advance_exskip_stop(&mut self, stop_reason: WaitReason) {
+    fn advance_exskip_stop(
+        &mut self,
+        stop_reason: WaitReason,
+        profile: &mut crate::profiler::FrameProfile,
+    ) {
         if !self.debug_skip_active.swap(false, Ordering::SeqCst) {
             crate::core_debug!("[runtime] Stop:exskip without active debugSkip; skipping stop");
             self.advance_wait_line();
@@ -289,7 +311,7 @@ impl CoreRuntime {
         }
 
         if self.has_queued_tags() {
-            self.drain_queued_tags_while_stopped(stop_reason);
+            self.drain_queued_tags_while_stopped(stop_reason, profile);
         } else {
             self.advance_wait_line();
         }
@@ -327,14 +349,50 @@ impl CoreRuntime {
         Ok(())
     }
 
-    fn drain_queued_tags_while_stopped(&mut self, stop_reason: WaitReason) {
+    fn drain_queued_tags_with_host_effects(
+        &mut self,
+        profile: &mut crate::profiler::FrameProfile,
+    ) -> asb_interpreter::Result<asb_interpreter::interpreter::QueuedTagDrain> {
+        let script = self.interpreter.current_script().map(str::to_owned);
+        let line = self.interpreter.current_line();
+        let depth = self.interpreter.call_stack().len();
+        let (mut saw_call, mut saw_jump, mut saw_return) = (false, false, false);
+        loop {
+            let mut drain = self.interpreter.drain_queued_tags_only()?;
+            saw_call |= drain.saw_call;
+            saw_jump |= drain.saw_jump;
+            saw_return |= drain.saw_return;
+            if drain
+                .wait
+                .as_ref()
+                .is_some_and(super::events::event_requires_state_sync)
+            {
+                self.interpreter.advance_line();
+                self.flush_host_events(profile);
+                continue;
+            }
+            drain.saw_call = saw_call;
+            drain.saw_jump = saw_jump;
+            drain.saw_return = saw_return;
+            drain.changed_position = self.interpreter.current_script() != script.as_deref()
+                || self.interpreter.current_line() != line
+                || self.interpreter.call_stack().len() > depth;
+            return Ok(drain);
+        }
+    }
+
+    fn drain_queued_tags_while_stopped(
+        &mut self,
+        stop_reason: WaitReason,
+        profile: &mut crate::profiler::FrameProfile,
+    ) {
         /// 单帧排水上限：防止排队标签互相续接造成死循环。正常脚本远达不到。
         const MAX_DRAIN_ROUNDS: usize = 64;
         let mut should_resume = false;
         let mut rounds = 0;
         for _ in 0..MAX_DRAIN_ROUNDS {
             rounds += 1;
-            let drain = match self.interpreter.drain_queued_tags_only() {
+            let drain = match self.drain_queued_tags_with_host_effects(profile) {
                 Ok(drain) => drain,
                 Err(e) => {
                     crate::core_error!("解释器错误: {e:?}");
@@ -344,7 +402,7 @@ impl CoreRuntime {
                 }
             };
             self.finish_inline_event_frame(drain.wait.is_some(), drain.saw_call, drain.saw_jump);
-            should_resume |= drain.saw_return || drain.changed_position;
+            should_resume |= drain.changed_position;
             if drain.wait.is_some() {
                 self.interpreter.advance_line();
                 continue;
@@ -364,8 +422,12 @@ impl CoreRuntime {
         }
     }
 
-    fn drain_queued_tags_while_waiting(&mut self, wait_reason: WaitReason) {
-        let drain = match self.interpreter.drain_queued_tags_only() {
+    fn drain_queued_tags_while_waiting(
+        &mut self,
+        wait_reason: WaitReason,
+        profile: &mut crate::profiler::FrameProfile,
+    ) {
+        let drain = match self.drain_queued_tags_with_host_effects(profile) {
             Ok(drain) => drain,
             Err(e) => {
                 crate::core_error!("解释器错误: {e:?}");
@@ -376,7 +438,9 @@ impl CoreRuntime {
         };
         self.finish_inline_event_frame(drain.wait.is_some(), drain.saw_call, drain.saw_jump);
 
-        if drain.saw_return || drain.changed_position {
+        // A return to the same wait does not satisfy it. A return or jump to a
+        // different instruction must execute that continuation.
+        if drain.changed_position {
             self.wait_reason = None;
         } else if let Some(Event::Wait { reason }) = drain.wait {
             self.wait_reason = Some(reason);
@@ -385,8 +449,11 @@ impl CoreRuntime {
         }
     }
 
-    fn drain_inline_event_tags_without_wait(&mut self) {
-        let drain = match self.interpreter.drain_queued_tags_only() {
+    fn drain_inline_event_tags_without_wait(
+        &mut self,
+        profile: &mut crate::profiler::FrameProfile,
+    ) {
+        let drain = match self.drain_queued_tags_with_host_effects(profile) {
             Ok(drain) => drain,
             Err(error) => {
                 crate::core_error!("解释器错误: {error:?}");
@@ -448,13 +515,8 @@ fn settle_inline_event_frame(
         .is_some_and(|frame| frame.claimed_by_jump);
     if saw_queued_call && !claimed_by_jump {
         let frame = active_frame.take().unwrap();
-        let Some(script) = interpreter.current_script().map(str::to_string) else {
-            return Ok(());
-        };
-        let line = interpreter.current_line();
-        let mut stack = interpreter.call_stack();
-        super::input::detach_inline_event_marker(&frame, &mut stack);
-        return interpreter.restore_position(&script, line, stack);
+        interpreter.remove_call_frame(frame.stack.len());
+        return Ok(());
     }
 
     // Lua UI helpers commonly enqueue a jump to system/script.asb
@@ -574,6 +636,34 @@ mod tests {
             }));
         }
         assert!(!automode_stop_by_stop_wait(&WaitReason::Generic));
+    }
+
+    #[test]
+    fn event_return_does_not_resume_the_interrupted_story_wait() {
+        for (return_line, changed) in [(0, false), (1, true)] {
+            let mut interpreter = asb_interpreter::Interpreter::new(InterpreterConfig::default());
+            interpreter.load_script("story", "[wait]\n[stop]").unwrap();
+            interpreter
+                .restore_position(
+                    "story",
+                    0,
+                    vec![CallFrame {
+                        script: "story".into(),
+                        return_line,
+                    }],
+                )
+                .unwrap();
+            interpreter
+                .engine_context()
+                .lock()
+                .unwrap()
+                .tag_queue
+                .push(("return".into(), HashMap::new()));
+            let drain = interpreter.drain_queued_tags_only().unwrap();
+            assert!(drain.saw_return);
+            assert_eq!(drain.changed_position, changed);
+            assert_eq!(interpreter.current_line(), return_line);
+        }
     }
 
     #[test]

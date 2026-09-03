@@ -285,10 +285,6 @@ impl CoreRuntime {
     }
 
     pub(super) fn handle_go_title(&mut self) -> Result<(), String> {
-        /// 多数 Artemis 项目的标题入口脚本；BOOT 配置缺失或启动失败时回退。
-        const FALLBACK_TITLE_SCRIPT: &str = "system/first.iet";
-        const TITLE_LABEL: &str = "title";
-
         self.clear_emote_state("go title");
         self.compositor.reset_for_load();
         self.sync_layer_info_all();
@@ -299,23 +295,17 @@ impl CoreRuntime {
         self.timed_remaining_ms = 0;
         self.wait_reason = None;
 
-        // 优先用 system.ini 的 BOOT 脚本（标题界面通常就在 boot 脚本的 title 标签），
-        // 不再无条件硬编码单一路径。
-        let boot = self.boot_script.clone();
-        if let Some(boot) = boot.filter(|b| b != FALLBACK_TITLE_SCRIPT) {
-            match self.interpreter.start(&boot, TITLE_LABEL) {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    crate::core_warn!(
-                        "[runtime] gotitle: BOOT 脚本 {boot} 无 {TITLE_LABEL} 入口 ({e:?})，回退 {FALLBACK_TITLE_SCRIPT}"
-                    );
-                }
-            }
-        }
+        // [gotitle] 只表达“回到标题”这一生命周期动作，标题的实际入口
+        // 由项目自己的 BOOT 脚本决定。不同模板可能从文件开头跳到
+        // system/title.iet，也可能使用 *top/*main 等标签；硬编码
+        // `system/first.iet:title` 会在前者没有该标签时直接失败。
+        let boot = self
+            .boot_script
+            .as_deref()
+            .ok_or_else(|| "没有记录 BOOT 脚本，无法返回标题".to_string())?;
         self.interpreter
-            .start(FALLBACK_TITLE_SCRIPT, TITLE_LABEL)
-            .map_err(|e| format!("{e:?}"))?;
-        Ok(())
+            .boot(boot)
+            .map_err(|e| format!("执行 BOOT 脚本 {boot} 失败: {e:?}"))
     }
 
     pub(super) fn capture_save_screenshot(&mut self) {

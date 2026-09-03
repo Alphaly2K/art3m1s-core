@@ -382,6 +382,8 @@ pub struct EngineContext {
     /// `(脚本名, 内部索引)`。每次进入 Lua 前由解释器刷新，供 e:getScriptStack
     /// / e:getScriptBlock 读取真实调用栈。
     pub script_stack: Vec<(String, usize)>,
+    /// Source of the ScenarioText currently being delivered to the host.
+    pub scenario_text_source: Option<(String, usize)>,
     /// `e:setScriptStack` 请求的调用栈强制重写（与 `script_stack` 同构），
     /// 解释器在下一轮抽干标签队列前应用并清除。
     pub pending_stack_override: Option<Vec<(String, usize)>>,
@@ -410,6 +412,7 @@ impl EngineContext {
             file_reader: None,
             variables: None,
             script_stack: Vec::new(),
+            scenario_text_source: None,
             pending_stack_override: None,
             scripts_view: HashMap::new(),
             wait_reason_info: None,

@@ -60,6 +60,15 @@ pub struct CallFrame {
     pub return_line: usize,
 }
 
+/// A queued call temporarily owns execution of the script stream. Tags that
+/// were already queued after the call are held until that call returns; tags
+/// emitted by the called script itself continue to be processed normally.
+#[derive(Debug, Default)]
+struct QueuedCallBarrier {
+    stack_depth: usize,
+    deferred: Vec<(String, HashMap<String, String>)>,
+}
+
 #[derive(Debug, Clone)]
 pub struct QueuedTagDrain {
     pub wait: Option<Event>,
@@ -242,7 +251,7 @@ pub struct Interpreter {
     last_flush_saw_return: bool,
     last_flush_saw_call: bool,
     last_flush_saw_jump: bool,
-    last_flush_changed_position: bool,
+    queued_call_barriers: Vec<QueuedCallBarrier>,
     /// 当前指令是否经由 `TagResult::Jump` **跳转到达**（而非顺序执行到达）。
     ///
     /// if 链语义需要区分两种到达 [elseif]/[else] 的方式：
@@ -514,7 +523,7 @@ impl Interpreter {
             last_flush_saw_return: false,
             last_flush_saw_call: false,
             last_flush_saw_jump: false,
-            last_flush_changed_position: false,
+            queued_call_barriers: Vec::new(),
             arrived_by_jump: false,
             executed_lua_blocks: std::collections::HashSet::new(),
             macros: MacroRegistry::new(),
@@ -541,9 +550,9 @@ impl Interpreter {
     /// 宿主在把一个已命中的事件（lyevent/aevent/输入事件…）派发给其处理器之前调用：
     /// `name` = 事件设置时的标签名（如 "lyevent"），`params` = 该标签参数（含 id/type/
     /// label 等，均为字符串）。返回值：
-    /// - `None`：未设置过滤器，或过滤器返回 0/出错 —— 引擎按默认方式派发。
+    /// - `None`：未设置过滤器；引擎按默认方式派发。
     /// - `Some(1)`：脚本已自行处理，引擎**不**再派发。
-    /// - `Some(2)`：过滤器指示假装派发失败，宿主不得执行原处理器。
+    /// - `Some(2)`：过滤器指示假装派发失败，或过滤器自身出错；宿主不得执行原处理器。
     ///
     /// 未设置过滤器时零开销（不加载 Lua 值）。
     pub fn run_event_filter(
@@ -557,14 +566,34 @@ impl Interpreter {
             self.lua.registry_value(key).ok()?
         };
 
-        let params_table = self.lua.create_table().ok()?;
+        let params_table = match self.lua.create_table() {
+            Ok(table) => table,
+            Err(err) => {
+                self.engine_ctx.lock().unwrap().callbacks.debug(
+                    0,
+                    &format!("eventFilter setup error: {err}"),
+                    false,
+                );
+                return Some(2);
+            }
+        };
         for (k, v) in params {
             let _ = params_table.set(k.as_str(), v.as_str());
         }
-        // 过滤器签名 eventFilter(e, name, param)：e 传空表占位（宿主不便把 EngineApi
-        // 自身回传，脚本实际用到的是 name/param）。
-        let event_obj = self.lua.create_table().ok()?;
-        match filter.call::<i32>((event_obj, name, params_table)) {
+        // setEventFilter specifies the same engine object as calllua, not an
+        // empty placeholder table: filters may call e:var and e:tag.
+        let engine_obj: mlua::AnyUserData = match self.lua.globals().get("__engine") {
+            Ok(engine) => engine,
+            Err(err) => {
+                self.engine_ctx.lock().unwrap().callbacks.debug(
+                    0,
+                    &format!("eventFilter setup error: missing __engine: {err}"),
+                    false,
+                );
+                return Some(2);
+            }
+        };
+        match filter.call::<i32>((engine_obj, name, params_table)) {
             Ok(result) => Some(result),
             Err(err) => {
                 self.engine_ctx.lock().unwrap().callbacks.debug(
@@ -572,7 +601,9 @@ impl Interpreter {
                     &format!("eventFilter error: {err}"),
                     false,
                 );
-                None
+                // A filter may have emitted tags before failing. Do not also
+                // execute the unfiltered handler after reporting that error.
+                Some(2)
             }
         }
     }
@@ -728,6 +759,7 @@ impl Interpreter {
         self.current_script = Some(script.to_string());
         self.current_line = line;
         self.call_stack.clear();
+        self.queued_call_barriers.clear();
         self.variables.lock().unwrap().retain_macro_scopes(0);
         // 显式定位属于「顺序到达」，清掉可能残留的跳转到达标记。
         self.arrived_by_jump = false;
@@ -805,7 +837,7 @@ impl Interpreter {
             // 处理剧情文本
             if instruction.tag == "__text" {
                 let text = instruction.get("text").unwrap_or("").to_string();
-                let result = (self.callback)(Event::ScenarioText {
+                let result = self.emit_event(Event::ScenarioText {
                     content: text.clone(),
                     inline: false,
                 });
@@ -908,7 +940,7 @@ impl Interpreter {
                     }
                 }
                 TagResult::Wait(event) => {
-                    let result = (self.callback)(event.clone());
+                    let result = self.emit_event(event.clone());
                     match result {
                         CallbackResult::Continue => {
                             self.current_line += 1;
@@ -923,7 +955,7 @@ impl Interpreter {
                     }
                 }
                 TagResult::Emit(event) => {
-                    let result = (self.callback)(event.clone());
+                    let result = self.emit_event(event.clone());
                     match result {
                         CallbackResult::Continue => {
                             self.current_line += 1;
@@ -939,7 +971,7 @@ impl Interpreter {
                 }
                 TagResult::EmitMany(events) => {
                     for event in events {
-                        let result = (self.callback)(event.clone());
+                        let result = self.emit_event(event.clone());
                         match result {
                             CallbackResult::Continue => {}
                             CallbackResult::Pause => {
@@ -954,8 +986,9 @@ impl Interpreter {
                     continue;
                 }
                 TagResult::Dynamic(inner_instruction) => {
-                    // 动态执行另一条指令（用于 tag 标签）
-                    let inner_result = self.execute_tag(&inner_instruction, false)?;
+                    // [tag] invokes a script tag; its expanded instruction must
+                    // enter the tag-filter boundary just like a direct script tag.
+                    let inner_result = self.execute_tag(&inner_instruction, true)?;
                     // 处理内部指令的结果（不增加行号，因为外层会处理）
                     match inner_result {
                         TagResult::Continue => {
@@ -972,7 +1005,7 @@ impl Interpreter {
                             continue;
                         }
                         TagResult::Wait(event) => {
-                            let result = (self.callback)(event.clone());
+                            let result = self.emit_event(event.clone());
                             match result {
                                 CallbackResult::Continue => {
                                     self.current_line += 1;
@@ -987,7 +1020,7 @@ impl Interpreter {
                             }
                         }
                         TagResult::Emit(event) => {
-                            let result = (self.callback)(event.clone());
+                            let result = self.emit_event(event.clone());
                             match result {
                                 CallbackResult::Continue => {
                                     self.current_line += 1;
@@ -1003,7 +1036,7 @@ impl Interpreter {
                         }
                         TagResult::EmitMany(events) => {
                             for event in events {
-                                let result = (self.callback)(event.clone());
+                                let result = self.emit_event(event.clone());
                                 match result {
                                     CallbackResult::Continue => {}
                                     CallbackResult::Pause => {
@@ -1122,15 +1155,19 @@ impl Interpreter {
             }
 
             // `tag` 标签自身会返回 Dynamic，需再展开一层拿到真正的指令。
+            // The queued wrapper is a script-level tag invocation, so the
+            // expanded instruction enters the filter boundary. Direct tags
+            // queued by a filter still use the low-level path above and do not
+            // recursively re-enter the filter.
             let mut result = self.execute_tag(&instruction, false)?;
             if let TagResult::Dynamic(inner) = result {
-                result = self.execute_tag(&inner, false)?;
+                result = self.execute_tag(&inner, true)?;
             }
 
             match result {
                 TagResult::Continue => continue,
                 TagResult::Emit(event) | TagResult::Wait(event) => {
-                    match (self.callback)(event.clone()) {
+                    match self.emit_event(event.clone()) {
                         CallbackResult::Continue => continue,
                         CallbackResult::Pause => {
                             // 这个 Wait 来自排队标签，current_line 已指向下一条待执行
@@ -1143,7 +1180,7 @@ impl Interpreter {
                 }
                 TagResult::EmitMany(events) => {
                     for event in events {
-                        match (self.callback)(event.clone()) {
+                        match self.emit_event(event.clone()) {
                             CallbackResult::Continue => {}
                             CallbackResult::Pause => {
                                 self.last_wait_from_queue = true;
@@ -1160,7 +1197,6 @@ impl Interpreter {
                 // step 主循环会从新位置读取指令。
                 TagResult::Jump(line) => {
                     self.last_flush_saw_jump = true;
-                    self.last_flush_changed_position = true;
                     self.arrived_by_jump = true;
                     self.current_line = line;
                     // 继续抽干剩余标签而非立即返回——排在 jump 之后的 calllua
@@ -1171,7 +1207,6 @@ impl Interpreter {
                 }
                 TagResult::JumpExternal { file, label } => {
                     self.last_flush_saw_jump = true;
-                    self.last_flush_changed_position = true;
                     self.jump_to_external_script(&file, &label)?;
                     continue;
                 }
@@ -1182,7 +1217,6 @@ impl Interpreter {
                     return_script,
                 } => {
                     self.last_flush_saw_call = true;
-                    self.last_flush_changed_position = true;
                     // 排队 call 与内联 call 的返回语义不同：
                     // 内联 call 时 `self.current_line` 指向 call 指令本身，handler
                     // 用 `current_line + 1` 让 return 落到下一条指令是对的。
@@ -1205,6 +1239,19 @@ impl Interpreter {
                         script: return_script.clone(),
                         return_line,
                     });
+                    // Preserve queue order across the call. The call's body
+                    // may enqueue its own tags (which must run before the
+                    // caller's continuation), while tags already waiting in
+                    // the queue belong to that continuation and are deferred
+                    // until the call returns.
+                    let deferred = {
+                        let mut ctx = self.engine_ctx.lock().unwrap();
+                        std::mem::take(&mut ctx.tag_queue)
+                    };
+                    self.queued_call_barriers.push(QueuedCallBarrier {
+                        stack_depth: self.call_stack.len(),
+                        deferred,
+                    });
                     if let Some(target_file) = file {
                         self.load_external_script(&target_file)?;
                         let target_line = self
@@ -1224,12 +1271,13 @@ impl Interpreter {
                             .ok_or_else(|| Error::LabelNotFound(label.clone()))?;
                         self.current_line = line;
                     }
-                    // 继续抽干剩余标签——calllua 等函数调用在跨脚本跳转后仍然有效。
-                    continue;
+                    // Stop draining here so the next interpreter iteration
+                    // executes the called script before its deferred queue
+                    // continuation is considered.
+                    return Ok(None);
                 }
                 TagResult::Return => {
                     self.last_flush_saw_return = true;
-                    self.last_flush_changed_position = true;
                     if let Some(frame) = self.pop_call_frame() {
                         self.current_script = Some(frame.script);
                         self.current_line = frame.return_line;
@@ -1248,7 +1296,51 @@ impl Interpreter {
             .lock()
             .unwrap()
             .retain_macro_scopes(self.call_stack.len());
+        self.restore_completed_queued_barriers();
         frame
+    }
+
+    /// Restore continuations for queued calls whose frames were removed by a
+    /// return or an explicit script-stack rewrite.
+    fn restore_completed_queued_barriers(&mut self) {
+        // A queued-call barrier is complete once its frame (and any nested
+        // frames) has returned. Restore deferred continuation tags at the
+        // front of the shared queue, preserving FIFO order.
+        while self
+            .queued_call_barriers
+            .last()
+            .is_some_and(|barrier| barrier.stack_depth > self.call_stack.len())
+        {
+            let barrier = self.queued_call_barriers.pop().expect("barrier exists");
+            if !barrier.deferred.is_empty() {
+                let mut ctx = self.engine_ctx.lock().unwrap();
+                let mut restored = barrier.deferred;
+                restored.append(&mut ctx.tag_queue);
+                ctx.tag_queue = restored;
+            }
+        }
+    }
+
+    fn emit_event(&mut self, event: Event) -> CallbackResult {
+        if matches!(event, Event::ScenarioText { .. }) {
+            let mut source = self
+                .current_script
+                .clone()
+                .map(|file| (file, self.current_line));
+            // Macros are tags: their text belongs to the invocation in the
+            // caller, not to a shared printing helper used by every page.
+            for frame in self.call_stack.iter().rev() {
+                let Some((file, _)) = source.as_ref() else {
+                    break;
+                };
+                if !self.macro_files.contains_key(file) && !file.starts_with("__macro__") {
+                    break;
+                }
+                source = Some((frame.script.clone(), frame.return_line.saturating_sub(1)));
+            }
+            self.engine_ctx.lock().unwrap().scenario_text_source = source;
+        }
+        (self.callback)(event)
     }
 
     /// 把当前调用栈 + 执行位置镜像进 [`EngineContext::script_stack`]。
@@ -1293,6 +1385,7 @@ impl Interpreter {
                 return_line: *index,
             })
             .collect();
+        self.restore_completed_queued_barriers();
         self.variables
             .lock()
             .unwrap()
@@ -1923,10 +2016,14 @@ impl Interpreter {
 
     /// 只抽干 Lua/事件排入的标签队列，不在队列清空后继续执行主脚本。
     pub fn drain_queued_tags_only(&mut self) -> Result<QueuedTagDrain> {
+        let origin = (
+            self.current_script.clone(),
+            self.current_line,
+            self.call_stack.len(),
+        );
         self.last_flush_saw_return = false;
         self.last_flush_saw_call = false;
         self.last_flush_saw_jump = false;
-        self.last_flush_changed_position = false;
         let wait = match self.flush_tag_queue()? {
             Some(ExecutionResult::Wait(event)) => Some(event),
             Some(ExecutionResult::Completed) | None => None,
@@ -1941,7 +2038,9 @@ impl Interpreter {
             saw_return: self.last_flush_saw_return,
             saw_call: self.last_flush_saw_call,
             saw_jump: self.last_flush_saw_jump,
-            changed_position: self.last_flush_changed_position,
+            changed_position: self.current_script != origin.0
+                || self.current_line != origin.1
+                || self.call_stack.len() > origin.2,
         })
     }
 
@@ -2004,6 +2103,7 @@ impl Interpreter {
             self.current_script = Some(script.to_string());
             self.current_line = 0;
             self.call_stack.clear();
+            self.queued_call_barriers.clear();
             self.variables.lock().unwrap().retain_macro_scopes(0);
             self.arrived_by_jump = false;
             return Ok(());
@@ -2028,6 +2128,7 @@ impl Interpreter {
         self.current_script = Some(script.to_string());
         self.current_line = line;
         self.call_stack = stack;
+        self.queued_call_barriers.clear();
         self.variables
             .lock()
             .unwrap()
@@ -2074,6 +2175,20 @@ impl Interpreter {
     /// 获取调用栈快照（供存档序列化）
     pub fn call_stack(&self) -> Vec<CallFrame> {
         self.call_stack.clone()
+    }
+
+    /// Remove a host-inserted return frame without discarding the arguments of
+    /// calls above it. Restoring a shortened stack would truncate those scopes.
+    pub fn remove_call_frame(&mut self, index: usize) -> Option<CallFrame> {
+        if index >= self.call_stack.len() {
+            return None;
+        }
+        let frame = self.call_stack.remove(index);
+        self.variables
+            .lock()
+            .unwrap()
+            .remove_call_frame_scope(index);
+        Some(frame)
     }
 
     /// 获取脚本
@@ -2287,7 +2402,7 @@ mod tests {
 
     #[test]
     fn event_filter_intercepts_and_reports_verdict() {
-        let interpreter = Interpreter::new(InterpreterConfig::default());
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
         // 未安装过滤器：返回 None（引擎按默认方式派发）。
         assert_eq!(
             interpreter.run_event_filter("lyevent", &HashMap::new()),
@@ -2300,6 +2415,7 @@ mod tests {
             .load(
                 r#"
                 __engine:setEventFilter(function(e, name, param)
+                    assert(e:var("t.sceneskip") == "1")
                     seen_name = name
                     seen_id = param.id
                     return 1
@@ -2308,6 +2424,8 @@ mod tests {
             )
             .exec()
             .unwrap();
+
+        interpreter.set_variable("t.sceneskip", Value::String("1".into()));
 
         let mut params = HashMap::new();
         params.insert("id".to_string(), "10".to_string());
@@ -2325,6 +2443,28 @@ mod tests {
             .exec()
             .unwrap();
         assert_eq!(interpreter.run_event_filter("lyevent", &params), None);
+    }
+
+    #[test]
+    fn event_filter_error_fails_closed_instead_of_dispatching_twice() {
+        let interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter
+            .lua()
+            .load(
+                r#"
+                __engine:setEventFilter(function(_e, _name, _param)
+                    error("filter failed")
+                end)
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        assert_eq!(
+            interpreter.run_event_filter("setoncontrolskipin", &HashMap::new()),
+            Some(2),
+            "a filter error must suppress the original handler"
+        );
     }
 
     #[test]
@@ -2669,6 +2809,59 @@ mod tests {
         let globals = interpreter.lua().globals();
         assert!(globals.get::<bool>("dialog_closed").unwrap());
         assert!(globals.get::<bool>("backlog_jump_ran").unwrap());
+    }
+
+    #[test]
+    fn queued_call_completes_before_following_queued_tag() {
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter
+            .lua()
+            .load(
+                r#"
+                function mark_called(e)
+                    called_first = true
+                end
+                function verify_order(e)
+                    order_ok = called_first == true
+                end
+                "#,
+            )
+            .exec()
+            .unwrap();
+        interpreter.load_script("main", "*main\n[stop]\n").unwrap();
+        interpreter.set_callback(|event| match event {
+            Event::Wait { .. } => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        interpreter
+            .load_script(
+                "ui",
+                "*setup\n[calllua function=\"mark_called\"]\n[return]\n",
+            )
+            .unwrap();
+        {
+            let mut ctx = interpreter.engine_context().lock().unwrap();
+            ctx.tag_queue.push((
+                "call".into(),
+                HashMap::from([
+                    ("file".into(), "ui".into()),
+                    ("label".into(), "setup".into()),
+                ]),
+            ));
+            ctx.tag_queue.push((
+                "calllua".into(),
+                HashMap::from([("function".into(), "verify_order".into())]),
+            ));
+        }
+        interpreter.start("main", "main").unwrap();
+
+        assert!(matches!(
+            interpreter.run().unwrap(),
+            ExecutionResult::Wait(Event::Wait {
+                reason: WaitReason::Stop { .. }
+            })
+        ));
+        assert!(interpreter.lua().globals().get::<bool>("order_ok").unwrap());
     }
 
     #[test]
