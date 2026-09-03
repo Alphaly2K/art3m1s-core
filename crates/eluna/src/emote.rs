@@ -103,9 +103,10 @@ pub struct EmoteMeshPatch {
 
 impl EmoteMeshPatch {
     pub fn is_identity(&self) -> bool {
-        self.control_points.iter().enumerate().all(|(i, point)| {
-            *point == [(i % 4) as f32 / 3.0, (i / 4) as f32 / 3.0]
-        })
+        self.control_points
+            .iter()
+            .enumerate()
+            .all(|(i, point)| *point == [(i % 4) as f32 / 3.0, (i / 4) as f32 / 3.0])
     }
 
     pub fn identity(division_x: u32, division_y: u32) -> Self {
@@ -7501,18 +7502,21 @@ mod tests {
             format: None,
             compress: None,
             bit_count: None,
-            icons: BTreeMap::from([("lid".into(), EmoteTextureIcon {
-                texture_name: "atlas".into(),
-                name: "lid".into(),
-                left: 300.0,
-                top: 100.0,
-                width: 200.0,
-                height: 100.0,
-                origin_x: 100.0,
-                origin_y: 50.0,
-                resolution: 1.0,
-                attr: None,
-            })]),
+            icons: BTreeMap::from([(
+                "lid".into(),
+                EmoteTextureIcon {
+                    texture_name: "atlas".into(),
+                    name: "lid".into(),
+                    left: 300.0,
+                    top: 100.0,
+                    width: 200.0,
+                    height: 100.0,
+                    origin_x: 100.0,
+                    origin_y: 50.0,
+                    resolution: 1.0,
+                    attr: None,
+                },
+            )]),
         };
         let state = DynamicFrameState {
             src: Some("atlas".into()),
@@ -7528,7 +7532,9 @@ mod tests {
         let mut child = test_runtime_sprite("lid/white", &[0], "white");
         child.width = 80.0;
         child.height = 40.0;
-        child.mesh_deformer_chain.push(patch_with_domain(mesh, domain));
+        child
+            .mesh_deformer_chain
+            .push(patch_with_domain(mesh, domain));
         assert!((child.local_point(0.5, 0.5)[1] - 10.0).abs() < 1.0e-4);
         // Out-of-domain siblings must retain the position fix's boundary guard.
         child.center_x = 1000.0;
@@ -8220,8 +8226,16 @@ mod tests {
     fn null_parameter_binding_inherits_motion_time() {
         let layer = PsbValue::Object(vec![("parameterize".to_owned(), PsbValue::Null)]);
         let frames = vec![
-            test_frame(0.0, 2, test_content(vec![("icon", PsbValue::String("open".into()))])),
-            test_frame(20.0, 2, test_content(vec![("icon", PsbValue::String("closed".into()))])),
+            test_frame(
+                0.0,
+                2,
+                test_content(vec![("icon", PsbValue::String("open".into()))]),
+            ),
+            test_frame(
+                20.0,
+                2,
+                test_content(vec![("icon", PsbValue::String("closed".into()))]),
+            ),
         ];
         let eval = layer_parameter_eval(&layer, None, &BTreeMap::new(), &frames, 20.0).unwrap();
         assert_eq!(eval.id, None);
@@ -8245,7 +8259,8 @@ mod tests {
             for wall_time in [0.0, 200.0, 1000.0] {
                 let time = motion_sample_time(&motion, Some(&parameters), &variables, wall_time);
                 assert_eq!(time, expected);
-                let sample = layer_parameter_eval(&layer, Some(&parameters), &variables, &[], time).unwrap();
+                let sample =
+                    layer_parameter_eval(&layer, Some(&parameters), &variables, &[], time).unwrap();
                 assert_eq!(sample.local_time_ticks, expected);
             }
         }
