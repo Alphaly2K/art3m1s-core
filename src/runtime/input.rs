@@ -276,7 +276,7 @@ impl CoreRuntime {
             "",
             &[("type", event_name)],
         );
-        if dispatch.queued {
+        if dispatch.needs_return_frame {
             self.begin_inline_event_frame();
         }
     }
@@ -327,10 +327,35 @@ impl CoreRuntime {
         mouse_x: f32,
         mouse_y: f32,
     ) -> HandlerDispatch {
-        if !self.compositor.is_layer_draggable(layer_id)
-            || !has_drag_handler(&self.compositor, layer_id)
-        {
+        if !self.compositor.is_layer_draggable(layer_id) {
             return HandlerDispatch::default();
+        }
+        // Slider hit layers often expose only `dragin`; that handler computes
+        // the value and emits `[lydrag]` for the actual knob. Do not claim the
+        // pointer for the hit layer before that explicit transfer, otherwise
+        // the invisible track is dragged independently of the knob.
+        if !has_drag_handler(&self.compositor, layer_id) {
+            let has_dragin = self
+                .compositor
+                .scene()
+                .get(layer_id)
+                .and_then(|layer| layer.event_handlers.get("dragin"))
+                .is_some_and(|handler| handler.enabled);
+            if !has_dragin {
+                return HandlerDispatch::default();
+            }
+            let dispatch = enqueue_layer_handler(
+                &self.interpreter,
+                &self.compositor,
+                layer_id,
+                "dragin",
+                &[("drag", "1"), ("id", layer_id)],
+            );
+            return HandlerDispatch {
+                handled: dispatch.handled,
+                needs_return_frame: dispatch.needs_return_frame,
+                queued: dispatch.queued,
+            };
         }
         self.begin_pointer_drag(layer_id, mouse_x, mouse_y)
     }
@@ -502,17 +527,6 @@ pub(super) fn inline_event_marker_is_active(
         .is_some_and(|marker| marker.script == frame.script && marker.return_line == frame.line)
 }
 
-pub(super) fn detach_inline_event_marker(
-    frame: &InlineEventFrame,
-    stack: &mut Vec<asb_interpreter::CallFrame>,
-) -> bool {
-    if !inline_event_marker_is_active(frame, stack) {
-        return false;
-    }
-    stack.remove(frame.stack.len());
-    true
-}
-
 #[derive(Clone, Copy, Debug, Default)]
 struct HandlerDispatch {
     handled: bool,
@@ -566,12 +580,10 @@ fn has_drag_handler(compositor: &Compositor, layer_id: &str) -> bool {
         .scene()
         .get(layer_id)
         .map(|layer| {
-            ["drag", "dragin", "dragout"].iter().any(|event_type| {
-                layer
-                    .event_handlers
-                    .get(*event_type)
-                    .is_some_and(|handler| handler.enabled)
-            })
+            layer
+                .event_handlers
+                .get("drag")
+                .is_some_and(|handler| handler.enabled)
         })
         .unwrap_or(false)
 }
@@ -599,13 +611,14 @@ fn event_dispatch_layers(
 #[cfg(test)]
 mod tests {
     use super::{
-        InlineEventFrame, dispatch_handler, enqueue_input_handler, enqueue_layer_handler,
-        event_dispatch_layers, forced_drag_state, global_push_absorbs_default_click,
-        inline_event_marker_is_active, link_area_has_jump_target, pointer_hit_test_required,
+        InlineEventFrame, dispatch_handler, enqueue_handler_tags, enqueue_input_handler,
+        enqueue_layer_handler, event_dispatch_layers, forced_drag_state,
+        global_push_absorbs_default_click, has_drag_handler, inline_event_marker_is_active,
+        link_area_has_jump_target, pointer_hit_test_required,
     };
     use crate::compositor::Compositor;
     use crate::text::render::LinkHitArea;
-    use asb_interpreter::event::{Event, WaitReason};
+    use asb_interpreter::event::{Event, LayerEvent, WaitReason};
     use asb_interpreter::{CallFrame, Interpreter, InterpreterConfig};
     use std::collections::HashMap;
 
@@ -975,6 +988,50 @@ mod tests {
     }
 
     #[test]
+    fn dragin_only_layers_are_not_claimed_as_direct_drags() {
+        let mut compositor = Compositor::new();
+        compositor.ensure_layer("slider");
+        compositor.apply_event(&Event::Layer(LayerEvent::SetProperties {
+            id: "slider".into(),
+            properties: HashMap::from([(String::from("draggable"), String::from("1"))]),
+        }));
+        compositor.apply_event(&Event::LayerEventHandler {
+            id: "slider".into(),
+            event_type: "dragin".into(),
+            mode: "init".into(),
+            file: None,
+            label: None,
+            call: false,
+            handler: Some("calllua".into()),
+            penetration: false,
+            extra_params: HashMap::new(),
+        });
+        assert!(!has_drag_handler(&compositor, "slider"));
+    }
+
+    #[test]
+    fn zero_handler_target_does_not_enqueue_script_control_flow() {
+        let interpreter = Interpreter::new(InterpreterConfig::default());
+        enqueue_handler_tags(
+            &interpreter,
+            None,
+            Some("0"),
+            Some("0"),
+            true,
+            &HashMap::new(),
+            &[],
+        );
+        assert!(
+            interpreter
+                .engine_context()
+                .lock()
+                .unwrap()
+                .tag_queue
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn link_area_jump_target_requires_file_or_label() {
         let base = LinkHitArea {
             layer_id: "msg".into(),
@@ -1016,6 +1073,19 @@ pub(super) fn enqueue_handler_tags(
     params: &HashMap<String, String>,
     runtime_params: &[(&str, &str)],
 ) {
+    // A target is optional only when *both* fields carry the sentinel.  Keep
+    // a non-sentinel counterpart intact: `[call file="0" label="foo"]` is a
+    // legitimate same-script call, while `[call file="foo" label="0"]`
+    // remains an explicit (and therefore diagnosable) script target.
+    let file = file.filter(|value| !value.is_empty());
+    let label = label.filter(|value| !value.is_empty());
+    let target_unset = file.map(|value| value == "0").unwrap_or(true)
+        && label.map(|value| value == "0").unwrap_or(true);
+    let (file, label) = if target_unset {
+        (None, None)
+    } else {
+        (file, label)
+    };
     let ctx = interpreter.engine_context();
     let mut queue = ctx.lock().unwrap();
     if let Some(tag) = handler_tag {
@@ -1054,6 +1124,15 @@ fn dispatch_handler(
     params: &HashMap<String, String>,
     runtime_params: &[(&str, &str)],
 ) -> HandlerDispatch {
+    let file = file.filter(|value| !value.is_empty());
+    let label = label.filter(|value| !value.is_empty());
+    let target_unset = file.map(|value| value == "0").unwrap_or(true)
+        && label.map(|value| value == "0").unwrap_or(true);
+    let (file, label) = if target_unset {
+        (None, None)
+    } else {
+        (file, label)
+    };
     // 过滤器观察的是注册事件的标签名及原始参数，而非触发时的 click/key。
     // 1 = 假装成功，2 = 假装失败；两者都不能把原处理器排入队列。
     match interpreter.run_event_filter(filter_name, filter_params) {

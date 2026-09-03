@@ -12,46 +12,33 @@ pub struct LytweenHandler;
 
 impl TagHandler for LytweenHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let id = ctx.instruction.get("id").unwrap_or("").to_string();
-        let param = ctx.instruction.get("param").unwrap_or("").to_string();
-        let from = ctx.instruction.get("from").map(|s| s.to_string());
-        let to = ctx.instruction.get("to").map(|s| s.to_string());
-        let ease = ctx.instruction.get("ease").map(|s| s.to_string());
-        let time = ctx
-            .instruction
-            .get("time")
-            .and_then(|s| s.parse::<u64>().ok());
-        let delay = ctx
-            .instruction
-            .get("delay")
-            .and_then(|s| s.parse::<u64>().ok());
-        let loop_count = ctx
-            .instruction
-            .get("loop")
-            .and_then(|s| s.parse::<i32>().ok());
-        let yoyo = ctx
-            .instruction
-            .get("yoyo")
-            .and_then(|s| s.parse::<i32>().ok());
-        let loop_delay = ctx
-            .instruction
-            .get("loopdelay")
-            .and_then(|s| s.parse::<u64>().ok());
-        let sync = ctx
-            .instruction
-            .get("sync")
+        let resolve_opt = |key: &str| -> Result<Option<String>> {
+            ctx.instruction
+                .get(key)
+                .map(|_| ctx.resolve_param_str(key))
+                .transpose()
+        };
+        let id = ctx.resolve_param_str("id")?;
+        let param = ctx.resolve_param_str("param")?;
+        let from = resolve_opt("from")?;
+        let to = resolve_opt("to")?;
+        let ease = resolve_opt("ease")?;
+        let time = resolve_opt("time")?.and_then(|s| s.parse::<u64>().ok());
+        let delay = resolve_opt("delay")?.and_then(|s| s.parse::<u64>().ok());
+        let loop_count = resolve_opt("loop")?.and_then(|s| s.parse::<i32>().ok());
+        let yoyo = resolve_opt("yoyo")?.and_then(|s| s.parse::<i32>().ok());
+        let loop_delay = resolve_opt("loopdelay")?.and_then(|s| s.parse::<u64>().ok());
+        let sync = resolve_opt("sync")?
             .and_then(|s| s.parse::<i32>().ok())
             .unwrap_or(0)
             != 0;
-        let delete = ctx
-            .instruction
-            .get("delete")
+        let delete = resolve_opt("delete")?
             .and_then(|s| s.parse::<i32>().ok())
             .unwrap_or(0)
             != 0;
-        let handler_file = ctx.instruction.get("file").map(|s| s.to_string());
-        let handler_label = ctx.instruction.get("label").map(|s| s.to_string());
-        let handler_handler = ctx.instruction.get("handler").map(|s| s.to_string());
+        let handler_file = resolve_opt("file")?;
+        let handler_label = resolve_opt("label")?;
+        let handler_handler = resolve_opt("handler")?;
         let known = [
             "id",
             "param",
@@ -318,7 +305,9 @@ pub struct LydragHandler;
 
 impl TagHandler for LydragHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let id = ctx.instruction.get("id").unwrap_or("").to_string();
+        // `id` is a STRING parameter. Resolve variables/expressions while
+        // preserving the textual layer path (e.g. `100.slider.7.1`).
+        let id = ctx.resolve_param_str("id")?;
         Ok(TagResult::Emit(Event::LayerDrag { id }))
     }
 }
@@ -418,6 +407,70 @@ mod tests {
             Some("config_sampletext")
         );
         assert!(!extra_params.contains_key("time"));
+    }
+
+    #[test]
+    fn lydrag_resolves_dynamic_layer_id() {
+        let lua = mlua::Lua::new();
+        let instruction = Instruction {
+            tag: "lydrag".into(),
+            params: HashMap::from([(String::from("id"), String::from("$t.slider.id + '.2'"))]),
+            line: 1,
+        };
+        let mut variables = VariableStore::new();
+        variables.set("t.slider.id", crate::Value::String("100.slider.7".into()));
+        let get_script = |_name: &str| None;
+        let mut ctx = ExecutionContext {
+            variables: &mut variables,
+            lua: &lua,
+            current_script: "test",
+            current_line: 0,
+            instruction: &instruction,
+            get_script: &get_script,
+        };
+
+        let TagResult::Emit(Event::LayerDrag { id }) = LydragHandler.execute(&mut ctx).unwrap()
+        else {
+            panic!("lydrag should produce a LayerDrag event");
+        };
+        assert_eq!(id, "100.slider.7.2");
+    }
+
+    #[test]
+    fn lytween_resolves_dynamic_layer_and_numeric_parameters() {
+        let lua = mlua::Lua::new();
+        let instruction = Instruction {
+            tag: "lytween".into(),
+            params: HashMap::from([
+                (String::from("id"), String::from("$t.slider.id")),
+                (String::from("param"), String::from("left")),
+                (String::from("to"), String::from("$t.slider.left")),
+                (String::from("time"), String::from("$t.slider.duration")),
+            ]),
+            line: 1,
+        };
+        let mut variables = VariableStore::new();
+        variables.set("t.slider.id", crate::Value::String("100.slider.7.2".into()));
+        variables.set("t.slider.left", crate::Value::Int(384));
+        variables.set("t.slider.duration", crate::Value::Int(700));
+        let get_script = |_name: &str| None;
+        let mut ctx = ExecutionContext {
+            variables: &mut variables,
+            lua: &lua,
+            current_script: "test",
+            current_line: 0,
+            instruction: &instruction,
+            get_script: &get_script,
+        };
+
+        let TagResult::Emit(Event::LayerTween { id, to, time, .. }) =
+            LytweenHandler.execute(&mut ctx).unwrap()
+        else {
+            panic!("lytween should produce a LayerTween event");
+        };
+        assert_eq!(id, "100.slider.7.2");
+        assert_eq!(to.as_deref(), Some("384"));
+        assert_eq!(time, Some(700));
     }
 
     /// 用给定参数执行单个标签处理器，返回 TagResult

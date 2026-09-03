@@ -1,4 +1,5 @@
 use super::Compositor;
+use crate::compositor::build::resolved_props;
 use crate::compositor::props::LayerProps;
 use crate::render_pipeline::draw::TextureProvider;
 use glam::{Affine2, Vec2};
@@ -54,13 +55,17 @@ impl Compositor {
         let Some(layer) = self.scene.get(id) else {
             return;
         };
-        let props = &layer.props;
+        // Match the render path: an in-flight `lytween` changes the geometry
+        // visible on screen without mutating the base properties until it
+        // finishes.  Hit testing the base props would leave the interactive
+        // area behind while a layer is moving (or otherwise being animated).
+        let props = resolved_props(layer, self.clock_ms);
 
-        if props.visible == Some(false) {
+        if !props.is_visible() {
             return;
         }
 
-        let world = parent_transform * local_transform(props);
+        let world = parent_transform * local_transform(&props);
 
         // 先递归检测子层（高 z-order 优先，reverse 遍历）。
         // 注意按 Artemis 图层顺序排序（与绘制次序一致），不能用原始插入顺序，
@@ -98,7 +103,7 @@ impl Compositor {
                 && local.y >= 0.0
                 && local.y < h
                 && !self.is_pointer_transparent_at(
-                    props,
+                    &props,
                     local.x,
                     local.y,
                     scale,
