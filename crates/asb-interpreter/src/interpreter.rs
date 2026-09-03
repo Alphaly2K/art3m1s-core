@@ -76,6 +76,7 @@ struct QueuedWaitCheckpoint {
     line: usize,
     stack: Vec<CallFrame>,
     deferred: Vec<(String, HashMap<String, String>)>,
+    immediate_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -813,6 +814,7 @@ impl Interpreter {
         self.variables.lock().unwrap().reset();
         let mut ctx = self.engine_ctx.lock().unwrap();
         ctx.tag_queue.clear();
+        ctx.immediate_tag_count = 0;
         ctx.script_stack.clear();
         ctx.scenario_text_source = None;
         ctx.pending_stack_override = None;
@@ -1196,7 +1198,11 @@ impl Interpreter {
                 if ctx.tag_queue.is_empty() {
                     None
                 } else {
-                    Some(ctx.tag_queue.remove(0))
+                    let queued = ctx.tag_queue.remove(0);
+                    if ctx.immediate_tag_count > 0 {
+                        ctx.immediate_tag_count -= 1;
+                    }
+                    Some(queued)
                 }
             };
             let Some((tag, params)) = queued else {
@@ -1320,7 +1326,8 @@ impl Interpreter {
                     // until the call returns.
                     let deferred = {
                         let mut ctx = self.engine_ctx.lock().unwrap();
-                        std::mem::take(&mut ctx.tag_queue)
+                        let split_at = ctx.immediate_tag_count.min(ctx.tag_queue.len());
+                        ctx.tag_queue.split_off(split_at)
                     };
                     self.queued_call_barriers.push(QueuedCallBarrier {
                         stack_depth: self.call_stack.len(),
@@ -1345,9 +1352,13 @@ impl Interpreter {
                             .ok_or_else(|| Error::LabelNotFound(label.clone()))?;
                         self.current_line = line;
                     }
-                    // Stop draining here so the next interpreter iteration
-                    // executes the called script before its deferred queue
-                    // continuation is considered.
+                    // `e:tag(call)` 的后续 e:tag 命令是这个新帧的
+                    // reservedCommands，必须先在该帧内抽干；典型写法是
+                    // call dummy ... return，用来给一组同步命令建立临时帧。
+                    // 只有没有同步保留命令时，才进入被调用脚本正文。
+                    if self.engine_ctx.lock().unwrap().immediate_tag_count > 0 {
+                        continue;
+                    }
                     return Ok(None);
                 }
                 TagResult::Return => {
@@ -1388,9 +1399,9 @@ impl Interpreter {
             let barrier = self.queued_call_barriers.pop().expect("barrier exists");
             if !barrier.deferred.is_empty() {
                 let mut ctx = self.engine_ctx.lock().unwrap();
-                let mut restored = barrier.deferred;
-                restored.append(&mut ctx.tag_queue);
-                ctx.tag_queue = restored;
+                // 被调用脚本产生的命令先于调用方 continuation；e:tag 前缀
+                // 仍保持在队首，barrier 中只有 enqueueTag/外部延迟命令。
+                ctx.tag_queue.extend(barrier.deferred);
             }
         }
     }
@@ -2040,7 +2051,9 @@ impl Interpreter {
     ) -> Result<()> {
         let pending = {
             let mut ctx = self.engine_ctx.lock().unwrap();
-            std::mem::take(&mut ctx.tag_queue)
+            let queue = std::mem::take(&mut ctx.tag_queue);
+            let immediate_count = std::mem::take(&mut ctx.immediate_tag_count);
+            (queue, immediate_count)
         };
 
         let result = self
@@ -2048,9 +2061,18 @@ impl Interpreter {
             .and_then(|()| self.flush_tag_queue().map(|_| ()));
 
         let mut ctx = self.engine_ctx.lock().unwrap();
-        let mut generated_leftovers = std::mem::take(&mut ctx.tag_queue);
-        generated_leftovers.extend(pending);
-        ctx.tag_queue = generated_leftovers;
+        let generated = std::mem::take(&mut ctx.tag_queue);
+        let generated_immediate = std::mem::take(&mut ctx.immediate_tag_count);
+        let (pending, pending_immediate) = pending;
+        let generated_split = generated_immediate.min(generated.len());
+        let pending_split = pending_immediate.min(pending.len());
+        let mut merged = Vec::with_capacity(generated.len() + pending.len());
+        merged.extend_from_slice(&generated[..generated_split]);
+        merged.extend_from_slice(&pending[..pending_split]);
+        merged.extend_from_slice(&generated[generated_split..]);
+        merged.extend_from_slice(&pending[pending_split..]);
+        ctx.immediate_tag_count = generated_split + pending_split;
+        ctx.tag_queue = merged;
         result
     }
 
@@ -2150,8 +2172,17 @@ impl Interpreter {
             let mut checkpoint = self.queued_wait_checkpoints.remove(index);
             self.queued_wait_checkpoints.truncate(index);
             let mut ctx = self.engine_ctx.lock().unwrap();
-            checkpoint.deferred.append(&mut ctx.tag_queue);
-            ctx.tag_queue = checkpoint.deferred;
+            let current = std::mem::take(&mut ctx.tag_queue);
+            let current_immediate = std::mem::take(&mut ctx.immediate_tag_count);
+            let checkpoint_split = checkpoint.immediate_count.min(checkpoint.deferred.len());
+            let current_split = current_immediate.min(current.len());
+            let mut merged = Vec::with_capacity(checkpoint.deferred.len() + current.len());
+            merged.extend(checkpoint.deferred.drain(..checkpoint_split));
+            merged.extend_from_slice(&current[..current_split]);
+            merged.append(&mut checkpoint.deferred);
+            merged.extend_from_slice(&current[current_split..]);
+            ctx.immediate_tag_count = checkpoint_split + current_split;
+            ctx.tag_queue = merged;
         }
         true
     }
@@ -2176,12 +2207,19 @@ impl Interpreter {
             self.active_queued_wait = Some(index);
             return;
         }
+        let (deferred, immediate_count) = {
+            let mut ctx = self.engine_ctx.lock().unwrap();
+            let deferred = std::mem::take(&mut ctx.tag_queue);
+            let immediate_count = std::mem::take(&mut ctx.immediate_tag_count);
+            (deferred, immediate_count)
+        };
         self.queued_wait_checkpoints.push(QueuedWaitCheckpoint {
             event: event.clone(),
             script,
             line,
             stack,
-            deferred: std::mem::take(&mut self.engine_ctx.lock().unwrap().tag_queue),
+            deferred,
+            immediate_count,
         });
         self.active_queued_wait = Some(self.queued_wait_checkpoints.len() - 1);
     }
@@ -3176,6 +3214,55 @@ mod tests {
             })
         ));
         assert!(interpreter.lua().globals().get::<bool>("order_ok").unwrap());
+    }
+
+    #[test]
+    fn immediate_tag_commands_after_dummy_call_stay_inside_that_call_frame() {
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter
+            .lua()
+            .load(
+                r#"
+                function run_reserved_commands(e)
+                    e:tag{"call", label="dummy"}
+                    e:tag{"var", name="reserved_ran", data="1"}
+                    e:tag{"return"}
+                end
+                "#,
+            )
+            .exec()
+            .unwrap();
+        interpreter.set_callback(|event| match event {
+            Event::Wait { .. } => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        interpreter
+            .load_script(
+                "main",
+                "*main\n[call label=outer]\n[var name=caller_resumed data=1]\n[stop]\n*outer\n[calllua function=run_reserved_commands]\n[var name=outer_continued data=1]\n[return]\n*dummy\n[return]\n",
+            )
+            .unwrap();
+        interpreter.start("main", "main").unwrap();
+
+        assert!(matches!(
+            interpreter.run().unwrap(),
+            ExecutionResult::Wait(Event::Wait {
+                reason: WaitReason::Stop { .. }
+            })
+        ));
+        assert_eq!(
+            interpreter.get_variable("reserved_ran"),
+            Some(Value::Int(1))
+        );
+        assert_eq!(
+            interpreter.get_variable("outer_continued"),
+            Some(Value::Int(1)),
+            "e:tag(return) 只能退出 e:tag(call) 建立的临时帧"
+        );
+        assert_eq!(
+            interpreter.get_variable("caller_resumed"),
+            Some(Value::Int(1))
+        );
     }
 
     #[test]

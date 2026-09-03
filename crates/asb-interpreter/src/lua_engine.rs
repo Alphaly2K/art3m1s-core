@@ -358,6 +358,12 @@ pub struct EngineContext {
     pub callbacks: Box<dyn EngineCallbacks + Send + Sync>,
     /// 待执行的标签队列
     pub tag_queue: Vec<(String, HashMap<String, String>)>,
+    /// `tag_queue` 前缀中由同步 `e:tag()` 产生的命令数。
+    ///
+    /// Artemis 区分 `e:tag()` 与 `e:enqueueTag()`：前者属于当前调用帧的
+    /// reserved commands，后者才是调用结束后的延迟队列。仍使用同一个 Vec
+    /// 保持既有宿主接口，只用这个前缀长度记录两种来源。
+    pub(crate) immediate_tag_count: usize,
     /// 待设置的事件处理器
     pub event_handlers: HashMap<String, String>,
     /// 事件过滤器函数（由 e:setEventFilter 设置）
@@ -406,6 +412,7 @@ impl EngineContext {
             frame_number: 0,
             callbacks,
             tag_queue: Vec::new(),
+            immediate_tag_count: 0,
             event_handlers: HashMap::new(),
             event_filter: None,
             log_filter: None,
@@ -600,7 +607,9 @@ impl UserData for EngineApi {
                         }
                     }
                 } else {
-                    ctx.tag_queue.push((tag_name, params));
+                    let insert_at = ctx.immediate_tag_count.min(ctx.tag_queue.len());
+                    ctx.tag_queue.insert(insert_at, (tag_name, params));
+                    ctx.immediate_tag_count += 1;
                 }
             }
             Ok(())
