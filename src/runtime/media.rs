@@ -554,12 +554,15 @@ impl CoreRuntime {
                 skippable,
             } => {
                 let resolved_file = self.resolve_magic_media_path(file);
+                // `s.segain.<id>` 是该 ID 的系统级持久增益；存在时既要影响
+                // 已播放通道，也要成为后续同 ID 播放的初始增益。
+                let effective_gain = self.system_se_gain(id).or(*gain);
                 self.audio.play_se(
                     id,
                     file,
                     &SeConfig {
                         loop_play: *loop_play,
-                        gain: *gain,
+                        gain: effective_gain,
                         pan: *pan,
                         fade_in_ms: fade_time.unwrap_or(0),
                         buffer_size: None,
@@ -573,7 +576,7 @@ impl CoreRuntime {
                         file,
                         resolved_file: Some(&resolved_file),
                         loop_play: *loop_play,
-                        gain: *gain,
+                        gain: effective_gain,
                         pan: *pan,
                         fade_ms: fade_time.unwrap_or(0),
                         skippable: *skippable,
@@ -637,12 +640,13 @@ impl CoreRuntime {
                         format!("voice:{}", self.voice_serial)
                     }
                 };
+                let effective_gain = self.system_se_gain(&voice_id).or(*gain);
                 self.audio.play_voice(
                     &voice_id,
                     file,
                     &SeConfig {
                         loop_play: *loop_play,
-                        gain: *gain,
+                        gain: effective_gain,
                         pan: *pan,
                         fade_in_ms: fade_time.unwrap_or(0),
                         buffer_size: None,
@@ -656,7 +660,7 @@ impl CoreRuntime {
                         file,
                         resolved_file: Some(&resolved_file),
                         loop_play: *loop_play,
-                        gain: *gain,
+                        gain: effective_gain,
                         pan: *pan,
                         fade_ms: fade_time.unwrap_or(0),
                     },
@@ -778,13 +782,23 @@ impl CoreRuntime {
         let vars = self.interpreter.variables_handle();
         let vars = vars.lock().unwrap();
         let read_volume = |key: &str| {
-            vars.get(key).and_then(|value| match value {
-                asb_interpreter::Value::Int(v) => Some((*v as f32 / VOLUME_SCALE).clamp(0.0, 1.0)),
-                _ => None,
-            })
+            vars.get(key)
+                .and_then(asb_interpreter::Value::as_float)
+                .map(|value| (value as f32 / VOLUME_SCALE).clamp(0.0, 1.0))
         };
         let bgm_volume = read_volume("s.bgmvol");
         let se_volume = read_volume("s.sevol");
+        let se_gains: Vec<(String, i32)> = vars
+            .iter_system()
+            .filter_map(|(key, value)| {
+                let id = key.strip_prefix("segain.")?;
+                if id.is_empty() {
+                    return None;
+                }
+                let gain = value.as_float()?.round().clamp(0.0, VOLUME_SCALE as f64) as i32;
+                Some((id.to_string(), gain))
+            })
+            .collect();
         drop(vars);
 
         // 只在值变化时下发，避免每帧向宿主重发相同命令。
@@ -814,6 +828,31 @@ impl CoreRuntime {
                 },
             );
         }
+
+        for (id, gain) in se_gains {
+            if self.last_system_se_gain.get(&id) == Some(&gain) {
+                continue;
+            }
+            self.last_system_se_gain.insert(id.clone(), gain);
+            self.audio.fade_se_gain(&id, gain, 0);
+            hm::emit(
+                Kind::AudioSeFade,
+                hm::SeFade {
+                    id: &id,
+                    gain,
+                    time_ms: 0,
+                },
+            );
+        }
+    }
+
+    fn system_se_gain(&self, id: &str) -> Option<i32> {
+        const VOLUME_SCALE: f64 = 1000.0;
+        let vars = self.interpreter.variables_handle();
+        let vars = vars.lock().unwrap();
+        vars.get(&format!("s.segain.{id}"))
+            .and_then(asb_interpreter::Value::as_float)
+            .map(|value| value.round().clamp(0.0, VOLUME_SCALE) as i32)
     }
 }
 

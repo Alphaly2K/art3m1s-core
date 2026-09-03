@@ -84,11 +84,11 @@ impl<'a> ExpressionEvaluator<'a> {
             // 去除内部的 $ 前缀（表达式中的变量引用）
             // 注意：不能去除字符串字面量中的 $
             let expr = strip_dollar_signs(&value[1..]);
-            self.evaluate(&expr).map_err(|error| {
-                if std::env::var_os("ASB_TRACE_EXPR").is_some() {
-                    eprintln!("[expr-error] raw={value:?} expr={expr:?} error={error:?}");
+            self.evaluate(&expr).map_err(|error| match error {
+                Error::ExpressionError(message) => {
+                    Error::ExpressionError(format!("{message}; raw={value:?}; expr={expr:?}"))
                 }
-                error
+                other => other,
             })
         } else if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
             Ok(Value::String(value[1..value.len() - 1].to_string()))
@@ -118,11 +118,11 @@ impl<'a> ExpressionEvaluator<'a> {
             let expr = strip_dollar_signs(&value[1..]);
             self.evaluate(&expr)
                 .map(|value| value.as_string())
-                .map_err(|error| {
-                    if std::env::var_os("ASB_TRACE_EXPR").is_some() {
-                        eprintln!("[expr-error] raw={value:?} expr={expr:?} error={error:?}");
+                .map_err(|error| match error {
+                    Error::ExpressionError(message) => {
+                        Error::ExpressionError(format!("{message}; raw={value:?}; expr={expr:?}"))
                     }
-                    error
+                    other => other,
                 })
         } else if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
             Ok(value[1..value.len() - 1].to_string())

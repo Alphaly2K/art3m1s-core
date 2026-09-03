@@ -400,9 +400,42 @@ fn parse_params(params_str: &str, line: usize) -> Result<HashMap<String, String>
         } else {
             // 无引号的值
             let mut value = String::new();
+            // Artemis 表达式通常以 `$` 开头，且合法地包含空格（例如
+            // `$t.lydialog.id + '.999'`）。普通未加引号参数仍按空白分隔，
+            // 避免把后续的位置参数误并入当前值。
+            let expression_value = chars.peek() == Some(&'$');
             while let Some(&c) = chars.peek() {
                 if c.is_whitespace() {
-                    break;
+                    if !expression_value {
+                        break;
+                    }
+                    // 参数值中的空格是合法的（最重要的是未加双引号的表达式，
+                    // 如 `$t.lydialog.id + '.999'`）。只有当空白之后紧跟着
+                    // 一个新的 `key=` 参数时，才把它视为当前值的边界。
+                    let mut lookahead = chars.clone();
+                    while lookahead
+                        .peek()
+                        .map(|next| next.is_whitespace())
+                        .unwrap_or(false)
+                    {
+                        lookahead.next();
+                    }
+                    let mut next_key = false;
+                    let mut key_chars = 0usize;
+                    while let Some(&next) = lookahead.peek() {
+                        if next == '=' {
+                            next_key = key_chars > 0;
+                            break;
+                        }
+                        if next.is_whitespace() {
+                            break;
+                        }
+                        key_chars += 1;
+                        lookahead.next();
+                    }
+                    if next_key {
+                        break;
+                    }
                 }
                 value.push(chars.next().unwrap());
             }
@@ -464,6 +497,23 @@ mod tests {
         let inst3 = &script.instructions[2];
         assert_eq!(inst3.get("cond"), Some("$t.check==0"));
         assert_eq!(inst3.get("label"), Some("next"));
+    }
+
+    #[test]
+    fn test_parse_unquoted_expression_keeps_internal_spaces() {
+        let script = Script::parse(
+            "test",
+            "[lyevent id=$t.lydialog.id + '.999' type=click mode=enable]",
+        )
+        .unwrap();
+        let instruction = &script.instructions[0];
+        assert_eq!(
+            instruction.get("id"),
+            Some("$t.lydialog.id + '.999'"),
+            "未加双引号的表达式不能在空格处被截断"
+        );
+        assert_eq!(instruction.get("type"), Some("click"));
+        assert_eq!(instruction.get("mode"), Some("enable"));
     }
 
     #[test]

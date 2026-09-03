@@ -5,11 +5,43 @@
 use super::{ExecutionContext, TagHandler, TagResult};
 use crate::error::Result;
 
-/// 求值 estimate 参数（已经是 $ 开头的表达式）
+/// Artemis 的裸 `estimate` 走数值参数转换，而不是表达式求值。
+/// 该转换会读取参数开头的数值，忽略其后的文本；没有数值时结果为 0。
+fn parse_bare_estimate_number(value: &str) -> f64 {
+    let value = value.trim_start();
+    let mut end = 0;
+    let bytes = value.as_bytes();
+    if matches!(bytes.first(), Some(b'+') | Some(b'-')) {
+        end = 1;
+    }
+    let integer_start = end;
+    while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+        end += 1;
+    }
+    if bytes.get(end) == Some(&b'.') {
+        end += 1;
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+            end += 1;
+        }
+    }
+    if end == integer_start || (end == integer_start + 1 && bytes.get(integer_start) == Some(&b'.'))
+    {
+        return 0.0;
+    }
+    value[..end].parse::<f64>().unwrap_or(0.0)
+}
+
+/// 求值 estimate 参数。
 fn evaluate_estimate(ctx: &ExecutionContext<'_>) -> Result<bool> {
     let condition = ctx.instruction.get("estimate").unwrap_or("1");
-    // estimate 值已经是表达式（可能以 $ 开头，也可能是字面量）
-    let value = ctx.evaluator().resolve_param(condition)?;
+    // 文档规定只有带 `$` 的参数值才是表达式；不带 `$` 时 estimate
+    // 按数值参数转换。原引擎会读取开头的数值（例如 `1 == 2` 得到 1），
+    // 没有数值的变量/字符串则得到 0，而不是按非空字符串判真。
+    let value = if condition.starts_with('$') {
+        ctx.evaluator().resolve_param(condition)?
+    } else {
+        crate::variable::Value::Float(parse_bare_estimate_number(condition))
+    };
     Ok(value.as_bool())
 }
 
@@ -209,6 +241,36 @@ mod tests {
             "n",
         );
         assert_eq!(n.and_then(|v| v.as_int()), Some(1));
+    }
+
+    #[test]
+    fn bare_estimate_uses_numeric_prefix_conversion() {
+        let r = run_and_get(
+            r#"
+*main
+[var name="t.items.size" data="2"]
+[var name="r" data="'ok'"]
+[if estimate="t.items.size != 2"]
+[var name="r" data="'bad'"]
+[/if]
+[stop]
+"#,
+            "r",
+        );
+        assert_eq!(r, Some(Value::String("ok".to_string())));
+
+        let r = run_and_get(
+            r#"
+*main
+[var name="r" data="'unset'"]
+[if estimate="1 == 2"]
+[var name="r" data="'true'"]
+[/if]
+[stop]
+"#,
+            "r",
+        );
+        assert_eq!(r, Some(Value::String("true".to_string())));
     }
 
     #[test]

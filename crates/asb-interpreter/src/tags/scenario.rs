@@ -197,7 +197,7 @@ impl TagHandler for ChgmsgHandler {
         // id 缺省时按文档"设置为随机值"——生成一个新的匿名消息层 ID，
         // 而不是落回缺省消息层（一次性切换后通常由 /chgmsg 回退）。
         let id = match ctx.instruction.get("id").filter(|v| !v.is_empty()) {
-            Some(id) => Some(id.to_string()),
+            Some(_) => Some(ctx.resolve_param_str("id")?),
             None => {
                 let serial = CHGMSG_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let nanos = std::time::SystemTime::now()

@@ -100,6 +100,8 @@ pub struct CoreRuntime {
     external_surface_kind: Option<i32>,
     /// 上次下发的系统音量 (bgm, se)，用于跳过重复下发。
     last_system_volume: (Option<f32>, Option<f32>),
+    /// 上次下发的 `s.segain.<id>`，键为 SE/Voice ID，值为 Artemis 0..1000 增益。
+    last_system_se_gain: HashMap<String, i32>,
     wait_reason: Option<WaitReason>,
     timed_remaining_ms: u64,
     control: control::RuntimeControlState,
@@ -217,6 +219,7 @@ impl CoreRuntime {
             external_surface_size: None,
             external_surface_kind: None,
             last_system_volume: (None, None),
+            last_system_se_gain: HashMap::new(),
             wait_reason: None,
             timed_remaining_ms: 0,
             control: control::RuntimeControlState::default(),

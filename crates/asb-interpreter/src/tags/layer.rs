@@ -90,7 +90,7 @@ pub struct LytweendelHandler;
 
 impl TagHandler for LytweendelHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let id = ctx.instruction.get("id").unwrap_or("").to_string();
+        let id = ctx.resolve_param_str("id")?;
         Ok(TagResult::Emit(Event::LayerTweenDelete { id }))
     }
 }
@@ -289,8 +289,8 @@ pub struct LyrenameHandler;
 
 impl TagHandler for LyrenameHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let id = ctx.instruction.get("id").unwrap_or("").to_string();
-        let to = ctx.instruction.get("to").unwrap_or("").to_string();
+        let id = ctx.resolve_param_str("id")?;
+        let to = ctx.resolve_param_str("to")?;
         Ok(TagResult::Emit(Event::LayerRename { id, to }))
     }
 }
@@ -300,10 +300,18 @@ pub struct LyeditHandler;
 
 impl TagHandler for LyeditHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let id = ctx.instruction.get("id").unwrap_or("").to_string();
-        let mode = ctx.instruction.get("mode").unwrap_or("").to_string();
-        let color = ctx.instruction.get("color").map(|s| s.to_string());
-        let file = ctx.instruction.get("file").map(|s| s.to_string());
+        let id = ctx.resolve_param_str("id")?;
+        let mode = ctx.resolve_param_str("mode")?;
+        let color = ctx
+            .instruction
+            .get("color")
+            .map(|_| ctx.resolve_param_str("color"))
+            .transpose()?;
+        let file = ctx
+            .instruction
+            .get("file")
+            .map(|_| ctx.resolve_param_str("file"))
+            .transpose()?;
         let left = ctx
             .instruction
             .get("left")
@@ -461,6 +469,59 @@ mod tests {
     }
 
     #[test]
+    fn layer_mutation_handlers_resolve_dynamic_layer_ids() {
+        let mut variables = VariableStore::new();
+        variables.set("t.layer.id", crate::Value::String("1000.201".into()));
+
+        let dynamic_id = "$t.layer.id + '.3'";
+        let TagResult::Emit(Event::LayerTweenDelete { id }) = exec_with_variables(
+            &LytweendelHandler,
+            HashMap::from([("id".into(), dynamic_id.into())]),
+            &mut variables,
+        ) else {
+            panic!("lytweendel should emit LayerTweenDelete");
+        };
+        assert_eq!(id, "1000.201.3");
+
+        let TagResult::Emit(Event::LayerRename { id, to }) = exec_with_variables(
+            &LyrenameHandler,
+            HashMap::from([
+                ("id".into(), dynamic_id.into()),
+                ("to".into(), "$t.layer.id + '.4'".into()),
+            ]),
+            &mut variables,
+        ) else {
+            panic!("lyrename should emit LayerRename");
+        };
+        assert_eq!(id, "1000.201.3");
+        assert_eq!(to, "1000.201.4");
+
+        let TagResult::Emit(Event::LayerEdit { id, .. }) = exec_with_variables(
+            &LyeditHandler,
+            HashMap::from([
+                ("id".into(), dynamic_id.into()),
+                ("mode".into(), "init".into()),
+            ]),
+            &mut variables,
+        ) else {
+            panic!("lyedit should emit LayerEdit");
+        };
+        assert_eq!(id, "1000.201.3");
+
+        let TagResult::Emit(Event::Anime { id, .. }) = exec_with_variables(
+            &AnimeHandler,
+            HashMap::from([
+                ("id".into(), dynamic_id.into()),
+                ("mode".into(), "start".into()),
+            ]),
+            &mut variables,
+        ) else {
+            panic!("anime should emit Anime");
+        };
+        assert_eq!(id, "1000.201.3");
+    }
+
+    #[test]
     fn lytween_resolves_dynamic_layer_and_numeric_parameters() {
         let lua = mlua::Lua::new();
         let instruction = Instruction {
@@ -555,6 +616,29 @@ mod tests {
         let get_script = |_name: &str| None;
         let mut ctx = ExecutionContext {
             variables: &mut variables,
+            lua: &lua,
+            current_script: "test",
+            current_line: 0,
+            instruction: &instruction,
+            get_script: &get_script,
+        };
+        handler.execute(&mut ctx).unwrap()
+    }
+
+    fn exec_with_variables(
+        handler: &dyn TagHandler,
+        params: HashMap<String, String>,
+        variables: &mut VariableStore,
+    ) -> TagResult {
+        let lua = mlua::Lua::new();
+        let instruction = Instruction {
+            tag: "test".into(),
+            params,
+            line: 1,
+        };
+        let get_script = |_name: &str| None;
+        let mut ctx = ExecutionContext {
+            variables,
             lua: &lua,
             current_script: "test",
             current_line: 0,
@@ -734,10 +818,18 @@ pub struct AnimeHandler;
 
 impl TagHandler for AnimeHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let id = ctx.instruction.get("id").unwrap_or("").to_string();
-        let mode = ctx.instruction.get("mode").unwrap_or("").to_string();
-        let file = ctx.instruction.get("file").map(|s| s.to_string());
-        let mask = ctx.instruction.get("mask").map(|s| s.to_string());
+        let id = ctx.resolve_param_str("id")?;
+        let mode = ctx.resolve_param_str("mode")?;
+        let file = ctx
+            .instruction
+            .get("file")
+            .map(|_| ctx.resolve_param_str("file"))
+            .transpose()?;
+        let mask = ctx
+            .instruction
+            .get("mask")
+            .map(|_| ctx.resolve_param_str("mask"))
+            .transpose()?;
         let time = ctx
             .instruction
             .get("time")
@@ -788,8 +880,12 @@ pub struct VideoHandler;
 
 impl TagHandler for VideoHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let id = ctx.instruction.get("id").map(|s| s.to_string());
-        let file = ctx.instruction.get("file").unwrap_or("").to_string();
+        let id = ctx
+            .instruction
+            .get("id")
+            .map(|_| ctx.resolve_param_str("id"))
+            .transpose()?;
+        let file = ctx.resolve_param_str("file")?;
         // skip：0=禁止跳过 / 缺省 1=单击跳过 / 2=仅右键菜单方式跳过，保留原值
         let skip = ctx
             .instruction

@@ -841,6 +841,7 @@ impl CoreRuntime {
         self.timed_remaining_ms = 0;
         self.wait_reason = None;
         self.last_system_volume = (None, None);
+        self.last_system_se_gain.clear();
         self.last_rendered_scene = None;
         self.last_rendered_clock_ms = 0;
         self.last_submitted_frame = None;
