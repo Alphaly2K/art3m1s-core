@@ -536,6 +536,16 @@ impl TagHandler for CallHandler {
             .evaluator()
             .resolve_param_str(ctx.instruction.get("label").unwrap_or(""))?;
 
+        // Artemis system macros use the numeric string `0` for an optional
+        // callback that was not configured (for example slider drag hooks).
+        // Such a call is a no-op; attempting to load a script literally named
+        // `0` turns every drag frame into a ScriptNotFound error.
+        if label == "0" && file.as_deref().map_or(true, |value| value == "0") {
+            return Ok(TagResult::Continue);
+        }
+
+        let file = file.and_then(|value| (value != "0").then_some(value));
+
         Ok(TagResult::Call {
             file,
             label,
@@ -969,5 +979,18 @@ mod tests {
             }
             result => panic!("expected dialog, got {result:?}"),
         }
+    }
+
+    #[test]
+    fn call_with_zero_callback_target_is_noop() {
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter
+            .load_script("test", "*main\n[call file=\"0\" label=\"0\"]\n[return]\n")
+            .unwrap();
+        interpreter.start("test", "main").unwrap();
+        assert!(matches!(
+            interpreter.run().unwrap(),
+            ExecutionResult::Completed
+        ));
     }
 }

@@ -352,6 +352,45 @@ mod tests {
     }
 
     #[test]
+    fn compiled_macro_dynamic_var_destination_is_stored_with_resolved_key() {
+        use crate::{Interpreter, InterpreterConfig};
+        let data = fixture(&[
+            ("slider_h", None),
+            (
+                "var",
+                Some(&[("name", "$'slider.' + id + '.file'"), ("data", "$file")]),
+            ),
+            (
+                "var",
+                Some(&[("name", "$'slider.' + id + '.label'"), ("data", "$label")]),
+            ),
+            ("return", Some(&[])),
+        ]);
+        let mut it = Interpreter::new(InterpreterConfig::default());
+        it.set_file_loader(Box::new(move |_| Ok(data.clone())));
+        it.load_macro_file("macros.iet").unwrap();
+        it.load_script(
+            "main",
+            "[slider_h id=\"100.slider.7\" file=\"system/config.iet\" label=\"onslide_sound\"]\n[stop]",
+        )
+        .unwrap();
+        it.start("main", "").unwrap();
+        it.run().unwrap();
+        assert_eq!(
+            it.get_variable("slider.100.slider.7.file")
+                .unwrap()
+                .as_string(),
+            "system/config.iet"
+        );
+        assert_eq!(
+            it.get_variable("slider.100.slider.7.label")
+                .unwrap()
+                .as_string(),
+            "onslide_sound"
+        );
+    }
+
+    #[test]
     fn removing_event_marker_preserves_compiled_handler_arguments() {
         use crate::{CallFrame, CallbackResult, Event, Interpreter, InterpreterConfig};
         let data = fixture(&[
