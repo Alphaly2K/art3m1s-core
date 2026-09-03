@@ -84,7 +84,12 @@ impl<'a> ExpressionEvaluator<'a> {
             // 去除内部的 $ 前缀（表达式中的变量引用）
             // 注意：不能去除字符串字面量中的 $
             let expr = strip_dollar_signs(&value[1..]);
-            self.evaluate(&expr)
+            self.evaluate(&expr).map_err(|error| {
+                if std::env::var_os("ASB_TRACE_EXPR").is_some() {
+                    eprintln!("[expr-error] raw={value:?} expr={expr:?} error={error:?}");
+                }
+                error
+            })
         } else if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
             Ok(Value::String(value[1..value.len() - 1].to_string()))
         } else {
@@ -111,7 +116,14 @@ impl<'a> ExpressionEvaluator<'a> {
     pub fn resolve_param_str(&self, value: &str) -> Result<String> {
         if value.starts_with('$') {
             let expr = strip_dollar_signs(&value[1..]);
-            Ok(self.evaluate(&expr)?.as_string())
+            self.evaluate(&expr)
+                .map(|value| value.as_string())
+                .map_err(|error| {
+                    if std::env::var_os("ASB_TRACE_EXPR").is_some() {
+                        eprintln!("[expr-error] raw={value:?} expr={expr:?} error={error:?}");
+                    }
+                    error
+                })
         } else if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
             Ok(value[1..value.len() - 1].to_string())
         } else {

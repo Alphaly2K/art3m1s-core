@@ -133,7 +133,12 @@ impl CoreRuntime {
                     break;
                 }
                 Err(e) => {
-                    crate::core_error!("解释器错误: {e:?}");
+                    crate::core_error!(
+                        "解释器错误: {e:?} at {:?}:{} stack_depth={}",
+                        self.interpreter.current_script(),
+                        self.interpreter.current_line(),
+                        self.interpreter.call_stack().len()
+                    );
                     break;
                 }
             }
@@ -396,7 +401,12 @@ impl CoreRuntime {
             let drain = match self.drain_queued_tags_with_host_effects(profile) {
                 Ok(drain) => drain,
                 Err(e) => {
-                    crate::core_error!("解释器错误: {e:?}");
+                    crate::core_error!(
+                        "解释器错误: {e:?} at {:?}:{} stack_depth={}",
+                        self.interpreter.current_script(),
+                        self.interpreter.current_line(),
+                        self.interpreter.call_stack().len()
+                    );
                     self.finish_inline_event_frame(false, false, false);
                     self.wait_reason = Some(stop_reason);
                     return;
@@ -431,7 +441,12 @@ impl CoreRuntime {
         let drain = match self.drain_queued_tags_with_host_effects(profile) {
             Ok(drain) => drain,
             Err(e) => {
-                crate::core_error!("解释器错误: {e:?}");
+                crate::core_error!(
+                    "解释器错误: {e:?} at {:?}:{} stack_depth={}",
+                    self.interpreter.current_script(),
+                    self.interpreter.current_line(),
+                    self.interpreter.call_stack().len()
+                );
                 self.finish_inline_event_frame(false, false, false);
                 self.wait_reason = Some(wait_reason);
                 return;
@@ -457,7 +472,12 @@ impl CoreRuntime {
         let drain = match self.drain_queued_tags_with_host_effects(profile) {
             Ok(drain) => drain,
             Err(error) => {
-                crate::core_error!("解释器错误: {error:?}");
+                crate::core_error!(
+                    "解释器错误: {error:?} at {:?}:{} stack_depth={}",
+                    self.interpreter.current_script(),
+                    self.interpreter.current_line(),
+                    self.interpreter.call_stack().len()
+                );
                 self.finish_inline_event_frame(false, false, false);
                 return;
             }
