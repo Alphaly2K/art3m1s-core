@@ -5,22 +5,42 @@ use asb_interpreter::event::{LayerEvent, WaitReason};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
+pub(super) struct RuntimeEvent {
+    pub event: Event,
+    pub text_source: Option<(String, usize)>,
+}
+
+pub(super) fn event_requires_state_sync(event: &Event) -> bool {
+    matches!(event, Event::Exec { .. })
+}
+
 impl CoreRuntime {
-    pub(super) fn drain_events(&mut self) -> Vec<Event> {
+    pub(super) fn flush_host_events(&mut self, profile: &mut crate::profiler::FrameProfile) {
+        let started = profile.mark();
+        let drain_started = profile.mark();
+        let collected = self.drain_events();
+        profile.event_drain_ns += crate::profiler::FrameProfile::elapsed(drain_started);
+        self.frame_visual_dirty |= !collected.is_empty();
+        self.pointer_hit_test_dirty |= !collected.is_empty();
+        self.dispatch_events(&collected, profile);
+        profile.events_ns += crate::profiler::FrameProfile::elapsed(started);
+    }
+
+    pub(super) fn drain_events(&mut self) -> Vec<RuntimeEvent> {
         let mut events = self.events.lock().unwrap();
         events.drain(..).collect()
     }
 
     pub(super) fn dispatch_events(
         &mut self,
-        events: &[Event],
+        events: &[RuntimeEvent],
         profile: &mut crate::profiler::FrameProfile,
     ) {
         const EVENT_TRACE_LIMIT: usize = 24;
 
         let mut trace = crate::ffi::debug_enabled()
             .then(|| Vec::with_capacity(events.len().min(EVENT_TRACE_LIMIT)));
-        for event in events {
+        for RuntimeEvent { event, text_source } in events {
             let runtime_started = profile.mark();
             if matches!(event, Event::Exit) {
                 crate::core_info!("[runtime] Event::Exit received");
@@ -115,6 +135,7 @@ impl CoreRuntime {
                     // [file command=clear_cache]：打包文件（pfs）由宿主资源回调
                     // 持有与缓存，核心转发命令让宿主清缓存。
                     crate::core_info!("[runtime] FileOperation clear_cache → 转发宿主");
+                    crate::ffi::clear_file_size_cache();
                     crate::ffi::emit_ui_command("file_clear_cache", serde_json::json!({}));
                 }
                 Event::FileOperation {
@@ -400,6 +421,11 @@ impl CoreRuntime {
                     if let Err(e) = self.handle_engine_reset() {
                         crate::core_error!("[runtime] 引擎重启失败: {}", e);
                     }
+                    // Reset replaces the interpreter and scene. Events that
+                    // were already drained from the old session must not be
+                    // applied after it; newly booted events remain in the
+                    // shared queue for the next tick.
+                    break;
                 }
                 _ => {}
             }
@@ -420,6 +446,9 @@ impl CoreRuntime {
             // 只有真正送入文本渲染器后才算本帧展示过剧情文本。
             if matches!(event, Event::ScenarioText { .. }) {
                 self.scenario_text_shown = true;
+                if let Some((script, line)) = text_source {
+                    self.record_scenario_text_source(script, *line);
+                }
             }
             profile.event_text_ns = profile
                 .event_text_ns
@@ -794,10 +823,15 @@ impl CoreRuntime {
     ///
     /// 解释器侧已在 ResetHandler 里清过 local/temp 变量域；Lua 全局环境无法
     /// 在不重建解释器的情况下清空，boot 脚本重跑时会重新初始化其自有状态。
-    fn handle_engine_reset(&mut self) -> Result<(), String> {
+    pub(super) fn handle_engine_reset(&mut self) -> Result<(), String> {
+        // Snapshot only the cross-session read history before resetting the
+        // transient control state. The interpreter's g./s. domains are saved
+        // by reboot_interpreter; local/temp Lua state is intentionally not.
+        let read_lines = self.control.read_lines_export();
         self.stop_all_media();
         self.clear_emote_state("engine reset");
-        self.compositor.reset_for_load();
+        self.compositor.reset_for_engine();
+        self.input.lock().unwrap().reset_all();
         self.sync_layer_info_all();
         self.hovered_layers.clear();
         self.pointer_drag = super::PointerDragState::default();
@@ -808,18 +842,32 @@ impl CoreRuntime {
         self.timed_remaining_ms = 0;
         self.wait_reason = None;
         self.last_system_volume = (None, None);
+        self.last_rendered_scene = None;
+        self.last_rendered_clock_ms = 0;
+        self.last_submitted_frame = None;
+        self.last_submitted_texture_revision = 0;
+        self.frame_visual_dirty = true;
+        self.last_pointer_hit_position = None;
+        self.last_pointer_hit_texture_revision = 0;
+        self.pointer_hit_test_dirty = true;
+        self.voice_serial = 0;
+        self.video_finished.store(false, Ordering::SeqCst);
+        self.debug_skip_active.store(false, Ordering::SeqCst);
+        self.exit_requested.store(false, Ordering::SeqCst);
+        self.script_status.store(0, Ordering::SeqCst);
+        self.last_engine_status = 0;
+        self.script_forced_stop = false;
+        self.was_click_wait = false;
+        self.scenario_text_shown = false;
+        self.events.lock().unwrap().clear();
         // 控制状态整体回到初始（keyconfig/hide/rclick/autosave 由 boot 脚本重新配置）
         self.control = super::control::RuntimeControlState::default();
+        self.control.read_lines_import(read_lines);
         self.audio.set_skipping(false);
         self.sync_control_status_variables();
 
-        let boot = self
-            .boot_script
-            .clone()
-            .ok_or_else(|| "没有记录 BOOT 脚本，无法重启".to_string())?;
-        self.interpreter
-            .boot(&boot)
-            .map_err(|e| format!("重启 boot 脚本失败: {e:?}"))
+        self.reboot_interpreter()
+            .map_err(|e| format!("重启 boot 脚本失败: {e}"))
     }
 
     // ── 宿主窗口按钮 / 屏幕方向通知 ────────────────────────────────

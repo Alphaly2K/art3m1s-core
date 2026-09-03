@@ -215,6 +215,15 @@ impl Compositor {
         self.active_wait_icon = None;
     }
 
+    /// Reset the engine session. Scene and transient compositor state are
+    /// discarded, and global input handlers are cleared because they belong
+    /// to the interpreter/Lua instance that is being replaced. Save/load uses
+    /// `reset_for_load` and intentionally preserves those handlers.
+    pub fn reset_for_engine(&mut self) {
+        self.reset_for_load();
+        self.input_handlers.clear();
+    }
+
     pub fn clock_ms(&self) -> u64 {
         self.clock_ms
     }
@@ -1113,6 +1122,22 @@ mod tests {
     }
 
     #[test]
+    fn reset_for_engine_clears_global_handlers() {
+        let mut c = Compositor::new();
+        c.apply_event(&Event::SetEventHandler {
+            event_name: "push".into(),
+            file: None,
+            label: None,
+            call: false,
+            handler: Some("calllua".into()),
+            extra_params: HashMap::new(),
+        });
+        assert!(c.get_input_handler("push", "").is_some());
+        c.reset_for_engine();
+        assert!(c.get_input_handler("push", "").is_none());
+    }
+
+    #[test]
     fn lyevent_disable_enable_preserves_registered_handler_params() {
         let mut c = Compositor::new();
         c.apply_event(&create("slot", "slot_button"));
@@ -1303,6 +1328,77 @@ mod tests {
 
         let mut provider = MockProvider::new();
         assert_eq!(c.hit_test(75.0, 50.0, &mut provider), None);
+    }
+
+    #[test]
+    fn hit_test_follows_active_tween_geometry() {
+        let mut c = Compositor::new();
+        c.apply_event(&create("1", "button"));
+        c.apply_event(&Event::Layer(LayerEvent::SetProperties {
+            id: "1".into(),
+            properties: HashMap::from([
+                ("left".into(), "0".into()),
+                ("top".into(), "0".into()),
+                ("width".into(), "100".into()),
+                ("height".into(), "100".into()),
+            ]),
+        }));
+        c.apply_event(&Event::LayerEventHandler {
+            id: "1".into(),
+            event_type: "click".into(),
+            mode: String::new(),
+            file: None,
+            label: None,
+            call: false,
+            handler: Some("calllua".into()),
+            penetration: false,
+            extra_params: HashMap::new(),
+        });
+        c.apply_event(&set_tween("1", "left", "0", "100", 1000));
+
+        // At the midpoint the rendered button occupies x=50..150.  The
+        // static properties still say x=0..100, so this distinguishes the
+        // resolved render geometry from the base layer properties.
+        c.advance(500);
+        let mut provider = MockProvider::new();
+        assert_eq!(c.hit_test(125.0, 50.0, &mut provider), Some("1".into()));
+        let mut provider = MockProvider::new();
+        assert_eq!(c.hit_test(25.0, 50.0, &mut provider), None);
+
+        let mut provider = MockProvider::new();
+        let frame = crate::render_pipeline::RenderPipeline::new(&c).build(&mut provider);
+        assert!((frame.commands[0].transform.translation.x - 50.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn hit_test_skips_children_of_hidden_parent() {
+        let mut c = Compositor::new();
+        c.apply_event(&create("1.0", "button"));
+        c.apply_event(&Event::Layer(LayerEvent::SetProperties {
+            id: "1".into(),
+            properties: HashMap::from([(String::from("visible"), String::from("0"))]),
+        }));
+        c.apply_event(&Event::Layer(LayerEvent::SetProperties {
+            id: "1.0".into(),
+            properties: HashMap::from([
+                ("width".into(), "100".into()),
+                ("height".into(), "100".into()),
+            ]),
+        }));
+        c.apply_event(&Event::LayerEventHandler {
+            id: "1.0".into(),
+            event_type: "click".into(),
+            mode: String::new(),
+            file: None,
+            label: None,
+            call: false,
+            handler: Some("calllua".into()),
+            penetration: false,
+            extra_params: HashMap::new(),
+        });
+
+        let mut provider = MockProvider::new();
+        assert_eq!(c.hit_test(50.0, 50.0, &mut provider), None);
     }
 
     #[test]

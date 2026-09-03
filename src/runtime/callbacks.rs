@@ -109,6 +109,19 @@ pub(super) struct InputSnapshot {
 }
 
 impl InputSnapshot {
+    /// Clear all physical input state when starting a new engine session.
+    /// Unlike `clear_edges`, this also releases held keys/buttons/touches and
+    /// their repeat timers so a reset cannot resurrect the previous session's
+    /// control-skip or drag state.
+    pub fn reset_all(&mut self) {
+        self.mouse_buttons_down.clear();
+        self.keys_down.clear();
+        self.keys_pressed_at.clear();
+        self.touches.clear();
+        self.touch_control = TouchControl::default();
+        self.clear_edges();
+    }
+
     pub fn clear_edges(&mut self) {
         self.clicked = false;
         self.mouse_buttons_down_edge.clear();
@@ -715,6 +728,23 @@ mod tests {
         assert!(input.push(32, Instant::now()));
         assert!(input.key_down_edge(32));
         assert!(input.key_up_edge(32));
+    }
+
+    #[test]
+    fn reset_all_releases_held_input_and_restores_touch_defaults() {
+        let mut input = InputSnapshot::default();
+        input.keys_down.insert(17);
+        input.mouse_buttons_down.insert(1);
+        input.keys_pressed_at.insert(17, Instant::now());
+        input.feed_touch(4, TOUCH_PHASE_DOWN, 10, 20);
+        input.touch_control.touch_hold_enabled = false;
+        input.reset_all();
+
+        assert!(input.keys_down.is_empty());
+        assert!(input.mouse_buttons_down.is_empty());
+        assert!(input.keys_pressed_at.is_empty());
+        assert!(input.touches.is_empty());
+        assert!(input.touch_control.touch_hold_enabled);
     }
 
     #[test]

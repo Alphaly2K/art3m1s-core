@@ -8,7 +8,6 @@ use crate::backend::gl::{GlRenderer, GlTextureProvider, ShaderProfile};
 use crate::compositor::Compositor;
 use crate::text::TextRenderer;
 use crate::video::VideoBackend;
-use asb_interpreter::Event;
 use asb_interpreter::event::WaitReason;
 use glow::HasContext;
 use std::collections::{HashMap, HashSet};
@@ -21,8 +20,8 @@ mod control;
 mod dialog;
 pub(crate) mod emote;
 mod events;
-mod layer_info;
 mod input;
+mod layer_info;
 mod magic_path;
 mod media;
 mod project;
@@ -80,7 +79,7 @@ pub struct CoreRuntime {
     video: Box<dyn VideoBackend>,
     interpreter: asb_interpreter::Interpreter,
     input: Arc<Mutex<callbacks::InputSnapshot>>,
-    events: Arc<Mutex<Vec<Event>>>,
+    events: Arc<Mutex<Vec<events::RuntimeEvent>>>,
     video_finished: Arc<AtomicBool>,
     debug_skip_active: Arc<AtomicBool>,
     script_status: Arc<AtomicU8>,
@@ -419,16 +418,12 @@ impl CoreRuntime {
         profile.input_ns = crate::profiler::FrameProfile::elapsed(input_started);
 
         let interpreter_started = profile.mark();
-        self.advance_script(clicked, delta_ms);
-        profile.interpreter_ns = crate::profiler::FrameProfile::elapsed(interpreter_started);
+        let events_before = profile.events_ns;
+        self.advance_script(clicked, delta_ms, profile);
+        profile.interpreter_ns = crate::profiler::FrameProfile::elapsed(interpreter_started)
+            .saturating_sub(profile.events_ns - events_before);
 
-        let events_started = profile.mark();
-        let event_drain_started = profile.mark();
-        let collected = self.drain_events();
-        self.frame_visual_dirty |= !collected.is_empty();
-        self.pointer_hit_test_dirty |= !collected.is_empty();
-        profile.event_drain_ns = crate::profiler::FrameProfile::elapsed(event_drain_started);
-        self.dispatch_events(&collected, profile);
+        self.flush_host_events(profile);
         let event_post_started = profile.mark();
         // 已读跟踪 + 未读停跳：在文本展示后的点击等待处标记已读，
         // 已读跳过遇未读剧情时停止跳过（[alreadyread]/[skip unread=] 语义）。
@@ -436,7 +431,7 @@ impl CoreRuntime {
         // 点击等待进入/退出边沿：触发 e:setEventHandler{onClickWaitIn/Out}。
         self.sync_click_wait_handlers();
         profile.event_post_ns = crate::profiler::FrameProfile::elapsed(event_post_started);
-        profile.events_ns = crate::profiler::FrameProfile::elapsed(events_started);
+        profile.events_ns += profile.event_post_ns;
 
         let emote_started = profile.mark();
         self.sync_emote_scene();

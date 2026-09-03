@@ -5,18 +5,8 @@ use crate::Project;
 use crate::backend::gl::GlTextureProvider;
 use crate::runtime::save_io;
 use crate::text::GlyphTextRenderer;
-use asb_interpreter::tags::{ExecutionContext, TagHandler, TagResult};
 use asb_interpreter::{CallbackResult, Event};
 use std::sync::Arc;
-
-struct RuntimeResetHandler;
-
-impl TagHandler for RuntimeResetHandler {
-    fn execute(&self, ctx: &mut ExecutionContext<'_>) -> asb_interpreter::Result<TagResult> {
-        ctx.variables.reset();
-        Ok(TagResult::Emit(Event::GoTitle))
-    }
-}
 
 impl CoreRuntime {
     /// Load a project from an in-memory system.ini string.
@@ -34,6 +24,8 @@ impl CoreRuntime {
     }
 
     fn load_open_project(&mut self, project: Project) -> Result<(), String> {
+        // File existence results belong to the currently mounted project.
+        crate::ffi::clear_file_size_cache();
         let new_width = project.config().stage_width;
         let new_height = project.config().stage_height;
 
@@ -49,24 +41,106 @@ impl CoreRuntime {
         self.pending_dialog = None;
         self.clear_pending_text_translation();
         self.clear_emote_state("project reload");
-        self.interpreter = project.create_interpreter();
-        self.interpreter.register_tag("reset", RuntimeResetHandler);
+        self.install_interpreter(project.create_interpreter());
 
-        self.wire_engine_callbacks();
-        self.wire_file_loader();
         self.wire_texture_source();
-        self.wire_event_callback();
         self.load_default_font();
         self.register_builtin_textures();
         self.seed_savepath_and_sysload();
         self.sync_control_status_variables();
 
         // Boot
-        project
-            .start_boot(&mut self.interpreter)
-            .map_err(|e| e.to_string())?;
+        self.start_configured_boot()?;
 
         Ok(())
+    }
+
+    fn install_interpreter(&mut self, interpreter: asb_interpreter::Interpreter) {
+        self.interpreter = interpreter;
+        self.wire_engine_callbacks();
+        self.wire_file_loader();
+        self.wire_event_callback();
+    }
+
+    /// Rebuild the interpreter for [reset] while keeping only the persistent
+    /// Rust variable domains. Everything owned by the old Lua VM, including
+    /// queued tags and event registrations, is discarded with that VM.
+    pub(super) fn reboot_interpreter(&mut self) -> Result<(), String> {
+        let boot = self
+            .boot_script
+            .clone()
+            .ok_or_else(|| "没有记录 BOOT 脚本，无法重启".to_string())?;
+        let config = self.interpreter.config().clone();
+        let store = self.interpreter.variables();
+        let global: Vec<_> = store
+            .iter_global()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        let system: Vec<_> = store
+            .iter_system()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        // Project::create_interpreter has already loaded tag.ini into the old
+        // parser. Keep using that project's loader when rebuilding the parser;
+        // this also works for standalone, non-FFI project roots.
+        let tag_ini_loader = self
+            .interpreter
+            .engine_context()
+            .lock()
+            .unwrap()
+            .file_reader
+            .clone();
+
+        self.install_interpreter(asb_interpreter::Interpreter::new(config.clone()));
+        if !crate::ffi::file_reader_registered()
+            && let Some(loader) = tag_ini_loader.clone()
+        {
+            // Interpreter::new starts without a loader. In standalone mode
+            // the old Project loader is the only path to BOOT and includes.
+            self.interpreter
+                .set_file_loader(Box::new(move |name| loader(name)));
+        }
+        if let Some(loader) = tag_ini_loader
+            && let Ok(bytes) = loader("tag.ini")
+        {
+            let (content, _, _) = config.encoding.decode(&bytes);
+            self.interpreter.load_tag_ini(&content);
+        }
+        for (name, value) in global {
+            self.interpreter.set_variable(&format!("g.{name}"), value);
+        }
+        for (name, value) in system {
+            self.interpreter.set_variable(&format!("s.{name}"), value);
+        }
+        self.sync_control_status_variables();
+        self.start_configured_boot_for(&boot)
+    }
+
+    fn start_configured_boot(&mut self) -> Result<(), String> {
+        let boot = self
+            .boot_script
+            .clone()
+            .ok_or_else(|| "没有记录 BOOT 脚本，无法启动".to_string())?;
+        self.start_configured_boot_for(&boot)
+    }
+
+    fn start_configured_boot_for(&mut self, boot: &str) -> Result<(), String> {
+        self.interpreter
+            .load_external_script(boot)
+            .map_err(|e| format!("加载 BOOT 脚本 {boot} 失败: {e:?}"))?;
+        if let Some(script) = self.interpreter.get_script(boot) {
+            for label in ["top", "main", "start", "_start"] {
+                if script.get_label_line(label).is_some() {
+                    return self
+                        .interpreter
+                        .start(boot, label)
+                        .map_err(|e| format!("启动 BOOT 脚本 {boot} 失败: {e:?}"));
+                }
+            }
+        }
+        self.interpreter
+            .boot(boot)
+            .map_err(|e| format!("启动 BOOT 脚本 {boot} 失败: {e:?}"))
     }
 
     fn wire_engine_callbacks(&mut self) {
@@ -83,6 +157,12 @@ impl CoreRuntime {
     }
 
     fn wire_file_loader(&mut self) {
+        // Project::create_interpreter already installs a local loader when no
+        // host file callback exists. Keep it for headless/standalone runtime
+        // tests; production FFI projects use the magic-path-aware loader.
+        if !crate::ffi::file_reader_registered() {
+            return;
+        }
         // Override the file loader with magic-path-aware FFI version.
         // Scripts can reference files via `:name/rest` notation; the
         // default loader (from create_interpreter) doesn't resolve these.
@@ -132,9 +212,15 @@ impl CoreRuntime {
 
     fn wire_event_callback(&mut self) {
         let events_cb = Arc::clone(&self.events);
+        let engine_ctx = Arc::clone(self.interpreter.engine_context());
         let layer_info_cb = Arc::clone(&self.layer_info);
         let exit_requested_cb = Arc::clone(&self.exit_requested);
         self.interpreter.set_callback(move |e| {
+            let text_source = if matches!(e, Event::ScenarioText { .. }) {
+                engine_ctx.lock().unwrap().scenario_text_source.clone()
+            } else {
+                None
+            };
             if matches!(e, Event::Exit) {
                 crate::core_info!("[CoreRuntime] Event::Exit received, setting exit flag");
                 exit_requested_cb.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -145,7 +231,10 @@ impl CoreRuntime {
             if super::layer_info::LayerQueryState::observes(&e) {
                 layer_info_cb.lock().unwrap().observe(&e);
             }
-            events_cb.lock().unwrap().push(e);
+            events_cb.lock().unwrap().push(super::events::RuntimeEvent {
+                event: e,
+                text_source,
+            });
             if pause {
                 CallbackResult::Pause
             } else {
@@ -223,16 +312,25 @@ impl CoreRuntime {
 }
 
 fn event_requires_host_pause(e: &Event) -> bool {
+    if super::events::event_requires_state_sync(e) {
+        return true;
+    }
     matches!(
         e,
-        Event::Wait { .. } | Event::YesNo { .. } | Event::ShowDialog { .. }
+        // Lifecycle jumps must be handled by CoreRuntime before the old
+        // script can execute its following cleanup/exit instructions.
+        Event::Reset
+            | Event::GoTitle
+            | Event::Wait { .. }
+            | Event::YesNo { .. }
+            | Event::ShowDialog { .. }
     ) || matches!(e, Event::VideoPlay { id, .. } if id.is_none())
         || matches!(e, Event::Trans { trans_type, .. } if *trans_type != 0)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{RuntimeResetHandler, event_requires_host_pause};
+    use super::{CoreRuntime, event_requires_host_pause};
     use asb_interpreter::{CallbackResult, Event, ExecutionResult, Interpreter};
     use std::sync::{
         Arc,
@@ -240,9 +338,8 @@ mod tests {
     };
 
     #[test]
-    fn go_title_reset_triggers_event() {
+    fn reset_uses_the_engine_reset_event() {
         let mut interpreter = Interpreter::new(asb_interpreter::InterpreterConfig::default());
-        interpreter.register_tag("reset", RuntimeResetHandler);
         interpreter
             .load_script(
                 "test",
@@ -253,9 +350,14 @@ mod tests {
             )
             .unwrap();
         interpreter.start("test", "main").unwrap();
+        let saw_reset = Arc::new(AtomicBool::new(false));
+        let saw_reset_c = Arc::clone(&saw_reset);
         let saw_go_title = Arc::new(AtomicBool::new(false));
         let saw_go_title_c = Arc::clone(&saw_go_title);
         interpreter.set_callback(move |event| {
+            if matches!(event, Event::Reset) {
+                saw_reset_c.store(true, Ordering::SeqCst);
+            }
             if matches!(event, Event::GoTitle) {
                 saw_go_title_c.store(true, Ordering::SeqCst);
             }
@@ -266,7 +368,8 @@ mod tests {
             result,
             ExecutionResult::Completed | ExecutionResult::Wait(_)
         ));
-        assert!(saw_go_title.load(Ordering::SeqCst));
+        assert!(saw_reset.load(Ordering::SeqCst));
+        assert!(!saw_go_title.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -287,5 +390,180 @@ mod tests {
             delay_margin_ms: None,
             mode: None,
         }));
+    }
+
+    #[test]
+    fn go_title_pauses_before_old_script_fallthrough() {
+        assert!(event_requires_host_pause(&Event::GoTitle));
+    }
+
+    #[test]
+    fn reset_pauses_before_old_script_fallthrough() {
+        assert!(event_requires_host_pause(&Event::Reset));
+    }
+
+    #[cfg(all(target_os = "macos", feature = "gl-backend"))]
+    #[test]
+    fn exec_skip_status_is_visible_within_one_runtime_tick() {
+        use crate::backend::gl::platform::GfxBackend;
+        use asb_interpreter::Value;
+
+        let Ok(mut runtime) = CoreRuntime::create(8, 8, GfxBackend::Cgl) else {
+            // Headless CGL availability depends on the test session.
+            return;
+        };
+        runtime.wire_event_callback();
+        runtime
+            .interpreter
+            .load_script(
+                "control",
+                r#"
+*main
+[exec command=skip mode=1]
+[var name=after_in data=$s.status.commandskip]
+[exec command=skip mode=0]
+[var name=after_out data=$s.status.commandskip]
+[stop]
+"#,
+            )
+            .unwrap();
+        runtime.interpreter.start("control", "main").unwrap();
+
+        runtime.advance_without_render(17);
+
+        assert_eq!(
+            runtime.interpreter.get_variable("after_in"),
+            Some(Value::Int(1)),
+            "mode=1 的 host effect 必须在后续脚本表达式前可见"
+        );
+        assert_eq!(
+            runtime.interpreter.get_variable("after_out"),
+            Some(Value::Int(0)),
+            "mode=0 的 host effect 必须在同一帧内可见"
+        );
+        assert!(matches!(
+            runtime.wait_reason.as_ref(),
+            Some(asb_interpreter::event::WaitReason::Stop { .. })
+        ));
+    }
+
+    #[cfg(all(target_os = "macos", feature = "gl-backend"))]
+    #[test]
+    fn reset_rebuilds_interpreter_and_discards_old_runtime_queues() {
+        use crate::Project;
+        use crate::backend::gl::platform::GfxBackend;
+        use asb_interpreter::Value;
+
+        let Ok(mut runtime) = CoreRuntime::create(8, 8, GfxBackend::Cgl) else {
+            // Headless CGL availability depends on the test session. The
+            // same behavior is covered on target builds with a GL context.
+            return;
+        };
+        let root = std::env::temp_dir().join(format!(
+            "art3m1s-reset-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(
+            root.join("boot.iet"),
+            r#"
+[lua]
+boot_marker = (boot_marker or 0) + 1
+[/lua]
+*top
+[stop]
+"#,
+        )
+        .unwrap();
+        let project = Project::open_from_data(
+            &root,
+            "[WINDOWS]\nWIDTH=8\nHEIGHT=8\nBOOT=boot.iet\nCHARSET=UTF-8\n",
+            "windows",
+        )
+        .unwrap();
+        runtime.load_open_project(project).unwrap();
+
+        runtime.interpreter.set_variable("g.keep", Value::Int(7));
+        runtime
+            .interpreter
+            .set_variable("s.keep", Value::String("system".into()));
+        runtime
+            .interpreter
+            .lua()
+            .globals()
+            .set("boot_marker", 41_i64)
+            .unwrap();
+        runtime
+            .interpreter
+            .lua()
+            .globals()
+            .set("stale_lua_value", true)
+            .unwrap();
+        runtime
+            .interpreter
+            .engine_context()
+            .lock()
+            .unwrap()
+            .tag_queue
+            .push(("exit".into(), std::collections::HashMap::new()));
+        runtime
+            .events
+            .lock()
+            .unwrap()
+            .push(crate::runtime::events::RuntimeEvent {
+                event: Event::Exit,
+                text_source: Some(("old.iet".into(), 9)),
+            });
+        runtime
+            .exit_requested
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        runtime.handle_engine_reset().unwrap();
+
+        assert!(!runtime.is_exit_requested());
+        assert!(
+            runtime
+                .interpreter
+                .engine_context()
+                .lock()
+                .unwrap()
+                .tag_queue
+                .is_empty()
+        );
+        assert!(runtime.events.lock().unwrap().is_empty());
+        assert_eq!(
+            runtime.interpreter.get_variable("g.keep"),
+            Some(Value::Int(7))
+        );
+        assert_eq!(
+            runtime.interpreter.get_variable("s.keep"),
+            Some(Value::String("system".into()))
+        );
+        let boot_marker: i64 = runtime
+            .interpreter
+            .lua()
+            .globals()
+            .get("boot_marker")
+            .unwrap();
+        assert_eq!(boot_marker, 1, "BOOT Lua 块应在新 VM 中重新执行");
+        let stale_lua_value: bool = runtime
+            .interpreter
+            .lua()
+            .globals()
+            .get("stale_lua_value")
+            .unwrap_or(false);
+        assert!(!stale_lua_value, "旧 Lua 全局不得穿透 reset");
+        assert_eq!(
+            runtime.interpreter.get_variable("s.status.commandskip"),
+            Some(Value::Int(0))
+        );
+
+        runtime.advance_without_render(0);
+        assert!(!runtime.is_exit_requested(), "旧队列尾部 exit 不得执行");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
