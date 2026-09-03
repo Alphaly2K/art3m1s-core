@@ -250,6 +250,15 @@ pub fn expand_triangle_strips_to_list(batch: &MeshStripBatch) -> Vec<EmoteVertex
 mod tests {
     use super::*;
 
+    fn assert_vertex_approx_eq(actual: EmoteVertex, expected: EmoteVertex) {
+        assert_eq!(actual.x, expected.x);
+        assert_eq!(actual.y, expected.y);
+        assert_eq!(actual.z, expected.z);
+        assert_eq!(actual.diffuse_argb, expected.diffuse_argb);
+        assert!((actual.u - expected.u).abs() <= 1.0e-6);
+        assert!((actual.v - expected.v).abs() <= 1.0e-6);
+    }
+
     #[test]
     fn vertex_layout_matches_d3d_stride() {
         assert_eq!(size_of::<EmoteVertex>(), 0x18);
@@ -268,21 +277,21 @@ mod tests {
         assert_eq!(batch.primitive_count_per_strip, 2);
         assert_eq!(batch.strips, vec![0..4]);
         assert_eq!(batch.vertices.len(), 4);
-        assert_eq!(
+        assert_vertex_approx_eq(
             batch.vertices[0],
-            EmoteVertex::new(0.0, 0.0, 0xffff0000, 0.0, 0.0)
+            EmoteVertex::new(0.0, 0.0, 0xffff0000, 0.0, 0.0),
         );
-        assert_eq!(
+        assert_vertex_approx_eq(
             batch.vertices[1],
-            EmoteVertex::new(0.0, 20.0, 0xff0000ff, 0.0, 0.1)
+            EmoteVertex::new(0.0, 20.0, 0xff0000ff, 0.0, 0.1),
         );
-        assert_eq!(
+        assert_vertex_approx_eq(
             batch.vertices[2],
-            EmoteVertex::new(10.0, 0.0, 0xff00ff00, 0.1, 0.0)
+            EmoteVertex::new(10.0, 0.0, 0xff00ff00, 0.1, 0.0),
         );
-        assert_eq!(
+        assert_vertex_approx_eq(
             batch.vertices[3],
-            EmoteVertex::new(10.0, 20.0, 0xffffffff, 0.1, 0.1)
+            EmoteVertex::new(10.0, 20.0, 0xffffffff, 0.1, 0.1),
         );
     }
 

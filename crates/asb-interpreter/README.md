@@ -181,7 +181,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```bash
 cargo fmt
-cargo test --lib
+cargo test --all-targets
+cargo test --no-default-features --features backend-luau --lib --tests
 ```
 
-与 runtime 交互的回归通常在 `art3m1s-core/tests` 中补 probe。
+不依赖游戏资源的解释器回归应使用内联脚本。需要真实游戏脚本的 runtime 兼容性
+检查统一放在 `art3m1s-core/tests/compatibility/`，并标记为 ignored test。

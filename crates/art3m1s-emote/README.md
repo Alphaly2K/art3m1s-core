@@ -54,6 +54,21 @@ The core integration adds:
 - host-owned layer content injection before scene children, inheriting parent
   transform, opacity, clip, shader, visibility, z-order, and deletion
 
+## Tests
+
+The default test suite is self-contained. The NekoMiko model compatibility
+test is ignored because game assets are not distributed with this repository.
+It follows the core fixture convention:
+
+```bash
+ART3M1S_FIXTURE_NEKOMIKO_DIR=/path/to/nekomiko \
+  cargo test --manifest-path crates/art3m1s-emote/Cargo.toml \
+  --test nekomiko_models -- --ignored
+```
+
+`ART3M1S_FIXTURES_DIR=/path/to/fixtures` can be used instead when the project
+is available as `/path/to/fixtures/nekomiko`.
+
 ## Known compatibility gaps
 
 - Exact proprietary frame easing semantics beyond linear interpolation

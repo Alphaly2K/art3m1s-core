@@ -890,6 +890,20 @@ mod tests {
     use crate::compositor::mock::MockProvider;
     use crate::render_pipeline::draw::DrawList;
 
+    fn nekomiko_model_path() -> std::path::PathBuf {
+        let root = std::env::var_os("ART3M1S_FIXTURE_NEKOMIKO_DIR")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("ART3M1S_FIXTURES_DIR")
+                    .map(std::path::PathBuf::from)
+                    .map(|base| base.join("nekomiko"))
+            })
+            .expect(
+                "set ART3M1S_FIXTURE_NEKOMIKO_DIR or ART3M1S_FIXTURES_DIR before running ignored compatibility tests",
+            );
+        root.join("image/fhd/fg/aya/tay_0.psb")
+    }
+
     #[test]
     fn expands_four_by_four_blend_points_into_nine_quads() {
         let mut points = Vec::new();
@@ -966,11 +980,9 @@ mod tests {
     }
 
     #[test]
-    fn builds_nekomiko_draw_commands_when_fixture_is_available() {
-        let Ok(root) = std::env::var("NEKOMIKO_DIR") else {
-            return;
-        };
-        let path = std::path::Path::new(&root).join("image/fhd/fg/aya/tay_0.psb");
+    #[ignore = "requires the external nekomiko fixture"]
+    fn builds_nekomiko_draw_commands() {
+        let path = nekomiko_model_path();
         let bytes = std::fs::read(&path).unwrap();
 
         let mut state = EmoteState::default();
@@ -1071,11 +1083,9 @@ mod tests {
 
     #[cfg(feature = "experimental-eluna")]
     #[test]
-    fn builds_nekomiko_draw_commands_with_eluna_when_fixture_is_available() {
-        let Ok(root) = std::env::var("NEKOMIKO_DIR") else {
-            return;
-        };
-        let path = std::path::Path::new(&root).join("image/fhd/fg/aya/tay_0.psb");
+    #[ignore = "requires the external nekomiko fixture"]
+    fn builds_nekomiko_draw_commands_with_eluna() {
+        let path = nekomiko_model_path();
         let bytes = std::fs::read(&path).unwrap();
         let mut state = EmoteState::default();
         state.set_backend(super::EmoteBackend::ElunaExperimental);

@@ -176,9 +176,13 @@ backlog 后点击空白处仍推进底层剧情。
 
 ```bash
 cargo fmt --check
-cargo test
+./scripts/test-all.sh
 cargo build --release
 ```
+
+`scripts/test-all.sh` 会依次运行 core、Lua 5.1/Luau 两种解释器后端、两个
+E-Mote 实现和 PFS 子模块的自包含测试。需要本地商业游戏资源的兼容性测试默认
+不会执行；fixture 配置和显式运行方法见 [`tests/README.md`](tests/README.md)。
 
 默认构建包含 GL 渲染器和实验性 Eluna 适配器。仅使用不依赖 GPU 的核心模块时可以
 关闭全部默认 features（此时不提供 `art3m1s_runtime_*` C 接口）：

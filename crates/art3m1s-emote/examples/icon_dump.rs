@@ -4,6 +4,10 @@ use std::env;
 
 fn main() {
     let path = env::args().nth(1).expect("model.psb");
+    let output_dir = env::args()
+        .nth(2)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(env::temp_dir);
     let model = EmoteModel::open(&path).expect("open");
     // (texture_id, name, x, y, w, h)
     let crops: &[(&str, &str, u32, u32, u32, u32)] = &[
@@ -35,7 +39,7 @@ fn main() {
             cover * 100 / (*w as usize * *h as usize)
         );
         image::save_buffer(
-            format!("/tmp/icon_{name}.png"),
+            output_dir.join(format!("icon_{name}.png")),
             &out,
             *w,
             *h,

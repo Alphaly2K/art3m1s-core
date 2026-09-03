@@ -4,14 +4,7 @@
 mod integration_tests {
     use asb_interpreter::event::LayerEvent;
     use asb_interpreter::{CallbackResult, Event, Interpreter, InterpreterConfig};
-    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
-
-    fn get_project_path() -> PathBuf {
-        // 真实示例项目位于同级 crate art3m1s-core 下（docs/examples/project 已移除）。
-        // 依赖在旁边 checkout 了 art3m1s-core；缺失时相关测试会因 fixture 不存在而失败。
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../art3m1s-core/example/project")
-    }
 
     #[test]
     fn test_event_callback() {
@@ -148,26 +141,23 @@ end
 
     #[test]
     fn test_load_ast_file() {
-        // 测试加载 .ast 文件（文本格式）
-        let project_path = get_project_path();
-        let ast_path = project_path.join("script/共通-03.ast");
-
-        if !ast_path.exists() {
-            println!("Skipping .ast test: file not found");
-            return;
-        }
-
-        let data = std::fs::read(&ast_path).expect("Failed to read .ast file");
+        // `load_file` only needs representative AST bytes; using an inline
+        // fixture keeps this parser regression independent of a game checkout.
+        let data = br#"
+*main
+[var name="loaded_from_ast" data="1"]
+[stop]
+"#;
 
         let mut interpreter = Interpreter::new(InterpreterConfig::default());
 
         // 使用 load_file 方法（自动检测格式）
         interpreter
-            .load_file("script/共通-03.ast", &data)
+            .load_file("script/fixture.ast", data)
             .expect("Failed to load .ast file");
 
         // 验证脚本被加载
-        assert!(interpreter.get_script("script/共通-03.ast").is_some());
+        assert!(interpreter.get_script("script/fixture.ast").is_some());
 
         println!("Text file (.ast) loading test passed");
     }
