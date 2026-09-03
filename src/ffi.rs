@@ -3,6 +3,7 @@
 //! The Flutter frontend registers callbacks at startup; afterwards every
 //! filesystem operation inside the core is routed through those callbacks,
 //! keeping the core entirely free of direct I/O.
+use std::collections::HashMap;
 use std::ffi::{CString, c_char, c_int, c_longlong, c_void};
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -373,10 +374,20 @@ type FileReaderCallback = unsafe extern "C" fn(
 ) -> c_int;
 
 static FILE_READER: Mutex<Option<FileReaderCallback>> = Mutex::new(None);
+// System scripts may probe the same optional asset many times while building
+// menus. Cache hits and misses at the synchronous FFI boundary.
+static FILE_SIZE_CACHE: Mutex<Option<HashMap<String, Option<u64>>>> = Mutex::new(None);
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_register_file_reader(cb: FileReaderCallback) {
     *FILE_READER.lock().unwrap() = Some(cb);
+    *FILE_SIZE_CACHE.lock().unwrap() = Some(HashMap::new());
+}
+
+pub fn clear_file_size_cache() {
+    if let Some(cache) = FILE_SIZE_CACHE.lock().unwrap().as_mut() {
+        cache.clear();
+    }
 }
 
 pub fn file_reader_registered() -> bool {
@@ -429,6 +440,7 @@ pub fn request_write(path: &str, data: &[u8]) -> Result<(), String> {
             data.len()
         ));
     }
+    clear_file_size_cache();
     Ok(())
 }
 
@@ -445,6 +457,7 @@ pub fn request_delete(path: &str) -> Result<(), String> {
     if r < 0 {
         return Err(format!("delete failed: {path}"));
     }
+    clear_file_size_cache();
     Ok(())
 }
 
@@ -569,27 +582,82 @@ pub fn save_dir() -> Option<&'static str> {
 
 fn query_size(path: &str) -> Option<u64> {
     let cb = FILE_READER.lock().unwrap().clone()?;
-    let c_path = CString::new(path).ok()?;
-    let started = begin_profile_io();
-    let size = unsafe { cb(c_path.as_ptr(), std::ptr::null_mut(), 0, -1) };
-    finish_profile_io(started, 0);
-    if size >= 0 { Some(size as u64) } else { None }
+    let key = path.replace('\\', "/");
+    if let Some(cached) = FILE_SIZE_CACHE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|cache| cache.get(&key).copied())
+    {
+        return cached;
+    }
+    // PFS archives in the host preserve the original Windows `\\` separator,
+    // while directory-backed projects conventionally use `/`.  Try the
+    // caller's spelling first, then the alternate separator only on failure;
+    // this keeps normal paths fast and makes the FFI boundary tolerant of both
+    // resource backends without teaching the interpreter game-specific paths.
+    for (index, candidate) in path_candidates(path).into_iter().enumerate() {
+        if index > 0 && candidate.as_ref() == path {
+            continue;
+        }
+        let Some(c_path) = CString::new(candidate.as_ref()).ok() else {
+            continue;
+        };
+        let started = begin_profile_io();
+        let size = unsafe { cb(c_path.as_ptr(), std::ptr::null_mut(), 0, -1) };
+        finish_profile_io(started, 0);
+        if size >= 0 {
+            let result = Some(size as u64);
+            if let Some(cache) = FILE_SIZE_CACHE.lock().unwrap().as_mut() {
+                cache.insert(key.clone(), result);
+            }
+            return result;
+        }
+    }
+    if let Some(cache) = FILE_SIZE_CACHE.lock().unwrap().as_mut() {
+        cache.insert(key, None);
+    }
+    None
 }
 
 fn read_chunk(path: &str, offset: u64, buf: &mut [u8]) -> Option<usize> {
     let cb = FILE_READER.lock().unwrap().clone()?;
-    let c_path = CString::new(path).ok()?;
-    let started = begin_profile_io();
-    let n = unsafe {
-        cb(
-            c_path.as_ptr(),
-            buf.as_mut_ptr(),
-            buf.len() as c_int,
-            offset as c_longlong,
-        )
+    for (index, candidate) in path_candidates(path).into_iter().enumerate() {
+        if index > 0 && candidate.as_ref() == path {
+            continue;
+        }
+        let Some(c_path) = CString::new(candidate.as_ref()).ok() else {
+            continue;
+        };
+        let started = begin_profile_io();
+        let n = unsafe {
+            cb(
+                c_path.as_ptr(),
+                buf.as_mut_ptr(),
+                buf.len() as c_int,
+                offset as c_longlong,
+            )
+        };
+        finish_profile_io(started, n.max(0) as usize);
+        if n >= 0 {
+            return Some(n as usize);
+        }
+    }
+    None
+}
+
+/// Return the original path and, when useful, a separator-normalized variant.
+/// The host file callback is the compatibility boundary, so both PFS and
+/// directory providers can retain their native path spelling.
+fn path_candidates(path: &str) -> [std::borrow::Cow<'_, str>; 2] {
+    let alternate = if path.contains('/') {
+        std::borrow::Cow::Owned(path.replace('/', "\\"))
+    } else if path.contains('\\') {
+        std::borrow::Cow::Owned(path.replace('\\', "/"))
+    } else {
+        std::borrow::Cow::Borrowed(path)
     };
-    finish_profile_io(started, n.max(0) as usize);
-    if n >= 0 { Some(n as usize) } else { None }
+    [std::borrow::Cow::Borrowed(path), alternate]
 }
 
 const CHUNK: usize = 65536;
@@ -1506,7 +1574,7 @@ pub unsafe extern "C" fn art3m1s_runtime_set_string_variable(
 #[cfg(test)]
 mod tests {
     use super::{
-        log_suppressed_by_filter, script_debug_print_allowed, set_log_filter,
+        log_suppressed_by_filter, path_candidates, script_debug_print_allowed, set_log_filter,
         set_script_debug_config,
     };
 
@@ -1559,5 +1627,16 @@ mod tests {
         // 回到禁用态，避免影响其它依赖默认值的行为。
         set_script_debug_config(Some(0), Some(0));
         assert!(!script_debug_print_allowed(0));
+    }
+
+    #[test]
+    fn path_candidates_preserve_native_and_alternate_separators() {
+        let unix = path_candidates("_data/image/menu/tag/btn_back_0.png");
+        assert_eq!(unix[0], "_data/image/menu/tag/btn_back_0.png");
+        assert_eq!(unix[1], r"_data\image\menu\tag\btn_back_0.png");
+
+        let windows = path_candidates(r"_data\image\menu\tag\btn_back_0.png");
+        assert_eq!(windows[0], r"_data\image\menu\tag\btn_back_0.png");
+        assert_eq!(windows[1], "_data/image/menu/tag/btn_back_0.png");
     }
 }
