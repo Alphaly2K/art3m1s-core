@@ -110,6 +110,32 @@ fn apply_var_tag_inner(
     params: &HashMap<String, String>,
     variables: &mut VariableStore,
 ) -> Result<()> {
+    // Variable destinations are expressions too.  Compiled Artemis macros
+    // commonly use names such as `$'slider.' + id + '.file'` to create a
+    // per-instance value.  Resolving only `data` (the old behaviour) stores
+    // the literal expression as the key; a later `$slider.(id).file` lookup
+    // then evaluates to the missing-value sentinel `0`.
+    //
+    // Work on a shallow copy so all system= variants (delete, var_exist,
+    // pseudo-array queries, ...) observe the same resolved destination while
+    // retaining the original parameter map owned by the instruction.
+    let mut effective_params;
+    let params = if let Some(raw_name) = params.get("name") {
+        let resolved_name = {
+            let evaluator = ExpressionEvaluator::new(variables);
+            evaluator.resolve_param_str(raw_name)?
+        };
+        if resolved_name != *raw_name {
+            effective_params = params.clone();
+            effective_params.insert("name".to_string(), resolved_name);
+            &effective_params
+        } else {
+            params
+        }
+    } else {
+        params
+    };
+
     if let Some(system) = params.get("system") {
         let system = system.clone();
 
@@ -171,7 +197,7 @@ pub fn execute_var_system(
                 if name.is_empty() {
                     variables.clear_all();
                 } else {
-                    delete_variable_tree(variables, name);
+                    variables.delete_group(name);
                 }
             } else {
                 variables.clear_all();
@@ -1077,29 +1103,28 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
     (year, month, day)
 }
 
-/// 删除变量树（包括子变量）
-fn delete_variable_tree(variables: &mut VariableStore, name: &str) {
-    variables.remove(name);
-
-    let prefix = format!("{}.", name);
-    let to_remove: Vec<String> = variables
-        .iter_local()
-        .chain(variables.iter_global())
-        .chain(variables.iter_temp())
-        .chain(variables.iter_system())
-        .chain(variables.iter_writable_macro_local())
-        .filter(|(k, _)| k.starts_with(&prefix))
-        .map(|(k, _)| k.clone())
-        .collect();
-
-    for key in to_remove {
-        variables.remove(&key);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dynamic_destination_name_is_resolved_before_store() {
+        let mut vars = VariableStore::new();
+        vars.set("id", Value::from("100.slider.7"));
+        apply_var_tag(
+            &HashMap::from([
+                ("name".into(), "$'slider.' + id + '.file'".into()),
+                ("data".into(), "system/config.iet".into()),
+            ]),
+            &mut vars,
+        )
+        .unwrap();
+        assert_eq!(
+            vars.get("slider.100.slider.7.file").map(Value::as_string),
+            Some("system/config.iet".into())
+        );
+        assert!(vars.get("$'slider.' + id + '.file'").is_none());
+    }
 
     #[test]
     fn set_pseudo_array_lays_out_indices_and_size() {
@@ -1412,8 +1437,34 @@ mod tests {
         execute_var_system("delete", &params, &resolved, &mut vars).unwrap();
 
         assert_eq!(vars.get("foo"), None);
+        assert_eq!(vars.get("foo.bar"), Some(&Value::Int(1)));
+        assert_eq!(vars.get("foo.baz"), Some(&Value::Int(2)));
+        execute_var_system("delete", &params, &resolved, &mut vars).unwrap();
         assert_eq!(vars.get("foo.bar"), None);
         assert_eq!(vars.get("foo.baz"), None);
+    }
+
+    #[test]
+    fn delete_group_uses_the_selected_variable_domain() {
+        for domain in ["", "t.", "g.", "s."] {
+            let mut vars = VariableStore::new();
+            for other in ["", "t.", "g.", "s."] {
+                vars.set(&format!("{other}items.child"), Value::Int(1));
+                vars.set(&format!("{other}items_extra.child"), Value::Int(2));
+            }
+            let params = HashMap::from([("name".into(), format!("{domain}items"))]);
+            execute_var_system("delete", &params, &HashMap::new(), &mut vars).unwrap();
+            for other in ["", "t.", "g.", "s."] {
+                assert_eq!(
+                    vars.get(&format!("{other}items.child")).is_none(),
+                    other == domain
+                );
+                assert_eq!(
+                    vars.get(&format!("{other}items_extra.child")),
+                    Some(&Value::Int(2))
+                );
+            }
+        }
     }
 
     #[test]

@@ -229,6 +229,30 @@ impl VariableStore {
         }
     }
 
+    /// `var system=delete`: remove an existing value first. Only when that
+    /// value is absent does the operation remove its dotted descendants.
+    pub(crate) fn delete_group(&mut self, name: &str) {
+        if self.remove(name).is_some() {
+            return;
+        }
+        let (map, key) = if self.write_macro_local && !self.macro_scopes.is_empty() {
+            (&mut self.macro_scopes.last_mut().unwrap().values, name)
+        } else if let Some(key) = name.strip_prefix("g.") {
+            (&mut self.global, key)
+        } else if let Some(key) = name.strip_prefix("t.") {
+            (&mut self.temp, key)
+        } else if let Some(key) = name.strip_prefix("s.") {
+            (&mut self.system, key)
+        } else {
+            (&mut self.local, name)
+        };
+        map.retain(|candidate, _| {
+            !candidate
+                .strip_prefix(key)
+                .is_some_and(|suffix| suffix.starts_with('.'))
+        });
+    }
+
     /// 检查变量是否存在
     pub fn contains(&self, name: &str) -> bool {
         self.get(name).is_some()
@@ -253,6 +277,19 @@ impl VariableStore {
 
     pub(crate) fn retain_macro_scopes(&mut self, depth: usize) {
         self.macro_scopes.retain(|scope| scope.depth <= depth);
+    }
+
+    pub(crate) fn remove_call_frame_scope(&mut self, index: usize) {
+        let depth = index + 1;
+        self.macro_scopes.retain_mut(|scope| {
+            if scope.depth == depth {
+                return false;
+            }
+            if scope.depth > depth {
+                scope.depth -= 1;
+            }
+            true
+        });
     }
 
     pub(crate) fn with_local_writes<T>(

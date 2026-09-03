@@ -45,6 +45,9 @@ pub(super) struct RuntimeControlState {
     /// [alreadyread mode]：是否进行已读/未读判定（默认 true）。
     /// 关闭时已读跳过遇未读剧情不停止。
     already_read_enabled: bool,
+    /// 本帧最后一条在 `alreadyread mode!=0` 下判定的剧情页是否已读。
+    /// `mode=0` 的文本不覆盖它；frame 末消费后清空。
+    current_scenario_was_read: Option<bool>,
     /// 已读记录：脚本名 → 已读的剧情文本行集合。跨会话持久化（aread.dat）。
     read_lines: HashMap<String, HashSet<usize>>,
     auto_wait_elapsed_ms: u64,
@@ -52,11 +55,6 @@ pub(super) struct RuntimeControlState {
     was_skipping: bool,
     // ── controlskip：按住 Ctrl（keyconfig role 14）期间的临时跳过 ──
     control_skip_active: bool,
-    /// Ctrl 跳过遇到不可跳的未读剧情后保持阻断，直到按键释放。
-    control_skip_blocked: bool,
-    /// 当前等待页在本次显示前是否已经读过。Ctrl 在等待期间按下时用它做
-    /// 触发判定，避免绕过文本出现帧已经完成的未读检查。
-    current_scenario_was_read: Option<bool>,
     // ── hide：临时隐藏消息窗 ──
     hide_allowed: bool,
     /// [hide window=] 配置的同时隐藏的图层 ID 列表
@@ -133,14 +131,13 @@ impl Default for RuntimeControlState {
             automode_stop_by_stop: true,
             automode_sync_se: Vec::new(),
             already_read_enabled: true,
+            current_scenario_was_read: None,
             read_lines: HashMap::new(),
             automode_layer: None,
             auto_wait_elapsed_ms: 0,
             skip_wait_revealed: false,
             was_skipping: false,
             control_skip_active: false,
-            control_skip_blocked: false,
-            current_scenario_was_read: None,
             hide_allowed: true,
             hide_window: Vec::new(),
             hide_active: false,
@@ -166,30 +163,11 @@ impl RuntimeControlState {
     }
 
     fn control_skip_effective(&self) -> bool {
-        self.skip_allowed && self.control_skip_active && !self.control_skip_blocked
+        self.skip_allowed && self.control_skip_active
     }
 
     fn command_skip_effective(&self) -> bool {
         self.skip_allowed && self.skip_active
-    }
-
-    fn block_control_skip_until_release(&mut self) {
-        if self.control_skip_active {
-            self.control_skip_blocked = true;
-        }
-    }
-
-    fn set_control_skip_pressed(&mut self, active: bool) {
-        self.control_skip_active = active;
-        if active && (!self.skip_allowed || self.current_unread_blocks_control_skip()) {
-            self.control_skip_blocked = true;
-        } else if !active {
-            self.control_skip_blocked = false;
-        }
-    }
-
-    fn current_unread_blocks_control_skip(&self) -> bool {
-        self.current_scenario_was_read != Some(true)
     }
 
     pub(super) fn hide_active(&self) -> bool {
@@ -270,7 +248,6 @@ impl RuntimeControlState {
         self.automode_active = false;
         self.was_skipping = false;
         self.control_skip_active = false;
-        self.control_skip_blocked = false;
         self.current_scenario_was_read = None;
         // 隐藏态是运行时瞬态：读档恢复的场景不再包含被隐藏的可见性覆盖。
         self.hide_active = false;
@@ -365,9 +342,6 @@ impl CoreRuntime {
             if !allow && self.control.skip_active {
                 self.set_skip_mode(false);
             }
-            if !allow {
-                self.control.block_control_skip_until_release();
-            }
             self.control.skip_allowed = allow;
             let is_skipping = self.control.skip_active();
             let is_control_skipping = self.control.control_skip_effective();
@@ -414,78 +388,56 @@ impl CoreRuntime {
 
     /// [alreadyread mode]：0=不做「未读停跳」判定；非 0=做（默认）。
     ///
-    /// 注意此开关**只**门控「已读跳过遇未读是否停跳」这一判定行为；已读记录的
-    /// **写入**与 `s.status.alreadyread` 的**暴露**始终进行（见
-    /// [`track_read_and_stop_skip_on_unread`](Self::track_read_and_stop_skip_on_unread)），
-    /// 以便自绘「既読」标记的游戏在 mode=0 下仍能读到可靠的已读状态。
+    /// 文档只定义 mode=0 关闭已读/未读判定及其停跳效果；它不定义清除已读记录。
+    /// 因此已读记录与 `s.status.alreadyread` 仍按真实源位置维护，但 mode=0 的文本
+    /// 不会覆盖本帧已经捕获的有效停跳状态。
     pub(super) fn apply_alreadyread(&mut self, mode: i32) {
         self.control.already_read_enabled = mode != 0;
     }
 
-    /// `[alreadyread mode=0]` 的 Lua ADV 框架自行维护剧情块已读状态。
-    /// 这些框架共同提供纯查询函数 `getAread()`；不存在该函数的游戏继续使用
-    /// 引擎按脚本位置维护的兼容记录。
-    fn script_owned_read_state(&self) -> Option<bool> {
-        if self.control.already_read_enabled {
-            return None;
-        }
-        self.interpreter.query_lua_truthy("getAread")
-    }
-
-    /// 已读跟踪 + 未读停跳 + `s.status.alreadyread` 暴露。
+    /// 记录一条实际派发的 `ScenarioText` 的源位置及其派发瞬间的已读状态。
     ///
-    /// 已读键 = (脚本文件, 该段之后的等待行号)，按**脚本执行位置**隔离——这天然
-    /// 免疫 chgmsg 多消息层：每段文本(主层/tips/子层)都落在各自唯一的脚本行，
-    /// 判定的永远是「当前执行行」是否已读，与它进的是哪个消息层无关。故不再依赖
-    /// 「一屏至多一段 ScenarioText」这一（被 chgmsg 推翻的）前提。
+    /// `script/line` 必须来自解释器发出该事件时的源位置；这里不重新读取帧末的
+    /// `current_script/current_line`。宏调用的源位置由解释器在发出事件前折回调用者。
     ///
-    /// 语义分层（与 alreadyread.md 一致，两件事解耦）：
-    /// - **记录已读 + 暴露 `s.status.alreadyread`**：始终进行。真实 Artemis 里
-    ///   带 Lua 的游戏并不自己从零记已读，而是读引擎暴露的 `s.status.alreadyread`
-    ///   来画「既読」标记 / 做跳过决策，故此值必须可靠反映「当前行此前是否已读」。
-    /// - **「未读停跳」判定**：仅在 `[alreadyread mode!=0]`（默认）时生效。mode=0
-    ///   关掉判定后，即便已读跳过遇未读也不停跳（alreadyread.md 明示的唯一具体效果）。
-    ///
-    /// 每帧调用一次。
-    pub(super) fn track_read_and_stop_skip_on_unread(&mut self) {
-        // 消费本帧"是否展示了剧情文本"的标志。
-        let shown = std::mem::take(&mut self.scenario_text_shown);
-        if !shown {
-            return;
-        }
-        // 只在文本后确实建立了等待（停止/点击/计时）时判定这一段剧情。
-        if self.wait_reason.is_none() {
-            return;
-        }
-        let Some(script) = self.interpreter.current_script().map(str::to_string) else {
-            return;
-        };
-        let line = self.interpreter.current_line();
-
-        // 本行在「此前的访问/会话」是否已读 —— 必须在本次标记之前取值。
-        let engine_was_read = self.control.is_read(&script, line);
-        let script_was_read = self.script_owned_read_state();
-        let was_read = script_was_read.unwrap_or(engine_was_read);
-        self.control.current_scenario_was_read = Some(was_read);
-        // 暴露给脚本：s.status.alreadyread（当前执行行此前是否已读，1/0）。
+    /// 先查询再标记，确保 `s.status.alreadyread` 反映本次显示前的状态。mode=0
+    /// 不更新 `current_scenario_was_read`，这样同一 frame 中
+    /// `AlreadyReadConfig(1) -> ScenarioText -> AlreadyReadConfig(0)` 不会丢掉前一条
+    /// 正文的有效门控。
+    pub(super) fn record_scenario_text_source(&mut self, script: &str, line: usize) {
+        let was_read = self.control.is_read(script, line);
         self.interpreter.set_variable(
             "s.status.alreadyread",
             Value::Int(if was_read { 1 } else { 0 }),
         );
 
-        // 已读跳过遇未读剧情：仅在启用判定(mode!=0)时停跳（[skip unread=0] 即不跳未读）。
-        let command_skip_hits_unread =
-            self.control.command_skip_effective() && self.control.unread_stops_skip() && !was_read;
-        // Ctrl 是按住触发的临时跳过，必须独立遵守当前剧情页的已读判定。
-        // [skip unread=1] 是命令 Skip 的配置，不能授权 Ctrl 跳过未读文本。
-        let control_skip_hits_unread = self.control.control_skip_effective() && !was_read;
-        if command_skip_hits_unread || control_skip_hits_unread {
-            self.stop_skip_on_unread();
+        if self.control.already_read_enabled {
+            self.control.current_scenario_was_read = Some(was_read);
         }
-        // 标记本段剧情已读（始终维护，使 s.status.alreadyread 跨访问准确）；
-        // 有新增则置脏，供 syssave 落 aread.dat。
-        if script_was_read.is_none() && self.control.mark_read(&script, line) {
+
+        // 访问过的正文仍进入引擎已读记录；mode=0 的文档效果是关闭判定，
+        // 不是删除或阻止历史记录。
+        if self.control.mark_read(script, line) {
             self.read_dirty = true;
+        }
+    }
+
+    /// frame 末仅依据派发时记录的正文状态执行普通 Skip 的未读停跳。
+    pub(super) fn track_read_and_stop_skip_on_unread(&mut self) {
+        // 两个状态都在这里消费，避免 mode=0 的文本或下一帧复用上一帧结果。
+        let shown = std::mem::take(&mut self.scenario_text_shown);
+        let was_read = self.control.current_scenario_was_read.take();
+        if !shown || self.wait_reason.is_none() {
+            return;
+        }
+
+        // `None` 表示本帧没有 mode!=0 的有效正文页，不能凭 mode=0 文本推断未读。
+        // `skip unread=0` 只覆盖普通 command Skip；Ctrl role 14 不进入此判定。
+        let command_skip_hits_unread = self.control.command_skip_effective()
+            && !self.control.skip_unread
+            && was_read == Some(false);
+        if command_skip_hits_unread {
+            self.stop_skip_on_unread();
         }
     }
 
@@ -619,7 +571,11 @@ impl CoreRuntime {
     pub(super) fn sync_control_status_variables(&mut self) {
         self.interpreter.set_variable(
             "s.status.commandskip",
-            Value::Int(if self.control.skip_active() { 1 } else { 0 }),
+            Value::Int(if self.control.command_skip_effective() {
+                1
+            } else {
+                0
+            }),
         );
         self.interpreter.set_variable(
             "s.status.automode",
@@ -637,36 +593,21 @@ impl CoreRuntime {
 
     // ── controlskip：按住临时跳过 ─────────────────────────────────────
 
-    /// role 14 的物理按键状态切换。只有触发判定通过后才进入有效强制跳过并
-    /// 派发脚本注册的 controlskipin；退出有效状态时派发 controlskipout。
+    /// role 14 的物理按键状态切换。强制跳过忽略已读/未读，仅受 [skip allow=]
+    /// 功能开关约束；进入/退出时派发脚本注册的 controlskipin/out。
     pub(super) fn set_control_skip(&mut self, active: bool) {
         if self.control.control_skip_active == active {
             return;
         }
-        let script_was_read = if active {
-            self.script_owned_read_state()
-        } else {
-            None
-        };
-        if let Some(was_read) = script_was_read {
-            self.control.current_scenario_was_read = Some(was_read);
-        }
         let was_skipping = self.control.skip_active();
         let was_control_skipping = self.control.control_skip_effective();
-        self.control.set_control_skip_pressed(active);
+        self.control.control_skip_active = active;
         let is_skipping = self.control.skip_active();
         let is_control_skipping = self.control.control_skip_effective();
         crate::core_debug!(
-            "[controlskip] pressed={} allow={} current_read={:?} read_source={} blocked={} effective={}",
+            "[controlskip] pressed={} allow={} effective={}",
             active,
             self.control.skip_allowed,
-            self.control.current_scenario_was_read,
-            if script_was_read.is_some() {
-                "lua"
-            } else {
-                "engine"
-            },
-            self.control.control_skip_blocked,
             is_control_skipping
         );
         self.control.reset_auto_wait();
@@ -680,28 +621,11 @@ impl CoreRuntime {
         self.enqueue_control_skip_transition(was_control_skipping, is_control_skipping);
     }
 
-    /// 未读剧情按普通 Skip 语义终止当前跳过。Ctrl 是按住触发，因此还需
-    /// 锁住本次按压，否则下一帧按键扫描会立即重新进入跳过。
+    /// 普通 Skip 遇到未读剧情时终止命令跳过。role 14 的强制跳过不进入此判定。
     fn stop_skip_on_unread(&mut self) {
         if self.control.skip_active {
             self.set_skip_mode(false);
         }
-        let was_skipping = self.control.skip_active();
-        let was_control_skipping = self.control.control_skip_effective();
-        self.control.block_control_skip_until_release();
-        let is_skipping = self.control.skip_active();
-        let is_control_skipping = self.control.control_skip_effective();
-        if was_control_skipping && !is_control_skipping {
-            crate::core_debug!("[controlskip] stopped at unread scenario text");
-        }
-        if was_skipping && !is_skipping {
-            self.control.reset_auto_wait();
-            self.control.was_skipping = true;
-            self.audio.set_skipping(false);
-            self.sync_control_status_variables();
-            self.reveal_text_now();
-        }
-        self.enqueue_control_skip_transition(was_control_skipping, is_control_skipping);
     }
 
     fn enqueue_control_skip_transition(&mut self, was_active: bool, is_active: bool) {
@@ -1078,43 +1002,49 @@ mod tests {
             ..RuntimeControlState::default()
         };
         assert!(!control.skip_active());
-        assert!(!control.control_skip_effective());
         assert!(control.control_skip_active);
     }
 
     #[test]
-    fn control_skip_trigger_requires_a_known_read_page_until_release() {
-        let mut control = RuntimeControlState {
+    fn control_skip_ignores_read_configuration() {
+        let control = RuntimeControlState {
             skip_allowed: true,
-            skip_unread: true,
-            already_read_enabled: false,
-            current_scenario_was_read: Some(false),
+            skip_unread: false,
+            already_read_enabled: true,
+            control_skip_active: true,
             ..RuntimeControlState::default()
         };
 
-        control.set_control_skip_pressed(true);
-        assert!(control.control_skip_active);
-        assert!(!control.control_skip_effective());
-
-        control.set_control_skip_pressed(false);
-        control.current_scenario_was_read = Some(true);
-        control.set_control_skip_pressed(true);
-        assert!(control.control_skip_effective());
+        // [skip unread=0] applies to command Skip only.  role 14 remains
+        // effective even when the current scenario has not been read.
+        assert!(control.skip_active());
+        assert!(control.unread_stops_skip());
     }
 
     #[test]
-    fn control_skip_trigger_rejects_an_unknown_current_page() {
-        let mut control = RuntimeControlState {
+    fn command_and_control_skip_statuses_are_independent() {
+        // Ctrl 仅进入 controlskip：commandskip 必须仍为 0，避免游戏侧把
+        // controlskipin 误认为普通 Skip 再反复执行 commandskipout。
+        let control_only = RuntimeControlState {
             skip_allowed: true,
-            skip_unread: true,
-            current_scenario_was_read: None,
+            skip_active: false,
+            control_skip_active: true,
             ..RuntimeControlState::default()
         };
+        assert!(!control_only.command_skip_effective());
+        assert!(control_only.control_skip_effective());
+        assert!(control_only.skip_active());
 
-        control.set_control_skip_pressed(true);
-
-        assert!(control.control_skip_active);
-        assert!(!control.control_skip_effective());
+        // 普通 Skip 反向验证：commandskip=1，controlskip=0。
+        let command_only = RuntimeControlState {
+            skip_allowed: true,
+            skip_active: true,
+            control_skip_active: false,
+            ..RuntimeControlState::default()
+        };
+        assert!(command_only.command_skip_effective());
+        assert!(!command_only.control_skip_effective());
+        assert!(command_only.skip_active());
     }
 
     #[test]
@@ -1129,47 +1059,6 @@ mod tests {
         );
         assert_eq!(control_skip_transition_event(false, false), None);
         assert_eq!(control_skip_transition_event(true, true), None);
-    }
-
-    #[test]
-    fn control_skip_stays_blocked_on_unread_until_ctrl_is_released() {
-        let mut control = RuntimeControlState {
-            skip_allowed: true,
-            skip_unread: false,
-            control_skip_active: true,
-            current_scenario_was_read: Some(true),
-            ..RuntimeControlState::default()
-        };
-        assert!(control.skip_active());
-        assert!(control.unread_stops_skip());
-
-        control.block_control_skip_until_release();
-        assert!(!control.skip_active());
-        assert!(control.control_skip_active);
-
-        control.set_control_skip_pressed(false);
-        control.current_scenario_was_read = Some(true);
-        control.set_control_skip_pressed(true);
-        assert!(control.skip_active());
-    }
-
-    #[test]
-    fn unread_stop_disables_command_skip_and_blocks_held_ctrl_skip() {
-        let mut control = RuntimeControlState {
-            skip_allowed: true,
-            skip_unread: false,
-            skip_active: true,
-            control_skip_active: true,
-            ..RuntimeControlState::default()
-        };
-        assert!(control.skip_active());
-
-        control.skip_active = false;
-        control.block_control_skip_until_release();
-
-        assert!(!control.skip_active());
-        assert!(!control.skip_active);
-        assert!(control.control_skip_active);
     }
 
     #[test]
@@ -1224,7 +1113,7 @@ mod tests {
         // 仅在脚本显式 [skip unread=1] 后才允许跳过未读剧情。
         control.skip_unread = true;
         assert!(!control.unread_stops_skip());
-        // [alreadyread mode=0] 关掉已读判定 → 不停跳（Lua 游戏走这条）。
+        // [alreadyread mode=0] 关掉已读判定 → 不停跳。
         control.skip_unread = false;
         control.already_read_enabled = false;
         assert!(!control.unread_stops_skip());
