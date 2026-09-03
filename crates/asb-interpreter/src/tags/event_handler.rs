@@ -41,7 +41,7 @@ macro_rules! event_handler_struct {
                 let mut extra_params = std::collections::HashMap::new();
                 for (k, v) in &ctx.instruction.params {
                     if !known.contains(&k.as_str()) {
-                        extra_params.insert(k.clone(), ctx.evaluator().resolve_param_str(v)?);
+                        extra_params.insert(k.clone(), v.clone());
                     }
                 }
 
@@ -150,10 +150,7 @@ impl TagHandler for SetOnWindowButtonHandler {
         if !extra_params.contains_key("key")
             && let Some(button) = ctx.instruction.get("button")
         {
-            extra_params.insert(
-                "key".to_string(),
-                ctx.evaluator().resolve_param_str(button)?,
-            );
+            extra_params.insert("key".to_string(), button.to_string());
         }
 
         Ok(TagResult::Emit(Event::SetEventHandler {
@@ -279,7 +276,7 @@ mod tests {
         };
         assert_eq!(file.as_deref(), Some("system/title.iet"));
         assert_eq!(label.as_deref(), Some("return_title"));
-        assert_eq!(extra_params.get("key").map(String::as_str), Some("27"));
+        assert_eq!(extra_params.get("key").map(String::as_str), Some("$t.key"));
     }
 
     #[test]

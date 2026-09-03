@@ -70,6 +70,15 @@ struct QueuedCallBarrier {
 }
 
 #[derive(Debug, Clone)]
+struct QueuedWaitCheckpoint {
+    event: Event,
+    script: String,
+    line: usize,
+    stack: Vec<CallFrame>,
+    deferred: Vec<(String, HashMap<String, String>)>,
+}
+
+#[derive(Debug, Clone)]
 pub struct QueuedTagDrain {
     pub wait: Option<Event>,
     pub saw_return: bool,
@@ -248,6 +257,10 @@ pub struct Interpreter {
     /// 跳到相邻的 `*movie_play [stop]`，导致 brandlogo 卡死。故此处记录来源，
     /// 让 `advance_line()` 对排队来源的 Wait 退化为空操作。
     last_wait_from_queue: bool,
+    /// A queued wait may pause after the script PC has already advanced. Keep
+    /// its frame identity so a queued call can return to that wait boundary.
+    queued_wait_checkpoints: Vec<QueuedWaitCheckpoint>,
+    active_queued_wait: Option<usize>,
     last_flush_saw_return: bool,
     last_flush_saw_call: bool,
     last_flush_saw_jump: bool,
@@ -388,6 +401,13 @@ fn now_millis_i64() -> i64 {
         .unwrap_or(0)
 }
 
+fn same_call_stack(left: &[CallFrame], right: &[CallFrame]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(actual, expected)| {
+            actual.script == expected.script && actual.return_line == expected.return_line
+        })
+}
+
 impl Interpreter {
     /// 创建新的解释器实例
     pub fn new(config: InterpreterConfig) -> Self {
@@ -520,6 +540,8 @@ impl Interpreter {
             callback: Box::new(default_callback),
             engine_ctx,
             last_wait_from_queue: false,
+            queued_wait_checkpoints: Vec::new(),
+            active_queued_wait: None,
             last_flush_saw_return: false,
             last_flush_saw_call: false,
             last_flush_saw_jump: false,
@@ -760,11 +782,41 @@ impl Interpreter {
         self.current_line = line;
         self.call_stack.clear();
         self.queued_call_barriers.clear();
+        self.queued_wait_checkpoints.clear();
+        self.active_queued_wait = None;
         self.variables.lock().unwrap().retain_macro_scopes(0);
         // 显式定位属于「顺序到达」，清掉可能残留的跳转到达标记。
         self.arrived_by_jump = false;
 
         Ok(())
+    }
+
+    /// Reset the script execution boundary for `[reset]`.
+    ///
+    /// The documented variable semantics only discard local/temporary state;
+    /// global/system variables remain. Lua is the project's runtime
+    /// environment and is kept for the same reason: the restarted BOOT flow
+    /// may consume state written immediately before `[reset]`. The old program
+    /// counter, call/queue state and wait metadata must not cross the boundary.
+    pub fn reset_execution_state(&mut self) {
+        self.current_script = None;
+        self.current_line = 0;
+        self.call_stack.clear();
+        self.queued_call_barriers.clear();
+        self.queued_wait_checkpoints.clear();
+        self.active_queued_wait = None;
+        self.last_wait_from_queue = false;
+        self.last_flush_saw_return = false;
+        self.last_flush_saw_call = false;
+        self.last_flush_saw_jump = false;
+        self.arrived_by_jump = false;
+        self.variables.lock().unwrap().reset();
+        let mut ctx = self.engine_ctx.lock().unwrap();
+        ctx.tag_queue.clear();
+        ctx.script_stack.clear();
+        ctx.scenario_text_source = None;
+        ctx.pending_stack_override = None;
+        ctx.wait_reason_info = None;
     }
 
     /// 执行到下一个等待点（迭代版本，避免栈溢出）
@@ -781,15 +833,27 @@ impl Interpreter {
 
     fn step_inner(&mut self) -> Result<ExecutionResult> {
         loop {
+            // A queued handler may return to a PC that is already the next
+            // script instruction. Re-emit the original wait before flushing
+            // deferred tags or executing that instruction.
+            if let Some(event) = self.queued_wait_at_current_position() {
+                self.last_wait_from_queue = true;
+                return Ok(ExecutionResult::Wait(event));
+            }
             // 先抽干 Lua 通过 e:tag{} 排队的标签（如图层操作），它们由上一条
             // [calllua]/[lua] 产生，必须走标签管线才能发出对应事件。
             if let Some(result) = self.flush_tag_queue()? {
                 return Ok(result);
             }
+            if let Some(event) = self.queued_wait_at_current_position() {
+                self.last_wait_from_queue = true;
+                return Ok(ExecutionResult::Wait(event));
+            }
             // 走到这里说明队列已抽干，接下来执行的是脚本流里的内联指令；它若产生
             // Wait，current_line 指向的就是该 Wait 指令本身，宿主需要 advance_line()
             // 越过它。故在此把来源标记清为「非排队」。
             self.last_wait_from_queue = false;
+            self.active_queued_wait = None;
 
             // 消费「经由 Jump 到达当前行」标记（见字段注释）：每条指令只用一次，
             // 顺序推进（Continue/Wait 恢复等）不会置位。
@@ -1173,6 +1237,10 @@ impl Interpreter {
                             // 这个 Wait 来自排队标签，current_line 已指向下一条待执行
                             // 指令；记录来源，使 advance_line() 退化为空操作。
                             self.last_wait_from_queue = true;
+                            self.active_queued_wait = None;
+                            if matches!(event, Event::Wait { .. }) {
+                                self.record_queued_wait_checkpoint(&event);
+                            }
                             return Ok(Some(ExecutionResult::Wait(event)));
                         }
                         CallbackResult::Abort => return Err(Error::Aborted),
@@ -1184,6 +1252,10 @@ impl Interpreter {
                             CallbackResult::Continue => {}
                             CallbackResult::Pause => {
                                 self.last_wait_from_queue = true;
+                                self.active_queued_wait = None;
+                                if matches!(event, Event::Wait { .. }) {
+                                    self.record_queued_wait_checkpoint(&event);
+                                }
                                 return Ok(Some(ExecutionResult::Wait(event)));
                             }
                             CallbackResult::Abort => return Err(Error::Aborted),
@@ -1198,6 +1270,7 @@ impl Interpreter {
                 TagResult::Jump(line) => {
                     self.last_flush_saw_jump = true;
                     self.arrived_by_jump = true;
+                    self.prune_queued_wait_checkpoints_for_jump();
                     self.current_line = line;
                     // 继续抽干剩余标签而非立即返回——排在 jump 之后的 calllua
                     // 等函数调用仍有效（典型：fn.push 的 jump 和按钮点击 handler
@@ -1207,6 +1280,7 @@ impl Interpreter {
                 }
                 TagResult::JumpExternal { file, label } => {
                     self.last_flush_saw_jump = true;
+                    self.prune_queued_wait_checkpoints_for_jump();
                     self.jump_to_external_script(&file, &label)?;
                     continue;
                 }
@@ -1378,6 +1452,8 @@ impl Interpreter {
             // 空数组：无处可去，忽略（脚本至少要留 1 帧）。
             return Ok(());
         };
+        self.queued_wait_checkpoints.clear();
+        self.active_queued_wait = None;
         self.call_stack = rest
             .iter()
             .map(|(file, index)| CallFrame {
@@ -2055,11 +2131,79 @@ impl Interpreter {
     pub fn advance_line(&mut self) {
         // 宿主 advance = 等待结束：清掉 getScriptWaitReason 的数据源。
         self.engine_ctx.lock().unwrap().wait_reason_info = None;
-        if self.last_wait_from_queue {
-            self.last_wait_from_queue = false;
+        if self.release_queued_wait() {
             return;
         }
         self.current_line = self.current_line.saturating_add(1);
+    }
+
+    /// Release a queued wait without advancing the script PC. This is used by
+    /// host-side waits that complete asynchronously (for example video/trans).
+    pub fn release_queued_wait(&mut self) -> bool {
+        if !self.last_wait_from_queue {
+            return false;
+        }
+        self.last_wait_from_queue = false;
+        if let Some(index) = self.active_queued_wait.take()
+            && index < self.queued_wait_checkpoints.len()
+        {
+            let mut checkpoint = self.queued_wait_checkpoints.remove(index);
+            self.queued_wait_checkpoints.truncate(index);
+            let mut ctx = self.engine_ctx.lock().unwrap();
+            checkpoint.deferred.append(&mut ctx.tag_queue);
+            ctx.tag_queue = checkpoint.deferred;
+        }
+        true
+    }
+
+    fn record_queued_wait_checkpoint(&mut self, event: &Event) {
+        let Some(script) = self.current_script.clone() else {
+            return;
+        };
+        let line = self.current_line;
+        let stack = self.call_stack.clone();
+        if self
+            .queued_wait_checkpoints
+            .last()
+            .is_some_and(|checkpoint| {
+                checkpoint.script == script
+                    && checkpoint.line == line
+                    && same_call_stack(&checkpoint.stack, &stack)
+            })
+        {
+            let index = self.queued_wait_checkpoints.len() - 1;
+            self.queued_wait_checkpoints[index].event = event.clone();
+            self.active_queued_wait = Some(index);
+            return;
+        }
+        self.queued_wait_checkpoints.push(QueuedWaitCheckpoint {
+            event: event.clone(),
+            script,
+            line,
+            stack,
+            deferred: std::mem::take(&mut self.engine_ctx.lock().unwrap().tag_queue),
+        });
+        self.active_queued_wait = Some(self.queued_wait_checkpoints.len() - 1);
+    }
+
+    fn prune_queued_wait_checkpoints_for_jump(&mut self) {
+        let depth = self.call_stack.len();
+        self.queued_wait_checkpoints
+            .retain(|checkpoint| checkpoint.stack.len() < depth);
+        self.active_queued_wait = None;
+    }
+
+    fn queued_wait_at_current_position(&mut self) -> Option<Event> {
+        let checkpoint = self.queued_wait_checkpoints.last()?;
+        if self.current_script.as_deref() != Some(checkpoint.script.as_str())
+            || self.current_line != checkpoint.line
+            || !same_call_stack(&self.call_stack, &checkpoint.stack)
+        {
+            return None;
+        }
+        let event = checkpoint.event.clone();
+        self.active_queued_wait = Some(self.queued_wait_checkpoints.len() - 1);
+        Some(event)
     }
 
     /// 获取变量存储的快照（用于存档）
@@ -2104,6 +2248,8 @@ impl Interpreter {
             self.current_line = 0;
             self.call_stack.clear();
             self.queued_call_barriers.clear();
+            self.queued_wait_checkpoints.clear();
+            self.active_queued_wait = None;
             self.variables.lock().unwrap().retain_macro_scopes(0);
             self.arrived_by_jump = false;
             return Ok(());
@@ -2129,6 +2275,8 @@ impl Interpreter {
         self.current_line = line;
         self.call_stack = stack;
         self.queued_call_barriers.clear();
+        self.queued_wait_checkpoints.clear();
+        self.active_queued_wait = None;
         self.variables
             .lock()
             .unwrap()
@@ -2136,6 +2284,31 @@ impl Interpreter {
         self.arrived_by_jump = false;
         // 重新加载目标脚本并定位到当前行
         self.load_external_script(script)?;
+        Ok(())
+    }
+
+    /// Push the synthetic return frame used by a host-dispatched inline event.
+    ///
+    /// Unlike [`Self::restore_position`], this deliberately preserves queued
+    /// call barriers: an input event may interrupt a queued call before its
+    /// deferred continuation has been restored.
+    pub fn push_inline_event_frame(&mut self) -> Result<()> {
+        let script = self
+            .current_script
+            .clone()
+            .ok_or_else(|| Error::RuntimeError {
+                line: self.current_line,
+                message: "inline event frame requires an active script".into(),
+            })?;
+        let line = self.current_line;
+        self.call_stack.push(CallFrame {
+            script,
+            return_line: line,
+        });
+        self.variables
+            .lock()
+            .unwrap()
+            .retain_macro_scopes(self.call_stack.len());
         Ok(())
     }
 
@@ -2184,6 +2357,11 @@ impl Interpreter {
             return None;
         }
         let frame = self.call_stack.remove(index);
+        for barrier in &mut self.queued_call_barriers {
+            if barrier.stack_depth > index {
+                barrier.stack_depth -= 1;
+            }
+        }
         self.variables
             .lock()
             .unwrap()
@@ -2238,6 +2416,142 @@ mod tests {
     use crate::{CallbackResult, Event, ExecutionResult, InterpreterConfig, Value};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
+
+    fn queued_stop_fixture() -> Interpreter {
+        let mut it = Interpreter::new(InterpreterConfig::default());
+        it.lua()
+            .load(
+                r#"
+            function park(e)
+                e:enqueueTag{'stop'}
+                e:enqueueTag{'var', name='after_wait', data='1'}
+            end
+            function return_event(e) e:enqueueTag{'return'} end
+        "#,
+            )
+            .exec()
+            .unwrap();
+        it.load_script(
+            "story",
+            "*main\n[calllua function=park]\n[var name=after_pc data=1]\n[stop]\n",
+        )
+        .unwrap();
+        it.load_script(
+            "handler",
+            "*main\n[debugprint data=sync]\n[calllua function=return_event]\n",
+        )
+        .unwrap();
+        it.set_callback(|e| match e {
+            Event::Wait { .. } | Event::DebugPrint { .. } => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        it.start("story", "main").unwrap();
+        assert!(matches!(
+            it.run().unwrap(),
+            ExecutionResult::Wait(Event::Wait {
+                reason: WaitReason::Stop { .. }
+            })
+        ));
+        it
+    }
+
+    #[test]
+    fn reset_keeps_runtime_environment_but_discards_transient_execution_state() {
+        let mut it = Interpreter::new(InterpreterConfig::default());
+        it.load_script("boot", "*main\n[stop]\n").unwrap();
+        it.start("boot", "main").unwrap();
+        it.set_variable("local_value", Value::Int(1));
+        it.set_variable("t.temporary", Value::Int(2));
+        it.set_variable("g.global", Value::Int(3));
+        it.set_variable("s.system", Value::Int(4));
+        it.lua().globals().set("restart_route", "title").unwrap();
+        it.lua().load("__engine:enqueueTag{'exit'}").exec().unwrap();
+
+        it.reset_execution_state();
+
+        assert_eq!(it.current_script(), None);
+        assert_eq!(it.current_line(), 0);
+        assert!(it.call_stack().is_empty());
+        assert_eq!(it.get_variable("local_value"), None);
+        assert_eq!(it.get_variable("t.temporary"), None);
+        assert_eq!(it.get_variable("g.global"), Some(Value::Int(3)));
+        assert_eq!(it.get_variable("s.system"), Some(Value::Int(4)));
+        assert_eq!(
+            it.lua().globals().get::<String>("restart_route").unwrap(),
+            "title"
+        );
+        assert!(it.engine_context().lock().unwrap().tag_queue.is_empty());
+    }
+
+    #[test]
+    fn queued_stop_survives_event_call_and_queued_return() {
+        let mut it = queued_stop_fixture();
+        let pc = it.current_line();
+        it.push_inline_event_frame().unwrap();
+        it.lua()
+            .load("__engine:enqueueTag{'call', file='handler', label='main'}")
+            .exec()
+            .unwrap();
+        assert!(it.drain_queued_tags_only().unwrap().saw_call);
+        it.remove_call_frame(0).unwrap();
+        assert!(matches!(
+            it.run().unwrap(),
+            ExecutionResult::Wait(Event::DebugPrint { .. })
+        ));
+        it.advance_line();
+        assert!(matches!(
+            it.run().unwrap(),
+            ExecutionResult::Wait(Event::Wait {
+                reason: WaitReason::Stop { .. }
+            })
+        ));
+        assert_eq!(it.current_script(), Some("story"));
+        assert_eq!(it.current_line(), pc);
+        assert!(it.get_variable("after_pc").is_none());
+        assert!(it.get_variable("after_wait").is_none());
+        it.advance_line();
+        it.run().unwrap();
+        assert_eq!(it.get_variable("after_wait"), Some(Value::Int(1)));
+        assert_eq!(it.get_variable("after_pc"), Some(Value::Int(1)));
+    }
+
+    #[test]
+    fn non_wait_pause_at_same_pc_does_not_release_queued_stop() {
+        let mut it = queued_stop_fixture();
+        it.lua()
+            .load("__engine:enqueueTag{'debugprint', data='sync'}")
+            .exec()
+            .unwrap();
+        assert!(matches!(
+            it.drain_queued_tags_only().unwrap().wait,
+            Some(Event::DebugPrint { .. })
+        ));
+        it.advance_line();
+        assert_eq!(it.queued_wait_checkpoints.len(), 1);
+        assert!(matches!(
+            it.run().unwrap(),
+            ExecutionResult::Wait(Event::Wait {
+                reason: WaitReason::Stop { .. }
+            })
+        ));
+        assert!(it.get_variable("after_wait").is_none());
+        assert!(it.get_variable("after_pc").is_none());
+    }
+
+    #[test]
+    fn queued_jump_leaves_stop_without_running_its_continuation() {
+        let mut it = queued_stop_fixture();
+        it.load_script("title", "*main\n[var name=at_title data=1]\n[stop]\n")
+            .unwrap();
+        it.lua()
+            .load("__engine:enqueueTag{'jump', file='title', label='main'}")
+            .exec()
+            .unwrap();
+        assert!(it.drain_queued_tags_only().unwrap().saw_jump);
+        it.run().unwrap();
+        assert_eq!(it.get_variable("at_title"), Some(Value::Int(1)));
+        assert!(it.get_variable("after_wait").is_none());
+    }
 
     #[test]
     fn frame_number_changes_only_at_host_tick_boundary() {

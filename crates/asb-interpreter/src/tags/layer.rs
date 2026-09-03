@@ -165,7 +165,7 @@ impl TagHandler for LyeventHandler {
         let mut base_extra_params = std::collections::HashMap::new();
         for (k, v) in ctx.instruction.params.iter() {
             if !known.contains(&k.as_str()) {
-                base_extra_params.insert(k.clone(), ctx.evaluator().resolve_param_str(v)?);
+                base_extra_params.insert(k.clone(), v.clone());
             }
         }
 
@@ -227,7 +227,7 @@ fn emit_legacy_lyevent(
     let mut extra_params = std::collections::HashMap::new();
     for (k, v) in ctx.instruction.params.iter() {
         if !known.contains(&k.as_str()) {
-            extra_params.insert(k.clone(), ctx.evaluator().resolve_param_str(v)?);
+            extra_params.insert(k.clone(), v.clone());
         }
     }
 
@@ -536,7 +536,7 @@ mod tests {
         assert_eq!(handler.as_deref(), Some("calllua"));
         assert_eq!(
             extra_params.get("function").map(String::as_str),
-            Some("button_click")
+            Some("$t.callback")
         );
     }
 

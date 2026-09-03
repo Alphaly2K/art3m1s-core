@@ -291,15 +291,7 @@ impl CoreRuntime {
         };
         let line = self.interpreter.current_line();
         let stack = self.interpreter.call_stack();
-        let mut event_stack = stack.clone();
-        event_stack.push(asb_interpreter::CallFrame {
-            script: script.clone(),
-            return_line: line,
-        });
-        if let Err(error) = self
-            .interpreter
-            .restore_position(&script, line, event_stack)
-        {
+        if let Err(error) = self.interpreter.push_inline_event_frame() {
             crate::core_error!("建立事件返回帧失败: {error:?}");
             return;
         }

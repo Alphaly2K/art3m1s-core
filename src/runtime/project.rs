@@ -62,61 +62,7 @@ impl CoreRuntime {
         self.wire_event_callback();
     }
 
-    /// Rebuild the interpreter for [reset] while keeping only the persistent
-    /// Rust variable domains. Everything owned by the old Lua VM, including
-    /// queued tags and event registrations, is discarded with that VM.
-    pub(super) fn reboot_interpreter(&mut self) -> Result<(), String> {
-        let boot = self
-            .boot_script
-            .clone()
-            .ok_or_else(|| "没有记录 BOOT 脚本，无法重启".to_string())?;
-        let config = self.interpreter.config().clone();
-        let store = self.interpreter.variables();
-        let global: Vec<_> = store
-            .iter_global()
-            .map(|(name, value)| (name.clone(), value.clone()))
-            .collect();
-        let system: Vec<_> = store
-            .iter_system()
-            .map(|(name, value)| (name.clone(), value.clone()))
-            .collect();
-        // Project::create_interpreter has already loaded tag.ini into the old
-        // parser. Keep using that project's loader when rebuilding the parser;
-        // this also works for standalone, non-FFI project roots.
-        let tag_ini_loader = self
-            .interpreter
-            .engine_context()
-            .lock()
-            .unwrap()
-            .file_reader
-            .clone();
-
-        self.install_interpreter(asb_interpreter::Interpreter::new(config.clone()));
-        if !crate::ffi::file_reader_registered()
-            && let Some(loader) = tag_ini_loader.clone()
-        {
-            // Interpreter::new starts without a loader. In standalone mode
-            // the old Project loader is the only path to BOOT and includes.
-            self.interpreter
-                .set_file_loader(Box::new(move |name| loader(name)));
-        }
-        if let Some(loader) = tag_ini_loader
-            && let Ok(bytes) = loader("tag.ini")
-        {
-            let (content, _, _) = config.encoding.decode(&bytes);
-            self.interpreter.load_tag_ini(&content);
-        }
-        for (name, value) in global {
-            self.interpreter.set_variable(&format!("g.{name}"), value);
-        }
-        for (name, value) in system {
-            self.interpreter.set_variable(&format!("s.{name}"), value);
-        }
-        self.sync_control_status_variables();
-        self.start_configured_boot_for(&boot)
-    }
-
-    fn start_configured_boot(&mut self) -> Result<(), String> {
+    pub(super) fn start_configured_boot(&mut self) -> Result<(), String> {
         let boot = self
             .boot_script
             .clone()
@@ -449,7 +395,7 @@ mod tests {
 
     #[cfg(all(target_os = "macos", feature = "gl-backend"))]
     #[test]
-    fn reset_rebuilds_interpreter_and_discards_old_runtime_queues() {
+    fn reset_restarts_boot_without_replacing_lua_runtime() {
         use crate::Project;
         use crate::backend::gl::platform::GfxBackend;
         use asb_interpreter::Value;
@@ -501,7 +447,7 @@ boot_marker = (boot_marker or 0) + 1
             .interpreter
             .lua()
             .globals()
-            .set("stale_lua_value", true)
+            .set("systemreset", true)
             .unwrap();
         runtime
             .interpreter
@@ -549,14 +495,17 @@ boot_marker = (boot_marker or 0) + 1
             .globals()
             .get("boot_marker")
             .unwrap();
-        assert_eq!(boot_marker, 1, "BOOT Lua 块应在新 VM 中重新执行");
-        let stale_lua_value: bool = runtime
+        assert_eq!(
+            boot_marker, 41,
+            "脚本文件的 Lua 定义块只在载入时执行，reset 只重跑 BOOT 脚本流"
+        );
+        let systemreset: bool = runtime
             .interpreter
             .lua()
             .globals()
-            .get("stale_lua_value")
+            .get("systemreset")
             .unwrap_or(false);
-        assert!(!stale_lua_value, "旧 Lua 全局不得穿透 reset");
+        assert!(systemreset, "脚本 reset 标记必须穿透 boot 重启");
         assert_eq!(
             runtime.interpreter.get_variable("s.status.commandskip"),
             Some(Value::Int(0))

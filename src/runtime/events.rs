@@ -819,14 +819,13 @@ impl CoreRuntime {
         crate::core_info!("[debugreload] 已重载 {script}（第 {line} 行继续）");
     }
 
-    /// [reset]：全量重启——重置合成器/音频/视频/控制状态后重新走 boot。
+    /// [reset]：重置宿主和脚本执行状态，然后重新走 BOOT。
     ///
-    /// 解释器侧已在 ResetHandler 里清过 local/temp 变量域；Lua 全局环境无法
-    /// 在不重建解释器的情况下清空，boot 脚本重跑时会重新初始化其自有状态。
+    /// 按变量规范清除 local/temp，保留 global/system；Lua 运行环境同样保留，
+    /// 使 BOOT 能消费 reset 前设置的重启分流状态。旧调用栈、标签队列、等待及
+    /// 场景/媒体状态均不得穿透该边界。
     pub(super) fn handle_engine_reset(&mut self) -> Result<(), String> {
-        // Snapshot only the cross-session read history before resetting the
-        // transient control state. The interpreter's g./s. domains are saved
-        // by reboot_interpreter; local/temp Lua state is intentionally not.
+        // 已读历史属于跨重启状态；其余控制状态由 BOOT 重新配置。
         let read_lines = self.control.read_lines_export();
         self.stop_all_media();
         self.clear_emote_state("engine reset");
@@ -866,8 +865,8 @@ impl CoreRuntime {
         self.audio.set_skipping(false);
         self.sync_control_status_variables();
 
-        self.reboot_interpreter()
-            .map_err(|e| format!("重启 boot 脚本失败: {e}"))
+        self.interpreter.reset_execution_state();
+        self.start_configured_boot()
     }
 
     // ── 宿主窗口按钮 / 屏幕方向通知 ────────────────────────────────

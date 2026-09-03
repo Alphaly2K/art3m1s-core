@@ -199,6 +199,7 @@ impl CoreRuntime {
             is_trans_wait && !RenderPipeline::new(&self.compositor).is_transition_in_progress();
         if video_resume || trans_resume {
             self.wait_reason = None;
+            self.interpreter.release_queued_wait();
             return;
         }
 
@@ -535,7 +536,8 @@ fn settle_inline_event_frame(
     }
 
     let frame = active_frame.take().unwrap();
-    interpreter.restore_position(&frame.script, frame.line, frame.stack)
+    interpreter.remove_call_frame(frame.stack.len());
+    Ok(())
 }
 
 fn timed_wait_accepts_click(input: i32, clicked: bool) -> bool {
@@ -808,6 +810,296 @@ mod tests {
         assert_eq!(interpreter.current_script(), Some("title"));
         assert_eq!(interpreter.current_line(), line);
         assert!(interpreter.call_stack().is_empty());
+    }
+
+    #[test]
+    fn queued_handler_return_keeps_deferred_tags_until_call_returns() {
+        let mut interpreter = asb_interpreter::Interpreter::new(InterpreterConfig::default());
+        interpreter.load_script("story", "*main\n[stop]\n").unwrap();
+        interpreter
+            .load_script(
+                "handler",
+                "*entry\n[var name=\"handler_done\" data=\"1\"]\n[return]\n",
+            )
+            .unwrap();
+        interpreter.set_callback(|event| match event {
+            Event::Wait { .. } => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        interpreter.start("story", "main").unwrap();
+        assert!(matches!(
+            interpreter.run().unwrap(),
+            ExecutionResult::Wait(_)
+        ));
+
+        let line = interpreter.current_line();
+        interpreter
+            .engine_context()
+            .lock()
+            .unwrap()
+            .tag_queue
+            .extend([
+                (
+                    "call".into(),
+                    HashMap::from([
+                        ("file".into(), "handler".into()),
+                        ("label".into(), "entry".into()),
+                    ]),
+                ),
+                (
+                    "var".into(),
+                    HashMap::from([
+                        ("name".into(), "deferred".into()),
+                        ("data".into(), "yes".into()),
+                    ]),
+                ),
+            ]);
+        let call_drain = interpreter.drain_queued_tags_only().unwrap();
+        assert!(call_drain.saw_call);
+        assert_eq!(interpreter.current_script(), Some("handler"));
+
+        let event_script = interpreter.current_script().unwrap().to_string();
+        let event_line = interpreter.current_line();
+        let event_stack = interpreter.call_stack();
+        interpreter.push_inline_event_frame().unwrap();
+        let mut event_frame = Some(InlineEventFrame {
+            script: event_script,
+            line: event_line,
+            stack: event_stack,
+            claimed_by_jump: false,
+        });
+        interpreter
+            .engine_context()
+            .lock()
+            .unwrap()
+            .tag_queue
+            .push(("return".into(), HashMap::new()));
+
+        let return_drain = interpreter.drain_queued_tags_only().unwrap();
+        assert!(return_drain.saw_return);
+        settle_inline_event_frame(
+            &mut interpreter,
+            &mut event_frame,
+            false,
+            false,
+            return_drain.saw_call,
+            return_drain.saw_jump,
+        )
+        .unwrap();
+        assert!(event_frame.is_none());
+        assert_eq!(interpreter.call_stack().len(), 1);
+        assert_eq!(interpreter.current_line(), event_line);
+
+        assert!(matches!(
+            interpreter.run().unwrap(),
+            ExecutionResult::Wait(_)
+        ));
+        assert_eq!(interpreter.current_script(), Some("story"));
+        assert_eq!(interpreter.current_line(), line);
+        assert_eq!(
+            interpreter.get_variable("deferred").unwrap().as_string(),
+            "yes"
+        );
+        assert_eq!(
+            interpreter
+                .get_variable("handler_done")
+                .unwrap()
+                .as_string(),
+            "1"
+        );
+    }
+
+    #[test]
+    fn no_control_flow_handler_removes_marker_without_resetting_queued_call() {
+        let mut interpreter = asb_interpreter::Interpreter::new(InterpreterConfig::default());
+        interpreter.load_script("story", "*main\n[stop]\n").unwrap();
+        interpreter
+            .load_script("handler", "*entry\n[return]\n")
+            .unwrap();
+        interpreter
+            .lua()
+            .load("function event_handler(e, p) end")
+            .exec()
+            .unwrap();
+        interpreter.set_callback(|event| match event {
+            Event::Wait { .. } => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        interpreter.start("story", "main").unwrap();
+        assert!(matches!(
+            interpreter.run().unwrap(),
+            ExecutionResult::Wait(_)
+        ));
+
+        interpreter
+            .engine_context()
+            .lock()
+            .unwrap()
+            .tag_queue
+            .extend([
+                (
+                    "call".into(),
+                    HashMap::from([
+                        ("file".into(), "handler".into()),
+                        ("label".into(), "entry".into()),
+                    ]),
+                ),
+                (
+                    "var".into(),
+                    HashMap::from([
+                        ("name".into(), "deferred".into()),
+                        ("data".into(), "yes".into()),
+                    ]),
+                ),
+            ]);
+        interpreter.drain_queued_tags_only().unwrap();
+
+        let event_script = interpreter.current_script().unwrap().to_string();
+        let event_line = interpreter.current_line();
+        let event_stack = interpreter.call_stack();
+        interpreter.push_inline_event_frame().unwrap();
+        let mut event_frame = Some(InlineEventFrame {
+            script: event_script,
+            line: event_line,
+            stack: event_stack,
+            claimed_by_jump: false,
+        });
+        interpreter
+            .engine_context()
+            .lock()
+            .unwrap()
+            .tag_queue
+            .push((
+                "calllua".into(),
+                HashMap::from([(String::from("function"), String::from("event_handler"))]),
+            ));
+        let handler_drain = interpreter.drain_queued_tags_only().unwrap();
+        assert!(!handler_drain.saw_call);
+        assert!(!handler_drain.saw_jump);
+        settle_inline_event_frame(
+            &mut interpreter,
+            &mut event_frame,
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(event_frame.is_none());
+        assert_eq!(interpreter.call_stack().len(), 1);
+        assert!(matches!(
+            interpreter.run().unwrap(),
+            ExecutionResult::Wait(_)
+        ));
+        assert_eq!(
+            interpreter.get_variable("deferred").unwrap().as_string(),
+            "yes"
+        );
+    }
+
+    #[test]
+    fn nested_handler_return_does_not_release_outer_deferred_call_early() {
+        let mut interpreter = asb_interpreter::Interpreter::new(InterpreterConfig::default());
+        interpreter.load_script("story", "*main\n[stop]\n").unwrap();
+        interpreter
+            .load_script(
+                "handler",
+                "*entry\n[event_macro]\n[call file=\"nested\" label=\"entry\"]\n[var name=\"observed\" data=\"$deferred\"]\n[return]\n",
+            )
+            .unwrap();
+        interpreter
+            .load_script(
+                "nested",
+                "*entry\n[var name=\"nested_done\" data=\"1\"]\n[return]\n",
+            )
+            .unwrap();
+        interpreter.set_file_loader(Box::new(|name| {
+            if name == "macro.iet" {
+                Ok(b"*event_macro\n[var name=\"macro_done\" data=\"1\"]\n[return]\n".to_vec())
+            } else {
+                Err(asb_interpreter::Error::ScriptNotFound(name.into()))
+            }
+        }));
+        interpreter.load_macro_file("macro.iet").unwrap();
+        interpreter.set_callback(|event| match event {
+            Event::Wait { .. } => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        interpreter.start("story", "main").unwrap();
+        assert!(matches!(
+            interpreter.run().unwrap(),
+            ExecutionResult::Wait(_)
+        ));
+
+        // This is the hover/input dispatch point while the story is stopped:
+        // the real event call is queued above the synthetic return marker.
+        let event_script = interpreter.current_script().unwrap().to_string();
+        let event_line = interpreter.current_line();
+        let event_stack = interpreter.call_stack();
+        interpreter.push_inline_event_frame().unwrap();
+        let mut event_frame = Some(InlineEventFrame {
+            script: event_script,
+            line: event_line,
+            stack: event_stack,
+            claimed_by_jump: false,
+        });
+        interpreter
+            .engine_context()
+            .lock()
+            .unwrap()
+            .tag_queue
+            .extend([
+                (
+                    "call".into(),
+                    HashMap::from([
+                        ("file".into(), "handler".into()),
+                        ("label".into(), "entry".into()),
+                    ]),
+                ),
+                (
+                    "var".into(),
+                    HashMap::from([
+                        ("name".into(), "deferred".into()),
+                        ("data".into(), "yes".into()),
+                    ]),
+                ),
+            ]);
+        let call_drain = interpreter.drain_queued_tags_only().unwrap();
+        assert!(call_drain.saw_call);
+        assert_eq!(interpreter.call_stack().len(), 2);
+        settle_inline_event_frame(
+            &mut interpreter,
+            &mut event_frame,
+            false,
+            false,
+            call_drain.saw_call,
+            call_drain.saw_jump,
+        )
+        .unwrap();
+        assert!(event_frame.is_none());
+        assert_eq!(interpreter.call_stack().len(), 1);
+
+        assert!(matches!(
+            interpreter.run().unwrap(),
+            ExecutionResult::Wait(_)
+        ));
+        assert_eq!(
+            interpreter.get_variable("observed").unwrap().as_string(),
+            "0",
+            "nested return must not release the outer call's deferred tags"
+        );
+        assert_eq!(
+            interpreter.get_variable("deferred").unwrap().as_string(),
+            "yes"
+        );
+        assert_eq!(
+            interpreter.get_variable("macro_done").unwrap().as_string(),
+            "1"
+        );
+        assert_eq!(
+            interpreter.get_variable("nested_done").unwrap().as_string(),
+            "1"
+        );
     }
 
     #[test]

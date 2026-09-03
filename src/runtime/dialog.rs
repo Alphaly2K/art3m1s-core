@@ -11,6 +11,7 @@ impl CoreRuntime {
         textfield: Option<&str>,
         textfield_size: Option<usize>,
     ) {
+        crate::core_debug!("[dialog] show title={title:?} message={message:?}");
         let initial_text = textfield
             .and_then(|name| self.interpreter.get_variable(name))
             .map(|value| value.as_string())
