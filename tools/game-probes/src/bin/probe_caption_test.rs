@@ -1,5 +1,5 @@
 //! 诊断：对真实游戏跑 caption 探测，打印 boot 发出的所有事件，看 caption 是否被发出。
-//! 用法：cargo run --example probe_caption_test -- <project-root>
+//! 用法：cargo run --features game-probes --bin probe_caption_test -- <project-root>
 
 use art3m1s_core::Project;
 use art3m1s_core::script::{CallbackResult, Event};

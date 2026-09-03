@@ -4,7 +4,21 @@
 - 顶层 `tests/*.rs` 是自包含的集成回归测试，默认在 CI 中执行。
 - `tests/compatibility/` 依赖无法随仓库分发的商业游戏数据。这些测试统一标记为
   `#[ignore]`，仅在明确要求时执行。
-- 一次性诊断程序放在 `examples/`，输入路径必须通过命令行参数传入。
+- 依赖真实游戏数据的手动诊断程序放在 `tools/game-probes`，输入路径必须通过命令行
+  参数传入。这些目标要求默认关闭的 `game-probes` feature，默认构建和 CI 不会编译
+  或运行它们。
+
+## 手动诊断工具
+
+按需从本地游戏项目运行：
+
+```bash
+cargo run --features game-probes \
+  --bin probe_caption_test -- /path/to/project
+
+cargo run --features game-probes \
+  --bin compatibility_probe -- /path/to/game.pfs config /path/to/output
+```
 
 ## 外部 fixture
 

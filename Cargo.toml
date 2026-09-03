@@ -6,6 +6,16 @@ edition = "2024"
 [lib]
 crate-type = ["rlib", "cdylib"]
 
+[[bin]]
+name = "compatibility_probe"
+path = "tools/game-probes/src/bin/compatibility_probe.rs"
+required-features = ["game-probes"]
+
+[[bin]]
+name = "probe_caption_test"
+path = "tools/game-probes/src/bin/probe_caption_test.rs"
+required-features = ["game-probes"]
+
 [dependencies]
 art3m1s-emote = { path = "crates/art3m1s-emote" }
 eluna = { package = "eluna_rs", path = "crates/eluna", optional = true }
@@ -36,6 +46,7 @@ asb-interpreter = { path = "crates/asb-interpreter", default-features = false, f
 default = ["gl-backend", "experimental-eluna"]
 gl-backend = ["dep:glow", "dep:image", "dep:libloading"]
 experimental-eluna = ["dep:eluna"]
+game-probes = ["gl-backend"]
 
 [dev-dependencies]
 # 离屏像素回读测试需要在 macOS 上创建一个 CGL headless 上下文。
