@@ -1026,6 +1026,46 @@ mod tests {
     }
 
     #[test]
+    fn rename_preserves_running_tween_and_settles_at_right_endpoint() {
+        let mut c = Compositor::new();
+        c.apply_event(&create("1.0", "a"));
+        c.apply_event(&Event::LayerTween {
+            id: "1.0".into(),
+            param: "left".into(),
+            from: Some("0".into()),
+            to: Some("100".into()),
+            ease: None,
+            time: Some(1000),
+            delay: None,
+            loop_count: None,
+            yoyo: None,
+            loop_delay: None,
+            sync: false,
+            delete: false,
+            handler_file: None,
+            handler_label: None,
+            handler_handler: None,
+            extra_params: HashMap::new(),
+        });
+
+        // 改名不会复制/重建图层；正在运行的 tween 应随子树一起保留。
+        assert!(c.advance(400));
+        c.apply_event(&Event::LayerRename {
+            id: "1.0".into(),
+            to: "1.5".into(),
+        });
+        assert!(c.scene().get("1.0").is_none());
+        assert_eq!(c.scene().get("1.5").unwrap().tweens.len(), 1);
+
+        // tween 继续推进，完成后固定在右侧终点，而不是回到起点或停止在改名瞬间。
+        assert!(c.advance(700));
+        let layer = c.scene().get("1.5").unwrap();
+        assert!(layer.tweens.is_empty());
+        assert_eq!(layer.props.left, Some(100.0));
+        assert_eq!(layer.props.offset().0, 100.0);
+    }
+
+    #[test]
     fn tween_event_drives_value_then_settles() {
         let mut c = Compositor::new();
         c.apply_event(&create("1", "a"));
