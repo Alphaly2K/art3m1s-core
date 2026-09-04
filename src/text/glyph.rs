@@ -6,8 +6,8 @@ use crate::render_pipeline::draw::{
 use crate::text::backlog::{BacklogPage, BacklogTag};
 use crate::text::render::{
     ClickWaitIconPlacement, FontDesc, FontState, GlyphIconConfig, GlyphInfo, LinkHitArea,
-    LinkRange, RubyRange, ScetweenConfig, TextAlignment, TextLayoutConfig, TextRenderer,
-    TextSpanToken,
+    LinkRange, MessageLayer, RubyRange, ScetweenConfig, TextAlignment, TextLayoutConfig,
+    TextRenderer, TextSpanToken,
 };
 use ab_glyph::{Font, FontArc, PxScale, PxScaleFont, ScaleFont};
 use glam::{Affine2, Vec2};
@@ -1079,9 +1079,22 @@ impl TextRenderer for GlyphTextRenderer {
                 .as_deref()
                 .map(parse)
                 .unwrap_or([0.0, 0.0, 0.0]);
+            let shadow_c = ly
+                .font
+                .shadow_color
+                .as_deref()
+                .map(parse)
+                .unwrap_or([0.0, 0.0, 0.0]);
             let st = ly.font.style.as_deref().unwrap_or("");
-            let has_outline = st.contains("outline");
-            let has_shadow = st.contains("shadow");
+            // Artemis enables these effects through the numeric font
+            // properties as well as the legacy comma-separated style field.
+            // Checking style alone drops a nonzero outline/shadow setting.
+            let has_outline =
+                st.contains("outline") || ly.font.outline_size.is_some_and(|size| size > 0.0);
+            let has_shadow =
+                st.contains("shadow") || ly.font.shadow_size.is_some_and(|size| size > 0.0);
+            let page_alpha = ly.font.entire_alpha.unwrap_or(255) as f32 / 255.0;
+            let page_transform = message_page_transform(ly);
 
             // 统一走排版函数：禁则 / wordparts / 缩进 / 注音不可拆行都在这里生效
             let keep_ranges = ly.keep_ranges();
@@ -1123,7 +1136,7 @@ impl TextRenderer for GlyphTextRenderer {
                 // link type=1 hover 强调：更改该区间文字/阴影/轮廓颜色
                 // （各颜色缺省 0x000000，见 link 标签文档）
                 let mut g_color = color;
-                let mut g_shadow_c = oc;
+                let mut g_shadow_c = shadow_c;
                 let mut g_outline_c = oc;
                 if links_enabled
                     && let Some(link) = ly.links.iter().find(|k| {
@@ -1183,8 +1196,8 @@ impl TextRenderer for GlyphTextRenderer {
                             width: ATLAS_SZ,
                             height: ATLAS_SZ,
                         },
-                        transform: base_transform,
-                        opacity: char_alpha,
+                        transform: page_transform * base_transform,
+                        opacity: char_alpha * page_alpha,
                         blend: BlendMode::Alpha,
                         color: ColorFilter {
                             multiply: g_color,
@@ -1202,7 +1215,8 @@ impl TextRenderer for GlyphTextRenderer {
                         let mut sc = base.clone();
                         let sd = ly.font.shadow_size.unwrap_or(2.0);
                         sc.color.multiply = g_shadow_c;
-                        sc.transform = Affine2::from_translation(Vec2::new(pos_x + sd, pos_y + sd));
+                        sc.transform = page_transform
+                            * Affine2::from_translation(Vec2::new(pos_x + sd, pos_y + sd));
                         v.push(sc);
                     }
                     if has_outline {
@@ -1210,10 +1224,11 @@ impl TextRenderer for GlyphTextRenderer {
                         for &(ox, oy) in &OUTLINE_OFFSETS {
                             let mut ocp = base.clone();
                             ocp.color.multiply = g_outline_c;
-                            ocp.transform = Affine2::from_translation(Vec2::new(
-                                pos_x + ox * os,
-                                pos_y + oy * os,
-                            ));
+                            ocp.transform = page_transform
+                                * Affine2::from_translation(Vec2::new(
+                                    pos_x + ox * os,
+                                    pos_y + oy * os,
+                                ));
                             v.push(ocp);
                         }
                     }
@@ -1256,11 +1271,12 @@ impl TextRenderer for GlyphTextRenderer {
                             width: ATLAS_SZ,
                             height: ATLAS_SZ,
                         },
-                        transform: Affine2::from_translation(Vec2::new(
-                            ly.left + gx + g.offset_x,
-                            ruby_top + g.offset_y,
-                        )),
-                        opacity: 1.0,
+                        transform: page_transform
+                            * Affine2::from_translation(Vec2::new(
+                                ly.left + gx + g.offset_x,
+                                ruby_top + g.offset_y,
+                            )),
+                        opacity: page_alpha,
                         blend: BlendMode::Alpha,
                         color: ColorFilter {
                             multiply: color,
@@ -1301,13 +1317,11 @@ impl TextRenderer for GlyphTextRenderer {
                                 width: ATLAS_SZ,
                                 height: ATLAS_SZ,
                             },
-                            transform: Affine2::from_translation(Vec2::new(
-                                ly.left + x,
-                                ly.top + y,
-                            )),
+                            transform: page_transform
+                                * Affine2::from_translation(Vec2::new(ly.left + x, ly.top + y)),
                             // 文档为"渐变叠加"；这里先以固定半透明近似，
                             // 呼吸式渐变需要接入帧时钟后再补
-                            opacity: 0.5,
+                            opacity: 0.5 * page_alpha,
                             blend: BlendMode::Add,
                             color: ColorFilter {
                                 multiply: [1.0, 1.0, 1.0],
@@ -1518,12 +1532,46 @@ impl TextRenderer for GlyphTextRenderer {
     }
 }
 
+/// 构造整页文字变换。`left/top` 是消息页首字符的舞台坐标，而
+/// `entireanchorx/y` 是相对该消息页原点的锚点坐标。
+fn message_page_transform(layer: &MessageLayer) -> Affine2 {
+    let font = &layer.font;
+    let has_page_transform = font.entire_xscale.is_some()
+        || font.entire_yscale.is_some()
+        || font.entire_rotate.is_some()
+        || font.entire_anchorx.is_some()
+        || font.entire_anchory.is_some()
+        || font.anchorcenter.is_some();
+    if !has_page_transform {
+        return Affine2::IDENTITY;
+    }
+
+    let anchor = if font.anchorcenter.unwrap_or(true) {
+        Vec2::new(
+            layer.left + layer.width.max(0.0) * 0.5,
+            layer.top + layer.height.max(0.0) * 0.5,
+        )
+    } else {
+        Vec2::new(
+            layer.left + font.entire_anchorx.unwrap_or(0.0),
+            layer.top + font.entire_anchory.unwrap_or(0.0),
+        )
+    };
+    Affine2::from_translation(anchor)
+        * Affine2::from_angle(font.entire_rotate.unwrap_or(0.0).to_radians())
+        * Affine2::from_scale(Vec2::new(
+            font.entire_xscale.unwrap_or(100.0) / 100.0,
+            font.entire_yscale.unwrap_or(100.0) / 100.0,
+        ))
+        * Affine2::from_translation(-anchor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ATLAS_NAME, ATLAS_SZ, GlyphTextRenderer, align_layout, layout_glyphs, layout_message_layer,
-        link_line_rects, replace_layer_span, ruby_positions, scetween_char_offset, shuffled_order,
-        text_line_metrics,
+        link_line_rects, message_page_transform, replace_layer_span, ruby_positions,
+        scetween_char_offset, shuffled_order, text_line_metrics,
     };
     use crate::render_pipeline::draw::TextureId;
     use crate::text::backlog::BacklogTag;
@@ -1532,6 +1580,40 @@ mod tests {
         TextLayoutConfig, TextRenderer, TextSpanToken,
     };
     use std::collections::HashMap;
+
+    #[test]
+    fn entire_scale_keeps_page_origin_at_authored_left_top() {
+        let mut layer = MessageLayer::new("adv".into());
+        layer.left = 314.0;
+        layer.top = 576.0;
+        layer.font.entire_xscale = Some(66.0);
+        layer.font.entire_yscale = Some(66.0);
+        layer.font.anchorcenter = Some(false);
+
+        let transform = message_page_transform(&layer);
+        let origin = transform.transform_point2(glam::Vec2::new(layer.left, layer.top));
+        let offset =
+            transform.transform_point2(glam::Vec2::new(layer.left + 100.0, layer.top + 50.0));
+
+        assert!(origin.abs_diff_eq(glam::Vec2::new(314.0, 576.0), 0.001));
+        assert!(offset.abs_diff_eq(glam::Vec2::new(380.0, 609.0), 0.001));
+    }
+
+    #[test]
+    fn entire_scale_defaults_to_page_center_anchor() {
+        let mut layer = MessageLayer::new("adv".into());
+        layer.left = 100.0;
+        layer.top = 200.0;
+        layer.width = 400.0;
+        layer.height = 200.0;
+        layer.font.entire_xscale = Some(50.0);
+        layer.font.entire_yscale = Some(50.0);
+
+        let center = glam::Vec2::new(300.0, 300.0);
+        let transformed = message_page_transform(&layer).transform_point2(center);
+
+        assert!(transformed.abs_diff_eq(center, 0.001));
+    }
 
     /// 构造一个测试字形：宽度与步进均可指定。
     fn glyph(c: char, width: f32, advance: f32) -> GlyphInfo {
