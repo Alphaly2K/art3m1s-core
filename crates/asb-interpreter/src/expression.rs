@@ -283,7 +283,18 @@ impl<'a> Lexer<'a> {
                     }
                     self.tokens.push(Token::String(s));
                 }
-                _ if c.is_ascii_digit() || c == '.' => {
+                // A leading dot belongs to a numeric literal only when it is
+                // followed by a digit (`.5`).  In paths such as
+                // `slider.(id).file`, the dot before `file` is part of the
+                // identifier and must not become a malformed Number token.
+                _ if c.is_ascii_digit()
+                    || (c == '.'
+                        && self
+                            .input
+                            .clone()
+                            .nth(1)
+                            .is_some_and(|next| next.is_ascii_digit())) =>
+                {
                     let mut num = String::new();
                     // 检查是否是十六进制
                     if c == '0' {
@@ -822,6 +833,16 @@ mod tests {
         assert_eq!(
             eval_with_vars("foo.(0)", &vars).unwrap(),
             Value::String("Zero".to_string())
+        );
+
+        vars.set("t.slider.id", Value::String("100.slider.2".into()));
+        vars.set(
+            "slider.100.slider.2.file",
+            Value::String("system/config.iet".into()),
+        );
+        assert_eq!(
+            eval_with_vars("slider.(t.slider.id).file", &vars).unwrap(),
+            Value::String("system/config.iet".to_string())
         );
     }
 

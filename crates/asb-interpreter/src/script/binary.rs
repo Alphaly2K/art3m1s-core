@@ -391,6 +391,44 @@ mod tests {
     }
 
     #[test]
+    fn compiled_macro_dynamic_callback_survives_macro_return() {
+        use crate::{CallbackResult, Event, Interpreter, InterpreterConfig};
+        let slider = fixture(&[
+            ("slider_h", None),
+            (
+                "var",
+                Some(&[("name", "$'slider.' + id + '.file'"), ("data", "$file")]),
+            ),
+            (
+                "var",
+                Some(&[("name", "$'slider.' + id + '.label'"), ("data", "$label")]),
+            ),
+            ("return", Some(&[])),
+        ]);
+        let config = b"*onslide_sound\n[var name=\"t.callback\" data=\"ok\"]\n[var name=\"g.bgmvol\" data=\"$t.slider.value\"]\n[return]\n".to_vec();
+        let mut it = Interpreter::new(InterpreterConfig::default());
+        it.set_file_loader(Box::new(move |file| match file {
+            "slider.iet" => Ok(slider.clone()),
+            "system/config.iet" => Ok(config.clone()),
+            other => Err(crate::Error::ScriptNotFound(other.to_string())),
+        }));
+        it.load_macro_file("slider.iet").unwrap();
+        it.load_script(
+            "main",
+            "*main\n[var name=\"t.slider.id\" data=\"100.slider.2\"]\n[var name=\"t.slider.value\" data=\"777\"]\n[slider_h id=\"100.slider.2\" file=\"system/config.iet\" label=\"onslide_sound\"]\n[call file=\"$slider.(t.slider.id).file\" label=\"$slider.(t.slider.id).label\"]\n[stop]\n",
+        )
+        .unwrap();
+        it.set_callback(|event| match event {
+            Event::Wait { .. } => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        it.start("main", "main").unwrap();
+        it.run().unwrap();
+        assert_eq!(it.get_variable("t.callback").unwrap().as_string(), "ok");
+        assert_eq!(it.get_variable("g.bgmvol").unwrap().as_int(), Some(777));
+    }
+
+    #[test]
     fn removing_event_marker_preserves_compiled_handler_arguments() {
         use crate::{CallFrame, CallbackResult, Event, Interpreter, InterpreterConfig};
         let data = fixture(&[
