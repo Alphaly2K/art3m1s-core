@@ -187,6 +187,7 @@ pub(crate) struct LaidGlyph {
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct TextLineMetrics {
     line_height: f32,
+    body_top: f32,
     ruby_top: f32,
 }
 
@@ -199,10 +200,11 @@ fn text_line_metrics(font: &FontDesc, body_height: f32) -> TextLineMetrics {
     let ruby_height = font.ruby_size.unwrap_or(0.0).max(0.0);
     let spacemiddle = font.spacemiddle.unwrap_or(0.0);
     let spacebottom = font.spacebottom.unwrap_or(0.0);
+    let body_top = spacetop + ruby_height + spacemiddle;
     TextLineMetrics {
-        line_height: (spacetop + ruby_height + spacemiddle + body_height + spacebottom).max(1.0),
-        // font.top 是首个正文字符的顶部；ruby 位于正文上方，spacetop 只参与整行高度。
-        ruby_top: -(ruby_height + spacemiddle),
+        line_height: (body_top + body_height + spacebottom).max(1.0),
+        body_top,
+        ruby_top: spacetop,
     }
 }
 
@@ -698,7 +700,7 @@ impl TextRenderer for GlyphTextRenderer {
         Some(ClickWaitIconPlacement {
             layer_id,
             left: ly.left + pos.x + last.advance_x + dx,
-            top: ly.top + pos.line as f32 * metrics.line_height + dy,
+            top: ly.top + metrics.body_top + pos.line as f32 * metrics.line_height + dy,
             homing: cfg.homing,
         })
     }
@@ -945,7 +947,7 @@ impl TextRenderer for GlyphTextRenderer {
                         layer_id: lid.clone(),
                         link_index: idx,
                         left: ly.left + x,
-                        top: ly.top + y,
+                        top: ly.top + metrics.body_top + y,
                         width: w,
                         height: h,
                         file: link.file.clone(),
@@ -1127,7 +1129,10 @@ impl TextRenderer for GlyphTextRenderer {
                 }
 
                 let fx = ly.left + laid[i].x + g.offset_x;
-                let fy = ly.top + g.offset_y + laid[i].line as f32 * metrics.line_height;
+                let fy = ly.top
+                    + metrics.body_top
+                    + g.offset_y
+                    + laid[i].line as f32 * metrics.line_height;
 
                 // 计算每字符的 scetween 动画偏移
                 let anim_offset =
@@ -1318,7 +1323,10 @@ impl TextRenderer for GlyphTextRenderer {
                                 height: ATLAS_SZ,
                             },
                             transform: page_transform
-                                * Affine2::from_translation(Vec2::new(ly.left + x, ly.top + y)),
+                                * Affine2::from_translation(Vec2::new(
+                                    ly.left + x,
+                                    ly.top + metrics.body_top + y,
+                                )),
                             // 文档为"渐变叠加"；这里先以固定半透明近似，
                             // 呼吸式渐变需要接入帧时钟后再补
                             opacity: 0.5 * page_alpha,
@@ -1928,7 +1936,8 @@ mod tests {
             ..FontDesc::default()
         };
         let metrics = text_line_metrics(&font, 40.0);
-        assert_eq!(metrics.ruby_top, -4.0);
+        assert_eq!(metrics.ruby_top, -2.0);
+        assert_eq!(metrics.body_top, 2.0);
         assert_eq!(metrics.line_height, 38.0);
     }
 
@@ -2356,6 +2365,10 @@ mod tests {
             let l = r.font_state_mut().active_layer_mut();
             l.left = 100.0;
             l.top = 50.0;
+            l.font.ruby_size = Some(14.0);
+            l.font.spacetop = Some(-2.0);
+            l.font.spacemiddle = Some(-10.0);
+            l.font.spacebottom = Some(-4.0);
         }
         r.link_start(Some("sel.ast"), Some("*top"), 1, Some("FFFFFF"), None, None);
         {
@@ -2371,12 +2384,12 @@ mod tests {
             assert_eq!(l.links[0].link_type, 1);
         }
 
-        // 命中区域：消息层偏移 + 3 字符 × 宽 10；无字体时行高=缺省字号 40
+        // 命中区域跟随正文在行盒中的起点，而非从 ruby 区开始。
         let areas = r.link_hit_areas();
         assert_eq!(areas.len(), 1);
         assert_eq!(
             (areas[0].left, areas[0].top, areas[0].width, areas[0].height),
-            (100.0, 50.0, 30.0, 40.0)
+            (100.0, 52.0, 30.0, 38.0)
         );
         assert_eq!(areas[0].label.as_deref(), Some("*top"));
 
