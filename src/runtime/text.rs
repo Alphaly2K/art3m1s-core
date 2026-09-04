@@ -155,6 +155,12 @@ fn message_layer_scene_id(message_id: &str, layered: bool) -> String {
 }
 
 impl CoreRuntime {
+    pub(super) fn active_message_layer_id(&self) -> Option<String> {
+        self.text_renderer
+            .as_ref()
+            .and_then(|renderer| renderer.font_state().active_layer.clone())
+    }
+
     pub(super) fn set_text_renderer(&mut self, renderer: Box<dyn TextRenderer>) {
         self.text_renderer = Some(renderer);
     }

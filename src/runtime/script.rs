@@ -210,10 +210,13 @@ impl CoreRuntime {
 
         let advance = match reason {
             WaitReason::Timed { input, .. } => {
-                if timed_wait_accepts_click(input, advance_requested) {
+                // input=0 is a pure timer: neither Skip nor an input edge may
+                // shorten it. input=1 is released by actual user input only;
+                // input=2 additionally permits the engine's Skip state.
+                if timed_wait_accepts_click(input, physical_clicked) {
                     self.timed_remaining_ms = 0;
                     true
-                } else if self.skip_active() {
+                } else if input == 2 && self.skip_active() {
                     self.reveal_text_for_skip();
                     self.timed_remaining_ms = 0;
                     true
@@ -561,7 +564,7 @@ fn settle_inline_event_frame(
 }
 
 fn timed_wait_accepts_click(input: i32, clicked: bool) -> bool {
-    input == 1 && clicked
+    matches!(input, 1 | 2) && clicked
 }
 
 fn stop_wait_accepts_scripted_decide(scripted_decide: bool) -> bool {
@@ -626,7 +629,7 @@ mod tests {
     fn timed_wait_only_accepts_click_for_input_one() {
         assert!(!timed_wait_accepts_click(0, true));
         assert!(timed_wait_accepts_click(1, true));
-        assert!(!timed_wait_accepts_click(2, true));
+        assert!(timed_wait_accepts_click(2, true));
         assert!(!timed_wait_accepts_click(1, false));
     }
 

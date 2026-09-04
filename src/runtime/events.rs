@@ -311,25 +311,6 @@ impl CoreRuntime {
                 Event::KeyConfig(params) => {
                     self.apply_keyconfig(params);
                 }
-                // 跟踪活动消息层：hide 模式据此确定要隐藏的消息窗图层；同时
-                // 暴露 s.current_message_layer 供脚本查询（system_variables.md）。
-                Event::MessageLayerSwitch { id: Some(id), .. } => {
-                    self.control.active_message_layer = Some(id.clone());
-                    self.interpreter.set_variable(
-                        "s.current_message_layer",
-                        asb_interpreter::Value::String(id.clone()),
-                    );
-                }
-                Event::MessageLayerPop => {
-                    // 回退后活动层不可知（消息层堆栈在文本子系统内部），置空即可：
-                    // hide 只会少隐藏一层，不会误藏。s.current_message_layer 同样
-                    // 无从得知精确 id，清空为空串（脚本读到空串即"回到未知/默认层"）。
-                    self.control.active_message_layer = None;
-                    self.interpreter.set_variable(
-                        "s.current_message_layer",
-                        asb_interpreter::Value::String(String::new()),
-                    );
-                }
                 // ── 宿主转发族 ──
                 Event::AvoidConfig { file, windowbutton } => {
                     // [avoid] 仅配置：存下覆盖图与 windowbutton，等 keyconfig
@@ -442,6 +423,25 @@ impl CoreRuntime {
             let text_started = profile.mark();
             if let Some(pending) = self.apply_text_event(event) {
                 self.begin_text_translation(pending);
+            }
+            // `apply_text_event` has already applied the renderer's real
+            // message-layer stack.  Mirror the resulting active ID back to
+            // control state and s.current_message_layer; a pop must restore
+            // the previous layer instead of clearing the value blindly.
+            if matches!(
+                event,
+                Event::MessageLayerSwitch { .. } | Event::MessageLayerPop
+            ) {
+                self.control.active_message_layer = self.active_message_layer_id();
+                self.interpreter.set_variable(
+                    "s.current_message_layer",
+                    asb_interpreter::Value::String(
+                        self.control
+                            .active_message_layer
+                            .clone()
+                            .unwrap_or_default(),
+                    ),
+                );
             }
             // 只有真正送入文本渲染器后才算本帧展示过剧情文本。
             if matches!(event, Event::ScenarioText { .. }) {

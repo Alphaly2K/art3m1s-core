@@ -364,6 +364,8 @@ pub struct EngineContext {
     /// reserved commands，后者才是调用结束后的延迟队列。仍使用同一个 Vec
     /// 保持既有宿主接口，只用这个前缀长度记录两种来源。
     pub(crate) immediate_tag_count: usize,
+    /// 单调的 Lua 参数邮箱序号，避免同一逻辑帧内多个嵌套表互相覆盖。
+    pub(crate) enqueue_params_serial: u64,
     /// 待设置的事件处理器
     pub event_handlers: HashMap<String, String>,
     /// 事件过滤器函数（由 e:setEventFilter 设置）
@@ -413,6 +415,7 @@ impl EngineContext {
             callbacks,
             tag_queue: Vec::new(),
             immediate_tag_count: 0,
+            enqueue_params_serial: 0,
             event_handlers: HashMap::new(),
             event_filter: None,
             log_filter: None,
@@ -616,7 +619,7 @@ impl UserData for EngineApi {
         });
 
         // e:enqueueTag{"tagname", param1="val1"}
-        methods.add_method("enqueueTag", |lua, this, args: mlua::MultiValue| {
+        methods.add_method("enqueueTag", |_lua, this, args: mlua::MultiValue| {
             if let Some(Value::Table(t)) = args.into_iter().next() {
                 let tag_name: String = t
                     .get::<Value>(1)
@@ -628,7 +631,6 @@ impl UserData for EngineApi {
                     })
                     .unwrap_or_default();
                 let mut params = HashMap::new();
-                let mut real_param_table: Option<mlua::Table> = None;
                 for pair in t.pairs::<Value, Value>() {
                     if let Ok((k, v)) = pair {
                         let key_str = match &k {
@@ -638,9 +640,6 @@ impl UserData for EngineApi {
                         };
                         if let Some(ks) = key_str {
                             match v {
-                                Value::Table(vt) if ks == "params" => {
-                                    real_param_table = Some(vt.clone());
-                                }
                                 Value::Table(_) => {} // 其他表值跳过
                                 _ => {
                                     let val_str = match v {
@@ -659,42 +658,32 @@ impl UserData for EngineApi {
                     }
                 }
                 params.remove("1");
+                // enqueueTag is deliberately always deferred. In particular,
+                // calllua must not recurse into Lua here; it is appended to the
+                // same FIFO queue and consumed only after the caller returns.
+                // Keep the optional nested `params` table in a Lua mailbox: the
+                // interpreter queue itself is string-valued, while calllua's
+                // documented callback argument is a Lua table.
+                if let Ok(Value::Table(param_table)) = t.get::<Value>("params") {
+                    let mailbox = match _lua.globals().get::<Value>("__art3m1s_enqueue_params")? {
+                        Value::Table(table) => table,
+                        _ => {
+                            let table = _lua.create_table()?;
+                            _lua.globals()
+                                .set("__art3m1s_enqueue_params", table.clone())?;
+                            table
+                        }
+                    };
+                    let key = {
+                        let mut ctx = this.ctx.lock().unwrap();
+                        ctx.enqueue_params_serial = ctx.enqueue_params_serial.wrapping_add(1);
+                        format!("{}:{}", ctx.frame_number, ctx.enqueue_params_serial)
+                    };
+                    mailbox.set(key.as_str(), param_table)?;
+                    params.insert("__art3m1s_params_key".to_string(), key);
+                }
                 let mut ctx = this.ctx.lock().unwrap();
                 ctx.callbacks.enqueue_tag(tag_name.clone(), params.clone());
-                // calllua + 含表 params → 表数据无法序列化进 HashMap，同步执行，
-                // 仿 e:tag 对 var 标签的特判。
-                if tag_name == "calllua" {
-                    if let Some(function_name) = params.get("function").cloned() {
-                        drop(ctx);
-                        if let Some(real_pt) = real_param_table {
-                            let param_table =
-                                lua.create_table().map_err(|e| mlua::Error::external(e))?;
-                            for (k, v) in &params {
-                                if k != "function" && k != "params" {
-                                    let _ = param_table.set(k.as_str(), v.as_str());
-                                }
-                            }
-                            for pair in real_pt.pairs::<Value, Value>() {
-                                if let Ok((k, v)) = pair {
-                                    let _ = param_table.set(k, v);
-                                }
-                            }
-                            if let Err(e) = crate::tags::call_lua_function_with_table(
-                                lua,
-                                &function_name,
-                                param_table,
-                            ) {
-                                return Err(mlua::Error::external(format!(
-                                    "calllua 执行失败: {e}"
-                                )));
-                            }
-                            return Ok(());
-                        }
-                        crate::tags::call_lua_function(lua, &function_name, &params)
-                            .map_err(|e| mlua::Error::external(format!("calllua 执行失败: {e}")))?;
-                        return Ok(());
-                    }
-                }
                 ctx.tag_queue.push((tag_name, params));
             }
             Ok(())

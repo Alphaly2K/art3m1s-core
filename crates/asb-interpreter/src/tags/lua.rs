@@ -28,6 +28,22 @@ impl TagHandler for CallLuaHandler {
             }
         }
 
+        if let Some(key) = extra_params.remove("__art3m1s_params_key") {
+            if let Ok(mailbox) = ctx
+                .lua
+                .globals()
+                .get::<mlua::Table>("__art3m1s_enqueue_params")
+                && let Ok(param_table) = mailbox.get::<mlua::Table>(key.as_str())
+            {
+                for (key, value) in extra_params {
+                    param_table.set(key, value)?;
+                }
+                mailbox.set(key.as_str(), mlua::Value::Nil)?;
+                call_lua_function_with_table(ctx.lua, function_name, param_table)?;
+                return Ok(TagResult::Continue);
+            }
+        }
+
         // 调用 Lua 函数，传入 engine 对象和额外参数
         call_lua_function(ctx.lua, function_name, &extra_params)?;
 

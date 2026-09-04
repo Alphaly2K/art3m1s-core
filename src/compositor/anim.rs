@@ -337,7 +337,12 @@ impl Tween {
         }
 
         let effective_now = self.effective_time(now_ms);
-        let (local_from, local_to) = if self.yoyo_reverse {
+        // `yoyo_reverse` is retained for serialized compatibility with older
+        // snapshots, but the direction of a live tween is determined from the
+        // current segment.  The old code never updated that field, so every
+        // yoyo segment was rendered in the initial direction.
+        let reverse = self.yoyo_reverse || self.is_yoyo_reverse(now_ms);
+        let (local_from, local_to) = if reverse {
             (self.to, self.from)
         } else {
             (self.from, self.to)
@@ -399,6 +404,20 @@ impl Tween {
         now_ms >= self.start_ms + self.duration_ms
     }
 
+    /// 缓动自然完成后应固化到图层属性的值。
+    /// yoyo 的最后一段为反向时停在 `from`，否则停在 `to`。
+    pub fn final_value(&self) -> f32 {
+        if self.yoyo
+            && self
+                .loop_count
+                .is_some_and(|segments| segments > 0 && segments % 2 == 0)
+        {
+            self.from
+        } else {
+            self.to
+        }
+    }
+
     /// 本次循环中 yoyo 是否处于反转方向。
     pub fn is_yoyo_reverse(&self, now_ms: u64) -> bool {
         if !self.yoyo || !self.is_looping() {
@@ -408,8 +427,13 @@ impl Tween {
         if total_cycle == 0 {
             return false;
         }
-        let elapsed = now_ms - self.start_ms;
-        let cycle_index = elapsed / total_cycle;
+        let elapsed = now_ms.saturating_sub(self.start_ms);
+        let mut cycle_index = elapsed / total_cycle;
+        // 在最后一段结束之后，方向仍应取最后一段，而不是把一个
+        // 虚构的下一段当成当前段（yoyo=2 最终应停在 `to`）。
+        if let Some(max) = self.loop_count {
+            cycle_index = cycle_index.min(max.saturating_sub(1) as u64);
+        }
         cycle_index % 2 == 1
     }
 
@@ -498,13 +522,14 @@ pub(crate) fn apply_tween(scene: &mut Scene, clock_ms: u64, request: TweenReques
         Some(request.loop_count.unwrap() as u32)
     };
 
-    // 解析 yoyo：-1 -> 无限乒乓，0 -> 不乒乓，N -> 乒乓 N 次
+    // 解析 yoyo：-1 -> 无限乒乓，0 -> 不乒乓，N -> 初始正向段之外再
+    // 反向/正向交替 N 段，因此总段数为 N + 1。
     let yoyo_enabled = request.yoyo == Some(-1) || request.yoyo.unwrap_or(0) > 0;
     let yoyo_loops: Option<u32> = if yoyo_enabled {
         if request.yoyo == Some(-1) {
             None
         } else if request.yoyo.unwrap_or(0) > 0 {
-            Some(request.yoyo.unwrap() as u32)
+            Some(request.yoyo.unwrap() as u32 + 1)
         } else {
             None
         }
@@ -606,7 +631,7 @@ pub(crate) fn gc_finished_tweens(
         if let Some(layer) = scene.get(id) {
             for t in &layer.tweens {
                 if t.is_finished(now) {
-                    settle.push((id.clone(), t.param.clone(), t.to));
+                    settle.push((id.clone(), t.param.clone(), t.final_value()));
                     completed.push((id.clone(), t.handler.clone(), t.delete_on_finish));
                 }
             }
@@ -876,7 +901,7 @@ mod tests {
     #[test]
     fn yoyo_alternates_direction() {
         let mut t = tween(0.0, 100.0, 1000);
-        t.loop_count = Some(2);
+        t.loop_count = Some(3);
         t.yoyo = true;
 
         // Cycle 1 (forward): 1000→2000, from 0 to 100
@@ -885,6 +910,15 @@ mod tests {
         // Cycle 2 (reverse): 2000→3000, from 100 to 0
         // yoyo_reverse is computed dynamically by build_frame, so test the logic directly
         assert!(t.is_yoyo_reverse(2500));
+        // 第三段回到正向，并在第三段结束后停在终点。
+        assert!(!t.is_yoyo_reverse(3500));
+        assert!(!t.is_finished(3000));
+        assert!(t.is_finished(4000));
+        assert_eq!(t.final_value(), 100.0);
+
+        // yoyo=1 对应正向+反向两段，结束后应停回起点。
+        t.loop_count = Some(2);
+        assert_eq!(t.final_value(), 0.0);
     }
 
     #[test]
