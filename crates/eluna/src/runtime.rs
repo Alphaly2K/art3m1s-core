@@ -12,6 +12,7 @@ use crate::{
     EmoteStereovisionControl, PsbFile, PsbValue,
 };
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 
 const PHYSICS_MAX_SUBSTEP_TICKS: f32 = 1.0;
 const PHYSICS_EPSILON_TICKS: f32 = 0.00000011920929;
@@ -291,7 +292,7 @@ pub struct ElunaPlayer {
     elapsed_ticks: f32,
     pub paused: bool,
     pub physics_enabled: bool,
-    scene: EmoteStaticScene,
+    scene: Arc<EmoteStaticScene>,
     variables: BTreeMap<String, EmoteVariableState>,
     timelines: BTreeMap<String, EmoteTimeline>,
     pending_writes: Vec<VariableWrite>,
@@ -613,13 +614,17 @@ impl ElunaPlayer {
         &self.scene
     }
 
+    pub fn shared_scene(&self) -> Arc<EmoteStaticScene> {
+        Arc::clone(&self.scene)
+    }
+
     pub fn replace_scene(&mut self, scene: EmoteStaticScene) {
         // Camera StepFrame writes the active camera fov into the player's
         // stereovision coefficient input (+500 in this driver build).
         if let Some(camera) = scene.camera_runtime.as_ref() {
             self.stereovision_fov = camera.fov;
         }
-        self.scene = scene;
+        self.scene = Arc::new(scene);
     }
 
     pub fn bounds(&self) -> Option<EmoteSceneBounds> {
@@ -1157,7 +1162,7 @@ impl ElunaPlayer {
             elapsed_ticks: 0.0,
             paused: false,
             physics_enabled: true,
-            scene,
+            scene: Arc::new(scene),
             variables,
             timelines: timeline_map,
             pending_writes: Vec::new(),

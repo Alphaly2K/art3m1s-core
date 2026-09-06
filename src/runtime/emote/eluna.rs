@@ -5,11 +5,14 @@ use eluna::{
 };
 use glam::{Affine2, Vec2};
 use std::collections::{BTreeMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
+use std::time::Instant;
 
 #[path = "eluna_mesh.rs"]
 mod mesh;
 
+use super::EmoteProfileStats;
 use crate::render_pipeline::draw::{
     BlendMode, ClipRect, ColorFilter, DrawCommand, DrawMesh, NativeEmoteMaterial, StencilMetadata,
     TextureId, TextureInfo, TextureProvider,
@@ -24,6 +27,10 @@ pub(super) struct ElunaEmoteInstance {
     transform: ElunaLayerTransform,
     textures: BTreeMap<u32, ElunaTextureState>,
     source_bytes: u64,
+    cached_scene: Option<Arc<EmoteStaticScene>>,
+    cached_transform: Option<Affine2>,
+    cached_commands: Vec<DrawCommand>,
+    profile: Arc<ElunaProfileCounters>,
 }
 
 #[derive(Clone, Copy)]
@@ -48,12 +55,53 @@ struct ElunaTextureState {
     width: u32,
     height: u32,
     gpu: Option<(TextureId, TextureInfo)>,
-    data: Arc<[u8]>,
+    data: Option<Arc<[u8]>>,
 }
 
 struct ElunaWorker {
     message_tx: mpsc::Sender<ElunaWorkerMessage>,
     latest_scene: Arc<Mutex<Option<Arc<EmoteStaticScene>>>>,
+}
+
+#[derive(Default)]
+struct ElunaProfileCounters {
+    enabled: AtomicBool,
+    worker_eval_ns: AtomicU64,
+    scene_clone_ns: AtomicU64,
+    draw_build_ns: AtomicU64,
+    mesh_build_ns: AtomicU64,
+    worker_updates: AtomicU64,
+    worker_input_frames: AtomicU64,
+    worker_dropped_scenes: AtomicU64,
+    sprites: AtomicU64,
+    mesh_sprites: AtomicU64,
+    mesh_vertices: AtomicU64,
+}
+
+impl ElunaProfileCounters {
+    fn set_enabled(&self, enabled: bool) {
+        self.reset();
+        self.enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    fn reset(&self) {
+        let _ = self.take();
+    }
+
+    fn take(&self) -> EmoteProfileStats {
+        EmoteProfileStats {
+            worker_eval_ns: self.worker_eval_ns.swap(0, Ordering::Relaxed),
+            scene_clone_ns: self.scene_clone_ns.swap(0, Ordering::Relaxed),
+            draw_build_ns: self.draw_build_ns.swap(0, Ordering::Relaxed),
+            mesh_build_ns: self.mesh_build_ns.swap(0, Ordering::Relaxed),
+            worker_updates: self.worker_updates.swap(0, Ordering::Relaxed),
+            worker_input_frames: self.worker_input_frames.swap(0, Ordering::Relaxed),
+            worker_dropped_scenes: self.worker_dropped_scenes.swap(0, Ordering::Relaxed),
+            sprites: self.sprites.load(Ordering::Relaxed),
+            mesh_sprites: self.mesh_sprites.load(Ordering::Relaxed),
+            mesh_vertices: self.mesh_vertices.load(Ordering::Relaxed),
+        }
+    }
 }
 
 enum ElunaWorkerMessage {
@@ -68,6 +116,7 @@ impl ElunaEmoteInstance {
         bytes: &[u8],
         width: u32,
         height: u32,
+        profiling_enabled: bool,
     ) -> Result<Self, String> {
         let options = EmoteLoadOptions {
             autoplay_timeline: false,
@@ -110,13 +159,15 @@ impl ElunaEmoteInstance {
                         width: source.width,
                         height: source.height,
                         gpu: None,
-                        data,
+                        data: Some(data),
                     },
                 )
             })
             .collect();
-        let scene = Arc::new(runtime.scene().clone());
-        let worker = ElunaWorker::spawn(runtime, path, scene.clone())?;
+        let scene = runtime.shared_scene();
+        let profile = Arc::new(ElunaProfileCounters::default());
+        profile.set_enabled(profiling_enabled);
+        let worker = ElunaWorker::spawn(runtime, path, scene.clone(), Arc::clone(&profile))?;
 
         Ok(Self {
             generation,
@@ -127,11 +178,29 @@ impl ElunaEmoteInstance {
             transform: ElunaLayerTransform::default(),
             textures,
             source_bytes,
+            cached_scene: None,
+            cached_transform: None,
+            cached_commands: Vec::new(),
+            profile,
         })
     }
 
+    pub(super) fn set_profile_enabled(&self, enabled: bool) {
+        self.profile.set_enabled(enabled);
+    }
+
+    pub(super) fn take_profile_stats(&self) -> EmoteProfileStats {
+        self.profile.take()
+    }
+
     pub(super) fn source_bytes(&self) -> u64 {
-        self.source_bytes
+        self.source_bytes.saturating_add(
+            self.textures
+                .values()
+                .filter_map(|texture| texture.data.as_ref())
+                .map(|data| data.len() as u64)
+                .sum::<u64>(),
+        )
     }
 
     pub(super) fn command(&mut self, command: EmoteLayerCommand) -> Result<(), String> {
@@ -168,10 +237,20 @@ impl ElunaEmoteInstance {
         provider: &mut dyn TextureProvider,
         retained: &mut HashSet<String>,
     ) -> Result<Vec<DrawCommand>, String> {
+        let profiling = self.profile.enabled.load(Ordering::Relaxed);
+        let started = profiling.then(Instant::now);
         self.upload_textures(provider, retained)?;
         let layer_transform = self.layer_transform();
+        if self.cached_transform == Some(layer_transform)
+            && self
+                .cached_scene
+                .as_ref()
+                .is_some_and(|scene| Arc::ptr_eq(scene, &self.scene))
+        {
+            return Ok(self.cached_commands.clone());
+        }
         let scene = &self.scene;
-        Ok(scene
+        let commands = scene
             .sprites
             .iter()
             .filter(|sprite| {
@@ -184,7 +263,33 @@ impl ElunaEmoteInstance {
                     && !sprite.feedback_history
             })
             .filter_map(|sprite| self.draw_command(scene, sprite, layer_transform))
-            .collect())
+            .collect::<Vec<_>>();
+        if let Some(started) = started {
+            let mut mesh_sprites = 0u64;
+            let mut mesh_vertices = 0u64;
+            for command in &commands {
+                if let Some(mesh) = &command.mesh {
+                    mesh_sprites += 1;
+                    mesh_vertices = mesh_vertices.saturating_add(mesh.vertices.len() as u64);
+                }
+            }
+            self.profile
+                .draw_build_ns
+                .fetch_add(elapsed_ns(started), Ordering::Relaxed);
+            self.profile
+                .sprites
+                .store(commands.len() as u64, Ordering::Relaxed);
+            self.profile
+                .mesh_sprites
+                .store(mesh_sprites, Ordering::Relaxed);
+            self.profile
+                .mesh_vertices
+                .store(mesh_vertices, Ordering::Relaxed);
+        }
+        self.cached_scene = Some(Arc::clone(&self.scene));
+        self.cached_transform = Some(layer_transform);
+        self.cached_commands = commands;
+        Ok(self.cached_commands.clone())
     }
 
     fn upload_textures(
@@ -197,7 +302,9 @@ impl ElunaEmoteInstance {
             if texture.gpu.is_some() {
                 continue;
             }
-            let data = &texture.data;
+            let data = texture.data.as_deref().ok_or_else(|| {
+                format!("Eluna texture {resource_index} was evicted after source release")
+            })?;
             texture.gpu = provider.upload_dxt5_render_only(
                 &texture.name,
                 texture.width,
@@ -221,6 +328,7 @@ impl ElunaEmoteInstance {
                     "Eluna failed to upload texture resource {resource_index}"
                 ));
             }
+            texture.data = None;
         }
         Ok(())
     }
@@ -263,6 +371,17 @@ impl ElunaEmoteInstance {
         // transform exactly once.
         let sprite_transform = sprite_affine(sprite);
         let (transform, clip, mesh) = if has_mesh {
+            let started = self
+                .profile
+                .enabled
+                .load(Ordering::Relaxed)
+                .then(Instant::now);
+            let vertices = mesh::sprite_vertices(sprite, layer_transform * sprite_transform);
+            if let Some(started) = started {
+                self.profile
+                    .mesh_build_ns
+                    .fetch_add(elapsed_ns(started), Ordering::Relaxed);
+            }
             (
                 layer_transform * sprite_transform,
                 ClipRect {
@@ -271,7 +390,7 @@ impl ElunaEmoteInstance {
                     quad_size: [1.0, 1.0],
                 },
                 Some(DrawMesh {
-                    vertices: mesh::sprite_vertices(sprite, layer_transform * sprite_transform),
+                    vertices: vertices.into(),
                 }),
             )
         } else {
@@ -316,6 +435,7 @@ impl ElunaWorker {
         runtime: EmoteRuntime,
         path: &str,
         initial_scene: Arc<EmoteStaticScene>,
+        profile: Arc<ElunaProfileCounters>,
     ) -> Result<Self, String> {
         let (message_tx, message_rx) = mpsc::channel();
         let latest_scene = Arc::new(Mutex::new(None));
@@ -327,7 +447,13 @@ impl ElunaWorker {
         std::thread::Builder::new()
             .name(thread_name)
             .spawn(move || {
-                run_eluna_worker(runtime, message_rx, worker_latest_scene, initial_scene);
+                run_eluna_worker(
+                    runtime,
+                    message_rx,
+                    worker_latest_scene,
+                    initial_scene,
+                    profile,
+                );
             })
             .map_err(|error| format!("failed to start Eluna worker for {path}: {error}"))?;
         Ok(Self {
@@ -359,13 +485,15 @@ fn run_eluna_worker(
     message_rx: mpsc::Receiver<ElunaWorkerMessage>,
     latest_scene: Arc<Mutex<Option<Arc<EmoteStaticScene>>>>,
     initial_scene: Arc<EmoteStaticScene>,
+    profile: Arc<ElunaProfileCounters>,
 ) {
     if let Ok(mut slot) = latest_scene.lock() {
         *slot = Some(initial_scene);
     }
     let mut deferred_commands = Vec::new();
     loop {
-        let Some((commands, delta_ms)) = receive_worker_batch(&message_rx, &mut deferred_commands)
+        let Some((commands, delta_ms, input_frames)) =
+            receive_worker_batch(&message_rx, &mut deferred_commands)
         else {
             break;
         };
@@ -379,6 +507,16 @@ fn run_eluna_worker(
                 crate::core_warn!("[E-Mote:Eluna] worker command failed: {error}");
             }
         }
+        // A static model has no time-dependent state to evaluate.  The old
+        // worker rebuilt all layer state on every host frame even after the
+        // initial scene had settled, keeping one CPU core busy per model.
+        // Commands still wake the worker and force a rebuild; only a pure
+        // elapsed-time tick can be discarded while the runtime is idle.
+        if delta_ms != 0 && !had_commands && !runtime.is_animating() && !runtime.is_modified() {
+            continue;
+        }
+        let profiling = profile.enabled.load(Ordering::Relaxed);
+        let update_started = profiling.then(Instant::now);
         let update = if delta_ms != 0 {
             // Scene evaluation can take longer than one host frame. Advance
             // directly to the newest model time and build only that scene;
@@ -394,9 +532,30 @@ fn run_eluna_worker(
             crate::core_warn!("[E-Mote:Eluna] worker update failed: {error}");
             continue;
         }
+        if let Some(started) = update_started {
+            profile
+                .worker_eval_ns
+                .fetch_add(elapsed_ns(started), Ordering::Relaxed);
+            profile.worker_updates.fetch_add(1, Ordering::Relaxed);
+            profile
+                .worker_input_frames
+                .fetch_add(input_frames, Ordering::Relaxed);
+        }
         runtime.clear_modified();
+        let clone_started = profiling.then(Instant::now);
+        let scene = runtime.shared_scene();
+        if let Some(started) = clone_started {
+            profile
+                .scene_clone_ns
+                .fetch_add(elapsed_ns(started), Ordering::Relaxed);
+        }
         if let Ok(mut slot) = latest_scene.lock() {
-            *slot = Some(Arc::new(runtime.scene().clone()));
+            let dropped = slot.replace(scene).is_some();
+            if profiling && dropped {
+                profile
+                    .worker_dropped_scenes
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -404,9 +563,10 @@ fn run_eluna_worker(
 fn receive_worker_batch(
     message_rx: &mpsc::Receiver<ElunaWorkerMessage>,
     deferred_commands: &mut Vec<EmoteLayerCommand>,
-) -> Option<(Vec<EmoteLayerCommand>, u64)> {
+) -> Option<(Vec<EmoteLayerCommand>, u64, u64)> {
     let mut commands = std::mem::take(deferred_commands);
     let mut delta_ms = 0u64;
+    let mut input_frames = 0u64;
     // Advance is the host-frame commit point. Commands commonly arrive as a
     // pass/play/fade/step sequence; evaluating before that sequence is complete
     // produces redundant full scene builds and exposes transient face states.
@@ -415,6 +575,7 @@ fn receive_worker_batch(
             ElunaWorkerMessage::Command(command) => commands.push(command),
             ElunaWorkerMessage::Advance(delta) => {
                 delta_ms = delta_ms.saturating_add(delta);
+                input_frames += 1;
                 break commands.len();
             }
         }
@@ -424,12 +585,17 @@ fn receive_worker_batch(
             ElunaWorkerMessage::Command(command) => commands.push(command),
             ElunaWorkerMessage::Advance(delta) => {
                 delta_ms = delta_ms.saturating_add(delta);
+                input_frames += 1;
                 committed_commands = commands.len();
             }
         }
     }
     *deferred_commands = commands.split_off(committed_commands);
-    Some((commands, delta_ms))
+    Some((commands, delta_ms, input_frames))
+}
+
+fn elapsed_ns(started: Instant) -> u64 {
+    started.elapsed().as_nanos().min(u64::MAX as u128) as u64
 }
 
 fn apply_worker_command(
@@ -716,7 +882,7 @@ mod tests {
         }
         let mut runtime = EmoteRuntime::from_bytes(&bytes, options).unwrap();
         runtime.set_physics_enabled(false);
-        let mut instance = ElunaEmoteInstance::new(1, &path, &bytes, 1024, 1024).unwrap();
+        let mut instance = ElunaEmoteInstance::new(1, &path, &bytes, 1024, 1024, false).unwrap();
         let centers = runtime
             .sprites()
             .iter()
@@ -726,10 +892,38 @@ mod tests {
         assert_eq!(centers.len(), 2);
         instance.transform.origin = ((centers[0] + centers[1]) * 0.5).to_array();
         instance.transform.scale = 1.0;
-        let (gl, _context, _) =
-            platform::create_offscreen_context(platform::GfxBackend::Cgl, 1024, 1024).unwrap();
-        let mut renderer =
-            GlRenderer::new(gl.clone(), 1024, 1024, ShaderProfile::GlCore330).unwrap();
+        // The validation host can select ANGLE without requiring a windowing
+        // system.  `EMOTE_TEST_ANGLE_PATH` points at a directory containing
+        // libEGL/libGLESv2 (either macOS dylibs or framework bundles).
+        let requested_backend = std::env::var("EMOTE_TEST_BACKEND")
+            .ok()
+            .map(|value| match value.to_ascii_lowercase().as_str() {
+                "angle" | "metal" | "3" => {
+                    platform::GfxBackend::Angle(platform::AngleBackend::Metal)
+                }
+                "gl" | "opengl" | "1" => {
+                    platform::GfxBackend::Angle(platform::AngleBackend::OpenGL)
+                }
+                "vulkan" | "2" => platform::GfxBackend::Angle(platform::AngleBackend::Vulkan),
+                _ => platform::GfxBackend::Cgl,
+            })
+            .unwrap_or(platform::GfxBackend::Cgl);
+        if let Ok(path) = std::env::var("EMOTE_TEST_ANGLE_PATH") {
+            let path = std::ffi::CString::new(path).unwrap();
+            unsafe { crate::ffi::art3m1s_set_angle_path(path.as_ptr()) };
+        }
+        let (gl, _context, effective_backend) =
+            platform::create_offscreen_context(requested_backend, 1024, 1024).unwrap();
+        let mut renderer = GlRenderer::new(
+            gl.clone(),
+            1024,
+            1024,
+            match effective_backend {
+                platform::GfxBackend::Angle(_) => ShaderProfile::Gles300,
+                platform::GfxBackend::Cgl => ShaderProfile::GlCore330,
+            },
+        )
+        .unwrap();
         let mut textures = GlTextureProvider::new(gl.clone());
         let (fbo, color) = unsafe { platform::create_fbo_target(&gl, 1024, 1024).unwrap() };
         let mut previous_pixels = None;
@@ -764,7 +958,7 @@ mod tests {
                 assert_ne!(icons, previous_icons);
             }
             previous_icons = icons;
-            instance.scene = Arc::new(runtime.scene().clone());
+            instance.scene = runtime.shared_scene();
             let mut frame = DrawList::new();
             for command in instance
                 .build_commands(&mut textures, &mut HashSet::new())
@@ -838,7 +1032,7 @@ mod tests {
 
         assert_eq!(
             receive_worker_batch(&message_rx, &mut Vec::new()),
-            Some((Vec::new(), 766))
+            Some((Vec::new(), 766, 3))
         );
     }
 
@@ -866,7 +1060,7 @@ mod tests {
 
         assert_eq!(
             receive_worker_batch(&message_rx, &mut Vec::new()),
-            Some((vec![EmoteLayerCommand::Pass, play, fade], 16))
+            Some((vec![EmoteLayerCommand::Pass, play, fade], 16, 1))
         );
     }
 
@@ -881,14 +1075,14 @@ mod tests {
         let mut deferred = Vec::new();
         assert_eq!(
             receive_worker_batch(&message_rx, &mut deferred),
-            Some((Vec::new(), 16))
+            Some((Vec::new(), 16, 1))
         );
         assert_eq!(deferred, vec![EmoteLayerCommand::Pass]);
 
         message_tx.send(ElunaWorkerMessage::Advance(17)).unwrap();
         assert_eq!(
             receive_worker_batch(&message_rx, &mut deferred),
-            Some((vec![EmoteLayerCommand::Pass], 17))
+            Some((vec![EmoteLayerCommand::Pass], 17, 1))
         );
     }
 }

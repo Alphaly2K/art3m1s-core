@@ -7,6 +7,7 @@
 use crate::api::{
     milliseconds_to_emote_ticks, transform_order_mask, EmotePlayerControl, TimelinePlayMode,
 };
+use crate::emote::CompiledEmote;
 use crate::{
     collect_emote_runtime_pipeline, collect_emote_timelines, collect_emote_variables, ElunaPlayer,
     EmoteDrawFrameInfo, EmoteGroundCorrectionHook, EmoteModelSchema, EmoteMotionInfo,
@@ -19,6 +20,7 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct EmoteLoadOptions {
@@ -277,7 +279,8 @@ pub fn emote_runtime_parity_report() -> EmoteRuntimeParityReport {
 #[derive(Debug, Clone)]
 pub struct EmoteRuntime {
     normalized_data: Vec<u8>,
-    psb: PsbFile,
+    psb: Arc<PsbFile>,
+    compiled: Arc<CompiledEmote>,
     schema: EmoteModelSchema,
     active_motion: Option<String>,
     player: ElunaPlayer,
@@ -302,6 +305,8 @@ impl EmoteRuntime {
 
     pub fn from_bytes(data: &[u8], options: EmoteLoadOptions) -> Result<Self, EmoteRuntimeError> {
         let (normalized_data, psb) = PsbFile::parse_normalized(data, &options.normalize)?;
+        let psb = Arc::new(psb);
+        let compiled = Arc::new(CompiledEmote::new(psb.clone()));
         let schema = EmoteModelSchema::from_psb(&psb)?;
         let active_motion = options
             .motion
@@ -351,6 +356,7 @@ impl EmoteRuntime {
         let mut runtime = Self {
             normalized_data,
             psb,
+            compiled,
             schema,
             active_motion,
             player,
@@ -398,12 +404,30 @@ impl EmoteRuntime {
         // dt=2 and persistent local frame values for serialized type-0 HOLD.
         // The second rebuild only reflects physics variables at the same motion
         // time and must not treat the first rebuild as a new native frame.
-        let previous_scene = self.player.scene().clone();
+        let previous_scene = self.player.shared_scene();
         let variables = self.player.evaluated_variable_values();
-        let scene = self
-            .schema
-            .build_motion_scene_at_with_resources_variables_previous_scene_and_ground_hook(
-                &self.psb,
+        let scene = self.schema.build_compiled_scene(
+            &self.compiled,
+            &self.normalized_data,
+            motion,
+            self.player.elapsed_ticks(),
+            &variables,
+            &previous_scene,
+            self.ground_correction_hook,
+        )?;
+        self.player.replace_scene(scene);
+        if physics_delta_ticks > 0.0 && self.player.is_physics_enabled() {
+            self.player
+                .evaluate_physics_for_current_scene(physics_delta_ticks);
+            let physics_variables = self.player.evaluated_variable_values();
+            // Physics may have no effective output (no controls, or a settled
+            // solver). The pre-physics scene already represents these inputs.
+            if physics_variables == variables {
+                return Ok(());
+            }
+            let variables = physics_variables;
+            let scene = self.schema.build_compiled_scene(
+                &self.compiled,
                 &self.normalized_data,
                 motion,
                 self.player.elapsed_ticks(),
@@ -411,22 +435,6 @@ impl EmoteRuntime {
                 &previous_scene,
                 self.ground_correction_hook,
             )?;
-        self.player.replace_scene(scene);
-        if physics_delta_ticks > 0.0 && self.player.is_physics_enabled() {
-            self.player
-                .evaluate_physics_for_current_scene(physics_delta_ticks);
-            let variables = self.player.evaluated_variable_values();
-            let scene = self
-                .schema
-                .build_motion_scene_at_with_resources_variables_previous_scene_and_ground_hook(
-                    &self.psb,
-                    &self.normalized_data,
-                    motion,
-                    self.player.elapsed_ticks(),
-                    &variables,
-                    &previous_scene,
-                    self.ground_correction_hook,
-                )?;
             self.player.replace_scene(scene);
         }
         Ok(())
@@ -940,6 +948,10 @@ impl EmoteRuntime {
         self.player.scene()
     }
 
+    pub fn shared_scene(&self) -> Arc<EmoteStaticScene> {
+        self.player.shared_scene()
+    }
+
     pub fn sprites(&self) -> &[EmoteStaticSprite] {
         &self.player.scene().sprites
     }
@@ -1208,5 +1220,96 @@ fn collect_chara_profile_nodes(value: Option<&PsbValue>, out: &mut BTreeMap<Stri
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod performance_regressions {
+    use super::*;
+
+    fn rebuild_reference(runtime: &mut EmoteRuntime, ticks: f32) {
+        let previous = runtime.player.shared_scene();
+        for pass in 0..2 {
+            if pass == 1 {
+                if ticks <= 0.0 || !runtime.player.is_physics_enabled() {
+                    break;
+                }
+                runtime.player.evaluate_physics_for_current_scene(ticks);
+            }
+            let scene = runtime
+                .schema
+                .build_motion_scene_at_with_resources_variables_previous_scene_and_ground_hook(
+                    &runtime.psb,
+                    &runtime.normalized_data,
+                    runtime.active_motion.as_deref().unwrap(),
+                    runtime.player.elapsed_ticks(),
+                    &runtime.player.evaluated_variable_values(),
+                    &previous,
+                    runtime.ground_correction_hook,
+                )
+                .unwrap();
+            runtime.player.replace_scene(scene);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires ART3M1S_FIXTURE_NEKOMIKO_DIR"]
+    fn compiled_nekomiko_matches_uncached_scene_with_physics_and_timeline_changes() {
+        let root = std::path::PathBuf::from(
+            std::env::var_os("ART3M1S_FIXTURE_NEKOMIKO_DIR").expect("fixture directory"),
+        );
+        for model in ["aya/tay_0.psb", "kae/tka_0.psb"] {
+            let bytes = std::fs::read(root.join("image/fhd/fg").join(model)).unwrap();
+            let encrypted = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+            let header_length = match bytes[4] {
+                1 | 2 => 40,
+                3 => 44,
+                4 => 56,
+                _ => panic!("PSB version"),
+            };
+            let shifted = 123_456_789u32 ^ 123_456_789u32.wrapping_shl(11);
+            let rhs = (encrypted ^ header_length) ^ shifted ^ (shifted >> 8);
+            let key = rhs ^ (rhs >> 19);
+            let mut optimized = EmoteRuntime::from_bytes(
+                &bytes,
+                EmoteLoadOptions {
+                    autoplay_timeline: false,
+                    ..Default::default()
+                }
+                .with_emote_key(key),
+            )
+            .unwrap();
+            let mut reference = optimized.clone();
+            let timelines: Vec<_> = optimized
+                .timeline_names()
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            for name in timelines {
+                optimized
+                    .player
+                    .play_timeline(&name, TimelinePlayMode::ONCE);
+                reference
+                    .player
+                    .play_timeline(&name, TimelinePlayMode::ONCE);
+                for ticks in [0.0, 1.0, 0.0, 1.0, 5.0, 20.0, 100.0] {
+                    // Advance controllers once: auto-blink draws from the
+                    // process RNG. Both evaluators must receive identical
+                    // controller/physics inputs and the same pre-tick scene.
+                    optimized.player.progress_ticks_without_physics(ticks);
+                    reference.player = optimized.player.clone();
+                    optimized.rebuild_scene_with_physics(ticks).unwrap();
+                    rebuild_reference(&mut reference, ticks);
+                    assert!(
+                        optimized.scene() == reference.scene(),
+                        "scene mismatch: model={model} timeline={name} ticks={ticks}"
+                    );
+                    assert_eq!(
+                        optimized.player.evaluated_variable_values(),
+                        reference.player.evaluated_variable_values()
+                    );
+                }
+            }
+        }
     }
 }

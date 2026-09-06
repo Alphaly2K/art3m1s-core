@@ -6,12 +6,12 @@
 //! being silently guessed.
 
 use crate::{PsbFile, PsbValue};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::error::Error;
 use std::fmt;
-use std::sync::Arc;
 #[cfg(debug_assertions)]
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 
 #[cfg(debug_assertions)]
 static MISSING_PARAMETER_VARIABLES: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
@@ -30,6 +30,164 @@ pub struct EmoteModelSchema {
     /// separate from MEmotePlayer::Init in the DLL, so this is exposed to the
     /// host and is not implicitly applied to player state.
     pub stereovision_profile: Option<EmoteStereovisionProfile>,
+}
+
+/// Immutable decoded data for the SDK's immutable PSB. Owning the PSB keeps
+/// address keys stable across runtime moves/clones. Keys are never dereferenced.
+/// Ad-hoc public schema calls remain uncached and accept editable PSB values.
+#[derive(Debug)]
+pub(crate) struct CompiledEmote {
+    psb: Arc<PsbFile>,
+    frames: HashMap<usize, DynamicFrameState>,
+    priorities: HashMap<usize, Arc<BTreeMap<String, usize>>>,
+    samples: Mutex<HashMap<(usize, i64), (f32, Arc<DynamicFrameState>)>>,
+    physics_base_layers: BTreeSet<String>,
+}
+
+impl CompiledEmote {
+    pub(crate) fn new(psb: Arc<PsbFile>) -> Self {
+        let mut compiled = Self {
+            psb: psb.clone(),
+            frames: HashMap::new(),
+            priorities: HashMap::new(),
+            samples: Mutex::new(HashMap::new()),
+            physics_base_layers: BTreeSet::new(),
+        };
+        compiled.visit(&psb.root);
+        compiled
+    }
+
+    fn visit(&mut self, value: &PsbValue) {
+        if let Some(base_layer) = value.field_str("baseLayer").filter(|name| !name.is_empty()) {
+            self.physics_base_layers.insert(base_layer.to_owned());
+        }
+        if let Some(frames) = value.field("frameList").and_then(PsbValue::as_list) {
+            for frame in frames {
+                if let Some(content) = frame.field("content") {
+                    let mut state = DynamicFrameState::default();
+                    merge_frame_content(&mut state, content);
+                    self.frames
+                        .insert(content as *const PsbValue as usize, state);
+                }
+            }
+        }
+        if let (Some(layers), Some(priority)) = (
+            value.field("layer").and_then(PsbValue::as_list),
+            value.field("priority").and_then(PsbValue::as_list),
+        ) {
+            for frame in priority {
+                if let Some(content) = frame.field("content").and_then(PsbValue::as_list) {
+                    self.priorities.insert(
+                        content.as_ptr() as usize,
+                        Arc::new(priority_ranks_from_content(layers, content)),
+                    );
+                }
+            }
+        }
+        match value {
+            PsbValue::Object(fields) => {
+                for (_, child) in fields {
+                    self.visit(child);
+                }
+            }
+            PsbValue::List(items) => {
+                for child in items {
+                    self.visit(child);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn sample_frame(
+        &self,
+        frames: &[PsbValue],
+        time: f32,
+        easing: Option<&[PsbValue]>,
+        coordinate: i64,
+        previous: Option<&DynamicFrameState>,
+    ) -> Arc<DynamicFrameState> {
+        let key = (frames.as_ptr() as usize, coordinate);
+        if let Some((sample_time, state)) = self.samples.lock().unwrap().get(&key) {
+            if *sample_time == time {
+                return state.clone();
+            }
+        }
+        let state = Arc::new(evaluate_frame_list_cached(
+            frames,
+            time,
+            easing,
+            coordinate,
+            previous,
+            Some(self),
+        ));
+        // HOLD depends on this layer's history, including when several nested
+        // players share one frame list. Never reuse it across those histories.
+        if state.serialized_frame_type != 0 && time.is_finite() {
+            self.samples
+                .lock()
+                .unwrap()
+                .insert(key, (time, state.clone()));
+        }
+        state
+    }
+
+    fn decode_frame(&self, content: &PsbValue) -> Option<DynamicFrameState> {
+        self.frames
+            .get(&(content as *const PsbValue as usize))
+            .cloned()
+    }
+
+    #[cfg(not(test))]
+    fn is_physics_base_layer(&self, layer: &PsbValue, path: &str) -> bool {
+        layer
+            .field_str("label")
+            .is_some_and(|label| self.physics_base_layers.contains(label))
+            || self.physics_base_layers.contains(path)
+    }
+}
+
+fn shared_priority_ranks(
+    motion: &PsbValue,
+    time: f32,
+    compiled: Option<&CompiledEmote>,
+) -> Arc<BTreeMap<String, usize>> {
+    if let Some(content) =
+        evaluate_priority_content(motion.field("priority").and_then(PsbValue::as_list), time)
+    {
+        if let Some(ranks) =
+            compiled.and_then(|cache| cache.priorities.get(&(content.as_ptr() as usize)))
+        {
+            return ranks.clone();
+        }
+    }
+    Arc::new(motion_priority_ranks(motion, time))
+}
+
+#[derive(Clone, Copy, Default)]
+enum PreviousPositions<'a> {
+    #[default]
+    None,
+    Map(&'a BTreeMap<String, [f32; 3]>),
+    Scene(&'a EmoteStaticScene),
+}
+
+impl PreviousPositions<'_> {
+    fn get(self, path: &str) -> Option<[f32; 3]> {
+        match self {
+            Self::None => None,
+            Self::Map(positions) => positions.get(path).copied(),
+            Self::Scene(scene) => scene
+                .layer_states
+                .binary_search_by(|layer| layer.path.as_str().cmp(path))
+                .ok()
+                .map(|index| scene.layer_states[index].raw_position),
+        }
+    }
+
+    fn is_some(self) -> bool {
+        !matches!(self, Self::None)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -224,7 +382,7 @@ pub struct EmoteStaticScene {
     // frame values instead of reconstructing a neutral frame. Keep this
     // implementation detail private; callers observe it through normal scene
     // progression only.
-    frame_runtime_states: BTreeMap<String, DynamicFrameState>,
+    frame_runtime_states: HashMap<String, Arc<DynamicFrameState>>,
     /// Composite-mask owners encountered during traversal, keyed by the owner
     /// layer's full path.  Value is the list of resolved source-layer paths
     /// taken from `stencilCompositeMaskLayerList` on that owner.
@@ -279,7 +437,7 @@ impl EmoteStaticScene {
             bounds: None,
             draw_frame_info: Vec::new(),
             layer_states: Vec::new(),
-            frame_runtime_states: BTreeMap::new(),
+            frame_runtime_states: HashMap::new(),
             composite_mask_owners: BTreeMap::new(),
             composite_mask_sources_by_key: BTreeMap::new(),
             particle_emitters: BTreeMap::new(),
@@ -465,13 +623,13 @@ pub struct EmoteStepFrameLayerState {
     /// nested/specialized consumers and Emote soft-body baseLayer lookup use
     /// this coordinate. It is rebuilt from `raw_position` after Anchor.
     pub position: [f32; 3],
-    pub(crate) mesh_chain: Vec<EmoteMeshPatch>,
-    pub(crate) mesh_deformer_chain: Vec<EmoteMeshPatch>,
+    pub(crate) mesh_chain: Arc<Vec<EmoteMeshPatch>>,
+    pub(crate) mesh_deformer_chain: Arc<Vec<EmoteMeshPatch>>,
     pub(crate) frame_offset: [f32; 2],
     /// Current decoded local frame, retained only for the native specialized
     /// pass sequence (Camera/Model/Particle/Feedback). It is intentionally not
     /// part of the public SDK surface.
-    specialized_frame: Option<DynamicFrameState>,
+    specialized_frame: Option<Arc<DynamicFrameState>>,
     pub transform: [f32; 6],
     pub opacity: f32,
     pub visible: bool,
@@ -501,6 +659,7 @@ pub struct EmoteStepFrameLayerState {
     screen_bounds: Option<[f32; 4]>,
     pub draw_frame_info: EmoteDrawFrameInfo,
 }
+
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EmoteModelRuntimeState {
@@ -675,7 +834,7 @@ impl JoinReusePool {
             if !info.join_target || !native_join_target_type(info.layer_type) {
                 continue;
             }
-            if let Some(frame) = layer.specialized_frame.clone() {
+            if let Some(frame) = layer.specialized_frame.as_deref().cloned() {
                 pool.frames.entry(info.layer_type).or_default().push(frame);
             }
             if info.layer_type == 4 {
@@ -1042,10 +1201,11 @@ impl EmoteModelSchema {
         self.build_motion_scene_internal(
             psb,
             None,
+            None,
             motion_name,
             time_ticks,
             &BTreeMap::new(),
-            None,
+            PreviousPositions::None,
             None,
             None,
             None,
@@ -1062,10 +1222,11 @@ impl EmoteModelSchema {
         self.build_motion_scene_internal(
             psb,
             None,
+            None,
             motion_name,
             time_ticks,
             variables,
-            None,
+            PreviousPositions::None,
             None,
             None,
             None,
@@ -1082,11 +1243,12 @@ impl EmoteModelSchema {
     ) -> Result<EmoteStaticScene, EmoteSchemaError> {
         self.build_motion_scene_internal(
             psb,
+            None,
             Some(psb_data),
             motion_name,
             time_ticks,
             variables,
-            None,
+            PreviousPositions::None,
             None,
             None,
             None,
@@ -1109,11 +1271,12 @@ impl EmoteModelSchema {
     ) -> Result<EmoteStaticScene, EmoteSchemaError> {
         self.build_motion_scene_internal(
             psb,
+            None,
             Some(psb_data),
             motion_name,
             time_ticks,
             variables,
-            Some(previous_positions),
+            PreviousPositions::Map(previous_positions),
             None,
             None,
             None,
@@ -1133,18 +1296,14 @@ impl EmoteModelSchema {
         variables: &BTreeMap<String, f32>,
         previous_scene: &EmoteStaticScene,
     ) -> Result<EmoteStaticScene, EmoteSchemaError> {
-        let previous_positions: BTreeMap<String, [f32; 3]> = previous_scene
-            .layer_states
-            .iter()
-            .map(|layer| (layer.path.clone(), layer.raw_position))
-            .collect();
         self.build_motion_scene_internal(
             psb,
+            None,
             Some(psb_data),
             motion_name,
             time_ticks,
             variables,
-            Some(&previous_positions),
+            PreviousPositions::Scene(previous_scene),
             Some(&previous_scene.frame_runtime_states),
             Some(previous_scene),
             None,
@@ -1161,33 +1320,55 @@ impl EmoteModelSchema {
         previous_scene: &EmoteStaticScene,
         ground_correction_hook: Option<EmoteGroundCorrectionHook>,
     ) -> Result<EmoteStaticScene, EmoteSchemaError> {
-        let previous_positions: BTreeMap<String, [f32; 3]> = previous_scene
-            .layer_states
-            .iter()
-            .map(|layer| (layer.path.clone(), layer.raw_position))
-            .collect();
         self.build_motion_scene_internal(
             psb,
+            None,
             Some(psb_data),
             motion_name,
             time_ticks,
             variables,
-            Some(&previous_positions),
+            PreviousPositions::Scene(previous_scene),
             Some(&previous_scene.frame_runtime_states),
             Some(previous_scene),
             ground_correction_hook,
         )
     }
 
+    pub(crate) fn build_compiled_scene(
+        &self,
+        compiled: &Arc<CompiledEmote>,
+        psb_data: &[u8],
+        motion: &str,
+        ticks: f32,
+        variables: &BTreeMap<String, f32>,
+        previous: &EmoteStaticScene,
+        hook: Option<EmoteGroundCorrectionHook>,
+    ) -> Result<EmoteStaticScene, EmoteSchemaError> {
+        let scene = self.build_motion_scene_internal(
+            &compiled.psb,
+            Some(compiled),
+            Some(psb_data),
+            motion,
+            ticks,
+            variables,
+            PreviousPositions::Scene(previous),
+            Some(&previous.frame_runtime_states),
+            Some(previous),
+            hook,
+        )?;
+        Ok(scene)
+    }
+
     fn build_motion_scene_internal(
         &self,
         psb: &PsbFile,
+        compiled: Option<&Arc<CompiledEmote>>,
         psb_data: Option<&[u8]>,
         motion_name: &str,
         time_ticks: f32,
         variables: &BTreeMap<String, f32>,
-        previous_positions: Option<&BTreeMap<String, [f32; 3]>>,
-        previous_frame_states: Option<&BTreeMap<String, DynamicFrameState>>,
+        previous_positions: PreviousPositions<'_>,
+        previous_frame_states: Option<&HashMap<String, Arc<DynamicFrameState>>>,
         previous_scene: Option<&EmoteStaticScene>,
         ground_correction_hook: Option<EmoteGroundCorrectionHook>,
     ) -> Result<EmoteStaticScene, EmoteSchemaError> {
@@ -1221,9 +1402,12 @@ impl EmoteModelSchema {
             variables,
             time_ticks,
         );
-        let mut sprites = Vec::new();
-        let mut layer_states = Vec::new();
-        let mut frame_runtime_states = BTreeMap::<String, DynamicFrameState>::new();
+        let mut sprites = Vec::with_capacity(previous_scene.map_or(0, |s| s.sprites.len()));
+        let mut layer_states =
+            Vec::with_capacity(previous_scene.map_or(0, |s| s.layer_states.len()));
+        let mut frame_runtime_states = HashMap::<String, Arc<DynamicFrameState>>::with_capacity(
+            previous_scene.map_or(0, |s| s.frame_runtime_states.len()),
+        );
         let mut mask_owners = BTreeMap::<String, Vec<String>>::new();
         let mut pending_nested = Vec::new();
         let mut pending_anchors = Vec::new();
@@ -1240,6 +1424,11 @@ impl EmoteModelSchema {
         let particle_delta_ticks = previous_scene
             .map(|scene| (time_ticks - scene.scene_time_ticks).max(0.0))
             .unwrap_or(0.0);
+        // Priority is a property of this motion sample, not of an individual
+        // root layer. Rebuilding the same rank table for every root made the
+        // full-scene evaluator disproportionately expensive on mobile CPUs.
+        let priority_ranks =
+            shared_priority_ranks(motion, effective_time, compiled.map(Arc::as_ref));
         for (index, layer) in layers.iter().enumerate() {
             travel_layer_at(
                 layer,
@@ -1256,8 +1445,9 @@ impl EmoteModelSchema {
                 motion_name,
                 effective_time,
                 TravelContext {
+                    compiled: compiled.cloned(),
                     draw_index: index,
-                    priority_ranks: Arc::new(motion_priority_ranks(motion, effective_time)),
+                    priority_ranks: Arc::clone(&priority_ranks),
                     ..TravelContext::default()
                 },
                 previous_positions,
@@ -1414,7 +1604,7 @@ impl EmoteModelSchema {
 
         let mut sprites = Vec::new();
         let mut layer_states = Vec::new();
-        let frame_runtime_states = BTreeMap::<String, DynamicFrameState>::new();
+        let frame_runtime_states = HashMap::<String, Arc<DynamicFrameState>>::new();
         let mut mask_owners = BTreeMap::<String, Vec<String>>::new();
         if let Some(motions) = motion_table.as_object() {
             for (motion_name, motion) in motions {
@@ -1473,7 +1663,7 @@ fn finalize_scene(
     base_object: String,
     mut sprites: Vec<EmoteStaticSprite>,
     mut layer_states: Vec<EmoteStepFrameLayerState>,
-    frame_runtime_states: BTreeMap<String, DynamicFrameState>,
+    frame_runtime_states: HashMap<String, Arc<DynamicFrameState>>,
     mask_owners_raw: BTreeMap<String, Vec<String>>,
 ) -> EmoteStaticScene {
     // Native manager order is two-stage. sub_103390C0 first emits each
@@ -2037,6 +2227,7 @@ impl Default for InheritSourceState {
 
 #[derive(Debug, Clone)]
 struct TravelContext {
+    compiled: Option<Arc<CompiledEmote>>,
     base_location: Option<[f32; 3]>,
     base_visible: bool,
     opacity_multiplier: f32,
@@ -2077,17 +2268,21 @@ struct TravelContext {
     mesh_sync_child: i64,
     join_target: bool,
     inherit_mask: Option<i64>,
-    transform_order: Vec<i64>,
+    transform_order: Arc<Vec<i64>>,
     coordinate: Option<i64>,
     ground_correction: bool,
     obj_tri_priority: i64,
     stencil_type: i64,
+    /// Nearest ancestor carrying a stencil phase. ReadyToDraw needs the
+    /// complete structural chain below that owner to recover DrawFrameInfo
+    /// +120, even when intermediary helpers have no geometry of their own.
+    stencil_ancestor_path: Option<String>,
     stencil_wipe_enabled: bool,
     stencil_wipe_reverse: bool,
     stencil_wipe_scale: f32,
     stencil_wipe_bias: f32,
     ready_to_draw: bool,
-    stencil_composite_mask_layer_list: Vec<String>,
+    stencil_composite_mask_layer_list: Arc<Vec<String>>,
     parent_mask_path: Option<String>,
     control_parameter: Option<String>,
     control_value: Option<f32>,
@@ -2101,7 +2296,7 @@ struct TravelContext {
     mesh_patch: Option<EmoteMeshPatch>,
     /// Active ancestor mesh-transform patches used by StepFrameMeshChain. The
     /// current layer's own mesh transform is appended only for descendants.
-    mesh_chain: Vec<EmoteMeshPatch>,
+    mesh_chain: Arc<Vec<EmoteMeshPatch>>,
     /// Start of the native meshCombine-collapse suffix in `mesh_chain` for the
     /// next child. StepFrameMeshChain walks the real parent chain upward and,
     /// when the child is an active `meshCombine` node, folds active meshes
@@ -2112,8 +2307,8 @@ struct TravelContext {
     mesh_combine_candidate_start: usize,
     /// Shape-sync deformers retained for sprite tessellation. Unlike
     /// `mesh_chain`, these preserve each authored patch domain independently.
-    mesh_deformer_chain: Vec<EmoteMeshPatch>,
-    mesh_parameters: BTreeSet<String>,
+    mesh_deformer_chain: Arc<Vec<EmoteMeshPatch>>,
+    mesh_parameters: Arc<BTreeSet<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -2122,7 +2317,7 @@ struct PendingNestedMotion<'a> {
     object_name: String,
     motion_name: String,
     parent_local_time: f32,
-    state: DynamicFrameState,
+    state: Arc<DynamicFrameState>,
     ctx: TravelContext,
 }
 
@@ -2145,6 +2340,7 @@ struct ScopeLayerPosition {
 impl Default for TravelContext {
     fn default() -> Self {
         Self {
+            compiled: None,
             base_location: None,
             base_visible: true,
             opacity_multiplier: 1.0,
@@ -2167,17 +2363,18 @@ impl Default for TravelContext {
             mesh_sync_child: 0,
             join_target: false,
             inherit_mask: None,
-            transform_order: Vec::new(),
+            transform_order: Arc::new(Vec::new()),
             coordinate: None,
             ground_correction: false,
             obj_tri_priority: 0,
             stencil_type: 0,
+            stencil_ancestor_path: None,
             stencil_wipe_enabled: false,
             stencil_wipe_reverse: false,
             stencil_wipe_scale: 0.0,
             stencil_wipe_bias: 0.0,
             ready_to_draw: true,
-            stencil_composite_mask_layer_list: Vec::new(),
+            stencil_composite_mask_layer_list: Arc::new(Vec::new()),
             parent_mask_path: None,
             control_parameter: None,
             control_value: None,
@@ -2189,10 +2386,10 @@ impl Default for TravelContext {
             mesh_division_x: 1,
             mesh_division_y: 1,
             mesh_patch: None,
-            mesh_chain: Vec::new(),
+            mesh_chain: Arc::new(Vec::new()),
             mesh_combine_candidate_start: 0,
-            mesh_deformer_chain: Vec::new(),
-            mesh_parameters: BTreeSet::new(),
+            mesh_deformer_chain: Arc::new(Vec::new()),
+            mesh_parameters: Arc::new(BTreeSet::new()),
         }
     }
 }
@@ -2264,7 +2461,7 @@ fn enter_layer_context(
         .map(|mask| (mask & (1 << 25)) != 0)
         .unwrap_or(true);
     if !inherit_shape {
-        ctx.mesh_deformer_chain.clear();
+        ctx.mesh_deformer_chain = Arc::new(Vec::new());
     }
     // sub_10331060: opacity inheritance is independent from the linear
     // channels.  A layer multiplies the selected inheritance source only when
@@ -2289,12 +2486,14 @@ fn enter_layer_context(
         0
     };
     ctx.stencil_type = layer.field_i64("stencilType").unwrap_or(0);
-    ctx.transform_order = layer
-        .field("transformOrder")
-        .and_then(PsbValue::as_list)
-        .map(|values| values.iter().filter_map(PsbValue::as_i64).collect())
-        .unwrap_or_default();
-    ctx.stencil_composite_mask_layer_list = Vec::new();
+    ctx.transform_order = Arc::new(
+        layer
+            .field("transformOrder")
+            .and_then(PsbValue::as_list)
+            .map(|values| values.iter().filter_map(PsbValue::as_i64).collect())
+            .unwrap_or_default(),
+    );
+    ctx.stencil_composite_mask_layer_list = Arc::new(Vec::new());
     // sub_1033ED90 parses stencilCompositeMaskLayerList only in the type-12
     // case and stores the resolved/runtime vector in that layer's +740 extra.
     if ctx.layer_type == 12 {
@@ -2302,11 +2501,13 @@ fn enter_layer_context(
             .field("stencilCompositeMaskLayerList")
             .and_then(PsbValue::as_list)
         {
-            ctx.stencil_composite_mask_layer_list = values
-                .iter()
-                .filter_map(PsbValue::as_str)
-                .map(str::to_owned)
-                .collect();
+            ctx.stencil_composite_mask_layer_list = Arc::new(
+                values
+                    .iter()
+                    .filter_map(PsbValue::as_str)
+                    .map(str::to_owned)
+                    .collect(),
+            );
         }
     }
     if let Some((dx, dy)) = parse_mesh_division(layer.field("meshDivision")) {
@@ -2417,7 +2618,7 @@ fn parse_screen_bounds(layer: &PsbValue) -> Option<[f32; 4]> {
     ])
 }
 
-fn draw_frame_info(label: Option<String>, ctx: TravelContext) -> EmoteDrawFrameInfo {
+fn draw_frame_info(label: Option<String>, ctx: &TravelContext) -> EmoteDrawFrameInfo {
     let mesh_sync_child_mask = ctx.mesh_sync_child;
     let inherit_mask = ctx.inherit_mask.unwrap_or(0);
     let stencil_phase = ctx.stencil_type & 0x3;
@@ -2435,9 +2636,9 @@ fn draw_frame_info(label: Option<String>, ctx: TravelContext) -> EmoteDrawFrameI
     };
     EmoteDrawFrameInfo {
         layer_label: label,
-        native_draw_key: ctx.native_draw_key,
+        native_draw_key: ctx.native_draw_key.clone(),
         draw_index: ctx.draw_index,
-        path: ctx.path,
+        path: ctx.path.clone(),
         layer_type: ctx.layer_type,
         ready_to_draw: ctx.ready_to_draw,
         submitted_to_draw_frame: ctx.ready_to_draw,
@@ -2454,7 +2655,7 @@ fn draw_frame_info(label: Option<String>, ctx: TravelContext) -> EmoteDrawFrameI
         inherit_opacity: (inherit_mask & (1 << 10)) != 0,
         inherit_shape: (inherit_mask & (1 << 25)) != 0,
         inherit_angle: (inherit_mask & (1 << 4)) != 0,
-        transform_order: ctx.transform_order,
+        transform_order: ctx.transform_order.as_ref().clone(),
         coordinate: ctx.coordinate,
         ground_correction: ctx.ground_correction,
         obj_tri_priority: ctx.obj_tri_priority,
@@ -2466,12 +2667,12 @@ fn draw_frame_info(label: Option<String>, ctx: TravelContext) -> EmoteDrawFrameI
         stencil_wipe_reverse: ctx.stencil_wipe_reverse,
         stencil_wipe_scale: ctx.stencil_wipe_scale,
         stencil_wipe_bias: ctx.stencil_wipe_bias,
-        stencil_composite_mask_layer_list: ctx.stencil_composite_mask_layer_list,
+        stencil_composite_mask_layer_list: ctx.stencil_composite_mask_layer_list.as_ref().clone(),
         stencil_composite_target_paths: Vec::new(),
-        parent_mask_path: ctx.parent_mask_path,
+        parent_mask_path: ctx.parent_mask_path.clone(),
         stencil_parent_path: None,
         stencil_parent_native_key: None,
-        control_parameter: ctx.control_parameter,
+        control_parameter: ctx.control_parameter.clone(),
         control_value: ctx.control_value,
         local_time_ticks: ctx.local_time_ticks,
         frame_index: ctx.frame_index,
@@ -2482,7 +2683,7 @@ fn draw_frame_info(label: Option<String>, ctx: TravelContext) -> EmoteDrawFrameI
 }
 
 fn layer_state_from_ctx(label: Option<String>, ctx: &TravelContext) -> EmoteStepFrameLayerState {
-    let info = draw_frame_info(label, ctx.clone());
+    let info = draw_frame_info(label, ctx);
     let raw_position = ctx.base_location.unwrap_or([0.0; 3]);
     EmoteStepFrameLayerState {
         path: ctx.path.clone(),
@@ -2540,7 +2741,7 @@ fn travel_layer(
     {
         mask_owners
             .entry(ctx.path.clone())
-            .or_insert_with(|| ctx.stencil_composite_mask_layer_list.clone());
+            .or_insert_with(|| ctx.stencil_composite_mask_layer_list.as_ref().clone());
     }
 
     if let Some(frame_list) = layer.field("frameList").and_then(PsbValue::as_list) {
@@ -3216,7 +3417,7 @@ fn build_sprite(
             .copied()
             .filter(|mesh| !mesh.is_identity())
             .collect(),
-        draw_frame_info: draw_frame_info(label, ctx),
+        draw_frame_info: draw_frame_info(label, &ctx),
     })
 }
 
@@ -3309,6 +3510,7 @@ fn apply_feedback_specialized_pass(
             state.feedback_runtime = None;
             continue;
         };
+        let frame = Arc::make_mut(frame);
         let Some(timespan) = frame.feedback_timespan else {
             state.feedback_runtime = None;
             continue;
@@ -3805,6 +4007,13 @@ fn motion_priority_ranks(motion: &PsbValue, time_ticks: f32) -> BTreeMap<String,
         return BTreeMap::new();
     };
 
+    priority_ranks_from_content(layers, priority_content)
+}
+
+fn priority_ranks_from_content(
+    layers: &[PsbValue],
+    priority_content: &[PsbValue],
+) -> BTreeMap<String, usize> {
     // sub_10333180 recursively builds one flat LayerInfo vector in preorder.
     // LayerInfo[0] is the synthetic player root, so authored layers occupy
     // native indices 1..N. priority.content stores zero-based authored-layer
@@ -3912,6 +4121,24 @@ fn evaluate_frame_list(
     coordinate_plane: i64,
     previous_state: Option<&DynamicFrameState>,
 ) -> DynamicFrameState {
+    evaluate_frame_list_cached(
+        frame_list,
+        time_ticks,
+        easing_table,
+        coordinate_plane,
+        previous_state,
+        None,
+    )
+}
+
+fn evaluate_frame_list_cached(
+    frame_list: &[PsbValue],
+    time_ticks: f32,
+    easing_table: Option<&[PsbValue]>,
+    coordinate_plane: i64,
+    previous_state: Option<&DynamicFrameState>,
+    compiled: Option<&CompiledEmote>,
+) -> DynamicFrameState {
     // MMotionPlayer keeps two fully parsed 212-byte frame buffers.  Each
     // serialized frame is decoded from native defaults; frame contents are not
     // accumulated across history.  Only a current type-3 frame is allowed to
@@ -3953,7 +4180,17 @@ fn evaluate_frame_list(
     let Some(current_content) = current_frame.field("content") else {
         return state;
     };
-    merge_frame_content(&mut state, current_content);
+    let mut decoded = compiled
+        .and_then(|cache| cache.decode_frame(current_content))
+        .unwrap_or_else(|| {
+            let mut decoded = DynamicFrameState::default();
+            merge_frame_content(&mut decoded, current_content);
+            decoded
+        });
+    decoded.frame_index = state.frame_index;
+    decoded.frame_start_ticks = state.frame_start_ticks;
+    decoded.serialized_frame_type = state.serialized_frame_type;
+    state = decoded;
 
     let next_index = current_index + 1;
     let Some(next_frame) = frame_list.get(next_index) else {
@@ -3990,8 +4227,13 @@ fn evaluate_frame_list(
     let t = elapsed / span;
     state.interpolation_t = t;
 
-    let mut next_state = DynamicFrameState::default();
-    merge_frame_content(&mut next_state, next_content);
+    let next_state = compiled
+        .and_then(|cache| cache.decode_frame(next_content))
+        .unwrap_or_else(|| {
+            let mut decoded = DynamicFrameState::default();
+            merge_frame_content(&mut decoded, next_content);
+            decoded
+        });
     interpolate_frame_content(
         &mut state,
         &next_state,
@@ -4936,9 +5178,9 @@ fn travel_layer_at<'a>(
     motion_name: &str,
     time_ticks: f32,
     mut ctx: TravelContext,
-    previous_positions: Option<&BTreeMap<String, [f32; 3]>>,
-    previous_frame_states: Option<&BTreeMap<String, DynamicFrameState>>,
-    frame_runtime_states: &mut BTreeMap<String, DynamicFrameState>,
+    previous_positions: PreviousPositions<'_>,
+    previous_frame_states: Option<&HashMap<String, Arc<DynamicFrameState>>>,
+    frame_runtime_states: &mut HashMap<String, Arc<DynamicFrameState>>,
     join_reuse: &mut JoinReusePool,
     pending_nested: &mut Vec<PendingNestedMotion<'a>>,
     pending_anchors: &mut Vec<PendingAnchor>,
@@ -4952,6 +5194,9 @@ fn travel_layer_at<'a>(
     let layer = value;
 
     ctx = enter_layer_context(ctx, &layer, sibling_index);
+    if ctx.stencil_type != 0 {
+        ctx.stencil_ancestor_path = Some(ctx.path.clone());
+    }
     // sub_1034D900/sub_103A20E0: every joinTarget layer consumes the next
     // compatible prior-layer record by type. Same-path StepFrame history wins
     // during ordinary progression, but consuming the record here preserves the
@@ -4975,7 +5220,7 @@ fn travel_layer_at<'a>(
     {
         mask_owners
             .entry(ctx.path.clone())
-            .or_insert_with(|| ctx.stencil_composite_mask_layer_list.clone());
+            .or_insert_with(|| ctx.stencil_composite_mask_layer_list.as_ref().clone());
     }
     let mesh_combinator = evaluate_mesh_combinator_split(
         &layer,
@@ -5013,7 +5258,7 @@ fn travel_layer_at<'a>(
             if sync_child_shape {
                 child_ctx.mesh_patch = combine_patch(child_ctx.mesh_patch.take(), patch);
                 if let Some(id) = &layer_mesh_parameter {
-                    child_ctx.mesh_parameters.insert(id.clone());
+                    Arc::make_mut(&mut child_ctx.mesh_parameters).insert(id.clone());
                 }
             }
         }
@@ -5021,7 +5266,7 @@ fn travel_layer_at<'a>(
             if let Some(patch) = mesh_combinator.child_patch {
                 child_ctx.mesh_patch = combine_patch(child_ctx.mesh_patch.take(), patch);
                 if let Some(id) = &layer_mesh_parameter {
-                    child_ctx.mesh_parameters.insert(id.clone());
+                    Arc::make_mut(&mut child_ctx.mesh_parameters).insert(id.clone());
                 }
             }
         }
@@ -5031,6 +5276,8 @@ fn travel_layer_at<'a>(
     let mut active_external_motion = false;
     let mut specialized_frame = None;
     let mut particle_triggered = false;
+    #[allow(unused_variables, unused_assignments)]
+    let mut emitted_sprite = false;
     if let Some(frame_list) = layer.field("frameList").and_then(PsbValue::as_list) {
         let param_eval =
             layer_parameter_eval(&layer, parameter_table, variables, frame_list, time_ticks)
@@ -5050,14 +5297,25 @@ fn travel_layer_at<'a>(
         let frame_runtime_key = frame_runtime_state_key(motion_name, &draw_ctx.path);
         let previous_local_state = previous_frame_states
             .and_then(|states| states.get(&frame_runtime_key))
+            .map(Arc::as_ref)
             .or(join_seed.as_ref());
-        let mut state = evaluate_frame_list(
-            frame_list,
-            local_time,
-            easing_table,
-            draw_ctx.coordinate.unwrap_or(0),
-            previous_local_state,
-        );
+        let mut state = if let Some(compiled) = ctx.compiled.as_deref() {
+            compiled.sample_frame(
+                frame_list,
+                local_time,
+                easing_table,
+                draw_ctx.coordinate.unwrap_or(0),
+                previous_local_state,
+            )
+        } else {
+            Arc::new(evaluate_frame_list(
+                frame_list,
+                local_time,
+                easing_table,
+                draw_ctx.coordinate.unwrap_or(0),
+                previous_local_state,
+            ))
+        };
         // layerInfo+36 is the native StepFrame dirty/trigger byte consumed by
         // trigger-mode particles. sub_1032E470/sub_10343E30/sub_10353A10 set
         // it when the active serialized frame buffer advances or seeks, while
@@ -5071,7 +5329,11 @@ fn travel_layer_at<'a>(
         // has native type 0.
         frame_runtime_states.insert(frame_runtime_key, state.clone());
         if let Some(sync) = draw_ctx.inherit_source.mesh_sync {
-            apply_mesh_sync_child_state(&mut state, sync, draw_ctx.inherit_mask.unwrap_or(0));
+            apply_mesh_sync_child_state(
+                Arc::make_mut(&mut state),
+                sync,
+                draw_ctx.inherit_mask.unwrap_or(0),
+            );
         }
         // Specialized passes consume the same composite decoded frame that
         // StepFrame leaves on the layer. Keep it attached until those passes
@@ -5085,7 +5347,7 @@ fn travel_layer_at<'a>(
         child_ctx.next_frame_index = state.next_frame_index;
         child_ctx.frame_offset = [state.ox, state.oy];
         child_ctx.interpolation_t = state.interpolation_t;
-        if let Some(mesh) = state.mesh_patch.take() {
+        if let Some(mesh) = state.mesh_patch {
             let mesh = EmoteMeshPatch {
                 division_x: ctx.mesh_division_x.max(mesh.division_x),
                 division_y: ctx.mesh_division_y.max(mesh.division_y),
@@ -5096,7 +5358,7 @@ fn travel_layer_at<'a>(
             if sync_child_shape {
                 child_ctx.mesh_patch = combine_patch(child_ctx.mesh_patch.take(), mesh);
                 if let Some(id) = &layer_mesh_parameter {
-                    child_ctx.mesh_parameters.insert(id.clone());
+                    Arc::make_mut(&mut child_ctx.mesh_parameters).insert(id.clone());
                 }
             }
         }
@@ -5175,8 +5437,7 @@ fn travel_layer_at<'a>(
         if let Some(mesh) = child_ctx.mesh_patch.take() {
             // A textured mesh owns the same pixel domain as its atlas icon.
             // Retain it when passing shape deformation to smaller child icons.
-            child_ctx
-                .mesh_deformer_chain
+            Arc::make_mut(&mut child_ctx.mesh_deformer_chain)
                 .push(patch_with_domain(mesh, frame_mesh_domain(&state, textures)));
         }
 
@@ -5240,6 +5501,10 @@ fn travel_layer_at<'a>(
                                 draw_ctx.clone(),
                             ) {
                                 out.push(sprite);
+                                #[cfg(not(test))]
+                                {
+                                    emitted_sprite = true;
+                                }
                             }
                         }
                     }
@@ -5260,18 +5525,46 @@ fn travel_layer_at<'a>(
         prepare_child_inherit_source(&mut child_ctx, None);
     }
 
-    let mut layer_state = layer_state_from_ctx(label, &child_ctx);
-    layer_state.specialized_frame = specialized_frame;
-    if child_ctx.layer_type == 1 {
-        layer_state.shape_kind = layer.field_i64("shape").unwrap_or(0) as i32;
+    // Most type-0 entries in exported PSBs are transform-only helper nodes.
+    // They still contribute to `child_ctx` above, but keeping a full public
+    // state for each one forces every specialized pass to scan and clone more
+    // than a thousand records that can never submit geometry. Retain nodes
+    // that have drawable frame data or participate in a native specialized
+    // pass; helper transforms remain represented by the traversal context.
+    #[cfg(not(test))]
+    let retain_layer_state = ctx.layer_type != 0
+        || emitted_sprite
+        || ctx.stencil_type != 0
+        || ctx.stencil_ancestor_path.is_some()
+        || !ctx.stencil_composite_mask_layer_list.is_empty()
+        || ctx.ground_correction;
+    #[cfg(not(test))]
+    let retain_layer_state = retain_layer_state
+        || ctx
+            .compiled
+            .as_deref()
+            .is_some_and(|compiled| compiled.is_physics_base_layer(&layer, &ctx.path));
+    // Unit and parity tests intentionally compare the complete native-shaped
+    // layer array against the uncached reference. The production renderer
+    // does not consume transform-only helper states, so release builds use
+    // the compact traversal above while test builds retain the reference
+    // shape for exact structural assertions.
+    #[cfg(test)]
+    let retain_layer_state = true;
+    if retain_layer_state {
+        let mut layer_state = layer_state_from_ctx(label, &child_ctx);
+        layer_state.specialized_frame = specialized_frame;
+        if child_ctx.layer_type == 1 {
+            layer_state.shape_kind = layer.field_i64("shape").unwrap_or(0) as i32;
+        }
+        layer_state.particle_static = parse_particle_static_config(&layer);
+        layer_state.particle_triggered = particle_triggered;
+        layer_state.screen_bounds = parse_screen_bounds(&layer);
+        if let Some(feedback_sprite) = build_feedback_history_sprite(&layer_state, motion_name) {
+            out.push(feedback_sprite);
+        }
+        layer_states.push(layer_state);
     }
-    layer_state.particle_static = parse_particle_static_config(&layer);
-    layer_state.particle_triggered = particle_triggered;
-    layer_state.screen_bounds = parse_screen_bounds(&layer);
-    if let Some(feedback_sprite) = build_feedback_history_sprite(&layer_state, motion_name) {
-        out.push(feedback_sprite);
-    }
-    layer_states.push(layer_state);
 
     // sub_10353CF0 layerInfo+704 is the native "active mesh-chain node"
     // bit.  Its hard structural requirements include:
@@ -5417,12 +5710,12 @@ fn nested_motion_direction_degrees(
 fn apply_nested_motion_direction_resolved(
     ctx: &mut TravelContext,
     state: &DynamicFrameState,
-    previous_positions: Option<&BTreeMap<String, [f32; 3]>>,
+    previous_positions: PreviousPositions<'_>,
     target_position: Option<[f32; 3]>,
 ) {
     let base_angle = ctx.linear_state.rotation_degrees;
-    let displacement = previous_positions.map(|positions| {
-        let previous = positions.get(&ctx.path).copied().unwrap_or_else(|| {
+    let displacement = previous_positions.is_some().then(|| {
+        let previous = previous_positions.get(&ctx.path).unwrap_or_else(|| {
             // MMotionPlayer reset (`player+273`) zeroes layer+108. A missing
             // previous entry is the Rust scene-builder equivalent of that
             // first/reset frame.
@@ -5463,7 +5756,7 @@ fn apply_nested_motion_direction_resolved(
 }
 
 fn apply_nested_motion_direction(ctx: &mut TravelContext, state: &DynamicFrameState) {
-    apply_nested_motion_direction_resolved(ctx, state, None, None);
+    apply_nested_motion_direction_resolved(ctx, state, PreviousPositions::None, None);
 }
 
 fn nested_motion_local_time(parent_local_time: f32, state: &DynamicFrameState) -> f32 {
@@ -5503,7 +5796,7 @@ fn apply_motion_layer_inherit(
         target_motion_parameter_ids(object_table, object_name, motion_name)
     else {
         ctx.mesh_patch = None;
-        ctx.mesh_parameters.clear();
+        Arc::make_mut(&mut ctx.mesh_parameters).clear();
         return;
     };
     let shared_parameter_count = target_parameters
@@ -5512,7 +5805,7 @@ fn apply_motion_layer_inherit(
         .count();
     if shared_parameter_count < 4 {
         ctx.mesh_patch = None;
-        ctx.mesh_parameters.clear();
+        Arc::make_mut(&mut ctx.mesh_parameters).clear();
     }
 }
 
@@ -5575,7 +5868,7 @@ fn anchor_axis_shift(
 
 fn apply_ground_correction_specialized_pass(
     hook: Option<EmoteGroundCorrectionHook>,
-    previous_positions: Option<&BTreeMap<String, [f32; 3]>>,
+    previous_positions: PreviousPositions<'_>,
     scope_start: usize,
     scope_end: usize,
     sprite_scope_start: usize,
@@ -5604,9 +5897,7 @@ fn apply_ground_correction_specialized_pass(
             .map(|state| state.raw_position)
             .unwrap_or([0.0; 3]);
         let raw = layer_states[index].raw_position;
-        let previous = previous_positions
-            .and_then(|positions| positions.get(&path).copied())
-            .unwrap_or(raw);
+        let previous = previous_positions.get(&path).unwrap_or(raw);
         let request = EmoteGroundCorrectionRequest {
             parent_path,
             layer_path: path.clone(),
@@ -5807,7 +6098,7 @@ fn apply_anchor_specialized_pass(
 }
 
 fn advance_native_mesh_combine_chain(
-    chain: &mut Vec<EmoteMeshPatch>,
+    chain: &mut Arc<Vec<EmoteMeshPatch>>,
     child_candidate_start: &mut usize,
     current_candidate_start: usize,
     current_patch: Option<EmoteMeshPatch>,
@@ -5838,9 +6129,9 @@ fn advance_native_mesh_combine_chain(
                 for ancestor in chain.iter().skip(start) {
                     patch = patch.combined_with(ancestor);
                 }
-                chain.truncate(start);
+                Arc::make_mut(chain).truncate(start);
             }
-            chain.push(patch);
+            Arc::make_mut(chain).push(patch);
             appended_current = true;
         }
     }
@@ -5970,50 +6261,13 @@ fn apply_ready_to_draw_specialized_pass(
     // type 12 applies the native wipe scale/bias range gate.
     let end = scope_end.min(layer_states.len());
     let begin = scope_start.min(end);
-    let mut ready_by_index = BTreeMap::<String, bool>::new();
-    // Portable copy of LayerInfo+724: this deliberately stores the nearest
-    // READY LayerInfo even when that helper LayerInfo has no DrawFrameInfo.
-    // Native sub_1035A660 does not skip through such helpers. The key is the
-    // player-local structural index path, never the authored label path.
-    let mut owner_by_index = BTreeMap::<String, Option<(String, i64, Vec<u64>)>>::new();
-    let mut path_by_index = BTreeMap::<String, String>::new();
-    let mut layer_type_by_index = BTreeMap::<String, i64>::new();
-    let mut draw_key_by_index = BTreeMap::<String, Vec<u64>>::new();
-
-    for state in layer_states[begin..end].iter_mut() {
-        let parent_index = state
+    let mut nearest_by_index = HashMap::<&str, Option<usize>>::new();
+    let mut readiness = Vec::with_capacity(end - begin);
+    for (index, state) in layer_states[begin..end].iter().enumerate() {
+        let parent_owner = state
             .scope_index_path
             .rsplit_once('/')
-            .map(|(parent, _)| parent.to_owned());
-        let parent_owner = parent_index.as_ref().and_then(|parent| {
-            if ready_by_index.get(parent).copied().unwrap_or(false) {
-                path_by_index
-                    .get(parent)
-                    .cloned()
-                    .zip(layer_type_by_index.get(parent).copied())
-                    .zip(draw_key_by_index.get(parent).cloned())
-                    .map(|((path, layer_type), draw_key)| (path, layer_type, draw_key))
-            } else {
-                owner_by_index.get(parent).cloned().flatten()
-            }
-        });
-
-        // sub_103390C0 writes DrawFrameInfo+120 as
-        //     layer+724 ? (layer+724)->+732 : NULL
-        // and sub_10332D00 allocates +732 only for types 0/3/10/12.  This is
-        // NOT "nearest drawable ancestor": if the nearest ready LayerInfo is a
-        // Shape/Camera/helper without +732, the native pointer is NULL and the
-        // stencil chain terminates there.  The previous Rust code incorrectly
-        // exposed the helper path and let the renderer continue the chain.
-        state.draw_frame_info.stencil_parent_path = parent_owner
-            .as_ref()
-            .filter(|(_, layer_type, _)| native_layer_has_draw_frame_info(*layer_type))
-            .map(|(path, _, _)| path.clone());
-        state.draw_frame_info.stencil_parent_native_key = parent_owner
-            .as_ref()
-            .filter(|(_, layer_type, _)| native_layer_has_draw_frame_info(*layer_type))
-            .map(|(_, _, draw_key)| draw_key.clone());
-
+            .and_then(|(parent, _)| nearest_by_index.get(parent).copied().flatten());
         // Native StepFrameReadyToDraw begins at LayerInfo index 1 because
         // LayerInfo[0] is the synthetic MMotionPlayer root. `layer_states` does
         // NOT contain that synthetic root, so relative_index 0 here is already
@@ -6041,6 +6295,29 @@ fn apply_ready_to_draw_specialized_pass(
             && state.draw_frame_info.stencil_type != 0
             && state.visible
             && (!special_drawable_type || drawable_gate);
+        readiness.push((ready, parent_owner));
+        nearest_by_index.insert(
+            &state.scope_index_path,
+            if ready { Some(index) } else { parent_owner },
+        );
+    }
+    drop(nearest_by_index);
+    for (index, (ready, parent_owner)) in readiness.into_iter().enumerate() {
+        let (previous, current) = layer_states[begin..end].split_at_mut(index);
+        let state = &mut current[0];
+        // sub_103390C0 writes DrawFrameInfo+120 as
+        //     layer+724 ? (layer+724)->+732 : NULL
+        // and sub_10332D00 allocates +732 only for types 0/3/10/12.  This is
+        // NOT "nearest drawable ancestor": if the nearest ready LayerInfo is a
+        // Shape/Camera/helper without +732, the native pointer is NULL and the
+        // stencil chain terminates there.  The previous Rust code incorrectly
+        // exposed the helper path and let the renderer continue the chain.
+        let parent = parent_owner
+            .map(|owner| &previous[owner].draw_frame_info)
+            .filter(|info| native_layer_has_draw_frame_info(info.layer_type));
+        state.draw_frame_info.stencil_parent_path = parent.map(|info| info.path.clone());
+        state.draw_frame_info.stencil_parent_native_key =
+            parent.map(|info| info.native_draw_key.clone());
         state.draw_frame_info.ready_to_draw = ready;
         state.draw_frame_info.submitted_to_draw_frame = false;
 
@@ -6058,34 +6335,23 @@ fn apply_ready_to_draw_specialized_pass(
             };
         }
         state.draw_frame_info.stencil_phase = phase;
-        ready_by_index.insert(state.scope_index_path.clone(), ready);
-        owner_by_index.insert(state.scope_index_path.clone(), parent_owner);
-        path_by_index.insert(state.scope_index_path.clone(), state.path.clone());
-        layer_type_by_index.insert(
-            state.scope_index_path.clone(),
-            state.draw_frame_info.layer_type,
-        );
-        draw_key_by_index.insert(
-            state.scope_index_path.clone(),
-            state.draw_frame_info.native_draw_key.clone(),
-        );
     }
 
     // Synchronize emitted ordinary sprites by native structural draw key, not
     // by the human-readable label path. Duplicate/empty authored labels can
     // produce identical display paths but never identical LayerInfo priority
     // identities inside one recursive draw stream.
-    let infos: BTreeMap<Vec<u64>, EmoteDrawFrameInfo> = layer_states[begin..end]
+    let infos: HashMap<&[u64], &EmoteDrawFrameInfo> = layer_states[begin..end]
         .iter()
         .map(|state| {
             (
-                state.draw_frame_info.native_draw_key.clone(),
-                state.draw_frame_info.clone(),
+                state.draw_frame_info.native_draw_key.as_slice(),
+                &state.draw_frame_info,
             )
         })
         .collect();
     for sprite in sprites.iter_mut().skip(sprite_scope_start) {
-        if let Some(info) = infos.get(&sprite.draw_frame_info.native_draw_key) {
+        if let Some(info) = infos.get(sprite.draw_frame_info.native_draw_key.as_slice()) {
             sprite.draw_frame_info.ready_to_draw = info.ready_to_draw;
             sprite.draw_frame_info.submitted_to_draw_frame = info.submitted_to_draw_frame;
             sprite.draw_frame_info.stencil_parent_path = info.stencil_parent_path.clone();
@@ -6234,75 +6500,79 @@ fn apply_model_specialized_pass(
     scope_start: usize,
     scope_end: usize,
     motion_time_ticks: f32,
-    previous_positions: Option<&BTreeMap<String, [f32; 3]>>,
+    previous_positions: PreviousPositions<'_>,
 ) {
     // MMotionPlayer::StepFrameModel (sub_103552F0). The model backend itself
     // is host-specific, but the model clock and all three native direction
     // modes are pure MMotionPlayer state and must be resolved here.
     let end = scope_end.min(layer_states.len());
-    let snapshot = layer_states[scope_start.min(end)..end].to_vec();
-    for state in layer_states.iter_mut().take(end).skip(scope_start) {
-        if state.draw_frame_info.layer_type != 6 || !state.visible {
-            state.model_runtime = None;
-            continue;
-        }
-        let Some(frame) = state.specialized_frame.as_ref() else {
-            state.model_runtime = None;
-            continue;
-        };
-        let Some(model) = frame.model.as_ref() else {
-            state.model_runtime = None;
-            continue;
-        };
+    let begin = scope_start.min(end);
+    let snapshot = &layer_states[begin..end];
+    let mut runtimes = Vec::new();
+    for index in 0..snapshot.len() {
+        let runtime = {
+            let state = &snapshot[index];
+            if state.draw_frame_info.layer_type != 6 || !state.visible {
+                continue;
+            }
+            let Some(frame) = state.specialized_frame.as_ref() else {
+                continue;
+            };
+            let Some(model) = frame.model.as_ref() else {
+                continue;
+            };
 
-        // On a newly selected model frame sub_103552F0 initializes the model
-        // clock to currentMotionTime - frameStart + timeOffset. On subsequent
-        // ticks it adds player delta. For an ordinary monotonic StepFrame these
-        // are algebraically identical; using the local expression also makes
-        // the SDK's pre/post-physics double rebuild idempotent.
-        let local_time_ticks = finite_or(
-            motion_time_ticks - frame.frame_start_ticks + model.time_offset_ticks,
-            0.0,
-        );
-        let direction = match model.direction_type {
-            // dt=2: exact layer+108 raw current-minus-previous displacement.
-            2 if local_time_ticks != 0.0 => previous_positions.and_then(|previous| {
-                previous.get(&state.path).copied().map(|p| {
+            // On a newly selected model frame sub_103552F0 initializes the model
+            // clock to currentMotionTime - frameStart + timeOffset. On subsequent
+            // ticks it adds player delta. For an ordinary monotonic StepFrame these
+            // are algebraically identical; using the local expression also makes
+            // the SDK's pre/post-physics double rebuild idempotent.
+            let local_time_ticks = finite_or(
+                motion_time_ticks - frame.frame_start_ticks + model.time_offset_ticks,
+                0.0,
+            );
+            let direction = match model.direction_type {
+                // dt=2: exact layer+108 raw current-minus-previous displacement.
+                2 if local_time_ticks != 0.0 => previous_positions.get(&state.path).map(|p| {
                     [
                         state.raw_position[0] - p[0],
                         state.raw_position[1] - p[1],
                         state.raw_position[2] - p[2],
                     ]
-                })
-            }),
-            // dt=3: the two 0.0001 path samples produced by StepLayer. Native
-            // stores the vector itself; do not normalize it to an angle.
-            3 => frame.motion_path_tangent_vector,
-            // dt=4: target +612..620 minus this layer's raw composite XYZ.
-            4 => find_layer_state_position(
-                &snapshot,
-                0,
-                snapshot.len(),
-                &model.direction_target,
-                true,
-            )
-            .map(|target| {
-                [
-                    target[0] - state.raw_position[0],
-                    target[1] - state.raw_position[1],
-                    target[2] - state.raw_position[2],
-                ]
-            }),
-            _ => None,
+                }),
+                // dt=3: the two 0.0001 path samples produced by StepLayer. Native
+                // stores the vector itself; do not normalize it to an angle.
+                3 => frame.motion_path_tangent_vector,
+                // dt=4: target +612..620 minus this layer's raw composite XYZ.
+                4 => find_layer_state_position(
+                    &snapshot,
+                    0,
+                    snapshot.len(),
+                    &model.direction_target,
+                    true,
+                )
+                .map(|target| {
+                    [
+                        target[0] - state.raw_position[0],
+                        target[1] - state.raw_position[1],
+                        target[2] - state.raw_position[2],
+                    ]
+                }),
+                _ => None,
+            };
+            EmoteModelRuntimeState {
+                local_time_ticks,
+                looped: model.looped,
+                direction_type: model.direction_type,
+                direction,
+                direction_target: (!model.direction_target.is_empty())
+                    .then(|| model.direction_target.clone()),
+            }
         };
-        state.model_runtime = Some(EmoteModelRuntimeState {
-            local_time_ticks,
-            looped: model.looped,
-            direction_type: model.direction_type,
-            direction,
-            direction_target: (!model.direction_target.is_empty())
-                .then(|| model.direction_target.clone()),
-        });
+        runtimes.push((index, runtime));
+    }
+    for (index, runtime) in runtimes {
+        layer_states[begin + index].model_runtime = Some(runtime);
     }
 }
 
@@ -6772,10 +7042,10 @@ fn apply_particle_specialized_pass(
     variables: &BTreeMap<String, f32>,
     textures: &BTreeMap<String, EmoteTextureSource>,
     delta_ticks: f32,
-    previous_positions: Option<&BTreeMap<String, [f32; 3]>>,
-    previous_frame_states: Option<&BTreeMap<String, DynamicFrameState>>,
+    previous_positions: PreviousPositions<'_>,
+    previous_frame_states: Option<&HashMap<String, Arc<DynamicFrameState>>>,
     ground_correction_hook: Option<EmoteGroundCorrectionHook>,
-    frame_runtime_states: &mut BTreeMap<String, DynamicFrameState>,
+    frame_runtime_states: &mut HashMap<String, Arc<DynamicFrameState>>,
     emitters: &mut BTreeMap<String, ParticleEmitterRuntime>,
     sprites: &mut Vec<EmoteStaticSprite>,
     layer_states: &mut Vec<EmoteStepFrameLayerState>,
@@ -6788,11 +7058,12 @@ fn apply_particle_specialized_pass(
     let mut cursor = 0usize;
     let mut processed = BTreeSet::<String>::new();
     while cursor < layer_states.len() {
-        let emitter = layer_states[cursor].clone();
+        let current = &layer_states[cursor];
         cursor += 1;
-        let Some(config) = emitter.particle_static.clone() else {
+        let Some(config) = current.particle_static.clone() else {
             continue;
         };
+        let emitter = current.clone();
         if !processed.insert(emitter.path.clone()) {
             continue;
         }
@@ -7045,11 +7316,11 @@ fn resolve_pending_nested_motions(
     psb_data: Option<&[u8]>,
     variables: &BTreeMap<String, f32>,
     textures: &BTreeMap<String, EmoteTextureSource>,
-    previous_positions: Option<&BTreeMap<String, [f32; 3]>>,
-    previous_frame_states: Option<&BTreeMap<String, DynamicFrameState>>,
+    previous_positions: PreviousPositions<'_>,
+    previous_frame_states: Option<&HashMap<String, Arc<DynamicFrameState>>>,
     ground_correction_hook: Option<EmoteGroundCorrectionHook>,
     delta_ticks: f32,
-    frame_runtime_states: &mut BTreeMap<String, DynamicFrameState>,
+    frame_runtime_states: &mut HashMap<String, Arc<DynamicFrameState>>,
     join_reuse: &mut JoinReusePool,
     out: &mut Vec<EmoteStaticSprite>,
     layer_states: &mut Vec<EmoteStepFrameLayerState>,
@@ -7143,11 +7414,11 @@ fn recurse_motion_at(
     textures: &BTreeMap<String, EmoteTextureSource>,
     time_ticks: f32,
     mut ctx: TravelContext,
-    previous_positions: Option<&BTreeMap<String, [f32; 3]>>,
-    previous_frame_states: Option<&BTreeMap<String, DynamicFrameState>>,
+    previous_positions: PreviousPositions<'_>,
+    previous_frame_states: Option<&HashMap<String, Arc<DynamicFrameState>>>,
     ground_correction_hook: Option<EmoteGroundCorrectionHook>,
     delta_ticks: f32,
-    frame_runtime_states: &mut BTreeMap<String, DynamicFrameState>,
+    frame_runtime_states: &mut HashMap<String, Arc<DynamicFrameState>>,
     join_reuse: &mut JoinReusePool,
     out: &mut Vec<EmoteStaticSprite>,
     layer_states: &mut Vec<EmoteStepFrameLayerState>,
@@ -7177,7 +7448,7 @@ fn recurse_motion_at(
         .and_then(PsbValue::as_list)
         .or(parameter_table);
     let effective_time = motion_sample_time(motion, motion_parameter_table, variables, time_ticks);
-    let priority_ranks = Arc::new(motion_priority_ranks(motion, effective_time));
+    let priority_ranks = shared_priority_ranks(motion, effective_time, ctx.compiled.as_deref());
     let scope_start = layer_states.len();
     let sprite_scope_start = out.len();
     let mut pending_nested = Vec::new();
@@ -7369,10 +7640,6 @@ fn evaluate_one_combinator(
     let neutral_index = combinator.field_i64("neutralIndex").unwrap_or(-1);
     let resource_index = combinator.field("rawMeshList")?.as_u32()? as usize;
     let raw = psb.resource_bytes(psb_data, resource_index)?;
-    let meshes = decode_raw_mesh_list(raw, mesh_count, is_delta)?;
-    if meshes.is_empty() {
-        return None;
-    }
 
     let pos = if mesh_count <= 1
         || !begin.is_finite()
@@ -7387,13 +7654,13 @@ fn evaluate_one_combinator(
     let i1 = pos.ceil() as usize;
     let t = pos - i0 as f32;
     let p0 = mesh_patch_from_values(
-        meshes.get(i0)?,
+        &decode_raw_mesh(raw, mesh_count, i0, is_delta)?,
         neutral_index == i0 as i64,
         division_x,
         division_y,
     );
     let p1 = mesh_patch_from_values(
-        meshes.get(i1).unwrap_or(&meshes[i0]),
+        &decode_raw_mesh(raw, mesh_count, i1.min(mesh_count - 1), is_delta)?,
         neutral_index == i1 as i64,
         division_x,
         division_y,
@@ -7417,45 +7684,151 @@ fn mesh_patch_from_values(
     patch
 }
 
-fn decode_raw_mesh_list(raw: &[u8], mesh_count: usize, is_delta: bool) -> Option<Vec<[f32; 32]>> {
-    let total = mesh_count.checked_mul(32)?;
-    let mut values = vec![0.0f32; total];
-    if raw.len() >= total * 8 {
-        for (i, chunk) in raw.chunks_exact(8).take(total).enumerate() {
-            values[i] = f64::from_le_bytes(chunk.try_into().ok()?) as f32;
-        }
-    } else if raw.len() >= total * 4 {
-        for (i, chunk) in raw.chunks_exact(4).take(total).enumerate() {
-            values[i] = f32::from_le_bytes(chunk.try_into().ok()?);
-        }
-    } else {
+// A combinator samples only two neighboring patches. Decode those directly
+// instead of allocating and decoding every patch in the resource each tick.
+fn decode_raw_mesh(
+    raw: &[u8],
+    mesh_count: usize,
+    index: usize,
+    is_delta: bool,
+) -> Option<[f32; 32]> {
+    if index >= mesh_count {
         return None;
     }
-
-    if is_delta {
-        for mesh_index in 0..mesh_count {
-            for row in 0..4 {
-                for col in 0..4 {
-                    let base = mesh_index * 32 + (row * 4 + col) * 2;
-                    values[base] += col as f32 / 3.0;
-                    values[base + 1] += row as f32 / 3.0;
-                }
-            }
+    let total = mesh_count.checked_mul(32)?;
+    let width = if raw.len() >= total.checked_mul(8)? {
+        8
+    } else if raw.len() >= total.checked_mul(4)? {
+        4
+    } else {
+        return None;
+    };
+    let start = index.checked_mul(32)?.checked_mul(width)?;
+    let mut mesh = [0.0f32; 32];
+    for (i, value) in mesh.iter_mut().enumerate() {
+        let offset = start + i * width;
+        *value = if width == 8 {
+            f64::from_le_bytes(raw.get(offset..offset + 8)?.try_into().ok()?) as f32
+        } else {
+            f32::from_le_bytes(raw.get(offset..offset + 4)?.try_into().ok()?)
+        };
+        if is_delta {
+            *value += if i % 2 == 0 {
+                ((i / 2) % 4) as f32 / 3.0
+            } else {
+                (i / 8) as f32 / 3.0
+            };
         }
     }
-
-    let mut out = Vec::with_capacity(mesh_count);
-    for mesh_index in 0..mesh_count {
-        let mut mesh = [0.0f32; 32];
-        mesh.copy_from_slice(&values[mesh_index * 32..mesh_index * 32 + 32]);
-        out.push(mesh);
-    }
-    Some(out)
+    Some(mesh)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn compiled_test_psb(root: PsbValue) -> Arc<PsbFile> {
+        let mut header = [0u8; 40];
+        header[..4].copy_from_slice(b"PSB\0");
+        header[4] = 2;
+        Arc::new(PsbFile {
+            header: crate::psb::PsbHeader::read(&header).unwrap(),
+            version: 2,
+            encrypted: false,
+            checksum: None,
+            names: vec![],
+            strings: vec![],
+            resources: vec![],
+            extra_resources: vec![],
+            root,
+        })
+    }
+
+    #[test]
+    fn shared_frame_samples_preserve_seeks_planes_and_independent_hold_history() {
+        let frames = vec![
+            test_frame(
+                0.0,
+                3,
+                test_content(vec![
+                    ("coord", test_coord(0.0, 0.0, 0.0)),
+                    ("cp", test_inline_cp_path()),
+                ]),
+            ),
+            test_frame(
+                10.0,
+                1,
+                test_content(vec![("coord", test_coord(10.0, 20.0, 30.0))]),
+            ),
+            test_frame(20.0, 0, test_content(vec![])),
+        ];
+        let psb = compiled_test_psb(test_content(vec![("frameList", PsbValue::List(frames))]));
+        let compiled = CompiledEmote::new(psb.clone());
+        let frames = psb.root.field("frameList").unwrap().as_list().unwrap();
+        let mut previous = None;
+        for time in [-1.0, 0.0, 5.0, 10.0, 20.0, 25.0, 5.0, 5.0] {
+            for plane in [0, 1] {
+                let reference = evaluate_frame_list(frames, time, None, plane, previous.as_ref());
+                let sampled = compiled.sample_frame(frames, time, None, plane, previous.as_ref());
+                assert_eq!(*sampled, reference, "time={time} plane={plane}");
+                previous = Some(reference);
+            }
+        }
+        let a = compiled.sample_frame(frames, 5.0, None, 0, None);
+        let b = compiled.sample_frame(frames, 5.0, None, 0, None);
+        assert!(Arc::ptr_eq(&a, &b));
+        let a = DynamicFrameState {
+            coord: Some([1.0; 3]),
+            ..Default::default()
+        };
+        let b = DynamicFrameState {
+            coord: Some([2.0; 3]),
+            ..Default::default()
+        };
+        assert_eq!(
+            compiled.sample_frame(frames, 20.0, None, 0, Some(&a)).coord,
+            a.coord
+        );
+        assert_eq!(
+            compiled.sample_frame(frames, 20.0, None, 0, Some(&b)).coord,
+            b.coord
+        );
+    }
+
+    #[test]
+    fn raw_mesh_sampling_preserves_float_double_and_delta_encodings() {
+        for width in [4, 8] {
+            let values: Vec<f32> = (0..96).map(|i| i as f32 / 7.0).collect();
+            let raw: Vec<u8> = values
+                .iter()
+                .flat_map(|v| {
+                    if width == 4 {
+                        v.to_le_bytes().to_vec()
+                    } else {
+                        (*v as f64).to_le_bytes().to_vec()
+                    }
+                })
+                .collect();
+            for delta in [false, true] {
+                for index in 0..3 {
+                    let decoded = decode_raw_mesh(&raw, 3, index, delta).unwrap();
+                    for i in 0..32 {
+                        let offset = if !delta {
+                            0.0
+                        } else if i % 2 == 0 {
+                            ((i / 2) % 4) as f32 / 3.0
+                        } else {
+                            (i / 8) as f32 / 3.0
+                        };
+                        assert_eq!(decoded[i], values[index * 32 + i] + offset);
+                    }
+                }
+            }
+            assert!(decode_raw_mesh(&raw, 3, 3, false).is_none());
+        }
+        assert!(decode_raw_mesh(&[0; 3], 1, 0, false).is_none());
+        assert!(decode_raw_mesh(&[], usize::MAX, 0, false).is_none());
+    }
 
     #[test]
     fn mesh_domain_icon_uses_size_and_origin() {
@@ -7624,7 +7997,7 @@ mod tests {
             uv_bottom: 1.0,
             mesh: None,
             mesh_deformer_chain: Vec::new(),
-            draw_frame_info: draw_frame_info(Some(label.to_owned()), ctx),
+            draw_frame_info: draw_frame_info(Some(label.to_owned()), &ctx),
         }
     }
 
@@ -7857,7 +8230,7 @@ mod tests {
     fn native_mesh_combine_collapses_inclusive_noncombining_active_parent() {
         let parent = test_mesh_patch(0.10, 0.20);
         let child = test_mesh_patch(0.30, -0.10);
-        let mut chain = Vec::new();
+        let mut chain = Arc::new(Vec::new());
         let mut candidate = 0usize;
 
         // Active parent with meshCombine=false: it is the inclusive stop node
@@ -7889,7 +8262,7 @@ mod tests {
     fn native_mesh_combine_inactive_false_parent_is_a_hard_barrier() {
         let older = test_mesh_patch(0.10, 0.0);
         let current = test_mesh_patch(0.30, 0.0);
-        let mut chain = vec![older];
+        let mut chain = Arc::new(vec![older]);
         let mut candidate = 0usize;
 
         // An inactive meshTransform with meshCombine=false causes the native
@@ -7913,7 +8286,7 @@ mod tests {
     fn native_mesh_combine_inactive_true_parent_preserves_parent_walk() {
         let older = test_mesh_patch(0.10, 0.0);
         let current = test_mesh_patch(0.30, 0.0);
-        let mut chain = vec![older];
+        let mut chain = Arc::new(vec![older]);
         let mut candidate = 0usize;
 
         // meshCombine=true with no active mesh is transparent: native keeps
@@ -8723,7 +9096,7 @@ mod tests {
             uv_bottom: 1.0,
             mesh: None,
             mesh_deformer_chain: Vec::new(),
-            draw_frame_info: draw_frame_info(None, TravelContext::default()),
+            draw_frame_info: draw_frame_info(None, &TravelContext::default()),
         };
         let b = compute_bounds(&[sprite]).unwrap();
         assert_eq!(b.min_x, -10.0);
