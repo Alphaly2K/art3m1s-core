@@ -16,6 +16,11 @@ name = "probe_caption_test"
 path = "tools/game-probes/src/bin/probe_caption_test.rs"
 required-features = ["game-probes"]
 
+[[bin]]
+name = "emote_parity_probe"
+path = "tools/game-probes/src/bin/emote_parity_probe.rs"
+required-features = ["game-probes", "experimental-eluna"]
+
 [dependencies]
 art3m1s-emote = { path = "crates/art3m1s-emote" }
 eluna = { package = "eluna_rs", path = "crates/eluna", optional = true }

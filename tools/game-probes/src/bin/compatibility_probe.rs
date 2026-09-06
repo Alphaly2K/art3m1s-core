@@ -1,13 +1,24 @@
 use art3m1s_core::{
-    archive::reader::PfsArchive, backend::gl::platform::GfxBackend, ffi, runtime::CoreRuntime,
+    archive::reader::PfsArchive,
+    backend::gl::platform::{AngleBackend, GfxBackend},
+    ffi,
+    runtime::CoreRuntime,
 };
 use std::{
     ffi::{CStr, CString, c_char, c_int, c_longlong},
+    fs::File,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 
-static ARCHIVE: OnceLock<Mutex<PfsArchive>> = OnceLock::new();
+enum ProbeSource {
+    Archive(PfsArchive),
+    Directory(PathBuf),
+}
+
+static SOURCE: OnceLock<Mutex<ProbeSource>> = OnceLock::new();
 static OUTPUT_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 unsafe extern "C" fn read(
@@ -17,18 +28,40 @@ unsafe extern "C" fn read(
     offset: c_longlong,
 ) -> c_int {
     let path = unsafe { CStr::from_ptr(path) }.to_string_lossy();
-    let mut archive = ARCHIVE.get().unwrap().lock().unwrap();
-    let Some(entry) = archive.find(&path).cloned() else {
-        return -1;
-    };
-    if buf.is_null() {
-        return entry.size as c_int;
+    let mut source = SOURCE.get().unwrap().lock().unwrap();
+    match &mut *source {
+        ProbeSource::Archive(archive) => {
+            let Some(entry) = archive.find(&path).cloned() else {
+                return -1;
+            };
+            if buf.is_null() {
+                return c_int::try_from(entry.size).unwrap_or(c_int::MAX);
+            }
+            let buf = unsafe { std::slice::from_raw_parts_mut(buf, len as usize) };
+            archive
+                .read_entry(&entry, offset as u64, buf)
+                .map(|n| n as c_int)
+                .unwrap_or(-1)
+        }
+        ProbeSource::Directory(root) => {
+            let relative = path.replace('\\', "/");
+            let Ok(mut file) = File::open(root.join(relative.trim_start_matches('/'))) else {
+                return -1;
+            };
+            if buf.is_null() {
+                return file
+                    .metadata()
+                    .ok()
+                    .and_then(|metadata| c_int::try_from(metadata.len()).ok())
+                    .unwrap_or(-1);
+            }
+            if file.seek(SeekFrom::Start(offset.max(0) as u64)).is_err() {
+                return -1;
+            }
+            let buf = unsafe { std::slice::from_raw_parts_mut(buf, len.max(0) as usize) };
+            file.read(buf).map(|n| n as c_int).unwrap_or(-1)
+        }
     }
-    let buf = unsafe { std::slice::from_raw_parts_mut(buf, len as usize) };
-    archive
-        .read_entry(&entry, offset as u64, buf)
-        .map(|n| n as c_int)
-        .unwrap_or(-1)
 }
 
 unsafe extern "C" fn log(level: *const c_char, msg: *const c_char) {
@@ -42,6 +75,15 @@ unsafe extern "C" fn log(level: *const c_char, msg: *const c_char) {
 fn tick(rt: &mut CoreRuntime, count: usize, pixels: &mut Vec<u8>) {
     for _ in 0..count {
         rt.advance_and_render_into(17, pixels);
+    }
+}
+
+fn paced_tick(rt: &mut CoreRuntime, count: usize, pixels: &mut Vec<u8>) {
+    let frame_time = Duration::from_nanos(16_666_667);
+    for _ in 0..count {
+        let started = Instant::now();
+        rt.advance_and_render_into(17, pixels);
+        std::thread::sleep(frame_time.saturating_sub(started.elapsed()));
     }
 }
 
@@ -82,8 +124,13 @@ fn main() {
     OUTPUT_DIR.set(output_dir.clone()).unwrap();
     let save_dir = output_dir.join("saves");
     std::fs::create_dir_all(&save_dir).expect("create isolated save directory");
-    let archive = PfsArchive::open(Path::new(&path)).unwrap();
-    ARCHIVE.set(Mutex::new(archive)).ok().unwrap();
+    let input = Path::new(&path);
+    let source = if input.is_dir() {
+        ProbeSource::Directory(input.to_path_buf())
+    } else {
+        ProbeSource::Archive(PfsArchive::open(input).unwrap())
+    };
+    SOURCE.set(Mutex::new(source)).ok().unwrap();
     unsafe {
         ffi::art3m1s_register_file_reader(read);
         ffi::art3m1s_register_log_callback(log);
@@ -92,12 +139,24 @@ fn main() {
         ffi::art3m1s_set_save_dir(save_dir.as_ptr());
     }
     let ini = ffi::request_file("system.ini").unwrap();
-    let mut rt = CoreRuntime::create(1280, 720, GfxBackend::Cgl).unwrap();
+    let backend = match std::env::var("ART3M1S_PROBE_BACKEND").as_deref() {
+        Ok("angle-metal") => GfxBackend::Angle(AngleBackend::Metal),
+        Ok("angle-vulkan") => GfxBackend::Angle(AngleBackend::Vulkan),
+        Ok("angle-opengl") => GfxBackend::Angle(AngleBackend::OpenGL),
+        Ok("angle-d3d11") => GfxBackend::Angle(AngleBackend::D3D11),
+        _ => GfxBackend::Cgl,
+    };
+    let mut rt = CoreRuntime::create(1280, 720, backend).unwrap();
+    if mode.starts_with("eluna") {
+        let selected = unsafe { ffi::art3m1s_runtime_set_emote_backend(&mut rt, 1) };
+        assert_eq!(selected, 1, "select Eluna backend");
+        rt.set_profiler_enabled(true);
+    }
     rt.load_project_bytes(&ini, "WINDOWS").unwrap();
     let mut pixels = vec![0; rt.pixel_buffer_size()];
     tick(&mut rt, 900, &mut pixels);
     snapshot(&rt, &pixels, "title");
-    if mode == "interactive" {
+    if mode.ends_with("interactive") {
         use std::io::BufRead;
         println!("PROBE READY");
         for line in std::io::stdin().lock().lines() {
@@ -110,7 +169,9 @@ fn main() {
                 ["mouse", x, y] => rt.feed_mouse(x.parse().unwrap(), y.parse().unwrap()),
                 ["button", key, down] => rt.feed_mouse_button(key.parse().unwrap(), *down == "1"),
                 ["tick", count] => tick(&mut rt, count.parse().unwrap(), &mut pixels),
+                ["pace", count] => paced_tick(&mut rt, count.parse().unwrap(), &mut pixels),
                 ["shot", name] => snapshot(&rt, &pixels, name),
+                ["profile"] => println!("{}", rt.profiler_snapshot_json()),
                 ["trace"] => rt.set_string_variable("codex.trace", "1"),
                 ["dialog", accepted] => {
                     rt.submit_dialog_response(*accepted == "1", None);
