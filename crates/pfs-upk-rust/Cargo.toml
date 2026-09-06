@@ -1,0 +1,15 @@
+[package]
+name = "pfs-upk-rust"
+version = "0.2.0"
+edition = "2021"
+description = "Artemis Engine PFS archive access, C ABI wrapper over pf8"
+license = "MIT"
+
+[lib]
+name = "pfs_upk"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+pf8 = { path = "../pf8" }
+encoding_rs = "0.8"
