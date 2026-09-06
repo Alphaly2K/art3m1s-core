@@ -120,6 +120,9 @@ pub fn create_offscreen_context(
         GfxBackend::Angle(sub) => match create_egl(sub, stage_w, stage_h) {
             Ok((g, c)) => Ok((g, c, GfxBackend::Angle(sub))),
             Err(e) => {
+                if std::env::var_os("ART3M1S_ANGLE_REQUIRED").is_some() {
+                    return Err(format!("ANGLE initialization failed: {e}"));
+                }
                 crate::core_warn!("ANGLE failed ({e}), falling back to CGL");
                 create_cgl().map(|(g, c)| (g, c, GfxBackend::Cgl))
             }
@@ -210,11 +213,32 @@ fn create_cgl() -> Result<(Rc<glow::Context>, Box<dyn GLPlatformContext>), Strin
             const PROFILE: c_uint = 99;
             const CORE: c_uint = 0x3200;
             const COLOR: c_uint = 8;
+            // Headless macOS sessions can reject the accelerated 3.2 core
+            // profile even though the same machine supports a software or
+            // legacy pixel format. Try progressively more permissive formats
+            // so offscreen validation remains usable without changing the
+            // normal accelerated path.
+            const CORE_ATTRS: &[c_uint] = &[A, PROFILE, CORE, COLOR, 24, 0];
+            const ACCEL_ATTRS: &[c_uint] = &[A, COLOR, 24, 0];
+            const LEGACY_ATTRS: &[c_uint] = &[COLOR, 24, 0];
+            const MINIMAL_ATTRS: &[c_uint] = &[0];
             unsafe {
-                let attrs: [c_uint; 6] = [A, PROFILE, CORE, COLOR, 24, 0];
                 let mut pix = std::ptr::null_mut();
                 let mut npix: c_int = 0;
-                if CGLChoosePixelFormat(attrs.as_ptr(), &mut pix, &mut npix) != 0 || pix.is_null() {
+                for attrs in [CORE_ATTRS, ACCEL_ATTRS, LEGACY_ATTRS, MINIMAL_ATTRS] {
+                    let mut candidate = std::ptr::null_mut();
+                    let mut candidate_count: c_int = 0;
+                    if CGLChoosePixelFormat(attrs.as_ptr(), &mut candidate, &mut candidate_count)
+                        == 0
+                        && !candidate.is_null()
+                    {
+                        pix = candidate;
+                        npix = candidate_count;
+                        break;
+                    }
+                }
+                let _ = npix;
+                if pix.is_null() {
                     return Err("CGLChoosePixelFormat failed".into());
                 }
                 let mut h = std::ptr::null_mut();
@@ -757,7 +781,8 @@ fn create_egl(
         type EGLAttrib = isize;
         const EGL_PLATFORM_ANGLE_TYPE_OPENGL_ANGLE: EGLAttrib = 0x320D;
         const EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE: EGLAttrib = 0x3450;
-        const EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE: EGLAttrib = 0x34A2;
+        // EGL_ANGLE_platform_angle_metal (see ANGLE's eglext_angle.h).
+        const EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE: EGLAttrib = 0x3489;
         const EGL_PLATFORM_ANGLE_TYPE_D3D11_ANGLE: EGLAttrib = 0x3421;
 
         pub fn make(
@@ -783,7 +808,14 @@ fn create_egl(
                 let egl_candidates = if cfg!(target_os = "ios") {
                     vec![crate::ffi::angle_lib_path("libEGL.framework/libEGL")]
                 } else if cfg!(target_os = "macos") {
-                    vec![crate::ffi::angle_lib_path("libEGL.dylib")]
+                    // macOS packages normally contain the loader-path patched
+                    // dylibs next to the executable.  Also accept the
+                    // framework layout emitted by `build_angle.sh`; this is
+                    // useful when testing against an unpacked ANGLE bundle.
+                    vec![
+                        crate::ffi::angle_lib_path("libEGL.framework/libEGL"),
+                        crate::ffi::angle_lib_path("libEGL.dylib"),
+                    ]
                 } else if cfg!(target_os = "android") {
                     // Android 系统自带 libEGL.so，无需 ANGLE。
                     vec!["libEGL.so".to_string()]
@@ -811,6 +843,8 @@ fn create_egl(
                     *mut EGLint,
                     *mut EGLint,
                 ) -> EGLBoolean = load!(egl_lib, "eglInitialize");
+                let egl_get_error_early: unsafe extern "C" fn() -> EGLint =
+                    load!(egl_lib, "eglGetError");
 
                 // ── Display 创建 ──────────────────────────────────────
                 // macOS/Windows ANGLE：优先 eglGetPlatformDisplay (EGL 1.5)，再试
@@ -912,10 +946,16 @@ fn create_egl(
                     load!(egl_lib, "eglGetCurrentContext");
 
                 if display.is_null() {
-                    return Err("eglGetDisplay failed".into());
+                    return Err(format!(
+                        "eglGetDisplay failed: EGL {:#x}",
+                        egl_get_error_early()
+                    ));
                 }
                 if egl_initialize(display, std::ptr::null_mut(), std::ptr::null_mut()) == 0 {
-                    return Err("eglInitialize failed".into());
+                    return Err(format!(
+                        "eglInitialize failed: EGL {:#x}",
+                        egl_get_error_early()
+                    ));
                 }
 
                 // 告诉 EGL 我们要用 OpenGL ES API（mesa 严格要求；ANGLE 宽松但
@@ -1004,7 +1044,10 @@ fn create_egl(
                 let gles_candidates = if cfg!(target_os = "ios") {
                     vec![crate::ffi::angle_lib_path("libGLESv2.framework/libGLESv2")]
                 } else if cfg!(target_os = "macos") {
-                    vec![crate::ffi::angle_lib_path("libGLESv2.dylib")]
+                    vec![
+                        crate::ffi::angle_lib_path("libGLESv2.framework/libGLESv2"),
+                        crate::ffi::angle_lib_path("libGLESv2.dylib"),
+                    ]
                 } else if cfg!(target_os = "android") {
                     // Android 系统自带 libGLESv2.so。
                     vec!["libGLESv2.so".to_string()]

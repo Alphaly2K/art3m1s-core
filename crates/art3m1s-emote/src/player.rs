@@ -37,6 +37,17 @@ pub struct TimelineState {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+struct DifferenceTrackState {
+    value: f32,
+    start: f32,
+    target: f32,
+    elapsed: f32,
+    duration: f32,
+    /// Latest authored frame reached by the native timeline cursor.
+    cursor: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum EmoteCommand {
     SetScale([f32; 3]),
     SetCoord([f32; 4]),
@@ -73,6 +84,7 @@ pub struct EmotePlayer {
     transform: EmoteTransform,
     variables: BTreeMap<String, VariableState>,
     timelines: BTreeMap<String, TimelineState>,
+    difference_tracks: BTreeMap<String, BTreeMap<String, DifferenceTrackState>>,
     commands: VecDeque<EmoteCommand>,
 }
 
@@ -151,19 +163,36 @@ impl EmotePlayer {
         flags: u32,
     ) {
         let label = label.into();
-        if model
+        if flags & 1 == 0 {
+            self.timelines.clear();
+            self.difference_tracks.clear();
+        }
+        self.play_timeline(label.clone(), flags);
+        if let Some(timeline) = model
             .timelines()
             .get(&label)
-            .is_some_and(|timeline| !timeline.diff)
+            .filter(|timeline| timeline.diff)
         {
-            self.timelines.retain(|active, _| {
-                model
-                    .timelines()
-                    .get(active)
-                    .is_some_and(|timeline| timeline.diff)
-            });
+            self.initialize_difference_timeline(timeline);
         }
-        self.play_timeline(label, flags);
+    }
+
+    pub fn fade_in_model_timeline(
+        &mut self,
+        model: &EmoteModel,
+        label: impl Into<String>,
+        frames: f32,
+        easing: u32,
+    ) {
+        let label = label.into();
+        self.fade_in_timeline(label.clone(), frames, easing);
+        if let Some(timeline) = model
+            .timelines()
+            .get(&label)
+            .filter(|timeline| timeline.diff)
+        {
+            self.initialize_difference_timeline_at(timeline, 0.0);
+        }
     }
 
     pub fn fade_in_timeline(&mut self, label: impl Into<String>, frames: f32, easing: u32) {
@@ -177,6 +206,7 @@ impl EmotePlayer {
     pub fn stop_timeline(&mut self, label: impl Into<String>) {
         let label = label.into();
         self.timelines.remove(&label);
+        self.difference_tracks.remove(&label);
         self.commands
             .push_back(EmoteCommand::StopTimeline { label });
     }
@@ -193,27 +223,80 @@ impl EmotePlayer {
         self.commands.push_back(EmoteCommand::Skip);
     }
 
-    pub fn advance(&mut self, frames: f32) {
+    /// Advances script-controlled state and reports whether the rendered pose
+    /// can have changed. Callers use this to keep static E-Mote layers frozen
+    /// instead of rebuilding the complete motion graph at display refresh
+    /// rate.
+    pub fn advance(&mut self, frames: f32) -> bool {
+        self.advance_inner(frames, None)
+    }
+
+    pub fn advance_model(&mut self, model: &EmoteModel, frames: f32) -> bool {
+        self.advance_inner(frames, Some(model))
+    }
+
+    fn advance_inner(&mut self, frames: f32, model: Option<&EmoteModel>) -> bool {
         let frames = frames.max(0.0);
+        let mut changed = false;
         for state in self.variables.values_mut() {
+            let before = state.value;
             advance_scalar(
                 &mut state.value,
                 state.target,
                 &mut state.remaining_frames,
                 frames,
             );
+            changed |= state.value != before;
         }
+        let mut difference_updates = Vec::new();
         for state in self.timelines.values_mut() {
-            state.position += frames;
+            let old_position = state.position;
+            let next_position = model
+                .and_then(|model| model.timelines().get(&state.label))
+                .filter(|timeline| timeline.loop_end <= timeline.loop_begin)
+                .filter(|timeline| timeline.last_time >= 0.0)
+                .map_or(state.position + frames, |timeline| {
+                    (state.position + frames).min(timeline.last_time)
+                });
+            changed |= next_position != state.position;
+            state.position = next_position;
+            if let Some(model) = model
+                && model
+                    .timelines()
+                    .get(&state.label)
+                    .is_some_and(|timeline| timeline.diff)
+            {
+                difference_updates.push((state.label.clone(), old_position, next_position));
+                changed = true;
+            }
+            let before = state.weight;
             advance_scalar(
                 &mut state.weight,
                 state.target_weight,
                 &mut state.remaining_frames,
                 frames,
             );
+            changed |= state.weight != before;
         }
+        if let Some(model) = model {
+            for (label, old_position, new_position) in difference_updates {
+                if let Some(timeline) = model.timelines().get(&label) {
+                    self.advance_difference_timeline(
+                        &label,
+                        timeline,
+                        old_position,
+                        new_position,
+                        frames,
+                    );
+                }
+            }
+        }
+        let before = self.timelines.len();
         self.timelines
             .retain(|_, timeline| timeline.weight != 0.0 || timeline.target_weight != 0.0);
+        self.difference_tracks
+            .retain(|label, _| self.timelines.contains_key(label));
+        changed | (self.timelines.len() != before)
     }
 
     pub fn take_commands(&mut self) -> impl Iterator<Item = EmoteCommand> + '_ {
@@ -227,14 +310,148 @@ impl EmotePlayer {
         self.timelines
             .values()
             .filter_map(|state| {
-                model
-                    .timelines()
-                    .get(&state.label)
-                    .map(|timeline| (state, timeline.sample(state.position)))
+                model.timelines().get(&state.label).map(|timeline| {
+                    let values = if timeline.diff {
+                        self.difference_tracks
+                            .get(&state.label)
+                            .map(|tracks| {
+                                tracks
+                                    .iter()
+                                    .map(|(label, track)| (label.clone(), track.value))
+                                    .collect()
+                            })
+                            .unwrap_or_else(|| timeline.sample(state.position))
+                    } else {
+                        timeline.sample(state.position)
+                    };
+                    (state, values)
+                })
             })
             .collect()
     }
 
+    fn initialize_difference_timeline(&mut self, timeline: &crate::EmoteTimeline) {
+        self.initialize_difference_timeline_at(timeline, 0.0);
+    }
+
+    fn initialize_difference_timeline_at(
+        &mut self,
+        timeline: &crate::EmoteTimeline,
+        position: f32,
+    ) {
+        let tracks = timeline
+            .tracks
+            .iter()
+            .filter_map(|track| {
+                if track.frames.is_empty() {
+                    return None;
+                }
+                let cursor = track
+                    .frames
+                    .iter()
+                    .rposition(|frame| frame.frame <= position)
+                    .unwrap_or(usize::MAX);
+                Some((
+                    track.label.clone(),
+                    DifferenceTrackState {
+                        value: 0.0,
+                        start: 0.0,
+                        target: 0.0,
+                        elapsed: 0.0,
+                        duration: 0.0,
+                        cursor,
+                    },
+                ))
+            })
+            .collect();
+        self.difference_tracks
+            .insert(timeline.label.clone(), tracks);
+        let mut tracks = self
+            .difference_tracks
+            .remove(&timeline.label)
+            .unwrap_or_default();
+        for source in &timeline.tracks {
+            let Some(track) = tracks.get_mut(&source.label) else {
+                continue;
+            };
+            if track.cursor != usize::MAX {
+                issue_difference_frame(source, track.cursor, position, track);
+            }
+        }
+        self.difference_tracks
+            .insert(timeline.label.clone(), tracks);
+    }
+
+    fn advance_difference_timeline(
+        &mut self,
+        label: &str,
+        timeline: &crate::EmoteTimeline,
+        old_position: f32,
+        new_position: f32,
+        delta: f32,
+    ) {
+        if !delta.is_finite() || delta <= 0.0 {
+            return;
+        }
+        if !self.difference_tracks.contains_key(label) {
+            self.initialize_difference_timeline(timeline);
+        }
+        let Some(mut tracks) = self.difference_tracks.remove(label) else {
+            return;
+        };
+
+        // Difference timelines issue a timed target only when a frame cursor
+        // crosses a keyframe. The target transition is then advanced by the
+        // complete host delta, matching the native Timeline Step routine.
+        //
+        // The timeline position grows monotonically even for looping
+        // timelines; fold both endpoints back into the loop before walking,
+        // otherwise every call after the first wrap would seek back to
+        // loop_begin and replay only its first frame.
+        let (old_position, new_position) = if timeline.loop_end > timeline.loop_begin {
+            let span = timeline.loop_end - timeline.loop_begin;
+            let shift = ((old_position - timeline.loop_begin) / span).floor() * span;
+            if shift > 0.0 {
+                (old_position - shift, new_position - shift)
+            } else {
+                (old_position, new_position)
+            }
+        } else {
+            (old_position, new_position)
+        };
+        let mut cursor = old_position;
+        let mut remaining = (new_position - old_position).max(0.0);
+        if timeline.loop_end > timeline.loop_begin {
+            while remaining > 0.0 {
+                let to_end = (timeline.loop_end - cursor).max(0.0);
+                if to_end <= f32::EPSILON {
+                    seek_difference_timeline(timeline, &mut tracks, timeline.loop_begin);
+                    cursor = timeline.loop_begin;
+                    continue;
+                }
+                let step = remaining.min(to_end);
+                let endpoint = cursor + step;
+                advance_difference_to(
+                    timeline,
+                    &mut tracks,
+                    endpoint,
+                    endpoint < timeline.loop_end,
+                );
+                cursor = endpoint;
+                remaining -= step;
+                if step >= to_end - f32::EPSILON {
+                    seek_difference_timeline(timeline, &mut tracks, timeline.loop_begin);
+                    cursor = timeline.loop_begin;
+                }
+            }
+        } else {
+            advance_difference_to(timeline, &mut tracks, new_position, true);
+        }
+        for track in tracks.values_mut() {
+            advance_difference_track(track, delta);
+        }
+        self.difference_tracks.insert(label.to_owned(), tracks);
+    }
     fn fade_timeline(
         &mut self,
         label: String,
@@ -277,6 +494,110 @@ impl EmotePlayer {
             }
         });
     }
+}
+
+fn issue_difference_frame(
+    source: &crate::EmoteTimelineTrack,
+    index: usize,
+    command_time: f32,
+    track: &mut DifferenceTrackState,
+) {
+    let Some(frame) = source.frames.get(index) else {
+        return;
+    };
+    track.cursor = index;
+    if frame.hold {
+        return;
+    }
+    track.target = frame.value;
+    track.start = track.value;
+    track.elapsed = 0.0;
+    // Native SetVariableDiff uses the next authored frame minus the current
+    // command time and one exclusive tick. The command time matters when a
+    // large host step crosses several keyframes in one update.
+    track.duration = source
+        .frames
+        .get(index + 1)
+        .map(|next| (next.frame - command_time - 1.0).max(0.0))
+        .unwrap_or(0.0);
+    if track.duration <= 0.0 {
+        track.value = frame.value;
+    }
+}
+
+fn seek_difference_timeline(
+    timeline: &crate::EmoteTimeline,
+    tracks: &mut BTreeMap<String, DifferenceTrackState>,
+    position: f32,
+) {
+    for source in &timeline.tracks {
+        let Some(track) = tracks.get_mut(&source.label) else {
+            continue;
+        };
+        let cursor = source
+            .frames
+            .iter()
+            .rposition(|frame| frame.frame <= position)
+            .unwrap_or(usize::MAX);
+        track.cursor = cursor;
+        if cursor == usize::MAX {
+            continue;
+        }
+        // A hold marker is a cursor-only frame. Native seek still reissues
+        // the latest preceding writable frame at the seek time.
+        if let Some(index) = source.frames[..=cursor]
+            .iter()
+            .rposition(|frame| !frame.hold)
+        {
+            issue_difference_frame(source, index, position, track);
+            track.cursor = cursor;
+        }
+    }
+}
+
+fn advance_difference_to(
+    timeline: &crate::EmoteTimeline,
+    tracks: &mut BTreeMap<String, DifferenceTrackState>,
+    position: f32,
+    inclusive: bool,
+) {
+    for source in &timeline.tracks {
+        let Some(track) = tracks.get_mut(&source.label) else {
+            continue;
+        };
+        loop {
+            let index = if track.cursor == usize::MAX {
+                0
+            } else {
+                track.cursor + 1
+            };
+            let Some(frame) = source.frames.get(index) else {
+                break;
+            };
+            let crossed = if inclusive {
+                frame.frame <= position
+            } else {
+                frame.frame < position
+            };
+            if !crossed {
+                break;
+            }
+            issue_difference_frame(source, index, position, track);
+        }
+    }
+}
+
+fn advance_difference_track(track: &mut DifferenceTrackState, delta: f32) {
+    if track.duration <= 0.0 {
+        track.value = track.target;
+        return;
+    }
+    track.elapsed = (track.elapsed + delta).min(track.duration);
+    let ratio = (track.elapsed / track.duration).clamp(0.0, 1.0);
+    // Timeline easing is uncommon for model-wide difference tracks. Linear
+    // interpolation keeps this hot path allocation-free and matches the
+    // default native easing used by the shipped models.
+    track.value = track.start + (track.target - track.start) * ratio;
 }
 
 fn advance_scalar(value: &mut f32, target: f32, remaining: &mut f32, frames: f32) {
@@ -323,5 +644,62 @@ mod tests {
         assert!((player.variables()["face_talk"].value - 0.4).abs() < 0.0001);
         player.advance(6.0);
         assert_eq!(player.variables()["face_talk"].value, 1.0);
+    }
+
+    #[test]
+    fn looping_difference_timeline_keeps_advancing_past_the_wrap() {
+        use crate::{EmoteKeyframe, EmoteTimeline, EmoteTimelineTrack};
+        let timeline = EmoteTimeline {
+            label: "idle".into(),
+            diff: true,
+            last_time: 300.0,
+            loop_begin: 0.0,
+            loop_end: 300.0,
+            tracks: vec![EmoteTimelineTrack {
+                label: "body_UD".into(),
+                frames: vec![
+                    EmoteKeyframe {
+                        frame: 0.0,
+                        hold: false,
+                        value: 0.0,
+                        easing: None,
+                    },
+                    EmoteKeyframe {
+                        frame: 1.0,
+                        hold: false,
+                        value: -15.0,
+                        easing: None,
+                    },
+                    EmoteKeyframe {
+                        frame: 150.0,
+                        hold: false,
+                        value: 30.0,
+                        easing: None,
+                    },
+                ],
+            }],
+        };
+        let mut player = EmotePlayer::default();
+        player.initialize_difference_timeline(&timeline);
+        let value = |player: &EmotePlayer| player.difference_tracks["idle"]["body_UD"].value;
+        let mut position = 0.0;
+        // 跨过第一次回绕后，游标必须继续前进而不是每帧重新 seek 回 loop_begin。
+        let mut wrapped_samples = Vec::new();
+        for _ in 0..620 {
+            let old = position;
+            position += 1.0;
+            player.advance_difference_timeline("idle", &timeline, old, position, 1.0);
+            if position > 310.0 {
+                wrapped_samples.push(value(&player));
+            }
+        }
+        let unique: std::collections::BTreeSet<_> = wrapped_samples
+            .iter()
+            .map(|value| value.to_bits())
+            .collect();
+        assert!(
+            unique.len() > 100,
+            "looped difference timeline froze after the wrap: {wrapped_samples:?}"
+        );
     }
 }

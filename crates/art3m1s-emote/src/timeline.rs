@@ -5,6 +5,9 @@ use crate::PsbValue;
 #[derive(Clone, Debug, PartialEq)]
 pub struct EmoteKeyframe {
     pub frame: f32,
+    /// Native TimelineVariableFrame::type == 0. Hold markers advance the
+    /// cursor without issuing a variable write.
+    pub hold: bool,
     pub value: f32,
     pub easing: Option<i64>,
 }
@@ -118,23 +121,30 @@ impl EmoteTimelineTrack {
     }
 
     pub fn sample(&self, frame: f32) -> Option<f32> {
-        let first = self.frames.first()?;
-        if frame <= first.frame {
-            return Some(first.value);
+        let index = self
+            .frames
+            .iter()
+            .rposition(|keyframe| keyframe.frame <= frame)?;
+        let current = &self.frames[index];
+        if current.hold {
+            return self.frames[..index]
+                .iter()
+                .rev()
+                .find(|keyframe| !keyframe.hold)
+                .map(|keyframe| keyframe.value);
         }
-        for pair in self.frames.windows(2) {
-            let from = &pair[0];
-            let to = &pair[1];
-            if frame <= to.frame {
-                let span = to.frame - from.frame;
-                if span <= f32::EPSILON {
-                    return Some(to.value);
-                }
-                let ratio = ((frame - from.frame) / span).clamp(0.0, 1.0);
-                return Some(from.value + (to.value - from.value) * ratio);
-            }
+        let Some(next) = self.frames.get(index + 1) else {
+            return Some(current.value);
+        };
+        if next.hold {
+            return Some(current.value);
         }
-        self.frames.last().map(|frame| frame.value)
+        let span = next.frame - current.frame;
+        if span <= f32::EPSILON {
+            return Some(next.value);
+        }
+        let ratio = ((frame - current.frame) / span).clamp(0.0, 1.0);
+        Some(current.value + (next.value - current.value) * ratio)
     }
 
     fn sample_looped(&self, frame: f32, loop_begin: f32, loop_end: f32) -> Option<f32> {
@@ -164,11 +174,21 @@ impl EmoteTimelineTrack {
 
 impl EmoteKeyframe {
     fn parse(value: &PsbValue) -> Option<Self> {
-        let content = value.get("content")?;
+        let hold = value.get("type").and_then(PsbValue::as_i64).unwrap_or(0) == 0;
+        let content = value.get("content");
+        if !hold && content.is_none() {
+            return None;
+        }
         Some(Self {
             frame: number(value.get("time")?)?,
-            value: variable_number(content.get("value")?)?,
-            easing: content.get("easing").and_then(PsbValue::as_i64),
+            hold,
+            value: content
+                .and_then(|content| content.get("value"))
+                .and_then(variable_number)
+                .unwrap_or(0.0),
+            easing: content
+                .and_then(|content| content.get("easing"))
+                .and_then(PsbValue::as_i64),
         })
     }
 }
@@ -286,35 +306,14 @@ impl EmoteEyeControl {
         if !self.enabled || !self.blink_enabled {
             return None;
         }
-        let targets = self.nodes.first()?;
-        for (index, [left, right]) in self.edges.iter().copied().enumerate() {
-            let (min, max) = if left <= right {
-                (left, right)
-            } else {
-                (right, left)
-            };
-            if value >= min && value <= max {
-                // Each edge selects the closed-eye target at the same node
-                // index. Values such as 30/32/34 are independent special eye
-                // expressions, not intermediate blink frames.
-                let target = *targets.get(index)?;
-                let phase = phase.clamp(0.0, 1.0);
-                // The closed state must survive normal fractional 60 Hz host
-                // deltas. A single mathematical midpoint can fall between two
-                // rendered frames, leaving only the open and half-closed atlas
-                // images visible. Keep the model's closed target for the
-                // center tenth of the blink while preserving its total length.
-                let amount = if phase < 0.45 {
-                    phase / 0.45
-                } else if phase <= 0.55 {
-                    1.0
-                } else {
-                    (1.0 - phase) / 0.45
-                };
-                return Some(value + (target - value) * amount);
-            }
+        if value < self.begin_frame
+            || value > self.end_frame
+            || (self.end_frame - self.begin_frame).abs() <= f32::EPSILON
+        {
+            return None;
         }
-        None
+        let phase = phase.clamp(0.0, 1.0);
+        Some(value + (self.end_frame - value) * phase)
     }
 }
 
@@ -352,11 +351,13 @@ mod tests {
             frames: vec![
                 EmoteKeyframe {
                     frame: 0.0,
+                    hold: false,
                     value: 0.0,
                     easing: Some(0),
                 },
                 EmoteKeyframe {
                     frame: 10.0,
+                    hold: false,
                     value: 100.0,
                     easing: Some(0),
                 },
@@ -401,13 +402,10 @@ mod tests {
             nodes: vec![vec![10.0, 30.0, 32.0, 34.0, 36.0, 38.0, 40.0, 0.0]],
         };
         assert_eq!(control.blink_value(0.0, 0.0), Some(0.0));
-        assert!((control.blink_value(0.0, 0.25).unwrap() - 5.555_555_3).abs() < 0.001);
-        assert_eq!(control.blink_value(0.0, 0.46), Some(10.0));
-        assert_eq!(control.blink_value(0.0, 0.5), Some(10.0));
-        assert_eq!(control.blink_value(0.0, 0.54), Some(10.0));
-        assert!((control.blink_value(0.0, 0.75).unwrap() - 5.555_555_3).abs() < 0.001);
-        assert_eq!(control.blink_value(0.0, 1.0), Some(0.0));
-        assert_eq!(control.blink_value(30.0, 0.0), Some(30.0));
+        assert_eq!(control.blink_value(0.0, 0.25), Some(2.5));
+        assert_eq!(control.blink_value(0.0, 0.5), Some(5.0));
+        assert_eq!(control.blink_value(0.0, 1.0), Some(10.0));
+        assert_eq!(control.blink_value(30.0, 0.0), None);
         assert_eq!(control.blink_value(23.0, 0.5), None);
     }
 
@@ -424,11 +422,13 @@ mod tests {
                 frames: vec![
                     EmoteKeyframe {
                         frame: 0.0,
+                        hold: false,
                         value: 0.0,
                         easing: Some(0),
                     },
                     EmoteKeyframe {
                         frame: 200.0,
+                        hold: false,
                         value: 100.0,
                         easing: Some(0),
                     },

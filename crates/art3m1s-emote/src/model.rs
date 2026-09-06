@@ -21,8 +21,19 @@ pub struct EmoteModelInfo {
     pub icon_count: usize,
 }
 
+#[derive(Clone, Debug)]
+struct EmoteClampControl {
+    enabled: bool,
+    kind: i64,
+    var_lr: String,
+    var_ud: String,
+    min: f32,
+    max: f32,
+}
+
 #[derive(Debug)]
 pub struct EmoteModel {
+    evaluation_identity: std::sync::Arc<()>,
     document: Option<PsbDocument>,
     info: EmoteModelInfo,
     atlas: EmoteAtlas,
@@ -31,9 +42,14 @@ pub struct EmoteModel {
     variables: BTreeMap<String, EmoteVariable>,
     selectors: Vec<EmoteSelectorControl>,
     eye_controls: Vec<EmoteEyeControl>,
+    clamp_controls: Vec<EmoteClampControl>,
 }
 
 impl EmoteModel {
+    pub(crate) fn evaluation_identity(&self) -> &std::sync::Arc<()> {
+        &self.evaluation_identity
+    }
+
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
         Self::from_document(PsbDocument::open(path)?)
     }
@@ -41,7 +57,8 @@ impl EmoteModel {
     pub fn from_document(document: PsbDocument) -> Result<Self> {
         let atlas = EmoteAtlas::from_document(&document)?;
         let motions = EmoteMotionLibrary::parse(&document.root)?;
-        let (timelines, variables, selectors, eye_controls) = parse_controls(&document.root);
+        let (timelines, variables, selectors, eye_controls, clamp_controls) =
+            parse_controls(&document.root);
         let info = inspect_model(&document.root, &atlas, &timelines, &variables)?;
         if info.type_id.as_deref() != Some("motion") {
             return Err(EmoteError::InvalidFormat(format!(
@@ -50,6 +67,7 @@ impl EmoteModel {
             )));
         }
         Ok(Self {
+            evaluation_identity: std::sync::Arc::new(()),
             document: Some(document),
             info,
             atlas,
@@ -58,6 +76,7 @@ impl EmoteModel {
             variables,
             selectors,
             eye_controls,
+            clamp_controls,
         })
     }
 
@@ -133,6 +152,69 @@ impl EmoteModel {
             selector.apply(value, variables);
         }
     }
+
+    /// Applies the metadata `clampControl` pass used by native E-Mote.
+    /// Clamp controls are evaluated after timeline/controller values are
+    /// resolved and before motion parameters sample their frame meshes.
+    pub(crate) fn apply_clamp_controls(&self, variables: &mut BTreeMap<String, f32>) {
+        for control in &self.clamp_controls {
+            if !control.enabled {
+                continue;
+            }
+            let span = control.max - control.min;
+            if !span.is_finite() || span.abs() <= f32::EPSILON {
+                continue;
+            }
+            let Some(lr) = variables.get(&control.var_lr).copied() else {
+                continue;
+            };
+            let Some(ud) = variables.get(&control.var_ud).copied() else {
+                continue;
+            };
+            let mut x = ((lr - control.min) / span) * 2.0 - 1.0;
+            let mut y = ((ud - control.min) / span) * 2.0 - 1.0;
+            if x != 0.0 && y != 0.0 {
+                match control.kind {
+                    // Native type 1 clips to a unit circle.
+                    1 => {
+                        let radius = x.hypot(y);
+                        if radius > 1.0 {
+                            x /= radius;
+                            y /= radius;
+                        }
+                    }
+                    // Native type 0 maps a square to a disc while preserving
+                    // the authored edge response from sub_10275CC0.
+                    0 => {
+                        let mut q = (x / y).abs();
+                        if q > 1.0 {
+                            q = 1.0 / q;
+                        }
+                        let inv = (q * q + 1.0).sqrt().recip();
+                        x *= inv;
+                        y *= inv;
+                        let radius = x.hypot(y);
+                        if radius > f32::EPSILON {
+                            let radial = (radius * std::f32::consts::FRAC_PI_2).sin() / radius;
+                            let axis_mix = 1.0 - (q * std::f32::consts::FRAC_PI_2).cos();
+                            let scale = (radial - 1.0) * axis_mix + 1.0;
+                            x *= scale;
+                            y *= scale;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            variables.insert(
+                control.var_lr.clone(),
+                ((x + 1.0) * 0.5) * span + control.min,
+            );
+            variables.insert(
+                control.var_ud.clone(),
+                ((y + 1.0) * 0.5) * span + control.min,
+            );
+        }
+    }
 }
 
 fn inspect_model(
@@ -204,6 +286,7 @@ fn parse_controls(
     BTreeMap<String, EmoteVariable>,
     Vec<EmoteSelectorControl>,
     Vec<EmoteEyeControl>,
+    Vec<EmoteClampControl>,
 ) {
     let timelines = root
         .at_path(&["metadata", "timelineControl"])
@@ -250,5 +333,30 @@ fn parse_controls(
         .iter()
         .filter_map(EmoteEyeControl::parse)
         .collect();
-    (timelines, variables, selectors, eye_controls)
+    let clamp_controls = root
+        .at_path(&["metadata", "clampControl"])
+        .and_then(PsbValue::as_list)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|value| {
+            Some(EmoteClampControl {
+                enabled: value.get("enabled").and_then(PsbValue::as_i64).unwrap_or(1) != 0,
+                kind: value.get("type").and_then(PsbValue::as_i64)?,
+                var_lr: value.get("var_lr").and_then(PsbValue::as_str)?.to_owned(),
+                var_ud: value.get("var_ud").and_then(PsbValue::as_str)?.to_owned(),
+                min: number(value.get("min")?)?,
+                max: number(value.get("max")?)?,
+            })
+        })
+        .collect();
+    (timelines, variables, selectors, eye_controls, clamp_controls)
+}
+
+fn number(value: &PsbValue) -> Option<f32> {
+    match value {
+        PsbValue::Integer(value) => Some(*value as f32),
+        PsbValue::Float(value) => Some(*value),
+        PsbValue::Double(value) => Some(*value as f32),
+        _ => None,
+    }
 }

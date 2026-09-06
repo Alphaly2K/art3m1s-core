@@ -9,6 +9,9 @@ instances, texture uploads, scene placement, and compositor integration.
 The PSB container behavior was cross-checked against the MIT-licensed
 [`number201724/psbfile`](https://github.com/number201724/psbfile) project. This
 crate is an independent Rust implementation and does not depend on FreeMote.
+The motion reader and transform behavior were also cross-checked against the
+repository's Eluna backend and krkrsdl3's emoteplayer plugin. Attribution and
+license details are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## NekoMiko script contract
 
@@ -71,7 +74,7 @@ is available as `/path/to/fixtures/nekomiko`.
 
 ## Known compatibility gaps
 
-- Exact proprietary frame easing semantics beyond linear interpolation
+- Stencil wipe and particle/model/camera layer effects
 - Exact SDK behavior of `pass`, `step`, and `skip`; calls are accepted and
   retained as playback mode commands, but do not yet alter timeline sampling
 - External-texture E-Mote packages and non-DXT5 atlas formats

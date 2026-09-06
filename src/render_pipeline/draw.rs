@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
+use std::sync::Arc;
 
 /// Opaque backend texture handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -270,7 +271,7 @@ pub type LayerDrawSource<'a> = dyn FnMut(&str) -> Vec<DrawCommand> + 'a;
 /// Positions are local pixels and UVs are normalized within `DrawCommand::clip`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DrawMesh {
-    pub vertices: Vec<[f32; 4]>,
+    pub vertices: Arc<[[f32; 4]]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

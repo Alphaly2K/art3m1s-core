@@ -495,6 +495,7 @@ impl CoreRuntime {
     pub fn set_profiler_enabled(&self, enabled: bool) {
         self.renderer.set_profile_enabled(enabled);
         self.texture_provider.set_profile_enabled(enabled);
+        self.emote.lock().unwrap().set_profile_enabled(enabled);
         self.profiler.set_enabled(enabled);
     }
 
@@ -533,9 +534,22 @@ impl CoreRuntime {
         profile.texture_count = texture_count as u64;
         profile.texture_gpu_bytes = gpu_bytes;
         profile.texture_cpu_bytes = cpu_bytes;
-        let (emote_layers, emote_source_bytes) = self.emote.lock().unwrap().profile_memory();
+        let emote = self.emote.lock().unwrap();
+        let (emote_layers, emote_source_bytes) = emote.profile_memory();
+        let emote_stats = emote.take_profile_stats();
+        drop(emote);
         profile.emote_layers = emote_layers as u64;
         profile.emote_source_bytes = emote_source_bytes;
+        profile.emote_worker_eval_ns = emote_stats.worker_eval_ns;
+        profile.emote_scene_publish_ns = emote_stats.scene_clone_ns;
+        profile.emote_draw_build_ns = emote_stats.draw_build_ns;
+        profile.emote_mesh_build_ns = emote_stats.mesh_build_ns;
+        profile.emote_worker_updates = emote_stats.worker_updates;
+        profile.emote_worker_input_frames = emote_stats.worker_input_frames;
+        profile.emote_worker_dropped_scenes = emote_stats.worker_dropped_scenes;
+        profile.emote_sprites = emote_stats.sprites;
+        profile.emote_mesh_sprites = emote_stats.mesh_sprites;
+        profile.emote_mesh_vertices = emote_stats.mesh_vertices;
         profile.finish();
         self.profiler.submit(*profile);
     }

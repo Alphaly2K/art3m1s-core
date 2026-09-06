@@ -18,10 +18,44 @@ mod eluna;
 
 pub(super) type SharedEmoteState = Arc<Mutex<EmoteState>>;
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct EmoteProfileStats {
+    pub worker_eval_ns: u64,
+    pub scene_clone_ns: u64,
+    pub draw_build_ns: u64,
+    pub mesh_build_ns: u64,
+    pub worker_updates: u64,
+    pub worker_input_frames: u64,
+    pub worker_dropped_scenes: u64,
+    pub sprites: u64,
+    pub mesh_sprites: u64,
+    pub mesh_vertices: u64,
+}
+
+impl EmoteProfileStats {
+    fn merge(&mut self, other: Self) {
+        self.worker_eval_ns = self.worker_eval_ns.saturating_add(other.worker_eval_ns);
+        self.scene_clone_ns = self.scene_clone_ns.saturating_add(other.scene_clone_ns);
+        self.draw_build_ns = self.draw_build_ns.saturating_add(other.draw_build_ns);
+        self.mesh_build_ns = self.mesh_build_ns.saturating_add(other.mesh_build_ns);
+        self.worker_updates = self.worker_updates.saturating_add(other.worker_updates);
+        self.worker_input_frames = self
+            .worker_input_frames
+            .saturating_add(other.worker_input_frames);
+        self.worker_dropped_scenes = self
+            .worker_dropped_scenes
+            .saturating_add(other.worker_dropped_scenes);
+        self.sprites = self.sprites.saturating_add(other.sprites);
+        self.mesh_sprites = self.mesh_sprites.saturating_add(other.mesh_sprites);
+        self.mesh_vertices = self.mesh_vertices.saturating_add(other.mesh_vertices);
+    }
+}
+
 pub(super) struct EmoteState {
     layers: BTreeMap<String, LayerSlots>,
     next_generation: u64,
     backend: EmoteBackend,
+    profiling_enabled: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -46,6 +80,7 @@ impl Default for EmoteState {
             layers: BTreeMap::new(),
             next_generation: 0,
             backend: EmoteBackend::Builtin,
+            profiling_enabled: false,
         }
     }
 }
@@ -64,6 +99,7 @@ enum EmoteInstanceSlot {
 }
 
 struct EmoteInstance {
+    evaluation_history: art3m1s_emote::EmoteEvaluationHistory,
     generation: u64,
     width: u32,
     height: u32,
@@ -83,8 +119,17 @@ struct EmoteInstance {
 struct EmoteEyeBlink {
     control: EmoteEyeControl,
     wait_remaining: f32,
-    blink_position: Option<f32>,
+    blink_frame: f32,
+    phase: EmoteBlinkPhase,
     random_state: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EmoteBlinkPhase {
+    Idle,
+    Closing,
+    ClosedHold,
+    Opening,
 }
 
 struct EmoteTextureState {
@@ -116,6 +161,28 @@ impl EmoteState {
         (instances, source_bytes)
     }
 
+    pub(super) fn set_profile_enabled(&mut self, enabled: bool) {
+        self.profiling_enabled = enabled;
+        for slots in self.layers.values_mut() {
+            for instance in [&mut slots.active, &mut slots.pending]
+                .into_iter()
+                .flatten()
+            {
+                instance.set_profile_enabled(enabled);
+            }
+        }
+    }
+
+    pub(super) fn take_profile_stats(&self) -> EmoteProfileStats {
+        let mut total = EmoteProfileStats::default();
+        for slots in self.layers.values() {
+            for instance in [&slots.active, &slots.pending].into_iter().flatten() {
+                total.merge(instance.take_profile_stats());
+            }
+        }
+        total
+    }
+
     pub fn create_layer(
         &mut self,
         id: &str,
@@ -143,7 +210,12 @@ impl EmoteState {
                 #[cfg(feature = "experimental-eluna")]
                 {
                     EmoteInstanceSlot::Eluna(eluna::ElunaEmoteInstance::new(
-                        generation, &path, &bytes, width, height,
+                        generation,
+                        &path,
+                        &bytes,
+                        width,
+                        height,
+                        self.profiling_enabled,
                     )?)
                 }
                 #[cfg(not(feature = "experimental-eluna"))]
@@ -263,6 +335,22 @@ impl EmoteState {
 }
 
 impl EmoteInstanceSlot {
+    fn set_profile_enabled(&mut self, enabled: bool) {
+        match self {
+            Self::Builtin(_) => {}
+            #[cfg(feature = "experimental-eluna")]
+            Self::Eluna(instance) => instance.set_profile_enabled(enabled),
+        }
+    }
+
+    fn take_profile_stats(&self) -> EmoteProfileStats {
+        match self {
+            Self::Builtin(_) => EmoteProfileStats::default(),
+            #[cfg(feature = "experimental-eluna")]
+            Self::Eluna(instance) => instance.take_profile_stats(),
+        }
+    }
+
     #[cfg(test)]
     fn as_builtin(&self) -> &EmoteInstance {
         match self {
@@ -293,10 +381,7 @@ impl EmoteInstanceSlot {
 
     fn advance(&mut self, _delta_ms: u64, builtin_frames: f32) -> bool {
         match self {
-            Self::Builtin(instance) => {
-                instance.advance(builtin_frames);
-                true
-            }
+            Self::Builtin(instance) => instance.advance(builtin_frames),
             #[cfg(feature = "experimental-eluna")]
             Self::Eluna(instance) => instance.advance(_delta_ms),
         }
@@ -354,6 +439,7 @@ impl EmoteInstance {
             })
             .collect();
         Ok(Self {
+            evaluation_history: Default::default(),
             generation,
             width,
             height,
@@ -603,7 +689,7 @@ impl EmoteInstance {
         }
 
         let items = EmoteMotionEvaluator::new(&self.model)
-            .evaluate_base(&state)
+            .evaluate_base_with_history(&state, &mut self.evaluation_history)
             .map_err(|error| error.to_string())?;
         Ok(items
             .into_iter()
@@ -614,6 +700,7 @@ impl EmoteInstance {
     fn draw_command(&self, item: EmoteDrawItem) -> Option<DrawCommand> {
         let texture = self.textures.get(&item.texture_id)?;
         let (texture_id, texture_info) = texture.gpu?;
+        let native_material = native_emote_material(&item, texture_info);
         let [atlas_x, atlas_y, width, height] = item.atlas_rect;
         if width <= 0.0 || height <= 0.0 {
             return None;
@@ -628,24 +715,30 @@ impl EmoteInstance {
                 * Affine2::from_angle(coord[3].to_radians())
                 * Affine2::from_scale(Vec2::splat(scale))
                 * Affine2::from_translation(Vec2::new(-transform.scale[1], -transform.scale[2]));
-        let sprite_transform =
-            Affine2::from_translation(Vec2::new(item.translation[0], item.translation[1]))
-                * Affine2::from_angle(item.angle.to_radians())
-                * Affine2::from_translation(Vec2::new(-item.origin[0], -item.origin[1]));
+        // The evaluator resolves the complete E-Mote layer chain (including
+        // zoom, shear, flips and coordinate-plane inheritance). Keep the
+        // public player transform as the outer operation and consume that
+        // affine directly instead of rebuilding a translation+angle
+        // approximation here.
+        let m = item.world_transform;
+        let sprite_transform = Affine2::from_cols_array(&[m[0], m[2], m[1], m[3], m[4], m[5]])
+            * Affine2::from_translation(Vec2::new(
+                -item.origin[0] - item.frame_offset[0],
+                -item.origin[1] - item.frame_offset[1],
+            ));
 
-        let alpha = color_component(&item.color, 3);
         Some(DrawCommand {
             texture: texture_id,
             size: texture_info,
             transform: layer_transform * sprite_transform,
-            opacity: item.opacity * alpha,
+            // E-Mote's corner colors, MODULATE2X and low-nibble blend modes
+            // are evaluated by the native-emote shader. Keep opacity in the
+            // material alpha so it is applied exactly once for both quad and
+            // tessellated mesh paths.
+            opacity: 1.0,
             blend: emote_blend(item.blend_mode),
             color: ColorFilter {
-                multiply: [
-                    color_component(&item.color, 0),
-                    color_component(&item.color, 1),
-                    color_component(&item.color, 2),
-                ],
+                multiply: [1.0, 1.0, 1.0],
                 grayscale: false,
                 negative: false,
             },
@@ -671,7 +764,7 @@ impl EmoteInstance {
                 source_label: item.layer_label,
                 mask_labels: item.stencil_mask_layers,
             }),
-            native_emote: None,
+            native_emote: Some(native_material),
         })
     }
 }
@@ -691,11 +784,12 @@ fn astc_cache_path(compressed: &[u8], width: u32, height: u32) -> String {
 }
 
 impl EmoteInstance {
-    fn advance(&mut self, frames: f32) {
-        self.player.advance(frames);
+    fn advance(&mut self, frames: f32) -> bool {
+        let mut changed = self.player.advance_model(&self.model, frames);
         for blink in &mut self.eye_blinks {
-            blink.advance(frames);
+            changed |= blink.advance(frames);
         }
+        changed
     }
 }
 
@@ -704,54 +798,103 @@ impl EmoteEyeBlink {
         let mut blink = Self {
             control,
             wait_remaining: 0.0,
-            blink_position: None,
+            blink_frame: 0.0,
+            phase: EmoteBlinkPhase::Idle,
             random_state: seed.max(1),
         };
+        blink.blink_frame = blink.control.begin_frame;
         blink.schedule_next();
         blink
     }
 
-    fn advance(&mut self, mut frames: f32) {
+    fn advance(&mut self, mut frames: f32) -> bool {
+        let was_active = !matches!(self.phase, EmoteBlinkPhase::Idle);
         frames = frames.max(0.0);
-        while frames > 0.0 {
-            if let Some(position) = self.blink_position {
-                let remaining = (self.control.blink_frame_count - position).max(0.0);
-                if frames < remaining {
-                    let next = position + frames;
-                    let closed = self.control.blink_frame_count * 0.5;
-                    // Runtime frame deltas rarely land exactly on the blink midpoint
-                    // (for example 0.96 E-Mote frames at 60 Hz). The model only hides
-                    // eye/white layers at the exact closed value, so preserve that peak
-                    // for one rendered frame when a step crosses it.
-                    self.blink_position = Some(if position < closed && next > closed {
-                        closed
-                    } else {
-                        next
-                    });
-                    break;
-                }
-                frames -= remaining;
-                self.blink_position = None;
-                self.schedule_next();
-            } else if frames < self.wait_remaining {
-                self.wait_remaining -= frames;
+        // The native EPEyeControl step uses a 40% close, 20% closed hold,
+        // and 40% open split (2.5x the nominal speed in each moving phase).
+        // Continue through phase boundaries in one call so a long host frame
+        // cannot leave the eye stuck half closed.
+        for _ in 0..8 {
+            if frames <= 0.0 {
                 break;
-            } else {
-                frames -= self.wait_remaining;
-                self.wait_remaining = 0.0;
-                self.blink_position = Some(0.0);
+            }
+            match self.phase {
+                EmoteBlinkPhase::Idle => {
+                    if !self.control.blink_enabled
+                        || (self.blink_frame - self.control.begin_frame).abs() > f32::EPSILON
+                    {
+                        break;
+                    }
+                    if frames < self.wait_remaining {
+                        self.wait_remaining -= frames;
+                        frames = 0.0;
+                    } else {
+                        frames -= self.wait_remaining;
+                        self.wait_remaining = 0.0;
+                        self.phase = EmoteBlinkPhase::Closing;
+                    }
+                }
+                EmoteBlinkPhase::Closing => {
+                    let span = (self.control.end_frame - self.control.begin_frame).max(0.0);
+                    let speed = span * 2.5 / self.control.blink_frame_count.max(f32::EPSILON);
+                    let remaining = ((self.control.end_frame - self.blink_frame) / speed).max(0.0);
+                    // 余量比较留出 float 余量：跨步恰好落在边界时必须走完成分支，
+                    // 否则 blink_frame 会残留 1e-6 级误差并推迟一个宿主帧才进下一阶段。
+                    if frames < remaining && remaining - frames > 1.0e-4 {
+                        self.blink_frame += speed * frames;
+                        frames = 0.0;
+                    } else {
+                        self.blink_frame = self.control.end_frame;
+                        frames -= remaining;
+                        self.wait_remaining = self.control.blink_frame_count / 5.0;
+                        self.phase = EmoteBlinkPhase::ClosedHold;
+                    }
+                }
+                EmoteBlinkPhase::ClosedHold => {
+                    if frames < self.wait_remaining {
+                        self.wait_remaining -= frames;
+                        frames = 0.0;
+                    } else {
+                        frames -= self.wait_remaining;
+                        self.wait_remaining = 0.0;
+                        self.phase = EmoteBlinkPhase::Opening;
+                    }
+                }
+                EmoteBlinkPhase::Opening => {
+                    let span = (self.control.end_frame - self.control.begin_frame).max(0.0);
+                    let speed = span * 2.5 / self.control.blink_frame_count.max(f32::EPSILON);
+                    let remaining =
+                        ((self.blink_frame - self.control.begin_frame) / speed).max(0.0);
+                    if frames < remaining && remaining - frames > 1.0e-4 {
+                        self.blink_frame -= speed * frames;
+                        frames = 0.0;
+                    } else {
+                        self.blink_frame = self.control.begin_frame;
+                        frames -= remaining;
+                        self.phase = EmoteBlinkPhase::Idle;
+                        self.schedule_next();
+                    }
+                }
             }
         }
+        was_active || !matches!(self.phase, EmoteBlinkPhase::Idle)
     }
 
     fn apply(&self, variables: &mut BTreeMap<String, f32>) {
-        let Some(position) = self.blink_position else {
+        if matches!(self.phase, EmoteBlinkPhase::Idle) {
             return;
-        };
+        }
         let base = variables.get(&self.control.label).copied().unwrap_or(0.0);
-        let phase = (position / self.control.blink_frame_count).clamp(0.0, 1.0);
-        if let Some(value) = self.control.blink_value(base, phase) {
-            variables.insert(self.control.label.clone(), value);
+        let span = self.control.end_frame - self.control.begin_frame;
+        if base >= self.control.begin_frame
+            && base <= self.control.end_frame
+            && span.abs() > f32::EPSILON
+        {
+            let amount = ((self.blink_frame - self.control.begin_frame) / span).clamp(0.0, 1.0);
+            variables.insert(
+                self.control.label.clone(),
+                base + (self.control.end_frame - base) * amount,
+            );
         }
     }
 
@@ -777,12 +920,68 @@ fn color_component(color: &[f32], index: usize) -> f32 {
 }
 
 fn emote_blend(value: i64) -> BlendMode {
-    match value {
-        1 => BlendMode::Add,
-        2 => BlendMode::Multiply,
-        3 => BlendMode::Screen,
+    match value & 0x0f {
+        1 => BlendMode::NativeAdd,
+        2 | 5 => BlendMode::NativeReverseSubtract,
+        3 => BlendMode::NativeMultiply,
+        4 => BlendMode::NativeScreen,
         _ => BlendMode::Alpha,
     }
+}
+
+fn native_emote_material(
+    item: &EmoteDrawItem,
+    texture_info: TextureInfo,
+) -> crate::render_pipeline::draw::NativeEmoteMaterial {
+    // `color` is either four byte channels decoded from a packed scalar or a
+    // list of packed 0xRRGGBBAA corner colors. The latter is distinguished by
+    // values wider than one byte, matching the independent emoteplayer parser.
+    let corners = if item.color.len() >= 4 && item.color.iter().take(4).any(|value| *value > 255.0)
+    {
+        item.color
+            .iter()
+            .take(4)
+            .map(|value| packed_color(*value as u32, item.opacity))
+            .collect::<Vec<_>>()
+    } else {
+        let rgba = [
+            color_component(&item.color, 0),
+            color_component(&item.color, 1),
+            color_component(&item.color, 2),
+            color_component(&item.color, 3) * item.opacity,
+        ];
+        vec![rgba; 4]
+    };
+    let mut corner_colors = [
+        [1.0, 1.0, 1.0, item.opacity],
+        [1.0, 1.0, 1.0, item.opacity],
+        [1.0, 1.0, 1.0, item.opacity],
+        [1.0, 1.0, 1.0, item.opacity],
+    ];
+    for (dst, src) in corner_colors.iter_mut().zip(corners.into_iter()) {
+        *dst = src;
+    }
+    crate::render_pipeline::draw::NativeEmoteMaterial {
+        corner_colors,
+        uv_rect: [
+            item.atlas_rect[0] / texture_info.width as f32,
+            item.atlas_rect[1] / texture_info.height as f32,
+            (item.atlas_rect[0] + item.atlas_rect[2]) / texture_info.width as f32,
+            (item.atlas_rect[1] + item.atlas_rect[3]) / texture_info.height as f32,
+        ],
+        blend_mode: item.blend_mode as u32,
+        clip_rect: [-1.0e30, -1.0e30, 1.0e30, 1.0e30],
+        wipe: [0.0, 0.0, 0.0],
+    }
+}
+
+fn packed_color(value: u32, opacity: f32) -> [f32; 4] {
+    [
+        ((value >> 24) & 0xff) as f32 / 255.0,
+        ((value >> 16) & 0xff) as f32 / 255.0,
+        ((value >> 8) & 0xff) as f32 / 255.0,
+        ((value & 0xff) as f32 / 255.0 * opacity).clamp(0.0, 1.0),
+    ]
 }
 
 fn draw_mesh(points: Option<&[f32]>, width: f32, height: f32) -> Option<DrawMesh> {
@@ -822,7 +1021,9 @@ fn draw_mesh(points: Option<&[f32]>, width: f32, height: f32) -> Option<DrawMesh
             ]);
         }
     }
-    Some(DrawMesh { vertices })
+    Some(DrawMesh {
+        vertices: vertices.into(),
+    })
 }
 
 impl CoreRuntime {

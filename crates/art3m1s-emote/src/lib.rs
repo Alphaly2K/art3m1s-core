@@ -16,12 +16,13 @@ pub use atlas::{AtlasIcon, EmoteAtlas, EmoteTexture, TextureFormat};
 pub use error::{EmoteError, Result};
 pub use model::{EmoteModel, EmoteModelInfo};
 pub use motion::{
-    EmoteFrameContent, EmoteLayer, EmoteLayerFrame, EmoteMesh, EmoteMotion, EmoteMotionLibrary,
-    EmoteMotionParameter, EmoteMotionRef,
+    EmoteBezierPath, EmoteEasingCurve, EmoteFrameContent, EmoteFrameCurves, EmoteLayer,
+    EmoteLayerFrame, EmoteMesh, EmoteMotion, EmoteMotionLibrary, EmoteMotionParameter,
+    EmoteMotionRef, EmoteMotionPriority,
 };
 pub use player::{EmoteCommand, EmotePlayer, EmoteTransform, TimelineState, VariableState};
 pub use psb::{PsbDocument, PsbHeader, PsbResourceData, PsbValue, ResourceRef};
-pub use render::{EmoteDrawItem, EmoteMotionEvaluator, EmoteRenderState};
+pub use render::{EmoteDrawItem, EmoteEvaluationHistory, EmoteMotionEvaluator, EmoteRenderState};
 pub use timeline::{
     EmoteEyeControl, EmoteKeyframe, EmoteSelectorControl, EmoteSelectorOption, EmoteTimeline,
     EmoteTimelineTrack, EmoteVariable,

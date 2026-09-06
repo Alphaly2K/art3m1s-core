@@ -9,7 +9,7 @@ const PUBLISH_INTERVAL: Duration = Duration::from_millis(500);
 const SAMPLE_WINDOW: Duration = Duration::from_secs(10);
 const QUEUE_CAPACITY: usize = 256;
 const MAX_WINDOW_SAMPLES: usize = 4096;
-const TIMING_COUNT: usize = 27;
+const TIMING_COUNT: usize = 31;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct FrameProfile {
@@ -30,6 +30,10 @@ pub(crate) struct FrameProfile {
     pub event_log_ns: u64,
     pub event_post_ns: u64,
     pub emote_ns: u64,
+    pub emote_worker_eval_ns: u64,
+    pub emote_scene_publish_ns: u64,
+    pub emote_draw_build_ns: u64,
+    pub emote_mesh_build_ns: u64,
     pub audio_media_ns: u64,
     pub compositor_ns: u64,
     pub text_ns: u64,
@@ -60,6 +64,12 @@ pub(crate) struct FrameProfile {
     pub texture_cpu_bytes: u64,
     pub emote_layers: u64,
     pub emote_source_bytes: u64,
+    pub emote_worker_updates: u64,
+    pub emote_worker_input_frames: u64,
+    pub emote_worker_dropped_scenes: u64,
+    pub emote_sprites: u64,
+    pub emote_mesh_sprites: u64,
+    pub emote_mesh_vertices: u64,
 }
 
 impl FrameProfile {
@@ -103,6 +113,10 @@ pub struct ProfileTimings {
     pub event_log_ms: f64,
     pub event_post_ms: f64,
     pub emote_ms: f64,
+    pub emote_worker_eval_ms: f64,
+    pub emote_scene_publish_ms: f64,
+    pub emote_draw_build_ms: f64,
+    pub emote_mesh_build_ms: f64,
     pub audio_media_ms: f64,
     pub compositor_ms: f64,
     pub text_ms: f64,
@@ -151,6 +165,12 @@ pub struct ProfilerSnapshot {
     pub texture_cpu_mib: f64,
     pub emote_layers: u64,
     pub emote_source_mib: f64,
+    pub emote_worker_updates_per_second: f64,
+    pub emote_worker_input_frames_per_second: f64,
+    pub emote_worker_dropped_scenes_per_second: f64,
+    pub emote_sprites: u64,
+    pub emote_mesh_sprites: u64,
+    pub emote_mesh_vertices: u64,
     pub dropped_samples: u64,
 }
 
@@ -367,6 +387,19 @@ impl RollingWindow {
             texture_cpu_mib: mib(latest.texture_cpu_bytes),
             emote_layers: latest.emote_layers,
             emote_source_mib: mib(latest.emote_source_bytes),
+            emote_worker_updates_per_second: sum_counter(|frame| frame.emote_worker_updates) as f64
+                / seconds,
+            emote_worker_input_frames_per_second: sum_counter(|frame| {
+                frame.emote_worker_input_frames
+            }) as f64
+                / seconds,
+            emote_worker_dropped_scenes_per_second: sum_counter(|frame| {
+                frame.emote_worker_dropped_scenes
+            }) as f64
+                / seconds,
+            emote_sprites: latest.emote_sprites,
+            emote_mesh_sprites: latest.emote_mesh_sprites,
+            emote_mesh_vertices: latest.emote_mesh_vertices,
             dropped_samples: dropped,
         }
     }
@@ -441,6 +474,10 @@ fn timing_values(frame: &FrameProfile) -> [u64; TIMING_COUNT] {
         frame.event_log_ns,
         frame.event_post_ns,
         frame.emote_ns,
+        frame.emote_worker_eval_ns,
+        frame.emote_scene_publish_ns,
+        frame.emote_draw_build_ns,
+        frame.emote_mesh_build_ns,
         frame.audio_media_ns,
         frame.compositor_ns,
         frame.text_ns,
@@ -474,18 +511,22 @@ fn timings_from_values(values: [f64; TIMING_COUNT]) -> ProfileTimings {
         event_log_ms: ms(values[12]),
         event_post_ms: ms(values[13]),
         emote_ms: ms(values[14]),
-        audio_media_ms: ms(values[15]),
-        compositor_ms: ms(values[16]),
-        text_ms: ms(values[17]),
-        frame_build_ms: ms(values[18]),
-        damage_compute_ms: ms(values[19]),
-        transition_capture_ms: ms(values[20]),
-        texture_upload_ms: ms(values[21]),
-        video_upload_ms: ms(values[22]),
-        gpu_submit_ms: ms(values[23]),
-        present_ms: ms(values[24]),
-        readback_ms: ms(values[25]),
-        host_ffi_ms: ms(values[26]),
+        emote_worker_eval_ms: ms(values[15]),
+        emote_scene_publish_ms: ms(values[16]),
+        emote_draw_build_ms: ms(values[17]),
+        emote_mesh_build_ms: ms(values[18]),
+        audio_media_ms: ms(values[19]),
+        compositor_ms: ms(values[20]),
+        text_ms: ms(values[21]),
+        frame_build_ms: ms(values[22]),
+        damage_compute_ms: ms(values[23]),
+        transition_capture_ms: ms(values[24]),
+        texture_upload_ms: ms(values[25]),
+        video_upload_ms: ms(values[26]),
+        gpu_submit_ms: ms(values[27]),
+        present_ms: ms(values[28]),
+        readback_ms: ms(values[29]),
+        host_ffi_ms: ms(values[30]),
     }
 }
 
