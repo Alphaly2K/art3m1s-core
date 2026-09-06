@@ -144,6 +144,10 @@ pub struct VariableStore {
     /// 不参与存档序列化——它由运行时配置决定，而非游戏进度的一部分。
     #[serde(skip)]
     platform: String,
+    /// 上报机种串覆盖（见 set_reported_os）。与 platform 一样是运行时配置，
+    /// 不参与存档序列化。
+    #[serde(skip)]
+    reported_os: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     macro_scopes: Vec<MacroScope>,
     #[serde(skip)]
@@ -170,6 +174,20 @@ impl VariableStore {
     /// 目标平台标识。空串表示未配置。
     pub fn platform(&self) -> &str {
         &self.platform
+    }
+
+    /// 设置上报给脚本的机种串覆盖（`var system="os"` 优先返回它）。
+    pub fn set_reported_os(&mut self, reported: impl Into<String>) {
+        self.reported_os = reported.into();
+    }
+
+    /// 上报机种串：覆盖值优先，否则回落到目标平台。
+    pub fn reported_os(&self) -> &str {
+        if self.reported_os.is_empty() {
+            &self.platform
+        } else {
+            &self.reported_os
+        }
     }
 
     /// 获取变量值

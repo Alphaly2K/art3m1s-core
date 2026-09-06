@@ -335,11 +335,10 @@ pub fn execute_var_system(
 
         "os" => {
             let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
-            // 优先返回项目配置的目标平台（解释器面向某目标平台运行，而非宿主机器）。
-            // 脚本据此选择机种分支（windows/android/ios/wasm 等），其表里并无 macos/linux。
-            // 仅当未配置平台时，才退回宿主 OS 作为兜底。
-            let os = if !variables.platform().is_empty() {
-                variables.platform().to_string()
+            // `reported_os()` 已实现"上报覆盖 → 目标平台"的回落；两者都空时
+            // 才退回宿主 OS 兜底。
+            let os = if !variables.reported_os().is_empty() {
+                variables.reported_os().to_string()
             } else {
                 #[cfg(target_os = "windows")]
                 let host = "windows";
@@ -1106,6 +1105,54 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reported_os_overrides_platform_for_var_system_os() {
+        let mut vars = VariableStore::new();
+        vars.set_platform("windows");
+        // 未覆盖：跟随目标平台
+        apply_var_tag(
+            &HashMap::from([
+                ("name".into(), "t.os".into()),
+                ("system".into(), "os".into()),
+            ]),
+            &mut vars,
+        )
+        .unwrap();
+        assert_eq!(
+            vars.get("t.os").map(Value::as_string),
+            Some("windows".into())
+        );
+        // 覆盖后：上报伪装机种，platform 本身不变
+        vars.set_reported_os("switch");
+        apply_var_tag(
+            &HashMap::from([
+                ("name".into(), "t.os".into()),
+                ("system".into(), "os".into()),
+            ]),
+            &mut vars,
+        )
+        .unwrap();
+        assert_eq!(
+            vars.get("t.os").map(Value::as_string),
+            Some("switch".into())
+        );
+        assert_eq!(vars.platform(), "windows");
+        // 清除覆盖：回到目标平台
+        vars.set_reported_os("");
+        apply_var_tag(
+            &HashMap::from([
+                ("name".into(), "t.os".into()),
+                ("system".into(), "os".into()),
+            ]),
+            &mut vars,
+        )
+        .unwrap();
+        assert_eq!(
+            vars.get("t.os").map(Value::as_string),
+            Some("windows".into())
+        );
+    }
 
     #[test]
     fn dynamic_destination_name_is_resolved_before_store() {

@@ -196,6 +196,7 @@ impl ProjectConfig {
             env: self.raw.clone(),
             // system.ini 段名为大写（WINDOWS/ANDROID/IOS/WASM），脚本机种表用小写键。
             platform: self.platform.to_ascii_lowercase(),
+            reported_os: None,
         }
     }
 

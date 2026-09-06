@@ -140,6 +140,12 @@ pub struct InterpreterConfig {
     /// 决定 `[var system="os"]` 返回值——解释器面向某一目标平台运行，而非宿主机器，
     /// 故不能用编译期 `cfg!(target_os)`。脚本据此选择机种分支。
     pub platform: String,
+
+    /// 上报给脚本的机种串覆盖（如 "switch"/"ps4"）。与 `platform` 解耦：
+    /// `platform` 仍用于 system.ini 分节选择等加载逻辑，`reported_os` 只影响
+    /// `[var system="os"]` 的返回值。部分移植版游戏把存档等关键功能开关在
+    /// 机种判断上，桌面运行时需要以上报覆盖伪装。
+    pub reported_os: Option<String>,
 }
 
 impl Default for InterpreterConfig {
@@ -162,6 +168,7 @@ impl Default for InterpreterConfig {
             process_id: None,
             env: HashMap::new(),
             platform: "windows".to_string(),
+            reported_os: None,
         }
     }
 }
@@ -488,6 +495,9 @@ impl Interpreter {
             let mut vars = variables.lock().unwrap();
             // 把目标平台写入变量存储，供 [var system="os"] 读取（见 InterpreterConfig::platform）。
             vars.set_platform(config.platform.clone());
+            if let Some(reported) = &config.reported_os {
+                vars.set_reported_os(reported.clone());
+            }
             // 引擎提供的系统常量（s.*）。它们不是存档状态，而是运行环境信息，脚本启动
             // 时直接读取。缺省会让 init.lua 里的数值比较（如 windowsversion 兼容性检查）
             // 对 nil 求值而崩溃，故在此种入合理默认值。
@@ -1237,7 +1247,7 @@ impl Interpreter {
                     "[flush] tag={} fn={:?} params={:?}",
                     instruction.tag,
                     instruction.get("function"),
-                    instruction.params.keys().collect::<Vec<_>>()
+                    instruction.params,
                 );
             }
 
@@ -2280,6 +2290,13 @@ impl Interpreter {
     /// 获取共享变量存储句柄（可变访问请锁定后操作）
     pub fn variables_handle(&self) -> Arc<Mutex<VariableStore>> {
         Arc::clone(&self.variables)
+    }
+
+    /// 设置上报给脚本的机种串覆盖（None/空串清除，回到 `platform`）。
+    /// 对运行中的解释器立即生效，下次 `var system="os"` 即返回新值。
+    pub fn set_reported_os(&mut self, reported: Option<String>) {
+        let mut vars = self.variables.lock().unwrap();
+        vars.set_reported_os(reported.unwrap_or_default());
     }
 
     /// 获取解释器配置（包含从 system.ini 读取的环境变量）

@@ -55,8 +55,18 @@ impl CoreRuntime {
         Ok(())
     }
 
+    /// 设置上报给脚本的机种串覆盖（如 "switch"/"ps4"），None 清除。
+    /// 立即作用于当前解释器，并在项目（重）加载后保持。
+    pub fn set_reported_os(&mut self, reported: Option<String>) {
+        self.reported_os = reported.clone();
+        self.interpreter.set_reported_os(reported);
+    }
+
     fn install_interpreter(&mut self, interpreter: asb_interpreter::Interpreter) {
         self.interpreter = interpreter;
+        // 项目重载会重建解释器，上报机种覆盖需要在每次装载后重新应用。
+        let reported = self.reported_os.clone();
+        self.interpreter.set_reported_os(reported);
         self.wire_engine_callbacks();
         self.wire_file_loader();
         self.wire_event_callback();

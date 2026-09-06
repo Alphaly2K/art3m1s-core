@@ -1635,6 +1635,28 @@ pub unsafe extern "C" fn art3m1s_runtime_set_string_variable(
     rt.set_string_variable(name, value);
 }
 
+/// 设置上报给脚本的机种串覆盖（`var system="os"` 的返回值），如
+/// "switch"/"ps4"。NULL 或空串清除覆盖，回到项目平台。对运行中的
+/// runtime 立即生效；移植版游戏把关键功能（如存档）开关在机种判断上时，
+/// 宿主用它在桌面环境伪装目标机种。
+#[cfg(feature = "gl-backend")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_set_reported_os(rt: *mut CoreRuntime, os: *const c_char) {
+    if rt.is_null() {
+        return;
+    }
+    let reported = if os.is_null() {
+        None
+    } else {
+        match unsafe { std::ffi::CStr::from_ptr(os) }.to_str() {
+            Ok(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+            _ => None,
+        }
+    };
+    let rt = unsafe { &mut *rt };
+    rt.set_reported_os(reported);
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

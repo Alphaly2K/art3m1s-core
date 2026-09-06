@@ -122,6 +122,9 @@ pub struct CoreRuntime {
     /// `[takess]` 缓存的游戏画面。`[savess]` 后续从这里缩放/编码，不能重新截保存 UI。
     save_screenshot: Option<save_io::ScreenshotBuffer>,
     loaded_font_face: Option<String>,
+    /// 上报给脚本的机种串覆盖（`var system="os"`），None 表示跟随目标平台。
+    /// 在 install_interpreter 时重新应用到重建的解释器。
+    reported_os: Option<String>,
     /// 宿主覆盖字体最近已见的世代号（None=当前无覆盖）。世代变化时作废
     /// `loaded_font_face` 并按当前活动 face 重解，使覆盖切换立即生效。
     font_override_generation: Option<u64>,
@@ -243,6 +246,7 @@ impl CoreRuntime {
             loaded_font_face: None,
             font_override_generation: None,
             font_override_cached_generation: None,
+            reported_os: None,
             pending_dialog: None,
             active_inline_event_frame: None,
             last_engine_status: 0,

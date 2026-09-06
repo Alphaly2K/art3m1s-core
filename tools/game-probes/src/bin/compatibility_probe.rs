@@ -147,6 +147,10 @@ fn main() {
         _ => GfxBackend::Cgl,
     };
     let mut rt = CoreRuntime::create(1280, 720, backend).unwrap();
+    if let Ok(os) = std::env::var("ART3M1S_PROBE_OS") {
+        let os = CString::new(os).unwrap();
+        unsafe { ffi::art3m1s_runtime_set_reported_os(&mut rt, os.as_ptr()) };
+    }
     if mode.starts_with("eluna") {
         let selected = unsafe { ffi::art3m1s_runtime_set_emote_backend(&mut rt, 1) };
         assert_eq!(selected, 1, "select Eluna backend");
@@ -173,6 +177,7 @@ fn main() {
                 ["shot", name] => snapshot(&rt, &pixels, name),
                 ["profile"] => println!("{}", rt.profiler_snapshot_json()),
                 ["trace"] => rt.set_string_variable("codex.trace", "1"),
+                ["setvar", name, value] => rt.set_string_variable(name, value),
                 ["dialog", accepted] => {
                     rt.submit_dialog_response(*accepted == "1", None);
                 }

@@ -86,6 +86,7 @@ void art3m1s_runtime_feed_key(CoreRuntime *rt, uint32_t vk, int32_t pressed);
 int32_t art3m1s_runtime_submit_dialog(CoreRuntime *rt, int32_t accepted, const char *text);
 int32_t art3m1s_runtime_submit_text_translation(CoreRuntime *rt, uint64_t serial,
                                                const char *text);
+void art3m1s_runtime_set_reported_os(CoreRuntime *rt, const char *os);
 int art3m1s_runtime_submit_http_result(CoreRuntime *rt, int status_code,
                                      const uint8_t *body, int body_len);
 void art3m1s_runtime_set_string_variable(CoreRuntime *rt, const char *name, const char *value);
@@ -160,6 +161,7 @@ int32_t art3m1s_runtime_profiler_snapshot(const CoreRuntime *rt, uint8_t *out,
 | `feed_mouse` / `feed_click` / `feed_mouse_button` / `feed_touch` / `feed_key` | 无返回 | 只喂状态；后续 tick 处理输入 |
 | `submit_dialog` | 1 接收当前对话框响应 | 0 无挂起对话框/无效；text 可 NULL；accepted=0 取消 |
 | `submit_text_translation` | 1 接收请求结果，不保证立即显示 | 0 serial 未登记/无效；text=NULL 表示失败 |
+| `set_reported_os` | 无返回；设置 `var system="os"` 的上报机种串（如 "switch"/"ps4"） | NULL/空串清除覆盖，回到项目平台；与 ini 分节选择解耦，不影响加载 |
 | `submit_http_result` | 1 完成当前请求 | 0 无挂起请求/无效；status=0 表失败；NULL body/非正长度视为空 |
 | `set_string_variable` | 无返回；支持 `result.title` 等路径 | name/value 必须有效 UTF-8；无 RPC 完成语义 |
 | `set_volume` | 无返回；value 限制到 [0,1] | channel 为 master/bgm/se/voice；不要传 NaN 或未知名称 |
