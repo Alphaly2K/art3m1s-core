@@ -122,6 +122,11 @@ pub struct CoreRuntime {
     /// `[takess]` 缓存的游戏画面。`[savess]` 后续从这里缩放/编码，不能重新截保存 UI。
     save_screenshot: Option<save_io::ScreenshotBuffer>,
     loaded_font_face: Option<String>,
+    /// 宿主覆盖字体最近已见的世代号（None=当前无覆盖）。世代变化时作废
+    /// `loaded_font_face` 并按当前活动 face 重解，使覆盖切换立即生效。
+    font_override_generation: Option<u64>,
+    /// 已解析进 renderer 字体缓存的覆盖世代号，同一字节块只解析一次。
+    font_override_cached_generation: Option<u64>,
     pending_dialog: Option<PendingDialog>,
     active_inline_event_frame: Option<InlineEventFrame>,
     /// 引擎侧最近一次写入 `script_status` 的值。用于区分「引擎状态迁移」与
@@ -236,6 +241,8 @@ impl CoreRuntime {
             savepath: "save".to_string(),
             save_screenshot: None,
             loaded_font_face: None,
+            font_override_generation: None,
+            font_override_cached_generation: None,
             pending_dialog: None,
             active_inline_event_frame: None,
             last_engine_status: 0,

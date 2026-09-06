@@ -125,6 +125,7 @@ register_file_reader(...), register_file_writer(...), register_file_delete(...)
 register_file_stat(...), register_font_query(...), register_window_state_query(...)
 register_media_command_callback(...), register_ui_command_callback(...)
 register_text_inject_callback(...)               // 可选
+set_font_override(font_bytes, font_len)          // 可选：译文缺字时覆盖运行时字体
 set_angle_path(directory)                       // 第一次加载 ANGLE 之前
 
 rt = runtime_create(initial_width, initial_height, gfx_backend)
@@ -294,6 +295,13 @@ serial，不能让旧响应完成新请求。
 `submit_text_translation(serial, text)`，失败传 `NULL`；返回 `1` 只表示接收结果，不
 保证立即可见。Core 等逐字动画结束再替换，并丢弃失效页面的视觉回填。Host 可缓存译文，
 但不能自行改写 reveal 状态。Ruby 正文进入注入，注音作为上下文，不要重复翻译成两段正文。
+
+游戏脚本指定的字体可能缺少译文字形（缺字渲染为空白）。`set_font_override` 安装一份
+覆盖字体（TTF/OTF 字节，Core 内部复制并立即校验，非法数据返回 0 不生效），此后所有
+脚本 face 请求都光栅化到该字体；`clear_font_override` 恢复脚本字体。两者是进程级全局
+设置，对所有 runtime 生效，可在任意时刻调用，变更在下一帧重解当前字体，不需要重启
+游戏。覆盖只作用于之后光栅化的文本（含异步译文热替换），已排版的既有字形不回溯。
+字号、描边、行距等排版属性仍由脚本控制，覆盖只替换字形来源。
 
 ## 9. 日志、Profiler 与退出
 

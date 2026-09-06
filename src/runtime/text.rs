@@ -186,6 +186,7 @@ impl CoreRuntime {
     /// Advances reveal animation and returns whether its visible output may
     /// have changed during this tick.
     pub(super) fn advance_text(&mut self, delta_ms: u64) -> bool {
+        self.sync_font_override();
         let skip_active = self.skip_active();
         let was_skipping = self.was_skipping();
         let was_reveal_complete = self.is_text_reveal_complete();
@@ -598,13 +599,52 @@ impl CoreRuntime {
         self.compositor.hide_click_wait_icon()
     }
 
+    /// 宿主覆盖字体的世代检查：覆盖被设置/更换/清除时，作废脚本字体的
+    /// 短路缓存并按当前活动 face 立即重解，不等下一个 font 事件。
+    pub(super) fn sync_font_override(&mut self) {
+        let generation = crate::ffi::font_override().map(|(generation, _)| generation);
+        if generation == self.font_override_generation {
+            return;
+        }
+        self.font_override_generation = generation;
+        self.loaded_font_face = None;
+        let face = self
+            .text_renderer
+            .as_ref()
+            .and_then(|renderer| renderer.active_font_face().map(str::to_string));
+        if let Some(face) = face {
+            self.load_script_font(&face);
+        }
+    }
+
     fn load_script_font(&mut self, face: &str) {
+        let font_override = crate::ffi::font_override();
+        // 覆盖世代在上次 font 事件后变化（sync_font_override 之外的路径，例如
+        // 覆盖变更后第一个到达的事件恰好是 FontSettings）时同样作废短路缓存。
+        let generation = font_override.as_ref().map(|(generation, _)| *generation);
+        if generation != self.font_override_generation {
+            self.font_override_generation = generation;
+            self.loaded_font_face = None;
+        }
         if self.loaded_font_face.as_deref() == Some(face) {
             return;
         }
         let Some(renderer) = self.text_renderer.as_mut() else {
             return;
         };
+        if let Some((generation, bytes)) = &font_override {
+            // 覆盖激活：所有脚本 face 请求都光栅化到宿主覆盖字体。
+            if apply_font_override(
+                renderer.as_mut(),
+                &mut self.font_override_cached_generation,
+                *generation,
+                bytes,
+            ) {
+                self.loaded_font_face = Some(face.to_string());
+                return;
+            }
+            // 覆盖字体加载失败时回落脚本字体，不让文本消失。
+        }
         if renderer.select_cached_font(face) {
             self.loaded_font_face = Some(face.to_string());
             return;
@@ -628,6 +668,35 @@ impl CoreRuntime {
             }
         }
         crate::core_warn!("[text] 脚本字体加载失败 {face}: {}", errors.join("; "));
+    }
+}
+
+/// 覆盖字体在 renderer 字体缓存里使用的逻辑 face 名。`:` 前缀与内部保留纹理
+/// 同约定，不会与脚本 face（游戏内相对路径）冲突。
+pub(super) const HOST_FONT_OVERRIDE_FACE: &str = ":host/font-override";
+
+/// 把 renderer 的当前光栅化字体切到覆盖字体；同一世代只解析一次字节块。
+/// 返回 false 表示覆盖字体不可用，调用方应回落到脚本字体。
+pub(super) fn apply_font_override(
+    renderer: &mut dyn TextRenderer,
+    cached_generation: &mut Option<u64>,
+    generation: u64,
+    bytes: &[u8],
+) -> bool {
+    if *cached_generation == Some(generation)
+        && renderer.select_cached_font(HOST_FONT_OVERRIDE_FACE)
+    {
+        return true;
+    }
+    match renderer.set_named_font_bytes(HOST_FONT_OVERRIDE_FACE, bytes.to_vec()) {
+        Ok(()) => {
+            *cached_generation = Some(generation);
+            true
+        }
+        Err(error) => {
+            crate::core_warn!("[text] 覆盖字体加载失败: {error}");
+            false
+        }
     }
 }
 
@@ -655,11 +724,12 @@ pub(super) fn font_fallback_candidates(face: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BACKLOG_SNAPSHOT, BacklogSnapshot, backlog_snapshot, build_backlog_snapshot,
-        font_fallback_candidates, text_span_ready,
+        BACKLOG_SNAPSHOT, BacklogSnapshot, HOST_FONT_OVERRIDE_FACE, apply_font_override,
+        backlog_snapshot, build_backlog_snapshot, font_fallback_candidates, text_span_ready,
     };
+    use crate::render_pipeline::draw::TextureProvider;
     use crate::text::GlyphTextRenderer;
-    use crate::text::render::{FontState, TextRenderer, TextSpanToken};
+    use crate::text::render::{FontState, ScetweenConfig, TextRenderer, TextSpanToken};
     use std::collections::HashMap;
 
     #[test]
@@ -989,4 +1059,117 @@ mod tests {
         r.push_text("あ", false);
         assert!(r.click_wait_icon_placement(false).is_none());
     }
+
+    // ── 宿主覆盖字体 ──
+
+    /// 只实现字体相关方法的最小 TextRenderer 桩。
+    struct StubFontRenderer {
+        state: FontState,
+        fonts: HashMap<String, ()>,
+        selected: Option<String>,
+        parses: usize,
+        fail_named: bool,
+    }
+
+    impl StubFontRenderer {
+        fn new() -> Self {
+            Self {
+                state: FontState::new(),
+                fonts: HashMap::new(),
+                selected: None,
+                parses: 0,
+                fail_named: false,
+            }
+        }
+    }
+
+    impl TextRenderer for StubFontRenderer {
+        fn set_font_bytes(&mut self, _bytes: Vec<u8>) -> Result<(), String> {
+            Ok(())
+        }
+        fn select_cached_font(&mut self, face: &str) -> bool {
+            if self.fonts.contains_key(face) {
+                self.selected = Some(face.to_string());
+                true
+            } else {
+                false
+            }
+        }
+        fn set_named_font_bytes(&mut self, face: &str, _bytes: Vec<u8>) -> Result<(), String> {
+            if self.fail_named {
+                return Err("invalid font".to_string());
+            }
+            self.parses += 1;
+            self.fonts.insert(face.to_string(), ());
+            self.selected = Some(face.to_string());
+            Ok(())
+        }
+        fn active_font_face(&self) -> Option<&str> {
+            None
+        }
+        fn apply_font_settings(&mut self, _settings: &HashMap<String, String>) {}
+        fn font_init(&mut self) {}
+        fn font_pop(&mut self) {}
+        fn font_default(&mut self, _settings: &HashMap<String, String>) {}
+        fn switch_message_layer(&mut self, _id: Option<&str>, _stack: bool) {}
+        fn pop_message_layer(&mut self) {}
+        fn set_glyph_config(&mut self, _config: &HashMap<String, String>) {}
+        fn push_text(&mut self, _content: &str, _inline: bool) {}
+        fn push_line_break(&mut self) {}
+        fn push_page_break(&mut self, _backlog: Option<i32>) {}
+        fn build_text_commands(
+            &mut self,
+            _provider: &mut dyn TextureProvider,
+        ) -> HashMap<String, Vec<crate::render_pipeline::draw::DrawCommand>> {
+            HashMap::new()
+        }
+        fn set_scetween(&mut self, _config: ScetweenConfig) {}
+        fn reset_reveal(&mut self) {}
+        fn advance_reveal(&mut self, _delta_ms: u64) {}
+        fn reveal_all(&mut self) {}
+        fn hide_text(&mut self) {}
+        fn show_text(&mut self) {}
+        fn is_reveal_complete(&self) -> bool {
+            true
+        }
+        fn font_state(&self) -> &FontState {
+            &self.state
+        }
+        fn font_state_mut(&mut self) -> &mut FontState {
+            &mut self.state
+        }
+    }
+
+    #[test]
+    fn font_override_parses_once_per_generation_and_selects_cache_afterwards() {
+        let mut renderer = StubFontRenderer::new();
+        let mut cached = None;
+
+        assert!(apply_font_override(&mut renderer, &mut cached, 1, b"a"));
+        assert_eq!(renderer.parses, 1);
+        assert_eq!(renderer.selected.as_deref(), Some(HOST_FONT_OVERRIDE_FACE));
+        assert_eq!(cached, Some(1));
+
+        // 同一世代重复应用走缓存选中，不重复解析字节块。
+        assert!(apply_font_override(&mut renderer, &mut cached, 1, b"a"));
+        assert_eq!(renderer.parses, 1);
+
+        // 世代递增（宿主更换了覆盖字体）后重新解析。
+        assert!(apply_font_override(&mut renderer, &mut cached, 2, b"b"));
+        assert_eq!(renderer.parses, 2);
+        assert_eq!(cached, Some(2));
+    }
+
+    #[test]
+    fn font_override_failure_keeps_state_for_script_font_fallback() {
+        let mut renderer = StubFontRenderer::new();
+        renderer.fail_named = true;
+        let mut cached = None;
+
+        assert!(!apply_font_override(&mut renderer, &mut cached, 7, b"bad"));
+        // 失败不污染已解析世代缓存，调用方得以回落脚本字体。
+        assert_eq!(cached, None);
+        assert_ne!(renderer.selected.as_deref(), Some(HOST_FONT_OVERRIDE_FACE));
+    }
 }
+

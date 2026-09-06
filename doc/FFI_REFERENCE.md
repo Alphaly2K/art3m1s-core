@@ -48,6 +48,8 @@ void art3m1s_register_file_stat(ArtFileStat cb);
 void art3m1s_register_font_query(ArtFontQuery cb);
 void art3m1s_register_window_state_query(ArtWindowQuery cb);
 void art3m1s_register_text_inject_callback(ArtTextInject cb);
+int art3m1s_set_font_override(const uint8_t *data, int len);
+void art3m1s_clear_font_override(void);
 void art3m1s_set_debug(int enabled);
 void art3m1s_set_damage_visualization(int enabled);
 void art3m1s_set_angle_path(const char *directory);
@@ -125,6 +127,7 @@ int32_t art3m1s_runtime_profiler_snapshot(const CoreRuntime *rt, uint8_t *out,
 | `register_font_query` | 非零参数分别筛选等宽/竖排；输出 UTF-8 换行分隔字体族，无 NUL，返回字节数；负数无结果；目前容量 16384 |
 | `register_window_state_query` | 返回位标志 bit0=全屏、bit1=最小化；未注册视为两者 false |
 | `register_text_inject_callback` | 返回替换 UTF-8 字节数，0 可替换为空；-1 保留原文，-2 后台翻译；目前容量 8192 |
+| `set_font_override` / `clear_font_override` | 安装/清除运行时覆盖字体（TTF/OTF 字节，进程级全局，core 复制）；返回 1 成功，0 参数无效或非法字体；变更下一帧生效，不回溯已排版文本 |
 | `set_debug` | 全局调试开关；关闭同时清除脏区着色开关，不自动关闭 per-runtime profiler |
 | `set_damage_visualization` | 仅 debug 开启时允许启用；Host 调试 UI 关闭时还应关闭 profiler |
 | `set_angle_path` | ANGLE 库目录；首次设置生效，需早于创建 runtime |
