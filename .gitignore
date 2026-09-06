@@ -4,3 +4,4 @@
 **/.DS_Store
 /output.json
 /crates/*/target/
+/example/docs/
