@@ -1,7 +1,7 @@
 # Third-party references
 
 `art3m1s-emote` is distributed as part of art3m1s-core under
-AGPL-3.0-or-later. The implementation is independent Rust code.
+MPL-2.0. The implementation is independent Rust code.
 
 The following projects were consulted to identify E-Mote PSB fields and to
 cross-check observable playback behavior:
