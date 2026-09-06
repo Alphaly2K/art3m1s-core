@@ -35,7 +35,7 @@ unsafe extern "C" fn read(
                 return -1;
             };
             if buf.is_null() {
-                return c_int::try_from(entry.size).unwrap_or(c_int::MAX);
+                return c_int::try_from(entry.size()).unwrap_or(c_int::MAX);
             }
             let buf = unsafe { std::slice::from_raw_parts_mut(buf, len as usize) };
             archive

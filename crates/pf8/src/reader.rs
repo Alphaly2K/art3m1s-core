@@ -14,9 +14,9 @@ use std::path::Path;
 /// A reader that supports both sequential reads and absolute seeks.
 ///
 /// art3m1s: 抽象掉 `File`，使分卷归档（多个物理文件串联成一个逻辑流）也能
-/// 作为读取源。
-pub trait ReadSeek: Read + Seek {}
-impl<T: Read + Seek> ReadSeek for T {}
+/// 作为读取源。`Send` 约束允许归档句柄跨线程转移（如宿主的工作线程）。
+pub trait ReadSeek: Read + Seek + Send {}
+impl<T: Read + Seek + Send> ReadSeek for T {}
 
 /// 条目查找键：统一小写（大小写不敏感，与引擎历史行为一致）。
 /// （art3m1s 本地改动：上游是区分大小写的精确匹配。）

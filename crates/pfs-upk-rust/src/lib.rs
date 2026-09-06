@@ -1,7 +1,7 @@
 //! Artemis PFS 归档访问层（C ABI）。
 //!
 //! 本 crate 历史上是另一 GPL 实现的跨语言重写；现实现已整体替换为 vendored
-//! pf8（MIT，见 `crates/pf8`），本包装层为 MIT 下新写的 FFI 胶合代码。
+//! pf8（MIT，见 `crates/pf8`），本包装层为 MPL-2.0 下新写的 FFI 胶合代码。
 //! dylib 名（`libpfs_upk`）与导出符号集保持兼容，宿主无需改动。
 //!
 //! 语义要点：
@@ -11,6 +11,9 @@
 //! - 支持分卷归档（`root.pfs` + `root.pfs.000`… 串联读取）。
 
 mod split;
+pub mod reader;
+
+pub use reader::PfsArchive;
 
 use std::ffi::{c_char, c_int, CStr};
 use std::path::{Path, PathBuf};
