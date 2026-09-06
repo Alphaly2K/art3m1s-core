@@ -1,6 +1,7 @@
 [package]
 name = "art3m1s-emote"
 version = "0.1.0-alpha.1"
+license = "MPL-2.0"
 edition = "2024"
 
 [lib]

@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+### 变更
+
+- 项目许可证由 AGPL-3.0 更换为 MPL-2.0（文件级 copyleft，兼容 App Store
+  分发；`crates/pf8` 保留上游 MIT）。
+- PFS 归档实现整体替换为基于 pf8 的新实现：条目哈希索引、分卷串联读取、
+  显式条目名编码与范围读取；移除 GPL 重写实现及其 git submodule。
+
+### 新增
+
+- 宿主运行时覆盖字体接口（`art3m1s_set_font_override` /
+  `art3m1s_clear_font_override`）：脚本自带字体缺译文字形时，由宿主提供
+  TTF/OTF 覆盖全部脚本字体的光栅化来源。
+
 ### 修复
 
 - 编译 ASB/IET 直接解析二进制记录，保留 Lua 字符串、源行号和编译器跳转地址，

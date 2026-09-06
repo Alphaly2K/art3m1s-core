@@ -3,7 +3,7 @@ name = "pfs-upk-rust"
 version = "0.2.0"
 edition = "2021"
 description = "Artemis Engine PFS archive access, C ABI wrapper over pf8"
-license = "MIT"
+license = "MPL-2.0"
 
 [lib]
 name = "pfs_upk"
