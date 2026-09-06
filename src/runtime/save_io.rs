@@ -14,6 +14,44 @@ const AUTOSAVE_FILE: &str = "__Autosave.dat";
 /// 已读记录（alreadyread）持久化文件名。跨会话保留，使"已读跳过"有意义。
 const AREAD_FILE: &str = "aread.dat";
 
+/// System variables that are part of the persistent user configuration.
+///
+/// Artemis exposes a single `s.*` namespace for both user-adjustable settings
+/// and values computed from the current runtime.  `iter_system()` therefore
+/// cannot be serialized wholesale: values such as `s.status.*`,
+/// `s.current_message_layer`, screen dimensions and paths describe the active
+/// session and must be re-created by the new runtime. Even writable values
+/// such as `s.http.cancel` and `s.backlog.annotation` are operation-scoped,
+/// so persistence is an explicit property rather than an inference from
+/// writability or from a particular game's script.
+///
+/// The translated copy of `system_variables` in `example/docs` predates
+/// `s.enablemaximizedwindow`; the upstream Japanese specification lists it as
+/// writable, and existing projects use it to retain the Windows maximize
+/// policy.  Keep it here even though most projects never set it.
+fn is_persistent_system_variable(name: &str) -> bool {
+    matches!(
+        name,
+        "bgmvol"
+            | "sevol"
+            | "videovol"
+            | "automodewait"
+            | "enablemaximizedwindow"
+    ) || name
+        .strip_prefix("segain.")
+        .is_some_and(|id| !id.is_empty())
+}
+
+fn persistent_system_snapshot(
+    store: &asb_interpreter::VariableStore,
+) -> HashMap<String, asb_interpreter::Value> {
+    store
+        .iter_system()
+        .filter(|(name, _)| is_persistent_system_variable(name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
 #[derive(Clone)]
 pub(super) struct ScreenshotBuffer {
     width: u32,
@@ -98,10 +136,10 @@ impl CoreRuntime {
             .iter_global()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        let system: HashMap<String, asb_interpreter::Value> = store
-            .iter_system()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        // `s.*` contains both persistent settings and runtime-derived values.
+        // Persist only the documented writable subset; otherwise a later boot
+        // inherits stale status/current-layer/path data from the previous run.
+        let system = persistent_system_snapshot(&store);
 
         for (file, map) in [(SAVEG_FILE, &global), (SYSTEM_FILE, &system)] {
             let json = serde_json::to_string_pretty(map).map_err(|e| e.to_string())?;
@@ -171,11 +209,25 @@ impl CoreRuntime {
                 }
             };
             let prefix = if is_global { "g." } else { "s." };
-            let n = map.len();
+            let total = map.len();
+            let mut loaded = 0;
             for (k, v) in map {
+                if !is_global && !is_persistent_system_variable(&k) {
+                    continue;
+                }
+                loaded += 1;
                 self.interpreter.set_variable(&format!("{prefix}{k}"), v);
             }
-            crate::core_info!("[runtime] sysload 已读回 {} ({} 项)", path, n);
+            crate::core_info!(
+                "[runtime] sysload 已读回 {} ({} 项{})",
+                path,
+                loaded,
+                if !is_global && loaded != total {
+                    format!(", 忽略 {} 项运行时变量", total - loaded)
+                } else {
+                    String::new()
+                }
+            );
         }
     }
 
@@ -516,8 +568,8 @@ fn encode_png_rgba(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Stri
 #[cfg(test)]
 mod tests {
     use super::{
-        ScreenshotBuffer, encode_png_rgba, load_transition_event, qualify_save_path,
-        resize_screenshot_rgba, sanitize_savepath,
+        ScreenshotBuffer, encode_png_rgba, is_persistent_system_variable, load_transition_event,
+        persistent_system_snapshot, qualify_save_path, resize_screenshot_rgba, sanitize_savepath,
     };
 
     #[test]
@@ -550,6 +602,80 @@ mod tests {
         );
         assert_eq!(sanitize_savepath(Some("../bad/save")), "bad/save");
         assert_eq!(sanitize_savepath(None), "save");
+    }
+
+    #[test]
+    fn system_snapshot_excludes_runtime_derived_values() {
+        let mut store = asb_interpreter::VariableStore::new();
+        store.set("s.bgmvol", asb_interpreter::Value::Int(800));
+        store.set("s.segain.901", asb_interpreter::Value::Int(800));
+        store.set("s.enablemaximizedwindow", asb_interpreter::Value::Int(1));
+        store.set("t.transient", asb_interpreter::Value::Int(99));
+        store.set(
+            "s.current_message_layer",
+            asb_interpreter::Value::String("1.80.mw.adv".into()),
+        );
+        store.set("s.status.alreadyread", asb_interpreter::Value::Int(1));
+        store.set("s.screen_width", asb_interpreter::Value::Int(1920));
+        store.set(
+            "s.savepath",
+            asb_interpreter::Value::String("qureate/NekoMiko".into()),
+        );
+
+        let snapshot = persistent_system_snapshot(&store);
+        assert_eq!(
+            snapshot.get("bgmvol"),
+            Some(&asb_interpreter::Value::Int(800))
+        );
+        assert_eq!(
+            snapshot.get("segain.901"),
+            Some(&asb_interpreter::Value::Int(800))
+        );
+        assert_eq!(
+            snapshot.get("enablemaximizedwindow"),
+            Some(&asb_interpreter::Value::Int(1))
+        );
+        assert!(!snapshot.contains_key("current_message_layer"));
+        assert!(!snapshot.contains_key("status.alreadyread"));
+        assert!(!snapshot.contains_key("screen_width"));
+        assert!(!snapshot.contains_key("savepath"));
+        assert!(!snapshot.contains_key("transient"));
+    }
+
+    #[test]
+    fn persistent_system_variable_schema_contains_only_user_settings() {
+        for name in [
+            "bgmvol",
+            "sevol",
+            "videovol",
+            "automodewait",
+            "enablemaximizedwindow",
+            "segain.901",
+        ] {
+            assert!(is_persistent_system_variable(name), "{name} should persist");
+        }
+        for name in [
+            "current_message_layer",
+            "status.controlskip",
+            "status.alreadyread",
+            "status.fullscreenatexit",
+            "engineversion",
+            "windowsversion",
+            "screen_width",
+            "screen_height",
+            "datapath",
+            "savepath",
+            "clickskip",
+            "overflowed",
+            "backlog.annotation",
+            "http.cancel",
+            "segain.",
+        ] {
+            assert!(
+                !is_persistent_system_variable(name),
+                "{name} is runtime state"
+            );
+        }
     }
 
     #[test]

@@ -258,6 +258,9 @@ pub struct Interpreter {
     /// 跳到相邻的 `*movie_play [stop]`，导致 brandlogo 卡死。故此处记录来源，
     /// 让 `advance_line()` 对排队来源的 Wait 退化为空操作。
     last_wait_from_queue: bool,
+    /// `last_wait_from_queue` 对应的是实际 `[wait]`，还是仅为保证宿主状态同步而
+    /// 暂停的普通排队事件。后者被确认后必须恢复其下方仍活动的排队等待。
+    last_queue_pause_is_wait: bool,
     /// A queued wait may pause after the script PC has already advanced. Keep
     /// its frame identity so a queued call can return to that wait boundary.
     queued_wait_checkpoints: Vec<QueuedWaitCheckpoint>,
@@ -541,6 +544,7 @@ impl Interpreter {
             callback: Box::new(default_callback),
             engine_ctx,
             last_wait_from_queue: false,
+            last_queue_pause_is_wait: false,
             queued_wait_checkpoints: Vec::new(),
             active_queued_wait: None,
             last_flush_saw_return: false,
@@ -785,6 +789,8 @@ impl Interpreter {
         self.queued_call_barriers.clear();
         self.queued_wait_checkpoints.clear();
         self.active_queued_wait = None;
+        self.last_wait_from_queue = false;
+        self.last_queue_pause_is_wait = false;
         self.variables.lock().unwrap().retain_macro_scopes(0);
         // 显式定位属于「顺序到达」，清掉可能残留的跳转到达标记。
         self.arrived_by_jump = false;
@@ -807,14 +813,22 @@ impl Interpreter {
         self.queued_wait_checkpoints.clear();
         self.active_queued_wait = None;
         self.last_wait_from_queue = false;
+        self.last_queue_pause_is_wait = false;
         self.last_flush_saw_return = false;
         self.last_flush_saw_call = false;
         self.last_flush_saw_jump = false;
         self.arrived_by_jump = false;
         self.variables.lock().unwrap().reset();
+        // Lua globals belong to the project rather than the engine variable
+        // domains. Keep the VM intact so project-defined restart markers can
+        // route the next boot; the boot script is responsible for resetting
+        // its own Lua tables.
         let mut ctx = self.engine_ctx.lock().unwrap();
         ctx.tag_queue.clear();
         ctx.immediate_tag_count = 0;
+        ctx.event_handlers.clear();
+        ctx.event_filter = None;
+        ctx.log_filter = None;
         ctx.script_stack.clear();
         ctx.scenario_text_source = None;
         ctx.pending_stack_override = None;
@@ -840,6 +854,7 @@ impl Interpreter {
             // deferred tags or executing that instruction.
             if let Some(event) = self.queued_wait_at_current_position() {
                 self.last_wait_from_queue = true;
+                self.last_queue_pause_is_wait = true;
                 return Ok(ExecutionResult::Wait(event));
             }
             // 先抽干 Lua 通过 e:tag{} 排队的标签（如图层操作），它们由上一条
@@ -849,12 +864,14 @@ impl Interpreter {
             }
             if let Some(event) = self.queued_wait_at_current_position() {
                 self.last_wait_from_queue = true;
+                self.last_queue_pause_is_wait = true;
                 return Ok(ExecutionResult::Wait(event));
             }
             // 走到这里说明队列已抽干，接下来执行的是脚本流里的内联指令；它若产生
             // Wait，current_line 指向的就是该 Wait 指令本身，宿主需要 advance_line()
             // 越过它。故在此把来源标记清为「非排队」。
             self.last_wait_from_queue = false;
+            self.last_queue_pause_is_wait = false;
             self.active_queued_wait = None;
 
             // 消费「经由 Jump 到达当前行」标记（见字段注释）：每条指令只用一次，
@@ -1243,8 +1260,8 @@ impl Interpreter {
                             // 这个 Wait 来自排队标签，current_line 已指向下一条待执行
                             // 指令；记录来源，使 advance_line() 退化为空操作。
                             self.last_wait_from_queue = true;
-                            self.active_queued_wait = None;
-                            if matches!(event, Event::Wait { .. }) {
+                            self.last_queue_pause_is_wait = matches!(event, Event::Wait { .. });
+                            if self.last_queue_pause_is_wait {
                                 self.record_queued_wait_checkpoint(&event);
                             }
                             return Ok(Some(ExecutionResult::Wait(event)));
@@ -1258,8 +1275,8 @@ impl Interpreter {
                             CallbackResult::Continue => {}
                             CallbackResult::Pause => {
                                 self.last_wait_from_queue = true;
-                                self.active_queued_wait = None;
-                                if matches!(event, Event::Wait { .. }) {
+                                self.last_queue_pause_is_wait = matches!(event, Event::Wait { .. });
+                                if self.last_queue_pause_is_wait {
                                     self.record_queued_wait_checkpoint(&event);
                                 }
                                 return Ok(Some(ExecutionResult::Wait(event)));
@@ -2166,7 +2183,9 @@ impl Interpreter {
             return false;
         }
         self.last_wait_from_queue = false;
-        if let Some(index) = self.active_queued_wait.take()
+        let release_checkpoint = std::mem::take(&mut self.last_queue_pause_is_wait);
+        if release_checkpoint
+            && let Some(index) = self.active_queued_wait.take()
             && index < self.queued_wait_checkpoints.len()
         {
             let mut checkpoint = self.queued_wait_checkpoints.remove(index);
@@ -2183,6 +2202,13 @@ impl Interpreter {
             merged.extend_from_slice(&current[current_split..]);
             ctx.immediate_tag_count = checkpoint_split + current_split;
             ctx.tag_queue = merged;
+        }
+        if !release_checkpoint && self.active_queued_wait.is_some() {
+            // A host-synchronised queued event temporarily sat above an older
+            // queued wait. Acknowledging that event must not turn the older
+            // wait into an inline wait whose release increments the script PC.
+            self.last_wait_from_queue = true;
+            self.last_queue_pause_is_wait = true;
         }
         true
     }
@@ -2503,7 +2529,13 @@ mod tests {
         it.set_variable("g.global", Value::Int(3));
         it.set_variable("s.system", Value::Int(4));
         it.lua().globals().set("restart_route", "title").unwrap();
+        it.lua().globals().set("systemreset", true).unwrap();
         it.lua().load("__engine:enqueueTag{'exit'}").exec().unwrap();
+        it.engine_context()
+            .lock()
+            .unwrap()
+            .event_handlers
+            .insert("onEnterFrame".into(), "stale".into());
 
         it.reset_execution_state();
 
@@ -2518,7 +2550,10 @@ mod tests {
             it.lua().globals().get::<String>("restart_route").unwrap(),
             "title"
         );
-        assert!(it.engine_context().lock().unwrap().tag_queue.is_empty());
+        assert!(it.lua().globals().get::<bool>("systemreset").unwrap());
+        let context = it.engine_context().lock().unwrap();
+        assert!(context.tag_queue.is_empty());
+        assert!(context.event_handlers.is_empty());
     }
 
     #[test]
@@ -2556,6 +2591,7 @@ mod tests {
     #[test]
     fn non_wait_pause_at_same_pc_does_not_release_queued_stop() {
         let mut it = queued_stop_fixture();
+        let pc = it.current_line();
         it.lua()
             .load("__engine:enqueueTag{'debugprint', data='sync'}")
             .exec()
@@ -2566,14 +2602,16 @@ mod tests {
         ));
         it.advance_line();
         assert_eq!(it.queued_wait_checkpoints.len(), 1);
-        assert!(matches!(
-            it.run().unwrap(),
-            ExecutionResult::Wait(Event::Wait {
-                reason: WaitReason::Stop { .. }
-            })
-        ));
-        assert!(it.get_variable("after_wait").is_none());
-        assert!(it.get_variable("after_pc").is_none());
+        assert_eq!(it.current_line(), pc);
+
+        // The runtime can acknowledge a host-synchronised event and release
+        // the underlying wait in the same tick. The second advance must
+        // release that wait without skipping the pending script instruction.
+        it.advance_line();
+        assert_eq!(it.current_line(), pc);
+        it.run().unwrap();
+        assert_eq!(it.get_variable("after_wait"), Some(Value::Int(1)));
+        assert_eq!(it.get_variable("after_pc"), Some(Value::Int(1)));
     }
 
     #[test]
