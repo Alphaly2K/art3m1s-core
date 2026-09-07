@@ -41,13 +41,3 @@ ART3M1S_RUN_CGL_TESTS=1 ./scripts/test-all.sh
 ```
 
 遇到 `CGLChoosePixelFormat failed`，先区分 context/环境失败和代码回归。外部游戏测试使用 `ART3M1S_FIXTURES_DIR` 或 `ART3M1S_FIXTURE_NEKOMIKO_DIR` 等配置，具体命令以 `tests/README.md` 为准。不要把本机绝对游戏路径写入测试。
-
-## 当前性能交接（2026-09-05，会随后续提交过时）
-
-用户报告的 NekoMiko 双模型实测基线：约 79 updates/s，完整求值约 25 ms/update，mesh build 约 6.4 ms/frame，84k–134k vertices/frame，上传约 73 MiB/s，core 探针物理内存约 500–610 MiB。它们来自此前运行，不能当成后续版本的已验证指标。
-
-本轮开始时已有未提交优化：motion priority 每帧共用、`Arc` 场景发布、profiler 分项、目录型 compatibility probe、纹理上传后释放重复宿主数据、共享 mesh 顶点及相同快照的 draw command 缓存。具体完成状态以 diff、测试和提交记录为准。
-
-当前优先事项是压低 Eluna CPU：削减每次更新对约 1777 个 layer state 的完整重建开销，随后完善静止冻结、静态 schema/scene 缓存与 worker 调度，最后处理动态 VBO 重复上传。用户已验证上一阶段画面，本轮明确要求优先性能，无需重复人工验图；后续涉及行为变更仍需自动回归验证。
-
-交接时明确列出：已排除问题、当前症状、优先怀疑点、建议探查顺序，以及已验证指标和未完成项目。
