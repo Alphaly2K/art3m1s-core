@@ -1,8 +1,8 @@
 //! Core project bootstrap for the Artemis visual novel engine rewrite.
 //!
 //! This crate intentionally keeps the first layer thin: it wires an unpacked
-//! Artemis project directory to `asb-interpreter`, while later renderer code can
-//! consume interpreter events and map them to ANGLE-backed drawing commands.
+//! Artemis project directory to `asb-interpreter`, while renderer code consumes
+//! interpreter events through a graphics-API-neutral GPU backend boundary.
 
 use asb_interpreter::{Interpreter, InterpreterConfig};
 use std::collections::HashMap;

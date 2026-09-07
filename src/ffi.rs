@@ -4,7 +4,9 @@
 //! filesystem operation inside the core is routed through those callbacks,
 //! keeping the core entirely free of direct I/O.
 use std::collections::HashMap;
-use std::ffi::{CString, c_char, c_int, c_longlong, c_void};
+#[cfg(feature = "gl-backend")]
+use std::ffi::c_void;
+use std::ffi::{CString, c_char, c_int, c_longlong};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -847,7 +849,7 @@ use crate::runtime::CoreRuntime;
 pub unsafe extern "C" fn art3m1s_runtime_create(w: u32, h: u32, backend: i32) -> *mut CoreRuntime {
     // catch_unwind 防止 panic 跨越 extern "C" 边界导致 abort，
     // 同时把 panic message 打印到日志方便定位。
-    let b = crate::backend::gl::platform::GfxBackend::from_int(backend);
+    let b = crate::backend::BackendSelection::from_legacy_int(backend);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         CoreRuntime::create(w, h, b)
     }));
@@ -1229,7 +1231,9 @@ pub unsafe extern "C" fn art3m1s_runtime_set_external_surface(
         return 0;
     }
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        unsafe { &mut *rt }.set_external_surface(kind, handle, width, height)
+        let surface =
+            crate::backend::OutputSurface::from_legacy_parts(kind, handle, width, height)?;
+        unsafe { &mut *rt }.set_output_surface(surface)
     }));
     match result {
         Ok(Ok(())) => 1,
@@ -1254,7 +1258,7 @@ pub unsafe extern "C" fn art3m1s_runtime_clear_external_surface(rt: *mut CoreRun
         return;
     }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        unsafe { &mut *rt }.clear_external_surface();
+        unsafe { &mut *rt }.clear_output_surface();
     }));
 }
 
@@ -1379,7 +1383,7 @@ pub unsafe extern "C" fn art3m1s_runtime_video_gl_get_proc_address(
         return std::ptr::null_mut();
     };
     let rt = unsafe { &*(ctx.cast::<CoreRuntime>()) };
-    rt.video_gl_proc_address(name).cast_mut()
+    rt.external_renderer_proc_address(name).cast_mut()
 }
 
 #[cfg(feature = "gl-backend")]
@@ -1389,7 +1393,7 @@ pub unsafe extern "C" fn art3m1s_runtime_video_gl_begin(rt: *mut CoreRuntime) ->
         return 0;
     }
     let rt = unsafe { &mut *rt };
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rt.begin_video_gl_render())) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rt.begin_external_render())) {
         Ok(Ok(())) => 1,
         Ok(Err(error)) => {
             core_warn!("video GL begin failed: {error}");
@@ -1418,7 +1422,9 @@ pub unsafe extern "C" fn art3m1s_runtime_video_gl_framebuffer(
     };
     let rt = unsafe { &mut *rt };
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        rt.video_layer_gl_framebuffer(id, width, height)
+        rt.video_layer_external_render_target(id, width, height)
+            .ok()
+            .and_then(|handle| u32::try_from(handle).ok())
             .unwrap_or(0)
     }))
     .unwrap_or(0)
@@ -1438,7 +1444,7 @@ pub unsafe extern "C" fn art3m1s_runtime_video_gl_commit(
     };
     let rt = unsafe { &mut *rt };
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        rt.commit_video_layer_gl_frame(id)
+        rt.commit_video_layer_external_frame(id)
     }))
     .map_or(0, i32::from)
 }
@@ -1451,14 +1457,15 @@ pub unsafe extern "C" fn art3m1s_runtime_video_gl_end(rt: *mut CoreRuntime) {
     }
     let rt = unsafe { &mut *rt };
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        rt.end_video_gl_render();
+        rt.end_external_render();
     }));
 }
 
 /// Upload one RGBA8 frame for a currently playing video layer.
 ///
 /// This call is synchronous. `rgba` is borrowed only for the duration of the
-/// call and is passed directly to GL without an intermediate CPU-side copy.
+/// call and is passed directly to the active GPU backend without an intermediate
+/// CPU-side copy.
 /// The host must serialize this with other calls using the same runtime.
 ///
 /// Returns 1 on success and 0 for invalid arguments, a stale layer, or failure.

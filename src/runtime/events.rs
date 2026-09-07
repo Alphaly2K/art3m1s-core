@@ -536,7 +536,7 @@ impl CoreRuntime {
                 return;
             }
         };
-        match self.renderer.register_hlsl_shader(id, &source) {
+        match self.gpu.register_hlsl_shader(id, &source) {
             Ok(()) => {
                 crate::core_info!("[shader] 已加载 id={} file={}", id, file);
             }
@@ -584,9 +584,7 @@ impl CoreRuntime {
         self.layer_info
             .lock()
             .unwrap()
-            .sync(&self.compositor, |file| {
-                self.texture_provider.cached_info(file)
-            });
+            .sync(&self.compositor, |file| self.gpu.cached_texture_info(file));
         self.layer_info_dirty = false;
     }
 
@@ -595,7 +593,7 @@ impl CoreRuntime {
             .lock()
             .unwrap()
             .sync_layer(&self.compositor, id, |file| {
-                self.texture_provider.cached_info(file)
+                self.gpu.cached_texture_info(file)
             });
     }
 

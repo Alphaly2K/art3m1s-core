@@ -10,6 +10,7 @@
 //! 因此默认无字节源、一律回退占位，让整条绘制管线无需素材即可端到端验证。
 
 use super::platform;
+use crate::backend::AssetSource;
 use crate::render_pipeline::draw::{TextureId, TextureInfo, TextureProvider};
 use glow::HasContext;
 use std::cell::Cell;
@@ -17,9 +18,6 @@ use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::time::Instant;
-
-/// 资源名 → 原始字节的来源。返回 `None` 表示该资源不存在（将回退占位）。
-pub type AssetSource = dyn Fn(&str) -> Option<Vec<u8>>;
 
 /// 占位纹理的外观。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

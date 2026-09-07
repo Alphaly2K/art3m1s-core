@@ -1029,12 +1029,9 @@ fn draw_mesh(points: Option<&[f32]>, width: f32, height: f32) -> Option<DrawMesh
 impl CoreRuntime {
     pub(crate) fn set_emote_backend(&mut self, backend: EmoteBackend) {
         let cleared = self.emote.lock().unwrap().set_backend(backend);
-        let textures = if self.gl_ctx.make_current() {
-            self.texture_provider.evict_prefix(":emote/")
-        } else {
-            crate::core_warn!("[E-Mote] GL context unavailable while changing backend");
-            0
-        };
+        self.gpu.begin_access();
+        let textures = self.gpu.evict_texture_prefix(":emote/");
+        self.gpu.end_access();
         crate::core_info!(
             "[E-Mote] backend={backend:?}; cleared {cleared} layer(s) and {textures} texture(s)"
         );
@@ -1043,12 +1040,9 @@ impl CoreRuntime {
 
     pub(super) fn clear_emote_state(&mut self, reason: &str) {
         let layers = self.emote.lock().unwrap().clear();
-        let textures = if self.gl_ctx.make_current() {
-            self.texture_provider.evict_prefix(":emote/")
-        } else {
-            crate::core_warn!("[E-Mote] GL context unavailable while clearing {reason}");
-            0
-        };
+        self.gpu.begin_access();
+        let textures = self.gpu.evict_texture_prefix(":emote/");
+        self.gpu.end_access();
         if layers != 0 || textures != 0 {
             crate::core_info!(
                 "[E-Mote] cleared {layers} layer(s) and {textures} GPU texture(s): {reason}"
@@ -1074,10 +1068,7 @@ impl CoreRuntime {
     pub(super) fn build_emote_commands(
         &mut self,
     ) -> (HashMap<String, Vec<DrawCommand>>, HashSet<String>) {
-        self.emote
-            .lock()
-            .unwrap()
-            .build_commands(&mut self.texture_provider)
+        self.emote.lock().unwrap().build_commands(&mut *self.gpu)
     }
 }
 

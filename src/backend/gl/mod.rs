@@ -19,6 +19,7 @@
 //! 舞台坐标映射到 NDC，因此 [`DrawCommand::transform`] 可以直接当作像素空间的
 //! 仿射变换使用。
 
+use crate::backend::RenderRegion;
 use crate::render_pipeline::draw::{
     BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, Renderer, ShaderGroup, TextureId,
     TextureInfo,
@@ -29,12 +30,14 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 
+mod backend;
 pub mod platform;
 mod provider;
 mod shader;
 
 pub use crate::render_pipeline::ShaderProfile;
-pub use provider::{AssetSource, GlTextureProvider, PlaceholderKind};
+pub use backend::GlBackend;
+pub use provider::{GlTextureProvider, PlaceholderKind};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct RenderProfile {
@@ -1112,32 +1115,6 @@ impl Renderer for GlRenderer {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum RenderRegion {
-    Full,
-    Rect([f32; 4]),
-}
-
-impl RenderRegion {
-    fn from_damage(damage: Option<[f32; 4]>) -> Self {
-        damage.map(Self::Rect).unwrap_or(Self::Full)
-    }
-
-    pub(crate) fn damage(self) -> Option<[f32; 4]> {
-        match self {
-            Self::Full => None,
-            Self::Rect(rect) => Some(rect),
-        }
-    }
-
-    fn union(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Full, _) | (_, Self::Full) => Self::Full,
-            (Self::Rect(left), Self::Rect(right)) => Self::Rect(union_rect(left, right)),
-        }
-    }
-}
-
 fn intersect_rect(left: [f32; 4], right: [f32; 4]) -> Option<[f32; 4]> {
     if !left
         .iter()
@@ -1151,14 +1128,6 @@ fn intersect_rect(left: [f32; 4], right: [f32; 4]) -> Option<[f32; 4]> {
     let x1 = (left[0] + left[2]).min(right[0] + right[2]);
     let y1 = (left[1] + left[3]).min(right[1] + right[3]);
     (x1 > x0 && y1 > y0).then_some([x0, y0, x1 - x0, y1 - y0])
-}
-
-fn union_rect(left: [f32; 4], right: [f32; 4]) -> [f32; 4] {
-    let x0 = left[0].min(right[0]);
-    let y0 = left[1].min(right[1]);
-    let x1 = (left[0] + left[2]).max(right[0] + right[2]);
-    let y1 = (left[1] + left[3]).max(right[1] + right[3]);
-    [x0, y0, x1 - x0, y1 - y0]
 }
 
 impl Drop for GlRenderer {

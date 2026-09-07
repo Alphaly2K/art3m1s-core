@@ -1,7 +1,5 @@
 use super::CoreRuntime;
-use crate::backend::gl::platform;
 use crate::save::AudioSnapshot;
-use glow::HasContext;
 use image::ImageEncoder;
 use std::collections::HashMap;
 
@@ -458,17 +456,7 @@ impl CoreRuntime {
     }
 
     pub(super) fn capture_save_screenshot(&mut self) {
-        // 确保 FBO 已绑定并渲染完成
-        unsafe {
-            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
-            self.gl.finish();
-        }
-        // 从 FBO 读取像素（使用 glReadPixels，对所有后端都可靠）
-        let rgba =
-            unsafe { platform::read_pixels(&self.gl, self.stage_w as i32, self.stage_h as i32) };
-        unsafe {
-            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-        }
+        let rgba = self.gpu.read_frame(self.stage_w, self.stage_h);
         self.save_screenshot = Some(ScreenshotBuffer {
             width: self.stage_w,
             height: self.stage_h,
@@ -500,12 +488,9 @@ impl CoreRuntime {
         let (resource_name, path) = self.screenshot_paths_for(file)?;
 
         crate::ffi::request_write(&path, &png)?;
-        let _ = self.texture_provider.upload_rgba_render_only(
-            &resource_name,
-            target_width,
-            target_height,
-            &rgba,
-        );
+        let _ =
+            self.gpu
+                .upload_rgba_render_only(&resource_name, target_width, target_height, &rgba);
         crate::core_info!(
             "[runtime] 已保存缩略图: {} (resource={}, {}x{})",
             path,

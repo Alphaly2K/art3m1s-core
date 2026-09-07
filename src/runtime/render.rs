@@ -1,34 +1,16 @@
 use super::CoreRuntime;
-use crate::backend::gl::RenderRegion;
-use crate::backend::gl::platform;
+use crate::backend::{FrameCapture, RenderRegion};
 use crate::render_pipeline::RenderPipeline;
-use crate::render_pipeline::draw::{DrawList, Renderer, TextureProvider};
+use crate::render_pipeline::draw::DrawList;
 use asb_interpreter::event::WaitReason;
-use glow::HasContext;
 
 impl CoreRuntime {
-    /// 重新创建 FBO 并更新渲染器的 viewport/projection。
+    /// Recreate the backend-owned render target and viewport/projection state.
     /// 当舞台尺寸改变时调用（例如加载不同分辨率的项目）。
     pub(super) fn resize_stage(&mut self, new_width: u32, new_height: u32) -> Result<(), String> {
-        // 先建新 FBO 再删旧的：创建失败时保留可用的旧目标，不留悬空句柄。
-        let (new_fbo, new_fbo_tex) = unsafe {
-            platform::create_fbo_target(&self.gl, new_width as i32, new_height as i32)
-                .map_err(|e| format!("重新创建 FBO 失败: {e}"))?
-        };
-
-        unsafe {
-            self.gl.delete_framebuffer(self.fbo);
-            self.gl.delete_texture(self.fbo_tex);
-        }
-
-        self.fbo = new_fbo;
-        self.fbo_tex = new_fbo_tex;
+        self.gpu.resize(new_width, new_height)?;
         self.stage_w = new_width;
         self.stage_h = new_height;
-
-        // 更新渲染器的 viewport 和 projection
-        self.renderer.set_viewport_size(new_width, new_height);
-        self.renderer.set_stage_size(new_width, new_height);
         self.last_rendered_scene = None;
         self.last_submitted_frame = None;
 
@@ -41,31 +23,25 @@ impl CoreRuntime {
         &mut self,
         profile: &mut crate::profiler::FrameProfile,
     ) -> Option<RenderRegion> {
-        // 绑定 FBO，渲染到纹理而不是默认帧缓冲
-        unsafe {
-            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
-        }
+        self.gpu.begin_frame();
 
         // 转场捕获：在渲染新帧前，若合成器需要捕捉旧画面，则从当前 FBO 读取
         let pipeline = RenderPipeline::new(&self.compositor);
         if pipeline.needs_trans_capture() {
             let capture_started = profile.mark();
-            if let Some((texture, info)) = self.texture_provider.copy_bound_framebuffer_render_only(
-                "__trans_capture__",
-                self.stage_w,
-                self.stage_h,
-            ) {
-                pipeline.capture_trans_gpu_texture(texture, info);
-            } else {
-                let pixels = unsafe {
-                    platform::read_pixels(&self.gl, self.stage_w as i32, self.stage_h as i32)
-                };
-                pipeline.capture_trans_texture(
+            match self
+                .gpu
+                .capture_frame("__trans_capture__", self.stage_w, self.stage_h)
+            {
+                FrameCapture::Texture(texture, info) => {
+                    pipeline.capture_trans_gpu_texture(texture, info);
+                }
+                FrameCapture::Pixels(pixels) => pipeline.capture_trans_texture(
                     &pixels,
                     self.stage_w,
                     self.stage_h,
-                    &mut self.texture_provider,
-                );
+                    &mut *self.gpu,
+                ),
             }
             profile.transition_capture_ns = crate::profiler::FrameProfile::elapsed(capture_started);
         }
@@ -77,7 +53,7 @@ impl CoreRuntime {
         // script.rs 的 wait 建立/退出路径（那不在本任务白名单内）。
         self.frame_visual_dirty |= self.drive_click_wait_icon();
 
-        let texture_revision = self.texture_provider.content_revision();
+        let texture_revision = self.gpu.texture_content_revision();
         if !self.frame_visual_dirty
             && self.last_submitted_frame.is_some()
             && self.last_submitted_texture_revision == texture_revision
@@ -85,14 +61,12 @@ impl CoreRuntime {
         {
             let frame = self.last_submitted_frame.as_ref().unwrap();
             let gpu_started = profile.mark();
-            let cleared_debug_overlay = self.renderer.clear_damage_overlay(frame);
+            let cleared_debug_overlay = self.gpu.clear_damage_overlay(frame);
             profile.gpu_submit_ns = crate::profiler::FrameProfile::elapsed(gpu_started);
             if let Some(region) = cleared_debug_overlay {
                 record_render_region(profile, region, self.stage_w, self.stage_h);
             }
-            unsafe {
-                self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            }
+            self.gpu.end_frame();
             return cleared_debug_overlay;
         }
 
@@ -105,7 +79,7 @@ impl CoreRuntime {
         profile.frame_build_ns = crate::profiler::FrameProfile::elapsed(build_started);
         profile.draw_list_commands = (frame.commands.len() + frame.mask_commands.len()) as u64;
         let changed_textures = self
-            .texture_provider
+            .gpu
             .changed_texture_ids_since(self.last_submitted_texture_revision);
         if !frame_requires_render(
             self.last_submitted_frame.as_ref(),
@@ -114,14 +88,12 @@ impl CoreRuntime {
             texture_revision,
         ) {
             let gpu_started = profile.mark();
-            let cleared_debug_overlay = self.renderer.clear_damage_overlay(&frame);
+            let cleared_debug_overlay = self.gpu.clear_damage_overlay(&frame);
             profile.gpu_submit_ns = crate::profiler::FrameProfile::elapsed(gpu_started);
             if let Some(region) = cleared_debug_overlay {
                 record_render_region(profile, region, self.stage_w, self.stage_h);
             }
-            unsafe {
-                self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            }
+            self.gpu.end_frame();
             return cleared_debug_overlay;
         }
 
@@ -131,7 +103,7 @@ impl CoreRuntime {
             .chain(std::iter::once(&frame))
             .flat_map(|draw_list| draw_list.commands.iter())
             .map(|command| command.texture)
-            .filter(|&texture| self.texture_provider.texture_is_opaque(texture))
+            .filter(|&texture| self.gpu.texture_is_opaque(texture))
             .collect::<std::collections::HashSet<_>>();
         let visualize_damage = crate::ffi::damage_visualization_enabled();
         let damage_started = profile.mark();
@@ -150,7 +122,7 @@ impl CoreRuntime {
         let repaint_region = match damage_decision {
             DamageDecision::Skip => {
                 let gpu_started = profile.mark();
-                let cleared_debug_overlay = self.renderer.clear_damage_overlay(&frame);
+                let cleared_debug_overlay = self.gpu.clear_damage_overlay(&frame);
                 profile.gpu_submit_ns = crate::profiler::FrameProfile::elapsed(gpu_started);
                 if let Some(region) = cleared_debug_overlay {
                     record_render_region(profile, region, self.stage_w, self.stage_h);
@@ -159,20 +131,15 @@ impl CoreRuntime {
                 self.last_submitted_texture_revision = texture_revision;
                 self.last_rendered_scene = Some(self.compositor.scene_snapshot());
                 self.last_rendered_clock_ms = self.compositor.clock_ms();
-                unsafe {
-                    self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-                }
+                self.gpu.end_frame();
                 return cleared_debug_overlay;
             }
             DamageDecision::Partial(damage) if visualize_damage => {
-                self.renderer.render_damage_visualized(&frame, damage)
+                self.gpu.render_damage_visualized(&frame, damage)
             }
-            DamageDecision::Partial(damage) => self.renderer.render_damage(&frame, damage),
-            DamageDecision::Full if visualize_damage => self.renderer.render_visualized(&frame),
-            DamageDecision::Full => {
-                self.renderer.render(&frame);
-                RenderRegion::Full
-            }
+            DamageDecision::Partial(damage) => self.gpu.render_damage(&frame, damage),
+            DamageDecision::Full if visualize_damage => self.gpu.render_visualized(&frame),
+            DamageDecision::Full => self.gpu.render(&frame),
         };
         profile.gpu_submit_ns = crate::profiler::FrameProfile::elapsed(gpu_started);
         record_render_region(profile, repaint_region, self.stage_w, self.stage_h);
@@ -181,31 +148,13 @@ impl CoreRuntime {
         self.last_rendered_scene = Some(self.compositor.scene_snapshot());
         self.last_rendered_clock_ms = self.compositor.clock_ms();
 
-        unsafe {
-            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-        }
+        self.gpu.end_frame();
         Some(repaint_region)
     }
 
     pub(super) fn read_current_frame_into(&mut self, out_pixels: &mut [u8]) -> usize {
-        unsafe {
-            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
-        }
-        let written = unsafe {
-            platform::read_pixels_into(
-                &self.gl,
-                self.stage_w as i32,
-                self.stage_h as i32,
-                out_pixels,
-            )
-        };
-
-        // 解绑 FBO
-        unsafe {
-            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-        }
-
-        written
+        self.gpu
+            .read_frame_into(self.stage_w, self.stage_h, out_pixels)
     }
 
     /// 用上一帧场景重建转场源画面。
@@ -217,12 +166,10 @@ impl CoreRuntime {
             // 首帧尚无场景快照时保留 FBO 原内容，沿用原有捕获行为。
             return;
         };
-        unsafe {
-            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
-        }
+        self.gpu.begin_frame();
         let (frame, text_layers, text_commands) =
             self.build_bound_scene(false, Some((&scene, self.last_rendered_clock_ms)));
-        self.renderer.render(&frame);
+        self.gpu.render(&frame);
         // The FBO now contains a reconstructed transition source rather than
         // the frame represented by `last_submitted_frame`.
         self.last_submitted_frame = None;
@@ -231,9 +178,7 @@ impl CoreRuntime {
             text_layers,
             text_commands
         );
-        unsafe {
-            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-        }
+        self.gpu.end_frame();
     }
 
     fn build_bound_scene(
@@ -259,18 +204,14 @@ impl CoreRuntime {
             pipeline.build_scene_with_content(
                 scene,
                 clock_ms,
-                &mut self.texture_provider,
+                &mut *self.gpu,
                 content_for,
                 text_for,
             )
         } else if include_transition {
-            pipeline.build_composited_with_content(
-                &mut self.texture_provider,
-                content_for,
-                text_for,
-            )
+            pipeline.build_composited_with_content(&mut *self.gpu, content_for, text_for)
         } else {
-            pipeline.build_with_content(&mut self.texture_provider, content_for, text_for)
+            pipeline.build_with_content(&mut *self.gpu, content_for, text_for)
         };
         frame.materialize_stencil_groups(crate::render_pipeline::shader::ALPHA_MASK_SHADER);
         let mut used_files = scene_snapshot
@@ -285,7 +226,7 @@ impl CoreRuntime {
         for f in RenderPipeline::new(&self.compositor).retained_files() {
             used_files.insert(f);
         }
-        self.texture_provider.retain(&used_files);
+        self.gpu.retain(&used_files);
         (frame, text_layer_count, text_command_count)
     }
 

@@ -342,46 +342,30 @@ impl CoreRuntime {
         }
 
         let texture_name = video_layer_texture_name(id);
-        let saved_ctx = self.gl_ctx.bind_save();
+        self.gpu.begin_access();
         let uploaded = self
-            .texture_provider
+            .gpu
             .upload_video_rgba(&texture_name, width, height, rgba);
-        self.gl_ctx.restore(saved_ctx);
+        self.gpu.end_access();
         uploaded
     }
 
-    /// Resolves GL symbols from the exact implementation used by this
-    /// runtime. This matters for ANGLE, where loading system OpenGL symbols
-    /// would create an incompatible render context for libmpv.
-    pub fn video_gl_proc_address(&self, name: &str) -> *const std::ffi::c_void {
-        self.gl_ctx.get_proc_address(name)
+    /// Resolves entry points for the backend's optional external renderer API.
+    pub fn external_renderer_proc_address(&self, name: &str) -> *const std::ffi::c_void {
+        self.gpu.external_renderer_proc_address(name)
     }
 
-    /// Makes the runtime GL context current for a short external render pass.
-    /// Calls are intentionally non-nestable; every successful begin must be
-    /// paired with `end_video_gl_render` even when the external renderer fails.
-    pub fn begin_video_gl_render(&mut self) -> Result<(), String> {
-        if self.video_gl_saved_context.is_some() {
-            return Err("video GL render lease is already active".into());
-        }
-        let saved = self.gl_ctx.bind_save();
-        if !self.gl_ctx.make_current() {
-            self.gl_ctx.restore(saved);
-            return Err("failed to make runtime GL context current".into());
-        }
-        self.video_gl_saved_context = Some(saved);
-        Ok(())
+    /// Starts a short backend-specific external render pass.
+    pub fn begin_external_render(&mut self) -> Result<(), String> {
+        self.gpu.begin_external_render()
     }
 
-    pub fn video_layer_gl_framebuffer(
+    pub fn video_layer_external_render_target(
         &mut self,
         id: &str,
         width: u32,
         height: u32,
-    ) -> Result<u32, String> {
-        if self.video_gl_saved_context.is_none() {
-            return Err("video GL render lease is not active".into());
-        }
+    ) -> Result<u64, String> {
         let is_playing = self
             .video
             .video_state()
@@ -392,22 +376,17 @@ impl CoreRuntime {
             return Err(format!("video layer is not playing: {id}"));
         }
         let texture_name = video_layer_texture_name(id);
-        self.texture_provider
-            .ensure_video_render_target(&texture_name, width, height)
+        self.gpu
+            .external_render_target(&texture_name, width, height)
     }
 
-    pub fn commit_video_layer_gl_frame(&mut self, id: &str) -> bool {
-        if self.video_gl_saved_context.is_none() {
-            return false;
-        }
-        self.texture_provider
-            .commit_video_render_target(&video_layer_texture_name(id))
+    pub fn commit_video_layer_external_frame(&mut self, id: &str) -> bool {
+        self.gpu
+            .commit_external_render_target(&video_layer_texture_name(id))
     }
 
-    pub fn end_video_gl_render(&mut self) {
-        if let Some(saved) = self.video_gl_saved_context.take() {
-            self.gl_ctx.restore(saved);
-        }
+    pub fn end_external_render(&mut self) {
+        self.gpu.end_external_render();
     }
 
     fn bind_video_layer_texture(&mut self, id: &str) {
