@@ -643,9 +643,7 @@ impl TextRenderer for GlyphTextRenderer {
     }
 
     fn pop_message_layer(&mut self) {
-        if let Some(prev) = self.state.layer_stack.pop() {
-            self.state.active_layer = Some(prev);
-        }
+        self.state.active_layer = self.state.layer_stack.pop();
     }
     fn set_glyph_config(&mut self, c: &HashMap<String, String>) {
         self.state.glyph_config.clone_from(c);
@@ -1924,6 +1922,16 @@ mod tests {
         // 弹栈应回到 a（b 未入栈），而不是 b。
         r.pop_message_layer();
         assert_eq!(r.state.active_layer.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn chgmsg_pop_with_empty_stack_clears_active_layer() {
+        let mut r = GlyphTextRenderer::new();
+        r.switch_message_layer(Some("stale"), false);
+
+        r.pop_message_layer();
+
+        assert!(r.state.active_layer.is_none());
     }
 
     #[test]

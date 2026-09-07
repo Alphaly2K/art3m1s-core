@@ -150,6 +150,13 @@ pub struct VariableStore {
     reported_os: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     macro_scopes: Vec<MacroScope>,
+    /// `chgmsg` / `/chgmsg` 的运行时消息层返回栈。
+    ///
+    /// 这不是游戏变量，也不随存档持久化；它只用于保证 Lua `e:tag()` 的同步
+    /// 可观察语义：同一 Lua 调用在执行 `/chgmsg` 后立刻读取
+    /// `s.current_message_layer` 时，必须看到弹栈后的值。
+    #[serde(skip)]
+    message_layer_stack: Vec<String>,
     #[serde(skip)]
     write_macro_local: bool,
 }
@@ -337,6 +344,7 @@ impl VariableStore {
     /// 清除所有变量（包括全局和系统变量）
     pub fn clear_all(&mut self) {
         self.macro_scopes.clear();
+        self.message_layer_stack.clear();
         self.local.clear();
         self.global.clear();
         self.temp.clear();
@@ -346,8 +354,27 @@ impl VariableStore {
     /// 清除局部和临时变量（用于 reset）
     pub fn reset(&mut self) {
         self.macro_scopes.clear();
+        self.message_layer_stack.clear();
         self.local.clear();
         self.temp.clear();
+    }
+
+    pub(crate) fn switch_message_layer(&mut self, id: String, stack: bool) {
+        if stack {
+            let current = self
+                .get("s.current_message_layer")
+                .map(Value::as_string)
+                .filter(|value| !value.is_empty() && value != "0");
+            if let Some(current) = current {
+                self.message_layer_stack.push(current);
+            }
+        }
+        self.set("s.current_message_layer", Value::String(id));
+    }
+
+    pub(crate) fn pop_message_layer(&mut self) {
+        let restored = self.message_layer_stack.pop().unwrap_or_default();
+        self.set("s.current_message_layer", Value::String(restored));
     }
 
     /// Numbered-save state, including suspended macro arguments but no global/system data.

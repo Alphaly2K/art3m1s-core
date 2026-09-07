@@ -408,6 +408,8 @@ pub struct EngineContext {
 /// 解释器与 [`EngineContext`] 之间共享同一个加载器。
 pub type FileReader = Arc<dyn Fn(&str) -> crate::error::Result<Vec<u8>> + Send + Sync>;
 
+pub(crate) const MESSAGE_LAYER_STATE_PREAPPLIED: &str = "__art3m1s_message_layer_state_preapplied";
+
 impl EngineContext {
     pub fn new(callbacks: Box<dyn EngineCallbacks + Send + Sync>) -> Self {
         Self {
@@ -610,6 +612,33 @@ impl UserData for EngineApi {
                         }
                     }
                 } else {
+                    // `e:tag()` 是同步标签入口，区别于延迟执行的 `enqueueTag()`。
+                    // 大部分宿主事件在 Lua 返回后统一派发即可；消息层是例外，因为
+                    // Artemis 宏会在同一 Lua 调用内反复 `/chgmsg`，并立即读取
+                    // s.current_message_layer 判断是否已经弹空。先同步更新变量态，
+                    // 随后仍把事件排入解释器，保证渲染器按原顺序收到完整事件。
+                    if matches!(tag_name.as_str(), "chgmsg" | "chgmsg_close" | "/chgmsg")
+                        && let Some(vars) = &ctx.variables
+                    {
+                        let mut store = vars.lock().unwrap();
+                        if tag_name == "chgmsg" {
+                            let id = match params.get("id").filter(|id| !id.is_empty()) {
+                                Some(raw) => crate::expression::ExpressionEvaluator::new(&store)
+                                    .resolve_param_str(raw)
+                                    .map_err(mlua::Error::external)?,
+                                None => crate::tags::next_anonymous_message_layer_id(),
+                            };
+                            let stack = params
+                                .get("stack")
+                                .map(|value| !matches!(value.as_str(), "0" | "false"))
+                                .unwrap_or(true);
+                            store.switch_message_layer(id.clone(), stack);
+                            params.insert("id".to_string(), id);
+                        } else {
+                            store.pop_message_layer();
+                        }
+                        params.insert(MESSAGE_LAYER_STATE_PREAPPLIED.to_string(), "1".to_string());
+                    }
                     let insert_at = ctx.immediate_tag_count.min(ctx.tag_queue.len());
                     ctx.tag_queue.insert(insert_at, (tag_name, params));
                     ctx.immediate_tag_count += 1;
@@ -1907,6 +1936,46 @@ mod tests {
             Some(&crate::variable::Value::Float(10.0))
         );
         assert_eq!(store.get("r.size"), Some(&crate::variable::Value::Int(1)));
+    }
+
+    #[test]
+    fn lua_tag_message_layer_stack_is_observable_before_lua_returns() {
+        let lua = Lua::new();
+        let variables = Arc::new(Mutex::new(crate::variable::VariableStore::new()));
+        variables.lock().unwrap().set(
+            "s.current_message_layer",
+            crate::variable::Value::String("base".to_string()),
+        );
+        let mut ctx = EngineContext::new(Box::new(EmoteProbe::default()));
+        ctx.variables = Some(Arc::clone(&variables));
+        let ctx = Arc::new(Mutex::new(ctx));
+        init_lua_engine_api(&lua, Arc::clone(&ctx)).unwrap();
+
+        lua.load(
+            r#"
+            __engine:tag{"chgmsg", id="nested"}
+            assert(__engine:var("s.current_message_layer") == "nested")
+            __engine:tag{"/chgmsg"}
+            assert(__engine:var("s.current_message_layer") == "base")
+            __engine:tag{"/chgmsg"}
+            assert(__engine:var("s.current_message_layer") == "")
+
+            __engine:enqueueTag{"chgmsg", id="deferred"}
+            assert(__engine:var("s.current_message_layer") == "")
+            "#,
+        )
+        .exec()
+        .unwrap();
+
+        let ctx = ctx.lock().unwrap();
+        assert_eq!(ctx.tag_queue.len(), 4);
+        assert_eq!(ctx.immediate_tag_count, 3);
+        assert_eq!(ctx.tag_queue[3].0, "chgmsg");
+        assert!(
+            !ctx.tag_queue[3]
+                .1
+                .contains_key(MESSAGE_LAYER_STATE_PREAPPLIED)
+        );
     }
 
     #[test]

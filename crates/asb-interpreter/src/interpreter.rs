@@ -1905,7 +1905,20 @@ impl Interpreter {
 
             // 获取 handler 并执行
             if let Some(handler) = self.tag_registry.get(&instruction.tag) {
-                handler.execute(&mut ctx)
+                let result = handler.execute(&mut ctx)?;
+                if instruction.get(crate::lua_engine::MESSAGE_LAYER_STATE_PREAPPLIED) != Some("1") {
+                    match &result {
+                        TagResult::Emit(Event::MessageLayerSwitch { id, stack, .. }) => {
+                            ctx.variables
+                                .switch_message_layer(id.clone().unwrap_or_default(), *stack);
+                        }
+                        TagResult::Emit(Event::MessageLayerPop) => {
+                            ctx.variables.pop_message_layer();
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(result)
             } else {
                 unreachable!()
             }
