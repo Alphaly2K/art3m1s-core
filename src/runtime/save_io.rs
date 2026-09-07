@@ -32,11 +32,7 @@ const AREAD_FILE: &str = "aread.dat";
 fn is_persistent_system_variable(name: &str) -> bool {
     matches!(
         name,
-        "bgmvol"
-            | "sevol"
-            | "videovol"
-            | "automodewait"
-            | "enablemaximizedwindow"
+        "bgmvol" | "sevol" | "videovol" | "automodewait" | "enablemaximizedwindow"
     ) || name
         .strip_prefix("segain.")
         .is_some_and(|id| !id.is_empty())
@@ -58,6 +54,7 @@ pub(super) struct ScreenshotBuffer {
     height: u32,
     rgba: Vec<u8>,
     scene: crate::compositor::Scene,
+    message_text: Option<crate::save::MessageTextSnapshot>,
 }
 
 impl CoreRuntime {
@@ -100,10 +97,35 @@ impl CoreRuntime {
             .map_err(|e| format!("onSave 处理器失败: {e:?}"))?;
 
         let mut data = crate::save::SaveData::from_interpreter(&self.interpreter);
+        if let Some(checkpoint) = &self.gameplay_save_checkpoint {
+            if checkpoint.is_ancestor_of(&data.current_script, &data.call_stack) {
+                crate::core_info!(
+                    "[runtime] 编号存档使用点击等待检查点 {}:{} -> {}:{} stack={} -> {}",
+                    data.current_script,
+                    data.current_line,
+                    checkpoint.script,
+                    checkpoint.line,
+                    data.call_stack.len(),
+                    checkpoint.call_stack.len()
+                );
+                data = data.with_gameplay_checkpoint(checkpoint);
+            }
+        }
         if let Some(snapshot) = &self.save_screenshot {
             data = data.with_scene(snapshot.scene.clone());
+            if let Some(message_text) = snapshot.message_text.clone() {
+                data = data.with_message_text(message_text);
+            }
         } else {
             data = data.with_scene(self.compositor.scene_snapshot());
+            if let Some(message_text) = self.capture_message_text_snapshot() {
+                data = data.with_message_text(message_text);
+            }
+        }
+        if data.waiting_for_input.is_none() {
+            data.waiting_for_input = Some(super::script::wait_reason_is_input_wait(
+                self.wait_reason.as_ref(),
+            ));
         }
         data = data.with_audio(AudioSnapshot::from_audio(self.audio.as_ref()));
         let json = serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?;
@@ -236,25 +258,61 @@ impl CoreRuntime {
     ///
     /// `trans_type`：`[load type=0..2]` 指定时在加载完成后执行一次转场
     /// （与 trans 标签 type 同值）；缺省瞬切。
+    pub(super) fn capture_gameplay_save_checkpoint(&mut self) {
+        let Some(script) = self.interpreter.current_script() else {
+            return;
+        };
+        let call_stack: Vec<crate::save::CallFrameSnapshot> = self
+            .interpreter
+            .call_stack()
+            .iter()
+            .map(crate::save::CallFrameSnapshot::from)
+            .collect();
+        if self
+            .gameplay_save_checkpoint
+            .as_ref()
+            .is_some_and(|existing| existing.is_ancestor_of(script, &call_stack))
+        {
+            // 菜单/对话框里的等待是从点击等待 call 出去的，不能覆盖原检查点。
+            return;
+        }
+        self.gameplay_save_checkpoint = Some(crate::save::GameplayCheckpoint {
+            script: script.to_string(),
+            line: self.interpreter.current_line(),
+            call_stack,
+            variables: self.interpreter.variables().local_snapshot(),
+            waiting_for_input: true,
+        });
+    }
+
     pub(super) fn handle_load_game(
         &mut self,
         file: &str,
         trans_type: Option<i32>,
     ) -> Result<(), String> {
         let path = self.save_path_for(file)?;
-        let bytes = crate::ffi::request_file(&path)?;
+        crate::core_info!("[runtime] 读取存档文件 FFI 开始: {}", path);
+        let bytes = crate::ffi::request_file(&path).map_err(|error| {
+            crate::core_error!("[runtime] 读取存档文件 FFI 失败: {}: {}", path, error);
+            error
+        })?;
+        crate::core_info!(
+            "[runtime] 读取存档文件 FFI 返回: {} ({} bytes)",
+            path,
+            bytes.len()
+        );
         let data: crate::save::SaveData =
             serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        self.gameplay_save_checkpoint = None;
+        self.pending_load_resume = None;
+        self.pending_message_text = None;
         self.clear_emote_state("save load");
         self.compositor.reset_for_load();
         self.stop_all_media();
         self.reset_control_modes_for_load();
         self.clear_scene_text();
         self.hovered_layers.clear();
-        if let Some(scene) = data.scene.clone() {
-            self.compositor.restore_scene(scene);
-        }
-        self.sync_layer_info_all();
+        self.wait_reason = None;
         data.restore(&mut self.interpreter)
             .map_err(|e| format!("恢复存档状态失败: {e:?}"))?;
 
@@ -264,9 +322,19 @@ impl CoreRuntime {
             .fire_load_handler_with_params(&HashMap::from([("file".into(), file.into())]))
             .map_err(|e| format!("onLoad 处理器失败: {e:?}"))?;
         self.sync_control_status_variables();
+        // Immediate e:tag commands cover the outgoing scene. Deferred
+        // enqueueTag commands belong on the restored scene.
+        let deferred = self.interpreter.take_deferred_queued_tags();
         self.interpreter
             .flush_pending_tags()
             .map_err(|e| format!("抽干读档标签失败: {e:?}"))?;
+        let mut profile = crate::profiler::FrameProfile::default();
+        self.flush_host_events(&mut profile);
+        if let Some(scene) = data.scene.clone() {
+            self.compositor.restore_scene(scene);
+        }
+        self.sync_layer_info_all();
+        self.interpreter.append_queued_tags(deferred);
         self.reload_persistent_lua_tables()
             .map_err(|e| format!("恢复当前系统存档索引失败: {e}"))?;
         self.apply_system_audio_volume();
@@ -280,9 +348,35 @@ impl CoreRuntime {
             self.compositor.apply_event(&event);
         }
 
-        // 清除等待状态，使下一帧 run() 从恢复后的位置继续执行。
-        self.wait_reason = None;
-        crate::core_info!("[runtime] 已读取存档: {}", path);
+        let waiting = match data.waiting_for_input {
+            Some(value) => value,
+            None => saved_position_resumes_input_wait(&self.interpreter),
+        };
+        self.pending_message_text = data.message_text.clone();
+        if waiting {
+            // Saved click-waits snapshot the PC after the queued `@`/`[wait]`.
+            // Hold that wait so onLoad follow-up can run, then stop before the
+            // message macro's post-wait cleanup (rp / text_erase) executes.
+            self.interpreter.hold_queued_input_wait();
+            self.pending_load_resume = Some(super::PendingLoadResume {
+                script: data.current_script.clone(),
+                line: data.current_line,
+                stack_len: data.call_stack.len(),
+            });
+            self.wait_reason = None;
+            self.maybe_restore_loaded_message_text();
+        } else {
+            self.restore_pending_message_text();
+            self.wait_reason = None;
+        }
+        crate::core_info!(
+            "[runtime] 已读取存档: {} -> {}:{} stack={} wait={}",
+            path,
+            data.current_script,
+            data.current_line,
+            data.call_stack.len(),
+            waiting
+        );
         Ok(())
     }
 
@@ -337,6 +431,9 @@ impl CoreRuntime {
     }
 
     pub(super) fn handle_go_title(&mut self) -> Result<(), String> {
+        self.gameplay_save_checkpoint = None;
+        self.pending_load_resume = None;
+        self.pending_message_text = None;
         self.clear_emote_state("go title");
         self.compositor.reset_for_load();
         self.sync_layer_info_all();
@@ -377,6 +474,7 @@ impl CoreRuntime {
             height: self.stage_h,
             rgba,
             scene: self.compositor.scene_snapshot(),
+            message_text: self.capture_message_text_snapshot(),
         });
         crate::core_info!(
             "[runtime] takess 已缓存游戏画面 {}x{}",
@@ -444,6 +542,41 @@ impl CoreRuntime {
 /// 文档：type 0..2 与 trans 标签 type 同值（0=瞬切、1=交叉淡化、2=规则图转场，
 /// load 无 rule 参数故 2 退化为淡化）；缺省不执行转场。时长/输入用 trans 的
 /// 缺省值（time 缺省由合成器决定，input=1 允许输入跳过）。
+fn saved_position_resumes_input_wait(interpreter: &asb_interpreter::Interpreter) -> bool {
+    let Some(name) = interpreter.current_script() else {
+        return false;
+    };
+    let Some(script) = interpreter.get_script(name) else {
+        return false;
+    };
+    let line = interpreter.current_line();
+    if instruction_is_input_wait(script.get_instruction(line)) {
+        return true;
+    }
+    if line == 0 {
+        return false;
+    }
+    instruction_is_input_wait(script.get_instruction(line - 1))
+}
+
+fn instruction_is_input_wait(instruction: Option<&asb_interpreter::Instruction>) -> bool {
+    let Some(instruction) = instruction else {
+        return false;
+    };
+    match instruction.tag.as_str() {
+        "@" | "wt" | "s" | "clickwait" => true,
+        "wait" => {
+            let timed = instruction.get("time").is_some();
+            let input = instruction.get("input");
+            if timed && input == Some("0") {
+                return false;
+            }
+            input != Some("0")
+        }
+        _ => false,
+    }
+}
+
 fn load_transition_event(trans_type: Option<i32>) -> Option<asb_interpreter::Event> {
     let trans_type = trans_type?;
     if !(0..=2).contains(&trans_type) {
@@ -570,7 +703,37 @@ mod tests {
     use super::{
         ScreenshotBuffer, encode_png_rgba, is_persistent_system_variable, load_transition_event,
         persistent_system_snapshot, qualify_save_path, resize_screenshot_rgba, sanitize_savepath,
+        saved_position_resumes_input_wait,
     };
+    use asb_interpreter::{Interpreter, InterpreterConfig};
+
+    #[test]
+    fn legacy_saves_resume_wait_when_pc_is_after_a_queued_click_wait() {
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter
+            .load_script(
+                "macro.iet",
+                "*main
+[wait input=1]
+[@]
+[call label=commandskipcheck]
+",
+            )
+            .unwrap();
+        interpreter.start("macro.iet", "main").unwrap();
+        interpreter
+            .restore_position("macro.iet", 2, Vec::new())
+            .unwrap();
+        assert!(saved_position_resumes_input_wait(&interpreter));
+        interpreter
+            .restore_position("macro.iet", 1, Vec::new())
+            .unwrap();
+        assert!(saved_position_resumes_input_wait(&interpreter));
+        interpreter
+            .restore_position("macro.iet", 0, Vec::new())
+            .unwrap();
+        assert!(saved_position_resumes_input_wait(&interpreter));
+    }
 
     #[test]
     fn save_paths_are_qualified_with_savepath_once() {
@@ -720,6 +883,7 @@ mod tests {
                 255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
             ],
             scene: crate::compositor::Scene::new(),
+            message_text: None,
         };
         let resized = resize_screenshot_rgba(&screenshot, 1, 1).unwrap();
         assert_eq!(resized.len(), 4);

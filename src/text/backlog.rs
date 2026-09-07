@@ -39,7 +39,7 @@ fn tag_with_params(name: &str, params: &HashMap<String, String>) -> String {
 ///
 /// `get_backlog_tags` / `get_message_tags` 把它们序列化为可交给
 /// `tag` 标签逐条执行的标签字符串，从而重现该页文本。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum BacklogTag {
     /// 剧情文本段落。再现时以 `[print data="…"]` 执行（print 标签用于
     /// 把字符串显示为剧情文本，正是再现场景所需）。

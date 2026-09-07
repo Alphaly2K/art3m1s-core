@@ -142,6 +142,13 @@ pub struct CoreRuntime {
     was_click_wait: bool,
     /// 本帧是否派发了剧情文本（用于已读判定：只在文本展示后的点击等待处标记已读）。
     scenario_text_shown: bool,
+    /// Click/key-wait interpreter snapshot. Numbered saves taken from a nested
+    /// menu persist this instead of the menu program counter.
+    gameplay_save_checkpoint: Option<crate::save::GameplayCheckpoint>,
+    /// After `[load]`, keep running onLoad follow-up until this wait is restored.
+    pending_load_resume: Option<PendingLoadResume>,
+    /// Message-page snapshot restored once onLoad follow-up has rebuilt the MW.
+    pending_message_text: Option<crate::save::MessageTextSnapshot>,
     /// 已读记录自上次持久化后是否有新增（syssave 时落 aread.dat）。
     read_dirty: bool,
     /// Saved host GL context while libmpv is rendering directly into a
@@ -153,8 +160,16 @@ pub struct CoreRuntime {
     gl_ctx: Box<dyn platform::GLPlatformContext>,
 }
 
+/// Restored click-wait that must not run until onLoad follow-up returns.
+struct PendingLoadResume {
+    script: String,
+    line: usize,
+    stack_len: usize,
+}
+
 impl CoreRuntime {
     /// Create a new runtime with the given rendering backend.
+
     pub fn create(
         stage_width: u32,
         stage_height: u32,
@@ -253,6 +268,9 @@ impl CoreRuntime {
             script_forced_stop: false,
             was_click_wait: false,
             scenario_text_shown: false,
+            gameplay_save_checkpoint: None,
+            pending_load_resume: None,
+            pending_message_text: None,
             read_dirty: false,
             video_gl_saved_context: None,
             profiler: crate::profiler::RuntimeProfiler::new(),

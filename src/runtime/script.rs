@@ -59,13 +59,39 @@ impl CoreRuntime {
         }
 
         if self.wait_reason.is_none() {
+            self.maybe_restore_loaded_message_text();
             self.run_until_wait_or_complete(profile);
             // [autosave allow=2]：每次进入用户输入等待时自动保存。
+            // Only click/key waits. Trans/menu `wait input=1` would otherwise
+            // freeze the checkpoint on [adv] with sysbtn_mode=hide and skip the
+            // later `@` wait that actually owns the message window.
+            if wait_reason_is_input_wait(self.wait_reason.as_ref()) {
+                self.capture_gameplay_save_checkpoint();
+            }
             if wait_reason_is_input_wait(self.wait_reason.as_ref()) {
                 self.maybe_autosave_on_input_wait();
             }
         } else {
             self.advance_wait_state(clicked, delta_ms, profile);
+        }
+    }
+
+    pub(super) fn maybe_restore_loaded_message_text(&mut self) {
+        let Some(resume) = self.pending_load_resume.as_ref() else {
+            return;
+        };
+        let stack_len = self.interpreter.call_stack().len();
+        let at_restore = self.interpreter.current_script() == Some(resume.script.as_str())
+            && self.interpreter.current_line() == resume.line
+            && stack_len == resume.stack_len;
+        if at_restore && !self.has_queued_tags() {
+            self.pending_load_resume = None;
+            self.restore_pending_message_text();
+            return;
+        }
+        if stack_len < resume.stack_len || (stack_len == resume.stack_len && !at_restore) {
+            self.pending_load_resume = None;
+            self.restore_pending_message_text();
         }
     }
 
@@ -76,16 +102,19 @@ impl CoreRuntime {
 
     fn run_until_wait_or_complete(&mut self, profile: &mut crate::profiler::FrameProfile) {
         loop {
+            self.maybe_restore_loaded_message_text();
             match self.interpreter.run() {
                 Ok(ExecutionResult::Wait(event))
                     if super::events::event_requires_state_sync(&event) =>
                 {
                     // A following script expression must observe this command's
                     // effect. Dispatch in order, without spending a display frame.
+                    self.maybe_restore_loaded_message_text();
                     self.interpreter.advance_line();
                     self.flush_host_events(profile);
                 }
                 Ok(ExecutionResult::Wait(Event::Wait { reason })) => {
+                    self.maybe_restore_loaded_message_text();
                     match &reason {
                         WaitReason::Timed { milliseconds, .. } => {
                             self.timed_remaining_ms = *milliseconds;
@@ -606,7 +635,7 @@ fn trans_input_skip_requested(
 /// 是否属于"用户输入等待"（[autosave allow=2] 的自动保存触发点）：
 /// 点击等待（Generic/Generic0）与按键等待（exkey）算；
 /// 定时/停止/媒体同步类等待不算。
-fn wait_reason_is_input_wait(reason: Option<&WaitReason>) -> bool {
+pub(crate) fn wait_reason_is_input_wait(reason: Option<&WaitReason>) -> bool {
     matches!(
         reason,
         Some(WaitReason::Generic) | Some(WaitReason::Generic0) | Some(WaitReason::KeyWait { .. })

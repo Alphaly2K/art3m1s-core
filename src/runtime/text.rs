@@ -557,6 +557,88 @@ impl CoreRuntime {
         }
     }
 
+    pub(super) fn capture_message_text_snapshot(&self) -> Option<crate::save::MessageTextSnapshot> {
+        let renderer = self.text_renderer.as_ref()?;
+        let state = renderer.font_state();
+        let mut layers = Vec::new();
+        for (id, layer) in &state.layers {
+            if layer.page_tags.is_empty() {
+                continue;
+            }
+            layers.push(crate::save::MessageLayerTextSnapshot {
+                id: id.clone(),
+                page_font: layer.page_font.clone(),
+                tags: layer.page_tags.clone(),
+            });
+        }
+        if layers.is_empty() {
+            return None;
+        }
+        layers.sort_by(|a, b| a.id.cmp(&b.id));
+        Some(crate::save::MessageTextSnapshot {
+            active_layer: state.active_layer.clone(),
+            layers,
+        })
+    }
+
+    pub(super) fn restore_pending_message_text(&mut self) {
+        let Some(snapshot) = self.pending_message_text.take() else {
+            return;
+        };
+        self.restore_message_text_snapshot(&snapshot);
+    }
+
+    fn restore_message_text_snapshot(&mut self, snapshot: &crate::save::MessageTextSnapshot) {
+        crate::core_info!(
+            "[runtime] 还原消息层文本 layers={} active={:?}",
+            snapshot.layers.len(),
+            snapshot.active_layer
+        );
+        for layer in &snapshot.layers {
+            if let Some(face) = layer.page_font.get("face").filter(|face| !face.is_empty()) {
+                self.load_script_font(face);
+            }
+            for tag in &layer.tags {
+                if let crate::text::BacklogTag::Font(settings) = tag
+                    && let Some(face) = settings.get("face").filter(|face| !face.is_empty())
+                {
+                    self.load_script_font(face);
+                }
+            }
+            if let Some(renderer) = self.text_renderer.as_mut() {
+                renderer.switch_message_layer(Some(&layer.id), false);
+                if let Some(state_layer) = renderer.font_state_mut().layers.get_mut(&layer.id) {
+                    state_layer.page_font.clone_from(&layer.page_font);
+                    state_layer.page_tags.clear();
+                    state_layer.text_buffer.clear();
+                }
+                if !layer.page_font.is_empty() {
+                    renderer.apply_font_settings(&layer.page_font);
+                }
+                for tag in &layer.tags {
+                    match tag {
+                        crate::text::BacklogTag::Text(content) => renderer.push_text(content, false),
+                        crate::text::BacklogTag::LineBreak => renderer.push_line_break(),
+                        crate::text::BacklogTag::Font(settings) => {
+                            renderer.apply_font_settings(settings)
+                        }
+                        crate::text::BacklogTag::RubyStart(text) => renderer.ruby_start(text),
+                        crate::text::BacklogTag::RubyEnd => renderer.ruby_end(),
+                    }
+                }
+                renderer.reveal_all();
+                renderer.show_text();
+            }
+            self.sync_message_layer_binding(true);
+        }
+        if let Some(active) = snapshot.active_layer.as_deref() {
+            if let Some(renderer) = self.text_renderer.as_mut() {
+                renderer.switch_message_layer(Some(active), false);
+            }
+            self.sync_message_layer_binding(true);
+        }
+    }
+
     /// 把当前活动消息层登记为合成器的默认消息层，并建立「消息层 ID → 场景图层
     /// ID」映射。分层消息层绑定同名图像层；独立消息层绑定到内部顶层节点。
     pub(super) fn sync_message_layer_binding(&mut self, revive: bool) {
@@ -1172,4 +1254,3 @@ mod tests {
         assert_ne!(renderer.selected.as_deref(), Some(HOST_FONT_OVERRIDE_FACE));
     }
 }
-
