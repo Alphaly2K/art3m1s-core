@@ -629,17 +629,22 @@ pub fn query_window_state() -> (bool, bool) {
 
 // ── Save directory ───────────────────────────────────────────────
 
-static SAVE_DIR: OnceLock<String> = OnceLock::new();
+// The Flutter host can create several runtimes in one process (for example
+// when switching games). This value must therefore be replaceable; OnceLock
+// would silently keep the first game's directory forever.
+static SAVE_DIR: Mutex<Option<String>> = Mutex::new(None);
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_set_save_dir(dir: *const c_char) {
-    if let Ok(s) = unsafe { std::ffi::CStr::from_ptr(dir).to_str() } {
-        let _ = SAVE_DIR.set(s.to_string());
+    if dir.is_null() {
+        *SAVE_DIR.lock().unwrap() = None;
+    } else if let Ok(s) = unsafe { std::ffi::CStr::from_ptr(dir).to_str() } {
+        *SAVE_DIR.lock().unwrap() = Some(s.to_string());
     }
 }
 
-pub fn save_dir() -> Option<&'static str> {
-    SAVE_DIR.get().map(|s| s.as_str())
+pub fn save_dir() -> Option<String> {
+    SAVE_DIR.lock().unwrap().clone()
 }
 
 // ── Query helpers ────────────────────────────────────────────────
@@ -1660,8 +1665,8 @@ pub unsafe extern "C" fn art3m1s_runtime_set_reported_os(rt: *mut CoreRuntime, o
 #[cfg(test)]
 mod tests {
     use super::{
-        font_override, log_suppressed_by_filter, path_candidates, script_debug_print_allowed,
-        set_font_override, set_log_filter, set_script_debug_config,
+        font_override, log_suppressed_by_filter, path_candidates, save_dir,
+        script_debug_print_allowed, set_font_override, set_log_filter, set_script_debug_config,
     };
 
     /// 日志过滤钩子是进程级状态，单测里串行验证后卸载，避免影响其它测试。
@@ -1734,5 +1739,17 @@ mod tests {
         assert!(set_font_override(Vec::new()).is_err());
         let after = font_override().map(|(generation, _)| generation);
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn save_dir_can_switch_between_game_runtimes() {
+        let first = std::ffi::CString::new("/tmp/game-one").unwrap();
+        let second = std::ffi::CString::new("/tmp/game-two").unwrap();
+        unsafe { super::art3m1s_set_save_dir(first.as_ptr()) };
+        assert_eq!(save_dir().as_deref(), Some("/tmp/game-one"));
+        unsafe { super::art3m1s_set_save_dir(second.as_ptr()) };
+        assert_eq!(save_dir().as_deref(), Some("/tmp/game-two"));
+        unsafe { super::art3m1s_set_save_dir(std::ptr::null()) };
+        assert_eq!(save_dir(), None);
     }
 }
