@@ -33,7 +33,9 @@ fn parse_bare_estimate_number(value: &str) -> f64 {
 
 /// 求值 estimate 参数。
 fn evaluate_estimate(ctx: &ExecutionContext<'_>) -> Result<bool> {
-    let condition = ctx.instruction.get("estimate").unwrap_or("1");
+    // 文档：estimate=0 跳过 then 体。缺省或拼写错误的参数名不等于
+    // 一个 NUMBER，按 0 处理，而不是默认为真。
+    let condition = ctx.instruction.get("estimate").unwrap_or("0");
     // 文档规定只有带 `$` 的参数值才是表达式；不带 `$` 时 estimate
     // 按数值参数转换。原引擎会读取开头的数值（例如 `1 == 2` 得到 1），
     // 没有数值的变量/字符串则得到 0，而不是按非空字符串判真。
@@ -378,5 +380,41 @@ mod tests {
             "r",
         );
         assert_eq!(r, Some(Value::String("after".to_string())));
+    }
+
+    #[test]
+    fn missing_estimate_skips_the_then_body() {
+        let r = run_and_get(
+            r#"
+*main
+[var name="r" data="'before'"]
+[if]
+[var name="r" data="'then'"]
+[/if]
+[var name="r" data="'after'"]
+[stop]
+"#,
+            "r",
+        );
+        assert_eq!(r, Some(Value::String("after".to_string())));
+    }
+
+    #[test]
+    fn misspelled_estimate_parameter_is_treated_as_missing() {
+        // Compiled scripts occasionally write `estiamte` instead of `estimate`.
+        // The unknown parameter must not make the condition default true.
+        let r = run_and_get(
+            r#"
+*main
+[var name="t.sceneskip" data="1"]
+[var name="r" data="'ok'"]
+[if estiamte="$t.sceneskip"]
+[var name="r" data="'returned'"]
+[/if]
+[stop]
+"#,
+            "r",
+        );
+        assert_eq!(r, Some(Value::String("ok".to_string())));
     }
 }
