@@ -1385,6 +1385,147 @@ pub unsafe extern "C" fn art3m1s_runtime_stage_height(rt: *const CoreRuntime) ->
     unsafe { &*rt }.stage_height()
 }
 
+/// Scene render target width. This may be lower than the native output width.
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_render_width(rt: *const CoreRuntime) -> u32 {
+    if rt.is_null() {
+        return 0;
+    }
+    unsafe { &*rt }.render_dimensions().map_or_else(
+        || unsafe { &*rt }.stage_width(),
+        |dimensions| dimensions.render_size.width,
+    )
+}
+
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_render_height(rt: *const CoreRuntime) -> u32 {
+    if rt.is_null() {
+        return 0;
+    }
+    unsafe { &*rt }.render_dimensions().map_or_else(
+        || unsafe { &*rt }.stage_height(),
+        |dimensions| dimensions.render_size.height,
+    )
+}
+
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_output_width(rt: *const CoreRuntime) -> u32 {
+    if rt.is_null() {
+        return 0;
+    }
+    unsafe { &*rt }.render_dimensions().map_or_else(
+        || unsafe { &*rt }.stage_width(),
+        |dimensions| dimensions.output_size.width,
+    )
+}
+
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_output_height(rt: *const CoreRuntime) -> u32 {
+    if rt.is_null() {
+        return 0;
+    }
+    unsafe { &*rt }.render_dimensions().map_or_else(
+        || unsafe { &*rt }.stage_height(),
+        |dimensions| dimensions.output_size.height,
+    )
+}
+
+/// Configures the current linear upscale pass. `mode=0` selects the supported
+/// linear sampler; `mode=1` reserves spatial upscaling and currently returns 0.
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_set_upscale_mode(
+    rt: *mut CoreRuntime,
+    mode: c_int,
+    sharpness: f32,
+) -> c_int {
+    if rt.is_null() {
+        return 0;
+    }
+    let mode = match mode {
+        0 => crate::render_pipeline::post_process::UpscaleMode::Linear,
+        1 => crate::render_pipeline::post_process::UpscaleMode::Spatial,
+        _ => return 0,
+    };
+    let mut pipeline = crate::render_pipeline::post_process::PostProcessPipeline::default();
+    pipeline.passes[0] = crate::render_pipeline::post_process::PostProcessPass::Upscale(
+        crate::render_pipeline::post_process::UpscaleConfig { mode, sharpness },
+    );
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        (&mut *rt).configure_post_process(pipeline)
+    })) {
+        Ok(Ok(())) => 1,
+        Ok(Err(error)) => {
+            core_warn!("post-process configuration rejected: {error}");
+            0
+        }
+        Err(panic_info) => {
+            core_error!(
+                "post-process configuration panicked: {}",
+                panic_msg(&panic_info)
+            );
+            0
+        }
+    }
+}
+
+/// Changes the physical SceneColor scale. The value must be finite and in
+/// `[0.1, 1.0]`; the native output size is unchanged.
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_set_render_scale(
+    rt: *mut CoreRuntime,
+    scale: f32,
+) -> c_int {
+    if rt.is_null() {
+        return 0;
+    }
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        (&mut *rt).set_render_scale(scale)
+    })) {
+        Ok(Ok(())) => 1,
+        Ok(Err(error)) => {
+            core_warn!("render scale configuration rejected: {error}");
+            0
+        }
+        Err(panic_info) => {
+            core_error!(
+                "render scale configuration panicked: {}",
+                panic_msg(&panic_info)
+            );
+            0
+        }
+    }
+}
+
 #[cfg(any(
     feature = "gl-backend",
     feature = "metal-backend",

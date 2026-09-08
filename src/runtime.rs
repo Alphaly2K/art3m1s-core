@@ -5,6 +5,7 @@
 use crate::audio::AudioBackend;
 use crate::backend::{BackendInfo, BackendSelection, GpuBackend, NativeSurface};
 use crate::compositor::Compositor;
+use crate::render_pipeline::post_process::{PostProcessPipeline, RenderDimensions};
 use crate::text::TextRenderer;
 use crate::video::VideoBackend;
 use asb_interpreter::event::WaitReason;
@@ -154,6 +155,29 @@ struct PendingLoadResume {
 impl CoreRuntime {
     pub fn backend_info(&self) -> BackendInfo {
         self.gpu.backend_info()
+    }
+
+    /// Returns the scene render size and presentation output size separately.
+    pub fn render_dimensions(&self) -> Option<RenderDimensions> {
+        self.gpu.render_dimensions()
+    }
+
+    /// Configures the linear post-process chain. Native GPU objects are kept
+    /// inside the selected backend and are recreated only when dimensions or
+    /// formats require it.
+    pub fn configure_post_process(&mut self, pipeline: PostProcessPipeline) -> Result<(), String> {
+        self.gpu.begin_access();
+        let result = self.gpu.configure_post_process(pipeline);
+        self.gpu.end_access();
+        result
+    }
+
+    /// Changes the physical SceneColor scale while preserving the logical
+    /// scene and native output sizes.
+    pub fn set_render_scale(&mut self, scale: f32) -> Result<(), String> {
+        let mut pipeline = PostProcessPipeline::default();
+        pipeline.render_scale = scale;
+        self.configure_post_process(pipeline)
     }
 
     /// Registers or replaces a backend-neutral Artemis HLSL effect.

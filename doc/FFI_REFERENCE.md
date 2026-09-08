@@ -193,6 +193,14 @@ CGL 仅 macOS 可用。ANGLE 创建失败会尝试 CGL，因此 create 成功不
 当前无实际后端查询 ABI，以日志与外部表面调用结果判断。Windows/方向通知是否被脚本使用
 取决于游戏注册的处理器，Host 只报告真实事件。
 
+`art3m1s_runtime_render_width/height` 返回 SceneColor 的 render size，
+`art3m1s_runtime_output_width/height` 返回 native presentation output size。
+两者可以不同；post-process 设计见 [`doc/POST_PROCESS.md`](POST_PROCESS.md)。
+`art3m1s_runtime_set_upscale_mode(rt, mode, sharpness)` 中 `mode=0` 为当前支持的线性采样，
+`mode=1` 预留给 spatial upscaler，当前会返回失败；`sharpness` 必须在 `[0,1]`。
+`art3m1s_runtime_set_render_scale(rt, scale)` 设置 SceneColor 的物理比例，范围为 `[0.1,1.0]`，
+不会改变逻辑舞台或 native output 尺寸。
+
 ## Runtime HLSL shader
 
 `art3m1s_runtime_register_hlsl_shader(rt,name,source,len)`、

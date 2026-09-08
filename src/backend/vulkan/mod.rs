@@ -5,6 +5,7 @@ use crate::render_pipeline::draw::*;
 use crate::render_pipeline::hlsl::{
     CompiledShader, ShaderCompiler, ShaderRegistry, ShaderRuntimeParameters,
 };
+use crate::render_pipeline::post_process::{PostProcessPipeline, RenderDimensions};
 use ash::{Device, Entry, Instance, vk};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -251,6 +252,9 @@ pub struct VulkanBackend {
     white: Image,
     transparent: Image,
     main: PrivateTarget,
+    scene_size: Extent2D,
+    output_size: Extent2D,
+    post_process: PostProcessPipeline,
     active: Option<ActiveFrame>,
     textures: HashMap<TextureId, VulkanTexture>,
     names: HashMap<String, TextureId>,
@@ -487,6 +491,9 @@ impl VulkanBackend {
             white,
             transparent,
             main,
+            scene_size: Extent2D::new(width, height),
+            output_size: Extent2D::new(width, height),
+            post_process: PostProcessPipeline::default(),
             active: None,
             textures: HashMap::new(),
             names: HashMap::new(),
@@ -1819,25 +1826,57 @@ impl GpuBackend for VulkanBackend {
             self.remove_texture(t.color);
         }
     }
-    fn resize(&mut self, e: Extent2D) -> Result<(), String> {
-        if e.is_empty() {
-            return Err("empty Vulkan extent".into());
-        }
+    fn replace_scene_target(&mut self, extent: Extent2D) -> Result<(), String> {
         self.wait_submissions()?;
         let pass = self.render_pass(vk::Format::R8G8B8A8_UNORM)?;
         let new = create_private_target(
             &self.device,
             &self.memory,
             pass,
-            e,
+            extent,
             TextureFormat::Rgba8Unorm,
         )?;
         let old = std::mem::replace(&mut self.main, new);
         self.destroy_private(old);
         self.clear_private_caches();
         self.last_overlay = None;
-        if self.swapchain.is_some() {
-            self.recreate_swapchain(e)?
+        Ok(())
+    }
+    fn resize(&mut self, e: Extent2D) -> Result<(), String> {
+        if e.is_empty() {
+            return Err("empty Vulkan extent".into());
+        }
+        let had_surface = self.swapchain.is_some();
+        self.scene_size = e;
+        self.replace_scene_target(scaled_extent(e, self.post_process.render_scale))?;
+        if !had_surface {
+            self.output_size = e;
+        } else {
+            self.recreate_swapchain(self.output_size)?;
+        }
+        Ok(())
+    }
+    fn render_dimensions(&self) -> Option<RenderDimensions> {
+        Some(RenderDimensions::new(
+            self.main.image.desc.extent,
+            self.output_size,
+        ))
+    }
+
+    fn configure_post_process(&mut self, pipeline: PostProcessPipeline) -> Result<(), String> {
+        let dimensions = RenderDimensions::new(self.main.image.desc.extent, self.output_size);
+        pipeline.validate(dimensions)?;
+        self.set_render_scale(pipeline.render_scale)?;
+        self.post_process = pipeline;
+        Ok(())
+    }
+    fn set_render_scale(&mut self, scale: f32) -> Result<(), String> {
+        if !scale.is_finite() || !(0.1..=1.0).contains(&scale) {
+            return Err("render scale must be finite and in [0.1, 1.0]".into());
+        }
+        let extent = scaled_extent(self.scene_size, scale);
+        if extent != self.main.image.desc.extent {
+            self.replace_scene_target(extent)?;
         }
         Ok(())
     }
@@ -2068,12 +2107,21 @@ impl GpuBackend for VulkanBackend {
         false
     }
     fn set_native_surface(&mut self, s: NativeSurface) -> Result<(), String> {
-        self.attach_surface(s)
+        let result = self.attach_surface(s);
+        if result.is_ok() {
+            self.output_size = s.extent;
+        }
+        result
     }
     fn clear_native_surface(&mut self) {
-        self.destroy_swapchain()
+        self.destroy_swapchain();
+        self.output_size = self.scene_size;
     }
     fn present(&mut self, _: Option<[f32; 4]>) -> Result<(), String> {
+        self.post_process.validate(RenderDimensions::new(
+            self.main.image.desc.extent,
+            self.output_size,
+        ))?;
         self.present_impl()
     }
     fn register_hlsl_shader(
@@ -2372,7 +2420,7 @@ impl VulkanBackend {
             ];
             let c = colors[self.flash % 4];
             self.flash = self.flash.wrapping_add(1);
-            let solid = solid_command(self.main.image.desc.extent, c, 0.24, current.damage());
+            let solid = solid_command(self.scene_size, c, 0.24, current.damage());
             let _ = self.encode_draw(target, &solid, None, Some(self.white.view), None, None);
         }
         self.last_overlay = visualize.then_some(current);
@@ -2426,10 +2474,7 @@ impl VulkanBackend {
                 clip: ClipRect {
                     uv_offset: [0., 0.],
                     uv_scale: [1., 1.],
-                    quad_size: [
-                        self.main.image.desc.extent.width as f32,
-                        self.main.image.desc.extent.height as f32,
-                    ],
+                    quad_size: [self.scene_size.width as f32, self.scene_size.height as f32],
                 },
                 clip_bounds: g.clip_bounds,
                 shader: Some(effect),
@@ -2664,7 +2709,7 @@ impl VulkanBackend {
     ) -> Result<(), String> {
         let Some(sc) = scissor(
             intersect_optional(c.clip_bounds, damage),
-            self.main.image.desc.extent,
+            self.scene_size,
             target.extent,
         ) else {
             return Ok(());
@@ -2714,13 +2759,10 @@ impl VulkanBackend {
                 .shader
                 .as_ref()
                 .ok_or("custom Vulkan pipeline has no shader effect")?;
-            let vertex = vertex_uniforms(c, self.main.image.desc.extent);
+            let vertex = vertex_uniforms(c, self.scene_size);
             let parameters = ShaderRuntimeParameters::from_draw(
                 c,
-                [
-                    self.main.image.desc.extent.width as f32,
-                    self.main.image.desc.extent.height as f32,
-                ],
+                [self.scene_size.width as f32, self.scene_size.height as f32],
                 vertex.transform,
                 self.shader_clock.elapsed().as_secs_f32(),
                 self.shader_frame_index,
@@ -2734,7 +2776,7 @@ impl VulkanBackend {
             (bytes, range)
         } else {
             let uniform = UniformBlock {
-                vertex: vertex_uniforms(c, self.main.image.desc.extent),
+                vertex: vertex_uniforms(c, self.scene_size),
                 sprite: sprite_uniforms(c),
                 effect: effect_uniforms(c),
             };
@@ -3289,7 +3331,7 @@ impl VulkanBackend {
         } {
             Ok(x) => x,
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                let e = self.main.image.desc.extent;
+                let e = self.output_size;
                 self.recreate_swapchain(e)?;
                 return self.present_impl();
             }
@@ -3403,12 +3445,12 @@ impl VulkanBackend {
         s.next_frame = (fi + 1) % s.frames.len();
         match out {
             Ok(present_suboptimal) if suboptimal || present_suboptimal => {
-                let e = self.main.image.desc.extent;
+                let e = self.output_size;
                 self.recreate_swapchain(e)
             }
             Ok(_) => Ok(()),
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                let e = self.main.image.desc.extent;
+                let e = self.output_size;
                 self.recreate_swapchain(e)
             }
             Err(e) => Err(format!("present Vulkan swapchain: {e}")),
@@ -3585,6 +3627,14 @@ fn scissor(r: Option<[f32; 4]>, stage: Extent2D, target: Extent2D) -> Option<vk:
         },
     })
 }
+
+fn scaled_extent(logical: Extent2D, scale: f32) -> Extent2D {
+    Extent2D::new(
+        ((logical.width as f32 * scale).round() as u32).max(1),
+        ((logical.height as f32 * scale).round() as u32).max(1),
+    )
+}
+
 fn vertex_uniforms(c: &DrawCommand, stage: Extent2D) -> VertexUniforms {
     let m = c.transform.matrix2;
     let t = c.transform.translation;

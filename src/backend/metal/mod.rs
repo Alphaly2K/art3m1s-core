@@ -18,6 +18,9 @@ use crate::render_pipeline::hlsl::{
     CompiledShader, ShaderCompiler, ShaderRegistry, ShaderResourceKind, ShaderRuntimeParameters,
     ShaderTexture,
 };
+use crate::render_pipeline::post_process::{
+    PostProcessPass, PostProcessPipeline, RenderDimensions, UpscaleMode,
+};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_core_foundation::CGSize;
@@ -246,6 +249,9 @@ pub struct MetalBackend {
     white_texture: Texture,
     transparent_texture: Texture,
     main_target: PrivateRenderTarget,
+    scene_size: Extent2D,
+    output_size: Extent2D,
+    post_process: PostProcessPipeline,
     active_frame: Option<ActiveFrame>,
     textures: HashMap<TextureId, MetalTexture>,
     names: HashMap<String, TextureId>,
@@ -340,6 +346,9 @@ impl MetalBackend {
             white_texture,
             transparent_texture,
             main_target,
+            scene_size: Extent2D::new(width, height),
+            output_size: Extent2D::new(width, height),
+            post_process: PostProcessPipeline::default(),
             active_frame: None,
             textures: HashMap::new(),
             names: HashMap::new(),
@@ -395,6 +404,37 @@ impl MetalBackend {
             after_serial: self.submitted_serial,
             resource: RetiredResource::Texture(texture),
         });
+    }
+
+    fn retire_private_target(&mut self, target: PrivateRenderTarget) {
+        self.retire_texture(MetalTexture {
+            raw: target.texture,
+            desc: TextureDesc {
+                extent: target.extent,
+                format: TextureFormat::Rgba8Unorm,
+                usage: TextureUsage::RENDER_TARGET | TextureUsage::SAMPLED,
+            },
+            info: TextureInfo {
+                width: target.extent.width,
+                height: target.extent.height,
+            },
+            cpu_pixels: PixelStorage::None,
+            opaque: false,
+        });
+    }
+
+    fn replace_scene_target(&mut self, extent: Extent2D) -> Result<(), String> {
+        let replacement = create_private_target(&self.device, extent, MTLPixelFormat::RGBA8Unorm)?;
+        let old = std::mem::replace(&mut self.main_target, replacement);
+        self.retire_private_target(old);
+        for target in std::mem::take(&mut self.group_targets) {
+            self.retire_private_target(target);
+        }
+        for target in std::mem::take(&mut self.mask_targets) {
+            self.retire_private_target(target);
+        }
+        self.last_damage_overlay = None;
+        Ok(())
     }
 
     fn invalidate_shader_pipelines(&mut self, shader: ShaderId) {
@@ -1008,28 +1048,39 @@ impl GpuBackend for MetalBackend {
     }
 
     fn resize(&mut self, extent: Extent2D) -> Result<(), String> {
-        let replacement = create_private_target(&self.device, extent, MTLPixelFormat::RGBA8Unorm)?;
-        let old = std::mem::replace(&mut self.main_target, replacement);
-        self.retired.push_back(PendingRetirement {
-            after_serial: self.submitted_serial,
-            resource: RetiredResource::Texture(MetalTexture {
-                raw: old.texture,
-                desc: TextureDesc {
-                    extent: old.extent,
-                    format: TextureFormat::Rgba8Unorm,
-                    usage: TextureUsage::RENDER_TARGET | TextureUsage::SAMPLED,
-                },
-                info: TextureInfo {
-                    width: old.extent.width,
-                    height: old.extent.height,
-                },
-                cpu_pixels: PixelStorage::None,
-                opaque: false,
-            }),
-        });
-        self.group_targets.clear();
-        self.mask_targets.clear();
-        self.last_damage_overlay = None;
+        let had_surface = self.surface.is_some();
+        self.scene_size = extent;
+        let target_extent = scaled_extent(extent, self.post_process.render_scale);
+        self.replace_scene_target(target_extent)?;
+        if !had_surface {
+            self.output_size = extent;
+        }
+        Ok(())
+    }
+
+    fn render_dimensions(&self) -> Option<RenderDimensions> {
+        Some(RenderDimensions::new(
+            self.main_target.extent,
+            self.output_size,
+        ))
+    }
+
+    fn configure_post_process(&mut self, pipeline: PostProcessPipeline) -> Result<(), String> {
+        let dimensions = RenderDimensions::new(self.main_target.extent, self.output_size);
+        pipeline.validate(dimensions)?;
+        self.set_render_scale(pipeline.render_scale)?;
+        self.post_process = pipeline;
+        Ok(())
+    }
+
+    fn set_render_scale(&mut self, scale: f32) -> Result<(), String> {
+        if !scale.is_finite() || !(0.1..=1.0).contains(&scale) {
+            return Err("render scale must be finite and in [0.1, 1.0]".into());
+        }
+        let extent = scaled_extent(self.scene_size, scale);
+        if extent != self.main_target.extent {
+            self.replace_scene_target(extent)?;
+        }
         Ok(())
     }
 
@@ -1232,7 +1283,7 @@ impl GpuBackend for MetalBackend {
 
     fn set_native_surface(&mut self, surface: NativeSurface) -> Result<(), String> {
         self.surface = None;
-        match surface.kind {
+        let result = match surface.kind {
             NativeSurfaceKind::AppleIoSurface => {
                 let descriptor = unsafe {
                     MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
@@ -1285,14 +1336,21 @@ impl GpuBackend for MetalBackend {
             NativeSurfaceKind::AndroidNativeWindow => {
                 Err("ANativeWindow is unsupported by MetalBackend".into())
             }
+        };
+        if result.is_ok() {
+            self.output_size = surface.extent;
         }
+        result
     }
 
     fn clear_native_surface(&mut self) {
         self.surface = None;
+        self.output_size = self.scene_size;
     }
 
     fn present(&mut self, damage: Option<[f32; 4]>) -> Result<(), String> {
+        let dimensions = RenderDimensions::new(self.main_target.extent, self.output_size);
+        self.post_process.validate(dimensions)?;
         let source = self.main_target.texture.clone();
         match self.surface.as_ref() {
             Some(MetalSurface::Shared { texture, extent }) => {
@@ -1304,7 +1362,7 @@ impl GpuBackend for MetalBackend {
                 // Shared textures are displayed by Flutter from the same object.
                 // Copy only the damaged region, keep untouched pixels, and wait
                 // so `frameAvailable` cannot observe a half-written surface.
-                self.encode_present(&source, &target, None, damage, true)
+                self.execute_post_process(&source, &target, None, damage, true)
             }
             Some(MetalSurface::Layer { layer, extent }) => {
                 let drawable = layer
@@ -1315,7 +1373,7 @@ impl GpuBackend for MetalBackend {
                     extent: *extent,
                     format: layer.pixelFormat(),
                 };
-                self.encode_present(&source, &target, Some(&drawable), None, false)
+                self.execute_post_process(&source, &target, Some(&drawable), None, false)
             }
             None => Err("native Metal surface is not configured".into()),
         }
@@ -1541,10 +1599,7 @@ impl MetalBackend {
                 clip: ClipRect {
                     uv_offset: [0.0, 0.0],
                     uv_scale: [1.0, 1.0],
-                    quad_size: [
-                        self.main_target.extent.width as f32,
-                        self.main_target.extent.height as f32,
-                    ],
+                    quad_size: [self.scene_size.width as f32, self.scene_size.height as f32],
                 },
                 clip_bounds: group.clip_bounds,
                 shader: Some(effect),
@@ -1559,6 +1614,7 @@ impl MetalBackend {
                 damage,
                 Some(&group_target.texture),
                 mask_texture.as_ref(),
+                None,
                 None,
             )?;
             index = group.end;
@@ -1594,6 +1650,7 @@ impl MetalBackend {
         source_override: Option<&Texture>,
         mask_override: Option<&Texture>,
         blend_override: Option<PipelineBlend>,
+        stage_override: Option<Extent2D>,
     ) -> Result<(), String> {
         let encoder = self.draw_encoder(command_buffer, target)?;
         let result = self.encode_draw_command(
@@ -1604,6 +1661,7 @@ impl MetalBackend {
             source_override,
             mask_override,
             blend_override,
+            stage_override,
         );
         encoder.endEncoding();
         result
@@ -1621,7 +1679,7 @@ impl MetalBackend {
         }
         let encoder = self.draw_encoder(command_buffer, target)?;
         let result = commands.iter().try_for_each(|command| {
-            self.encode_draw_command(&encoder, target, command, damage, None, None, None)
+            self.encode_draw_command(&encoder, target, command, damage, None, None, None, None)
         });
         encoder.endEncoding();
         result
@@ -1661,10 +1719,12 @@ impl MetalBackend {
         source_override: Option<&Texture>,
         mask_override: Option<&Texture>,
         blend_override: Option<PipelineBlend>,
+        stage_override: Option<Extent2D>,
     ) -> Result<(), String> {
+        let stage = stage_override.unwrap_or(self.scene_size);
         let Some(scissor) = metal_scissor(
             intersect_optional(command.clip_bounds, damage),
-            self.main_target.extent,
+            stage,
             target.extent,
         ) else {
             return Ok(());
@@ -1711,7 +1771,7 @@ impl MetalBackend {
         encoder.setRenderPipelineState(&pipeline);
         encoder.setScissorRect(scissor);
 
-        let vertex_uniforms = vertex_uniforms(command, self.main_target.extent);
+        let vertex_uniforms = vertex_uniforms(command, stage);
         unsafe {
             encoder.setVertexBytes_length_atIndex(
                 value_bytes(&vertex_uniforms),
@@ -1731,10 +1791,7 @@ impl MetalBackend {
                 .ok_or_else(|| "custom Metal pipeline has no shader effect".to_string())?;
             let parameters = ShaderRuntimeParameters::from_draw(
                 command,
-                [
-                    self.main_target.extent.width as f32,
-                    self.main_target.extent.height as f32,
-                ],
+                [stage.width as f32, stage.height as f32],
                 vertex_uniforms.transform,
                 self.shader_clock.elapsed().as_secs_f32(),
                 self.shader_frame_index,
@@ -1864,7 +1921,7 @@ impl MetalBackend {
         target: &PrivateRenderTarget,
         rect: [f32; 4],
     ) -> Result<(), String> {
-        let command = solid_command(self.main_target.extent, [0.0, 0.0, 0.0], 1.0, Some(rect));
+        let command = solid_command(self.scene_size, [0.0, 0.0, 0.0], 1.0, Some(rect));
         let white = self.white_texture.clone();
         self.encode_draw(
             command_buffer,
@@ -1874,6 +1931,7 @@ impl MetalBackend {
             Some(&white),
             None,
             Some(PipelineBlend::Replace),
+            None,
         )
     }
 
@@ -1891,7 +1949,7 @@ impl MetalBackend {
         ];
         let color = COLORS[self.damage_flash_index % COLORS.len()];
         self.damage_flash_index = self.damage_flash_index.wrapping_add(1);
-        let command = solid_command(self.main_target.extent, color, 0.24, region.damage());
+        let command = solid_command(self.scene_size, color, 0.24, region.damage());
         let white = self.white_texture.clone();
         self.encode_draw(
             command_buffer,
@@ -1899,6 +1957,7 @@ impl MetalBackend {
             &command,
             None,
             Some(&white),
+            None,
             None,
             None,
         )
@@ -1962,6 +2021,26 @@ impl MetalBackend {
         }
     }
 
+    fn execute_post_process(
+        &mut self,
+        source: &Texture,
+        target: &PrivateRenderTarget,
+        drawable: Option<&ProtocolObject<dyn CAMetalDrawable>>,
+        damage: Option<[f32; 4]>,
+        wait: bool,
+    ) -> Result<(), String> {
+        for pass in &self.post_process.passes {
+            match pass {
+                PostProcessPass::Upscale(config) if config.mode == UpscaleMode::Linear => {}
+                _ => return Err("unsupported Metal post-process pass".into()),
+            }
+        }
+        // The current linear pass is the cached fullscreen draw below. It does
+        // not allocate an intermediate texture; the output target is the pass
+        // destination and the shared sampler provides the resampling.
+        self.encode_present(source, target, drawable, damage, wait)
+    }
+
     fn encode_present(
         &mut self,
         source: &Texture,
@@ -2003,6 +2082,7 @@ impl MetalBackend {
             Some(source),
             None,
             Some(PipelineBlend::Replace),
+            Some(target.extent),
         )?;
         if let Some(drawable) = drawable {
             command_buffer.presentDrawable(drawable.as_ref());
@@ -2359,6 +2439,13 @@ fn metal_scissor(
         width: right - left,
         height: bottom - top,
     })
+}
+
+fn scaled_extent(logical: Extent2D, scale: f32) -> Extent2D {
+    Extent2D::new(
+        ((logical.width as f32 * scale).round() as u32).max(1),
+        ((logical.height as f32 * scale).round() as u32).max(1),
+    )
 }
 
 fn solid_command(

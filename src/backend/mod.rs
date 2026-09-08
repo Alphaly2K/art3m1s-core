@@ -6,6 +6,9 @@
 
 pub use crate::render_pipeline::draw::TextureOrigin;
 use crate::render_pipeline::draw::{DrawList, TextureId, TextureInfo, TextureProvider};
+use crate::render_pipeline::post_process::{
+    PostProcessPass, PostProcessPipeline, RenderDimensions, UpscaleMode,
+};
 use std::collections::HashSet;
 
 #[cfg(feature = "gl-backend")]
@@ -128,6 +131,38 @@ pub trait GpuBackend: TextureProvider {
     fn destroy_render_target(&mut self, target: RenderTargetId);
 
     fn resize(&mut self, extent: Extent2D) -> Result<(), String>;
+    /// Returns the scene render target size and the current presentation size.
+    /// `None` means the legacy backend has no explicit post-process surface.
+    fn render_dimensions(&self) -> Option<RenderDimensions> {
+        None
+    }
+    /// Changes the physical SceneColor scale while preserving logical scene
+    /// coordinates. Backends recreate the cached scene target only when the
+    /// resulting extent changes.
+    fn set_render_scale(&mut self, scale: f32) -> Result<(), String> {
+        if (scale - 1.0).abs() <= f32::EPSILON {
+            Ok(())
+        } else {
+            Err("render scale is unsupported by this backend".into())
+        }
+    }
+    /// Installs a linear post-process description. Native handles remain
+    /// private to the backend; unsupported future passes are rejected here.
+    fn configure_post_process(&mut self, pipeline: PostProcessPipeline) -> Result<(), String> {
+        if !pipeline.render_scale.is_finite() || !(0.1..=1.0).contains(&pipeline.render_scale) {
+            return Err("render scale must be finite and in [0.1, 1.0]".into());
+        }
+        if pipeline.passes.iter().all(|pass| {
+            matches!(
+                pass,
+                PostProcessPass::Upscale(config) if config.mode == UpscaleMode::Linear
+            )
+        }) {
+            Ok(())
+        } else {
+            Err("post-processing pass is unsupported by this backend".into())
+        }
+    }
     fn begin_frame(&mut self, target: FrameTarget) -> Result<(), String>;
     /// Clears the currently selected frame target.
     fn clear(&mut self, color: [f32; 4]);

@@ -11,6 +11,7 @@ use crate::compositor::reduce::Compositor;
 use crate::compositor::scene::Scene;
 pub mod draw;
 pub mod hlsl;
+pub mod post_process;
 pub mod shader;
 pub mod transition;
 
@@ -18,6 +19,10 @@ pub use draw::{
     BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, DrawMesh, LayerDrawSource,
     ShaderEffect, ShaderGroup, StencilMetadata, TextureId, TextureInfo, TextureOrigin,
     TextureProvider,
+};
+pub use post_process::{
+    PostProcessContext, PostProcessPass, PostProcessPipeline, RenderDimensions, SceneTarget,
+    UpscaleConfig, UpscaleMode,
 };
 pub use shader::{ALPHA_MASK_SHADER, GROUP_COMPOSITE_SHADER, RULE_TRANS_SHADER, SPRITE_SHADER};
 
