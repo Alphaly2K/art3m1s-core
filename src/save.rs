@@ -211,12 +211,10 @@ fn memsave_entries(variables: &VariableStore) -> Vec<(String, asb_interpreter::V
         .collect()
 }
 
-fn serialized_story_entries(
-    variables: &VariableStore,
-) -> Vec<(String, asb_interpreter::Value)> {
+fn serialized_story_entries(variables: &VariableStore) -> Vec<(String, asb_interpreter::Value)> {
     variables
         .iter_local()
-        .filter(|(name, _)| matches!(name.as_str(), "scr" | "log"))
+        .filter(|(name, _)| matches!(name.as_str(), "scr" | "log" | "btn"))
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect()
 }
@@ -459,6 +457,7 @@ mod tests {
         let mut live = VariableStore::new();
         live.set("scr", "latest-story-state".into());
         live.set("log", "latest-backlog".into());
+        live.set("btn", "latest-button-state".into());
         live.set("status", "save".into());
         let data = SaveData {
             version: SAVE_FORMAT_VERSION,
@@ -486,8 +485,18 @@ mod tests {
         };
 
         let data = data.with_gameplay_checkpoint(&checkpoint);
-        assert_eq!(data.variables.get("scr"), Some(&Value::from("latest-story-state")));
-        assert_eq!(data.variables.get("log"), Some(&Value::from("latest-backlog")));
+        assert_eq!(
+            data.variables.get("scr"),
+            Some(&Value::from("latest-story-state"))
+        );
+        assert_eq!(
+            data.variables.get("log"),
+            Some(&Value::from("latest-backlog"))
+        );
+        assert_eq!(
+            data.variables.get("btn"),
+            Some(&Value::from("latest-button-state"))
+        );
         assert_eq!(data.variables.get("status"), Some(&Value::from("adv")));
     }
 
