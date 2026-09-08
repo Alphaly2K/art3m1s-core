@@ -37,6 +37,7 @@ use std::time::Instant;
 type Device = Retained<ProtocolObject<dyn MTLDevice>>;
 type CommandQueue = Retained<ProtocolObject<dyn MTLCommandQueue>>;
 type CommandBuffer = Retained<ProtocolObject<dyn MTLCommandBuffer>>;
+type RenderCommandEncoder = Retained<ProtocolObject<dyn MTLRenderCommandEncoder>>;
 type Texture = Retained<ProtocolObject<dyn MTLTexture>>;
 type Buffer = Retained<ProtocolObject<dyn objc2_metal::MTLBuffer>>;
 type PipelineState = Retained<ProtocolObject<dyn MTLRenderPipelineState>>;
@@ -1387,16 +1388,18 @@ impl MetalBackend {
         while index < end {
             let Some((group_index, group)) = next_shader_group(frame, index, end, group_limit)
             else {
-                self.encode_draw(
+                let batch_end = ((index + 1)..end)
+                    .find(|&candidate| {
+                        next_shader_group(frame, candidate, end, group_limit).is_some()
+                    })
+                    .unwrap_or(end);
+                self.encode_draw_batch(
                     command_buffer,
                     target,
-                    &frame.commands[index],
+                    &frame.commands[index..batch_end],
                     damage,
-                    None,
-                    None,
-                    None,
                 )?;
-                index += 1;
+                index = batch_end;
                 continue;
             };
 
@@ -1416,17 +1419,12 @@ impl MetalBackend {
             let mask_texture = if let Some([mask_start, mask_end]) = group.mask_range {
                 let mask_target = self.ensure_mask_target(depth)?;
                 encode_clear(command_buffer, &mask_target, [0.0, 0.0, 0.0, 0.0])?;
-                for command in &frame.mask_commands[mask_start..mask_end] {
-                    self.encode_draw(
-                        command_buffer,
-                        &mask_target,
-                        command,
-                        None,
-                        None,
-                        None,
-                        None,
-                    )?;
-                }
+                self.encode_draw_batch(
+                    command_buffer,
+                    &mask_target,
+                    &frame.mask_commands[mask_start..mask_end],
+                    None,
+                )?;
                 Some(mask_target.texture)
             } else {
                 None
@@ -1501,6 +1499,73 @@ impl MetalBackend {
         mask_override: Option<&Texture>,
         blend_override: Option<PipelineBlend>,
     ) -> Result<(), String> {
+        let encoder = self.draw_encoder(command_buffer, target)?;
+        let result = self.encode_draw_command(
+            &encoder,
+            target,
+            command,
+            damage,
+            source_override,
+            mask_override,
+            blend_override,
+        );
+        encoder.endEncoding();
+        result
+    }
+
+    fn encode_draw_batch(
+        &mut self,
+        command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+        target: &PrivateRenderTarget,
+        commands: &[DrawCommand],
+        damage: Option<[f32; 4]>,
+    ) -> Result<(), String> {
+        if commands.is_empty() {
+            return Ok(());
+        }
+        let encoder = self.draw_encoder(command_buffer, target)?;
+        let result = commands.iter().try_for_each(|command| {
+            self.encode_draw_command(&encoder, target, command, damage, None, None, None)
+        });
+        encoder.endEncoding();
+        result
+    }
+
+    fn draw_encoder(
+        &self,
+        command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+        target: &PrivateRenderTarget,
+    ) -> Result<RenderCommandEncoder, String> {
+        let pass = render_pass(target, MTLLoadAction::Load, [0.0; 4]);
+        let encoder = command_buffer
+            .renderCommandEncoderWithDescriptor(&pass)
+            .ok_or_else(|| "failed to create Metal render command encoder".to_string())?;
+        encoder.setViewport(MTLViewport {
+            originX: 0.0,
+            originY: 0.0,
+            width: target.extent.width as f64,
+            height: target.extent.height as f64,
+            znear: 0.0,
+            zfar: 1.0,
+        });
+        unsafe {
+            encoder.setFragmentTexture_atIndex(Some(&self.transparent_texture), 2);
+            encoder.setFragmentSamplerState_atIndex(Some(&self.sampler), 0);
+        }
+        Ok(encoder)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_draw_command(
+        &mut self,
+        encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        target: &PrivateRenderTarget,
+        command: &DrawCommand,
+        damage: Option<[f32; 4]>,
+        source_override: Option<&Texture>,
+        mask_override: Option<&Texture>,
+        blend_override: Option<PipelineBlend>,
+    ) -> Result<(), String> {
         let Some(scissor) = metal_scissor(
             intersect_optional(command.clip_bounds, damage),
             self.main_target.extent,
@@ -1547,19 +1612,7 @@ impl MetalBackend {
             .map(|texture| texture.raw.clone())
             .unwrap_or_else(|| self.transparent_texture.clone());
 
-        let pass = render_pass(target, MTLLoadAction::Load, [0.0; 4]);
-        let encoder = command_buffer
-            .renderCommandEncoderWithDescriptor(&pass)
-            .ok_or_else(|| "failed to create Metal render command encoder".to_string())?;
         encoder.setRenderPipelineState(&pipeline);
-        encoder.setViewport(MTLViewport {
-            originX: 0.0,
-            originY: 0.0,
-            width: target.extent.width as f64,
-            height: target.extent.height as f64,
-            znear: 0.0,
-            zfar: 1.0,
-        });
         encoder.setScissorRect(scissor);
 
         let vertex_uniforms = vertex_uniforms(command, self.main_target.extent);
@@ -1571,9 +1624,7 @@ impl MetalBackend {
             );
             encoder.setFragmentTexture_atIndex(Some(&source), 0);
             encoder.setFragmentTexture_atIndex(Some(&mask), 1);
-            encoder.setFragmentTexture_atIndex(Some(&self.transparent_texture), 2);
             encoder.setFragmentTexture_atIndex(Some(&user), 3);
-            encoder.setFragmentSamplerState_atIndex(Some(&self.sampler), 0);
         }
 
         let sprite_uniforms = sprite_uniforms(command);
@@ -1633,7 +1684,6 @@ impl MetalBackend {
             }
             (6, 0)
         };
-        encoder.endEncoding();
         if self.profiling_enabled.get() {
             self.profile_draw_calls
                 .set(self.profile_draw_calls.get().saturating_add(1));
@@ -2314,6 +2364,7 @@ mod tests {
             native_emote: None,
         };
         let mut frame = DrawList::new();
+        frame.push(command.clone());
         frame.push(command.clone());
         backend.begin_frame(FrameTarget::Main).unwrap();
         backend.render(&frame);
