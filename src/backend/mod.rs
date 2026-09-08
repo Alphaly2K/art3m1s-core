@@ -13,6 +13,11 @@ pub mod gl;
 #[cfg(all(feature = "metal-backend", any(target_os = "macos", target_os = "ios")))]
 pub mod metal;
 pub mod types;
+#[cfg(all(
+    feature = "vulkan-backend",
+    any(target_os = "android", target_os = "windows", target_os = "linux")
+))]
+pub mod vulkan;
 
 pub use types::{
     Extent2D, FrameTarget, NativeSurface, NativeSurfaceKind, PipelineId, RenderTarget,
@@ -185,26 +190,45 @@ pub trait GpuBackend: TextureProvider {
 }
 
 /// Backend choice kept outside `CoreRuntime`.
-#[cfg(any(feature = "gl-backend", feature = "metal-backend"))]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendSelection {
     #[cfg(all(feature = "metal-backend", any(target_os = "macos", target_os = "ios")))]
     NativeMetal,
+    #[cfg(all(
+        feature = "vulkan-backend",
+        any(target_os = "android", target_os = "windows", target_os = "linux")
+    ))]
+    NativeVulkan,
     #[cfg(feature = "gl-backend")]
     ReferenceGl(gl::platform::GfxBackend),
 }
 
-#[cfg(any(feature = "gl-backend", feature = "metal-backend"))]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 impl BackendSelection {
     /// Preserves legacy ANGLE selections while making native Metal the Apple
     /// default. On Apple, values 0 and 3 select Metal; value 5 explicitly
     /// selects CGL and value 6 explicitly selects ANGLE-Metal for A/B
-    /// comparison. `ART3M1S_FORCE_GL` also forces GL; an iOS default selection
-    /// is routed to ANGLE-Metal because CGL is absent.
+    /// comparison. Android values 0 and 2 select native Vulkan. Setting
+    /// `ART3M1S_FORCE_GL` restores the legacy GL/ANGLE mappings for A/B tests;
+    /// an iOS default selection is routed to ANGLE-Metal because CGL is absent.
     pub fn from_legacy_int(value: i32) -> Self {
         #[cfg(all(feature = "metal-backend", any(target_os = "macos", target_os = "ios")))]
         if std::env::var_os("ART3M1S_FORCE_GL").is_none() && matches!(value, 0 | 3) {
             return Self::NativeMetal;
+        }
+
+        #[cfg(all(feature = "vulkan-backend", target_os = "android"))]
+        if std::env::var_os("ART3M1S_FORCE_GL").is_none() && matches!(value, 0 | 2) {
+            return Self::NativeVulkan;
         }
 
         #[cfg(feature = "gl-backend")]
@@ -232,7 +256,11 @@ impl From<gl::platform::GfxBackend> for BackendSelection {
     }
 }
 
-#[cfg(any(feature = "gl-backend", feature = "metal-backend"))]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 pub(crate) fn create_backend(
     selection: BackendSelection,
     width: u32,
@@ -241,6 +269,11 @@ pub(crate) fn create_backend(
     match selection {
         #[cfg(all(feature = "metal-backend", any(target_os = "macos", target_os = "ios")))]
         BackendSelection::NativeMetal => Ok(Box::new(metal::MetalBackend::new(width, height)?)),
+        #[cfg(all(
+            feature = "vulkan-backend",
+            any(target_os = "android", target_os = "windows", target_os = "linux")
+        ))]
+        BackendSelection::NativeVulkan => Ok(Box::new(vulkan::VulkanBackend::new(width, height)?)),
         #[cfg(feature = "gl-backend")]
         BackendSelection::ReferenceGl(config) => {
             Ok(Box::new(gl::GlBackend::new(config, width, height)?))

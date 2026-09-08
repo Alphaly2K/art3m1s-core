@@ -20,4 +20,68 @@ fn main() {
         // 数学函数库（FFmpeg 依赖）。
         println!("cargo:rustc-link-lib=dylib=m");
     }
+
+    #[cfg(feature = "vulkan-backend")]
+    if std::env::var_os("CARGO_FEATURE_VULKAN_BACKEND").is_some() {
+        compile_vulkan_shaders();
+    }
+}
+
+#[cfg(feature = "vulkan-backend")]
+fn compile_vulkan_shaders() {
+    use naga::back::spv;
+    use naga::valid::{Capabilities, ValidationFlags, Validator};
+    use std::path::{Path, PathBuf};
+
+    let source_path = Path::new("src/backend/vulkan/shaders.wgsl");
+    println!("cargo:rerun-if-changed={}", source_path.display());
+    let source = std::fs::read_to_string(source_path).expect("read Vulkan WGSL shaders");
+    let module = naga::front::wgsl::parse_str(&source).expect("parse Vulkan WGSL shaders");
+    let info = Validator::new(ValidationFlags::all(), Capabilities::empty())
+        .validate(&module)
+        .expect("validate Vulkan WGSL shaders");
+    let output = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
+    for (entry_point, stage, file) in [
+        (
+            "sprite_vertex",
+            naga::ShaderStage::Vertex,
+            "vulkan_sprite.vert.spv",
+        ),
+        (
+            "sprite_fragment",
+            naga::ShaderStage::Fragment,
+            "vulkan_sprite.frag.spv",
+        ),
+        (
+            "alpha_mask_fragment",
+            naga::ShaderStage::Fragment,
+            "vulkan_alpha_mask.frag.spv",
+        ),
+        (
+            "group_composite_fragment",
+            naga::ShaderStage::Fragment,
+            "vulkan_group.frag.spv",
+        ),
+        (
+            "rule_transition_fragment",
+            naga::ShaderStage::Fragment,
+            "vulkan_rule.frag.spv",
+        ),
+    ] {
+        let words = spv::write_vec(
+            &module,
+            &info,
+            &spv::Options::default(),
+            Some(&spv::PipelineOptions {
+                shader_stage: stage,
+                entry_point: entry_point.into(),
+            }),
+        )
+        .unwrap_or_else(|error| panic!("compile Vulkan shader {entry_point}: {error}"));
+        let bytes = words
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .collect::<Vec<_>>();
+        std::fs::write(output.join(file), bytes).expect("write Vulkan SPIR-V shader");
+    }
 }
