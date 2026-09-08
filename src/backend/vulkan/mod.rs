@@ -253,6 +253,7 @@ pub struct VulkanBackend {
     completed: u64,
     submissions: VecDeque<Submission>,
     retired: VecDeque<PendingRetirement>,
+    fatal_error: Option<String>,
     last_overlay: Option<RenderRegion>,
     flash: usize,
     profiling: Cell<bool>,
@@ -449,6 +450,7 @@ impl VulkanBackend {
             completed: 0,
             submissions: VecDeque::new(),
             retired: VecDeque::new(),
+            fatal_error: None,
             last_overlay: None,
             flash: 0,
             profiling: Cell::new(false),
@@ -526,6 +528,17 @@ impl VulkanBackend {
     }
     fn retirement_serial(&self) -> u64 {
         self.submitted + u64::from(self.active.is_some())
+    }
+    fn check_operational(&self) -> Result<(), String> {
+        self.fatal_error
+            .as_ref()
+            .map_or(Ok(()), |error| Err(error.clone()))
+    }
+
+    fn fail(&mut self, context: &str, error: impl std::fmt::Display) {
+        let error = format!("Vulkan backend is no longer operational ({context}): {error}");
+        crate::core_error!("[VulkanBackend] {error}");
+        self.fatal_error.get_or_insert(error);
     }
     fn retire(&mut self, resource: Retired) {
         self.retired.push_back(PendingRetirement {
@@ -1606,6 +1619,29 @@ fn update_cpu(t: &mut VulkanTexture, origin: [u32; 2], extent: Extent2D, data: &
 }
 
 impl GpuBackend for VulkanBackend {
+    fn backend_info(&self) -> BackendInfo {
+        let bc = unsafe {
+            self.instance
+                .get_physical_device_format_properties(self.physical, vk::Format::BC3_UNORM_BLOCK)
+        };
+        BackendInfo {
+            kind: BackendKind::Vulkan,
+            name: "Vulkan",
+            stability: BackendStability::Experimental,
+            capabilities: BackendCapabilities {
+                offscreen_render_target: true,
+                readback: true,
+                compressed_astc: self.supports_astc_4x4(),
+                compressed_bc: bc
+                    .optimal_tiling_features
+                    .contains(vk::FormatFeatureFlags::SAMPLED_IMAGE),
+                stencil: true,
+                dynamic_mesh: true,
+                ..BackendCapabilities::default()
+            },
+        }
+    }
+
     fn begin_access(&mut self) {}
     fn end_access(&mut self) {}
     fn create_texture(
@@ -1715,6 +1751,7 @@ impl GpuBackend for VulkanBackend {
         Ok(())
     }
     fn begin_frame(&mut self, target: FrameTarget) -> Result<(), String> {
+        self.check_operational()?;
         if self.active.is_some() {
             return Err("Vulkan frame already active".into());
         }
@@ -1824,7 +1861,7 @@ impl GpuBackend for VulkanBackend {
         );
         self.set_target_layout(a.target, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
         if let Err(error) = unsafe { self.device.end_command_buffer(a.command) } {
-            crate::core_warn!("[VulkanBackend] end frame command failed: {error}");
+            self.fail("ending frame command buffer", error);
             self.discard_active(a);
             return;
         }
@@ -1834,7 +1871,7 @@ impl GpuBackend for VulkanBackend {
         } {
             Ok(x) => x,
             Err(error) => {
-                crate::core_warn!("[VulkanBackend] create frame fence failed: {error}");
+                self.fail("creating frame fence", error);
                 self.discard_active(a);
                 return;
             }
@@ -1842,7 +1879,7 @@ impl GpuBackend for VulkanBackend {
         let cmds = [a.command];
         let submits = [vk::SubmitInfo::default().command_buffers(&cmds)];
         if let Err(error) = unsafe { self.device.queue_submit(self.queue, &submits, fence) } {
-            crate::core_warn!("[VulkanBackend] frame submission failed: {error}");
+            self.fail("submitting frame", error);
             unsafe { self.device.destroy_fence(fence, None) };
             self.discard_active(a);
             return;
@@ -1998,7 +2035,11 @@ impl VulkanBackend {
             };
             match unsafe { self.device.get_fence_status(s.fence) } {
                 Ok(true) => {}
-                Ok(false) | Err(_) => break,
+                Ok(false) => break,
+                Err(error) => {
+                    self.fail("polling submission fence", error);
+                    break;
+                }
             }
             let s = self.submissions.pop_front().unwrap();
             self.completed = self.completed.max(s.serial);
@@ -2106,6 +2147,7 @@ impl VulkanBackend {
         e: Extent2D,
         out: &mut [u8],
     ) -> Result<usize, String> {
+        self.check_operational()?;
         if self.active.is_some() {
             return Err("cannot read active Vulkan frame".into());
         }
@@ -2200,7 +2242,7 @@ impl VulkanBackend {
             0,
             repaint.damage(),
         ) {
-            crate::core_warn!("[VulkanBackend] render: {e}");
+            self.fail("encoding render commands", e);
         }
         if visualize {
             let colors = [
@@ -2770,6 +2812,7 @@ impl VulkanBackend {
         Ok(p)
     }
     fn attach_surface(&mut self, s: NativeSurface) -> Result<(), String> {
+        self.check_operational()?;
         if s.kind != NativeSurfaceKind::AndroidNativeWindow {
             return Err("VulkanBackend currently accepts ANativeWindow only".into());
         }
@@ -3010,6 +3053,7 @@ impl VulkanBackend {
         }
     }
     fn present_impl(&mut self) -> Result<(), String> {
+        self.check_operational()?;
         if self.active.is_some() {
             return Err("cannot present active Vulkan frame".into());
         }

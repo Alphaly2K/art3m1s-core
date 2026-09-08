@@ -860,17 +860,15 @@ use crate::runtime::CoreRuntime;
 #[unsafe(no_mangle)]
 /// Creates a runtime using the platform default GPU backend.
 ///
-/// On Apple, values 0 and 3 select native Metal. Values 1, 2 and 4 retain the
-/// legacy ANGLE selections; value 5 explicitly selects CGL and value 6 selects
-/// ANGLE-Metal for A/B comparison.
-/// On Android, values 0 and 1 select ANGLE/OpenGL ES; value 2 opts into the
-/// experimental native Vulkan backend. `ART3M1S_FORCE_GL` restores all legacy
-/// mappings.
+/// Value 0 selects the production platform default: Metal on Darwin and
+/// experimental Vulkan on Android/Windows/Linux, with GL as initialization
+/// fallback when it is built. Explicit native overrides are 2=Vulkan and
+/// 3=Metal. Values 1/4/5/6 retain GL/ANGLE debug and A/B paths.
 pub unsafe extern "C" fn art3m1s_runtime_create(w: u32, h: u32, backend: i32) -> *mut CoreRuntime {
     // catch_unwind 防止 panic 跨越 extern "C" 边界导致 abort，
     // 同时把 panic message 打印到日志方便定位。
-    let b = crate::backend::BackendSelection::from_legacy_int(backend);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let b = crate::backend::BackendSelection::try_from_legacy_int(backend)?;
         CoreRuntime::create(w, h, b)
     }));
     match result {
@@ -887,6 +885,48 @@ pub unsafe extern "C" fn art3m1s_runtime_create(w: u32, h: u32, backend: i32) ->
             std::ptr::null_mut()
         }
     }
+}
+
+/// Returns the active backend kind: 1=Metal, 2=Vulkan, 3=GL reference.
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_backend_kind(rt: *const CoreRuntime) -> i32 {
+    if rt.is_null() {
+        return 0;
+    }
+    unsafe { &*rt }.backend_info().kind.ffi_value()
+}
+
+/// Returns the active stability level: 1=Production, 2=Experimental, 3=Legacy.
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_backend_stability(rt: *const CoreRuntime) -> i32 {
+    if rt.is_null() {
+        return 0;
+    }
+    unsafe { &*rt }.backend_info().stability.ffi_value()
+}
+
+/// Returns the `BackendCapabilities` stable bit mask for the active backend.
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_backend_capabilities(rt: *const CoreRuntime) -> u64 {
+    if rt.is_null() {
+        return 0;
+    }
+    unsafe { &*rt }.backend_info().capabilities.bits()
 }
 
 /// Selects the E-Mote implementation before project loading.

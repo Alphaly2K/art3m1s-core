@@ -607,6 +607,22 @@ impl GlTextureProvider {
         Some(entry)
     }
 
+    pub fn supports_bc(&self) -> bool {
+        if cfg!(any(target_os = "android", target_os = "ios"))
+            || (cfg!(all(target_os = "macos", target_arch = "aarch64")) && self.supports_astc_4x4())
+        {
+            return false;
+        }
+        let extensions = self.gl.supported_extensions();
+        [
+            "GL_EXT_texture_compression_s3tc",
+            "GL_EXT_texture_compression_dxt5",
+            "GL_ANGLE_texture_compression_dxt5",
+        ]
+        .iter()
+        .any(|extension| extensions.contains(*extension))
+    }
+
     fn upload_dxt5_render_only(
         &mut self,
         name: &str,
@@ -617,20 +633,7 @@ impl GlTextureProvider {
         // Mobile GPUs are optimized for ASTC; accepting emulated S3TC there may
         // silently expand the texture. On Apple Silicon, prefer ASTC only when
         // the active backend exposes it, leaving the CGL path unchanged.
-        if cfg!(any(target_os = "android", target_os = "ios"))
-            || (cfg!(all(target_os = "macos", target_arch = "aarch64")) && self.supports_astc_4x4())
-        {
-            return None;
-        }
-        let extensions = self.gl.supported_extensions();
-        let supported = [
-            "GL_EXT_texture_compression_s3tc",
-            "GL_EXT_texture_compression_dxt5",
-            "GL_ANGLE_texture_compression_dxt5",
-        ]
-        .iter()
-        .any(|extension| extensions.contains(*extension));
-        if !supported {
+        if !self.supports_bc() {
             return None;
         }
         let expected = (width as usize)

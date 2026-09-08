@@ -529,6 +529,17 @@ impl CoreRuntime {
     }
 
     fn load_shader(&mut self, id: &str, file: &str) {
+        let backend = self.gpu.backend_info();
+        if !backend.capabilities.hlsl_shader {
+            crate::core_warn!(
+                "[shader] backend={} stability={:?} 不支持运行时 HLSL，跳过 id={} file={}",
+                backend.name,
+                backend.stability,
+                id,
+                file
+            );
+            return;
+        }
         let source = match crate::ffi::request_file(file) {
             Ok(source) => source,
             Err(error) => {

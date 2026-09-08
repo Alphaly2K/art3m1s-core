@@ -1,6 +1,100 @@
 use crate::render_pipeline::draw::TextureId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BackendKind {
+    Metal,
+    Vulkan,
+    GlReference,
+}
+
+impl BackendKind {
+    pub const fn ffi_value(self) -> i32 {
+        match self {
+            Self::Metal => 1,
+            Self::Vulkan => 2,
+            Self::GlReference => 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BackendStability {
+    Production,
+    Experimental,
+    Legacy,
+}
+
+impl BackendStability {
+    pub const fn ffi_value(self) -> i32 {
+        match self {
+            Self::Production => 1,
+            Self::Experimental => 2,
+            Self::Legacy => 3,
+        }
+    }
+}
+
+/// Backend features visible to runtime and host policy. A `true` value means
+/// the active backend can execute that operation, not merely that the platform
+/// could support it through another graphics API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BackendCapabilities {
+    pub runtime_shader: bool,
+    pub hlsl_shader: bool,
+    pub offscreen_render_target: bool,
+    pub readback: bool,
+    pub external_texture: bool,
+    pub zero_copy_video: bool,
+    pub spatial_upscaling: bool,
+    pub temporal_upscaling: bool,
+    pub compressed_astc: bool,
+    pub compressed_bc: bool,
+    pub stencil: bool,
+    pub custom_shader: bool,
+    pub dynamic_mesh: bool,
+}
+
+impl BackendCapabilities {
+    pub const RUNTIME_SHADER: u64 = 1 << 0;
+    pub const HLSL_SHADER: u64 = 1 << 1;
+    pub const OFFSCREEN_RENDER_TARGET: u64 = 1 << 2;
+    pub const READBACK: u64 = 1 << 3;
+    pub const EXTERNAL_TEXTURE: u64 = 1 << 4;
+    pub const ZERO_COPY_VIDEO: u64 = 1 << 5;
+    pub const SPATIAL_UPSCALING: u64 = 1 << 6;
+    pub const TEMPORAL_UPSCALING: u64 = 1 << 7;
+    pub const COMPRESSED_ASTC: u64 = 1 << 8;
+    pub const COMPRESSED_BC: u64 = 1 << 9;
+    pub const STENCIL: u64 = 1 << 10;
+    pub const CUSTOM_SHADER: u64 = 1 << 11;
+    pub const DYNAMIC_MESH: u64 = 1 << 12;
+
+    pub const fn bits(self) -> u64 {
+        (self.runtime_shader as u64) * Self::RUNTIME_SHADER
+            | (self.hlsl_shader as u64) * Self::HLSL_SHADER
+            | (self.offscreen_render_target as u64) * Self::OFFSCREEN_RENDER_TARGET
+            | (self.readback as u64) * Self::READBACK
+            | (self.external_texture as u64) * Self::EXTERNAL_TEXTURE
+            | (self.zero_copy_video as u64) * Self::ZERO_COPY_VIDEO
+            | (self.spatial_upscaling as u64) * Self::SPATIAL_UPSCALING
+            | (self.temporal_upscaling as u64) * Self::TEMPORAL_UPSCALING
+            | (self.compressed_astc as u64) * Self::COMPRESSED_ASTC
+            | (self.compressed_bc as u64) * Self::COMPRESSED_BC
+            | (self.stencil as u64) * Self::STENCIL
+            | (self.custom_shader as u64) * Self::CUSTOM_SHADER
+            | (self.dynamic_mesh as u64) * Self::DYNAMIC_MESH
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendInfo {
+    pub kind: BackendKind,
+    pub name: &'static str,
+    pub stability: BackendStability,
+    pub capabilities: BackendCapabilities,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Extent2D {
     pub width: u32,
     pub height: u32,
@@ -268,5 +362,21 @@ mod tests {
     fn rgba_length_is_checked() {
         assert_eq!(Extent2D::new(4, 3).rgba8_len(), Some(48));
         assert_eq!(Extent2D::new(5, 7).block_4x4_len(), Some(64));
+    }
+
+    #[test]
+    fn backend_capability_bits_are_stable_and_composable() {
+        let capabilities = BackendCapabilities {
+            readback: true,
+            stencil: true,
+            dynamic_mesh: true,
+            ..BackendCapabilities::default()
+        };
+        assert_eq!(
+            capabilities.bits(),
+            BackendCapabilities::READBACK
+                | BackendCapabilities::STENCIL
+                | BackendCapabilities::DYNAMIC_MESH
+        );
     }
 }

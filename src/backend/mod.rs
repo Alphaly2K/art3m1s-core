@@ -20,9 +20,9 @@ pub mod types;
 pub mod vulkan;
 
 pub use types::{
-    Extent2D, FrameTarget, NativeSurface, NativeSurfaceKind, PipelineId, RenderTarget,
-    RenderTargetDesc, RenderTargetId, ShaderId, TextureData, TextureDesc, TextureFormat,
-    TextureUpdate, TextureUsage,
+    BackendCapabilities, BackendInfo, BackendKind, BackendStability, Extent2D, FrameTarget,
+    NativeSurface, NativeSurfaceKind, PipelineId, RenderTarget, RenderTargetDesc, RenderTargetId,
+    ShaderId, TextureData, TextureDesc, TextureFormat, TextureUpdate, TextureUsage,
 };
 
 /// Resource name to encoded image bytes.
@@ -94,6 +94,8 @@ pub struct GpuProfileStats {
 /// [`TextureProvider`] is only the draw-list construction view of this same
 /// owner, so texture resolution and submission share one synchronization domain.
 pub trait GpuBackend: TextureProvider {
+    fn backend_info(&self) -> BackendInfo;
+
     /// Save the host graphics state and make this backend ready for work.
     /// Calls may nest; every call must be paired with [`Self::end_access`].
     fn begin_access(&mut self);
@@ -197,6 +199,7 @@ pub trait GpuBackend: TextureProvider {
 ))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendSelection {
+    PlatformDefault,
     #[cfg(all(feature = "metal-backend", any(target_os = "macos", target_os = "ios")))]
     NativeMetal,
     #[cfg(all(
@@ -214,46 +217,64 @@ pub enum BackendSelection {
     feature = "vulkan-backend"
 ))]
 impl BackendSelection {
-    /// Preserves legacy ANGLE selections while making native Metal the Apple
-    /// default. On Apple, values 0 and 3 select Metal; value 5 explicitly
-    /// selects CGL and value 6 explicitly selects ANGLE-Metal for A/B
-    /// comparison. Android values 0 and 1 select ANGLE/OpenGL ES; value 2 is
-    /// the experimental native Vulkan backend. Setting `ART3M1S_FORCE_GL`
-    /// restores the legacy GL/ANGLE mappings for A/B tests; an iOS default
-    /// selection is routed to ANGLE-Metal because CGL is absent.
-    pub fn from_legacy_int(value: i32) -> Self {
-        #[cfg(all(feature = "metal-backend", any(target_os = "macos", target_os = "ios")))]
-        if std::env::var_os("ART3M1S_FORCE_GL").is_none() && matches!(value, 0 | 3) {
-            return Self::NativeMetal;
+    /// Maps the stable host integer ABI into an implementation-neutral choice.
+    /// Value 0 is the platform default (Metal on Darwin, Vulkan on
+    /// Android/Windows/Linux). Values 2 and 3 explicitly select Vulkan and
+    /// Metal where those native backends are available. Other legacy values,
+    /// or every value while `ART3M1S_FORCE_GL` is set, retain the GL/ANGLE
+    /// debug paths used for A/B comparisons and regression tests.
+    pub fn try_from_legacy_int(value: i32) -> Result<Self, String> {
+        let force_gl = std::env::var_os("ART3M1S_FORCE_GL").is_some();
+        if value == 0 && !force_gl {
+            return Ok(Self::PlatformDefault);
         }
 
-        #[cfg(all(feature = "vulkan-backend", target_os = "android"))]
-        if std::env::var_os("ART3M1S_FORCE_GL").is_none() && value == 2 {
-            return Self::NativeVulkan;
+        #[cfg(all(feature = "metal-backend", any(target_os = "macos", target_os = "ios")))]
+        if !force_gl && value == 3 {
+            return Ok(Self::NativeMetal);
+        }
+
+        #[cfg(all(
+            feature = "vulkan-backend",
+            any(target_os = "android", target_os = "windows", target_os = "linux")
+        ))]
+        if !force_gl && value == 2 {
+            return Ok(Self::NativeVulkan);
         }
 
         #[cfg(feature = "gl-backend")]
-        {
-            #[cfg(target_os = "ios")]
-            if std::env::var_os("ART3M1S_FORCE_GL").is_some() && value == 0 {
-                return Self::ReferenceGl(gl::platform::GfxBackend::Angle(
-                    gl::platform::AngleBackend::Metal,
-                ));
-            }
-            #[cfg(target_os = "android")]
-            if matches!(value, 0 | 1) {
-                return Self::ReferenceGl(gl::platform::GfxBackend::Angle(
-                    gl::platform::AngleBackend::OpenGL,
-                ));
-            }
-            Self::ReferenceGl(gl::platform::GfxBackend::from_int(value))
-        }
+        return Ok(Self::ReferenceGl(reference_gl_selection(value)));
 
         #[cfg(not(feature = "gl-backend"))]
-        {
-            panic!("no GPU backend is enabled for selection {value}")
-        }
+        Err(format!(
+            "GL backend override {value} is unavailable in this build"
+        ))
     }
+
+    /// Compatibility helper for Rust callers. Invalid overrides degrade to the
+    /// platform default; FFI uses the fallible function and reports the error.
+    pub fn from_legacy_int(value: i32) -> Self {
+        Self::try_from_legacy_int(value).unwrap_or(Self::PlatformDefault)
+    }
+}
+
+#[cfg(feature = "gl-backend")]
+fn reference_gl_selection(value: i32) -> gl::platform::GfxBackend {
+    if value != 0 {
+        return gl::platform::GfxBackend::from_int(value);
+    }
+    #[cfg(target_os = "macos")]
+    return gl::platform::GfxBackend::Cgl;
+    #[cfg(target_os = "ios")]
+    return gl::platform::GfxBackend::Angle(gl::platform::AngleBackend::Metal);
+    #[cfg(target_os = "android")]
+    return gl::platform::GfxBackend::Angle(gl::platform::AngleBackend::OpenGL);
+    #[cfg(target_os = "windows")]
+    return gl::platform::GfxBackend::Angle(gl::platform::AngleBackend::D3D11);
+    #[cfg(target_os = "linux")]
+    return gl::platform::GfxBackend::Angle(gl::platform::AngleBackend::OpenGL);
+    #[allow(unreachable_code)]
+    gl::platform::GfxBackend::from_int(0)
 }
 
 #[cfg(feature = "gl-backend")]
@@ -274,6 +295,7 @@ pub(crate) fn create_backend(
     height: u32,
 ) -> Result<Box<dyn GpuBackend>, String> {
     match selection {
+        BackendSelection::PlatformDefault => create_platform_default(width, height),
         #[cfg(all(feature = "metal-backend", any(target_os = "macos", target_os = "ios")))]
         BackendSelection::NativeMetal => Ok(Box::new(metal::MetalBackend::new(width, height)?)),
         #[cfg(all(
@@ -285,5 +307,83 @@ pub(crate) fn create_backend(
         BackendSelection::ReferenceGl(config) => {
             Ok(Box::new(gl::GlBackend::new(config, width, height)?))
         }
+    }
+}
+
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+fn create_platform_default(width: u32, height: u32) -> Result<Box<dyn GpuBackend>, String> {
+    #[cfg(all(feature = "metal-backend", any(target_os = "macos", target_os = "ios")))]
+    {
+        return match metal::MetalBackend::new(width, height) {
+            Ok(backend) => Ok(Box::new(backend)),
+            Err(native_error) => fallback_to_gl(width, height, "Metal", native_error),
+        };
+    }
+
+    #[cfg(all(
+        feature = "vulkan-backend",
+        any(target_os = "android", target_os = "windows", target_os = "linux")
+    ))]
+    {
+        return match vulkan::VulkanBackend::new(width, height) {
+            Ok(backend) => Ok(Box::new(backend)),
+            Err(native_error) => fallback_to_gl(width, height, "Vulkan", native_error),
+        };
+    }
+
+    #[cfg(all(
+        feature = "gl-backend",
+        not(any(
+            all(feature = "metal-backend", any(target_os = "macos", target_os = "ios")),
+            all(
+                feature = "vulkan-backend",
+                any(target_os = "android", target_os = "windows", target_os = "linux")
+            )
+        ))
+    ))]
+    return Ok(Box::new(gl::GlBackend::new(
+        reference_gl_selection(0),
+        width,
+        height,
+    )?));
+
+    #[allow(unreachable_code)]
+    Err("no GPU backend is available for this platform".into())
+}
+
+#[cfg(any(
+    all(feature = "metal-backend", any(target_os = "macos", target_os = "ios")),
+    all(
+        feature = "vulkan-backend",
+        any(target_os = "android", target_os = "windows", target_os = "linux")
+    )
+))]
+fn fallback_to_gl(
+    width: u32,
+    height: u32,
+    native_name: &str,
+    native_error: String,
+) -> Result<Box<dyn GpuBackend>, String> {
+    #[cfg(feature = "gl-backend")]
+    {
+        crate::core_warn!(
+            "[GpuBackend] platform-default {native_name} initialization failed; using legacy GL: {native_error}"
+        );
+        return Ok(Box::new(gl::GlBackend::new(
+            reference_gl_selection(0),
+            width,
+            height,
+        )?));
+    }
+    #[cfg(not(feature = "gl-backend"))]
+    {
+        let _ = (width, height);
+        Err(format!(
+            "platform-default {native_name} initialization failed and no GL fallback is built: {native_error}"
+        ))
     }
 }

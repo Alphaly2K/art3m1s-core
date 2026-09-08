@@ -5,9 +5,10 @@
 //! backend-neutral resource identifiers.
 
 use crate::backend::{
-    AssetSource, Extent2D, FrameCapture, FrameTarget, GpuBackend, GpuProfileStats, NativeSurface,
-    NativeSurfaceKind, RenderRegion, RenderTarget, RenderTargetDesc, RenderTargetId, ShaderId,
-    TextureData, TextureDesc, TextureFormat, TextureOrigin, TextureUpdate, TextureUsage,
+    AssetSource, BackendCapabilities, BackendInfo, BackendKind, BackendStability, Extent2D,
+    FrameCapture, FrameTarget, GpuBackend, GpuProfileStats, NativeSurface, NativeSurfaceKind,
+    RenderRegion, RenderTarget, RenderTargetDesc, RenderTargetId, ShaderId, TextureData,
+    TextureDesc, TextureFormat, TextureOrigin, TextureUpdate, TextureUsage,
 };
 use crate::render_pipeline::draw::{
     BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, ShaderEffect, ShaderGroup, TextureId,
@@ -838,6 +839,23 @@ impl TextureProvider for MetalBackend {
 }
 
 impl GpuBackend for MetalBackend {
+    fn backend_info(&self) -> BackendInfo {
+        BackendInfo {
+            kind: BackendKind::Metal,
+            name: "Metal",
+            stability: BackendStability::Production,
+            capabilities: BackendCapabilities {
+                offscreen_render_target: true,
+                readback: true,
+                compressed_astc: self.supports_astc_4x4(),
+                compressed_bc: cfg!(target_os = "macos"),
+                stencil: true,
+                dynamic_mesh: true,
+                ..BackendCapabilities::default()
+            },
+        }
+    }
+
     fn begin_access(&mut self) {}
 
     fn end_access(&mut self) {}

@@ -1,9 +1,10 @@
 use super::platform::{self, GLPlatformContext, SavedGlContext};
 use super::{GlRenderer, GlTextureProvider, ShaderProfile};
 use crate::backend::{
-    AssetSource, Extent2D, FrameCapture, FrameTarget, GpuBackend, GpuProfileStats, NativeSurface,
-    NativeSurfaceKind, RenderRegion, RenderTarget, RenderTargetDesc, RenderTargetId, ShaderId,
-    TextureData, TextureDesc, TextureFormat, TextureOrigin, TextureUpdate, TextureUsage,
+    AssetSource, BackendCapabilities, BackendInfo, BackendKind, BackendStability, Extent2D,
+    FrameCapture, FrameTarget, GpuBackend, GpuProfileStats, NativeSurface, NativeSurfaceKind,
+    RenderRegion, RenderTarget, RenderTargetDesc, RenderTargetId, ShaderId, TextureData,
+    TextureDesc, TextureFormat, TextureOrigin, TextureUpdate, TextureUsage,
 };
 use crate::render_pipeline::draw::{DrawList, TextureId, TextureInfo, TextureProvider};
 use glow::HasContext;
@@ -152,6 +153,28 @@ impl TextureProvider for GlBackend {
 }
 
 impl GpuBackend for GlBackend {
+    fn backend_info(&self) -> BackendInfo {
+        BackendInfo {
+            kind: BackendKind::GlReference,
+            name: "OpenGL/ANGLE reference",
+            stability: BackendStability::Legacy,
+            capabilities: BackendCapabilities {
+                runtime_shader: true,
+                hlsl_shader: true,
+                offscreen_render_target: true,
+                readback: true,
+                external_texture: true,
+                zero_copy_video: true,
+                compressed_astc: self.supports_astc_4x4(),
+                compressed_bc: self.textures.supports_bc(),
+                stencil: true,
+                custom_shader: true,
+                dynamic_mesh: true,
+                ..BackendCapabilities::default()
+            },
+        }
+    }
+
     fn begin_access(&mut self) {
         if self.access_depth == 0 {
             self.saved_host_context = Some(self.platform_context.bind_save());

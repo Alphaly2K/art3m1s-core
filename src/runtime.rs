@@ -3,7 +3,7 @@
 //! that the Flutter frontend calls from its game loop.
 
 use crate::audio::AudioBackend;
-use crate::backend::{BackendSelection, GpuBackend, NativeSurface};
+use crate::backend::{BackendInfo, BackendSelection, GpuBackend, NativeSurface};
 use crate::compositor::Compositor;
 use crate::text::TextRenderer;
 use crate::video::VideoBackend;
@@ -152,6 +152,10 @@ struct PendingLoadResume {
 }
 
 impl CoreRuntime {
+    pub fn backend_info(&self) -> BackendInfo {
+        self.gpu.backend_info()
+    }
+
     /// Create a new runtime with the given rendering backend.
     pub fn create(
         stage_width: u32,
