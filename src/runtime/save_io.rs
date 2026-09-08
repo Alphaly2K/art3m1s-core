@@ -315,6 +315,14 @@ impl CoreRuntime {
         data.restore(&mut self.interpreter)
             .map_err(|e| format!("恢复存档状态失败: {e:?}"))?;
 
+        // A reset keeps the Lua VM, but the game's boot flow may have cleared
+        // its persistent globals before the next load.  The onLoad handler is
+        // allowed to populate these tables from the restored variables, yet
+        // real projects also touch `scr` while doing so.  Provide the empty
+        // table shape without replacing any existing game state.
+        self.ensure_load_lua_tables()
+            .map_err(|e| format!("准备读档 Lua 状态失败: {e}"))?;
+
         // onLoad（restore）把恢复的变量经 pluto 反序列化回 sys/gscr/scr/log 等表，
         // 否则承载游戏态与存档槽位的 Lua 表仍是旧的。
         self.interpreter
@@ -389,6 +397,22 @@ impl CoreRuntime {
                     if init.save_global then gscr = fload_pluto(init.save_global) or gscr or {} end
                     if init.save_config then conf = fload_pluto(init.save_config) or conf or {} end
                 end
+                "#,
+            )
+            .exec()
+            .map_err(|e| e.to_string())
+    }
+
+    fn ensure_load_lua_tables(&mut self) -> Result<(), String> {
+        self.interpreter
+            .lua()
+            .load(
+                r#"
+                if type(scr) ~= "table" then scr = {} end
+                if type(log) ~= "table" then log = {} end
+                if type(sys) ~= "table" then sys = {} end
+                if type(gscr) ~= "table" then gscr = {} end
+                if type(conf) ~= "table" then conf = {} end
                 "#,
             )
             .exec()
