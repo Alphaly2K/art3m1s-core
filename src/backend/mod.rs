@@ -217,9 +217,10 @@ impl BackendSelection {
     /// Preserves legacy ANGLE selections while making native Metal the Apple
     /// default. On Apple, values 0 and 3 select Metal; value 5 explicitly
     /// selects CGL and value 6 explicitly selects ANGLE-Metal for A/B
-    /// comparison. Android values 0 and 2 select native Vulkan. Setting
-    /// `ART3M1S_FORCE_GL` restores the legacy GL/ANGLE mappings for A/B tests;
-    /// an iOS default selection is routed to ANGLE-Metal because CGL is absent.
+    /// comparison. Android values 0 and 1 select ANGLE/OpenGL ES; value 2 is
+    /// the experimental native Vulkan backend. Setting `ART3M1S_FORCE_GL`
+    /// restores the legacy GL/ANGLE mappings for A/B tests; an iOS default
+    /// selection is routed to ANGLE-Metal because CGL is absent.
     pub fn from_legacy_int(value: i32) -> Self {
         #[cfg(all(feature = "metal-backend", any(target_os = "macos", target_os = "ios")))]
         if std::env::var_os("ART3M1S_FORCE_GL").is_none() && matches!(value, 0 | 3) {
@@ -227,7 +228,7 @@ impl BackendSelection {
         }
 
         #[cfg(all(feature = "vulkan-backend", target_os = "android"))]
-        if std::env::var_os("ART3M1S_FORCE_GL").is_none() && matches!(value, 0 | 2) {
+        if std::env::var_os("ART3M1S_FORCE_GL").is_none() && value == 2 {
             return Self::NativeVulkan;
         }
 
@@ -237,6 +238,12 @@ impl BackendSelection {
             if std::env::var_os("ART3M1S_FORCE_GL").is_some() && value == 0 {
                 return Self::ReferenceGl(gl::platform::GfxBackend::Angle(
                     gl::platform::AngleBackend::Metal,
+                ));
+            }
+            #[cfg(target_os = "android")]
+            if matches!(value, 0 | 1) {
+                return Self::ReferenceGl(gl::platform::GfxBackend::Angle(
+                    gl::platform::AngleBackend::OpenGL,
                 ));
             }
             Self::ReferenceGl(gl::platform::GfxBackend::from_int(value))

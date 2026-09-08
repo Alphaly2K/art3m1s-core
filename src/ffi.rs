@@ -863,8 +863,9 @@ use crate::runtime::CoreRuntime;
 /// On Apple, values 0 and 3 select native Metal. Values 1, 2 and 4 retain the
 /// legacy ANGLE selections; value 5 explicitly selects CGL and value 6 selects
 /// ANGLE-Metal for A/B comparison.
-/// On Android, values 0 and 2 select native Vulkan; value 1 explicitly keeps
-/// the GL reference backend. `ART3M1S_FORCE_GL` restores all legacy mappings.
+/// On Android, values 0 and 1 select ANGLE/OpenGL ES; value 2 opts into the
+/// experimental native Vulkan backend. `ART3M1S_FORCE_GL` restores all legacy
+/// mappings.
 pub unsafe extern "C" fn art3m1s_runtime_create(w: u32, h: u32, backend: i32) -> *mut CoreRuntime {
     // catch_unwind 防止 panic 跨越 extern "C" 边界导致 abort，
     // 同时把 panic message 打印到日志方便定位。
