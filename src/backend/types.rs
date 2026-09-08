@@ -315,18 +315,6 @@ impl NativeSurface {
     }
 }
 
-/// Opaque backend shader allocation. Draw commands continue to use semantic
-/// shader names until the runtime shader registry is made backend-neutral.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ShaderId(u64);
-
-impl ShaderId {
-    #[allow(dead_code)]
-    pub(crate) const fn from_opaque(value: u64) -> Self {
-        Self(value)
-    }
-}
-
 /// Opaque cached graphics-pipeline identity. It intentionally does not appear
 /// in `DrawCommand`; each backend derives/caches pipelines from semantic state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

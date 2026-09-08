@@ -2,6 +2,9 @@
 
 use crate::backend::*;
 use crate::render_pipeline::draw::*;
+use crate::render_pipeline::hlsl::{
+    CompiledShader, ShaderCompiler, ShaderRegistry, ShaderRuntimeParameters,
+};
 use ash::{Device, Entry, Instance, vk};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -153,6 +156,8 @@ enum Retired {
     Texture(VulkanTexture),
     Buffer(Buffer),
     Framebuffer(vk::Framebuffer),
+    Pipeline(vk::Pipeline),
+    ShaderModule(vk::ShaderModule),
 }
 struct PendingRetirement {
     after: u64,
@@ -184,6 +189,7 @@ enum ShaderKind {
     AlphaMask,
     GroupComposite,
     RuleTransition,
+    Custom(ShaderId),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum PipelineBlend {
@@ -216,6 +222,11 @@ struct ShaderModules {
     rule: vk::ShaderModule,
 }
 
+struct VulkanShader {
+    module: vk::ShaderModule,
+    compiled: CompiledShader,
+}
+
 pub struct VulkanBackend {
     _entry: Entry,
     instance: Instance,
@@ -228,10 +239,13 @@ pub struct VulkanBackend {
     swapchain_loader: ash::khr::swapchain::Device,
     descriptor_layout: vk::DescriptorSetLayout,
     pipeline_layout: vk::PipelineLayout,
+    custom_descriptor_layout: vk::DescriptorSetLayout,
+    custom_pipeline_layout: vk::PipelineLayout,
     sampler: vk::Sampler,
     shaders: ShaderModules,
     render_passes: HashMap<vk::Format, vk::RenderPass>,
     pipelines: HashMap<PipelineKey, vk::Pipeline>,
+    runtime_shaders: ShaderRegistry<VulkanShader>,
     quad_vertex: Buffer,
     quad_index: Buffer,
     white: Image,
@@ -263,6 +277,8 @@ pub struct VulkanBackend {
     vertices: Cell<u64>,
     binds: Cell<u64>,
     mesh_bytes: Cell<u64>,
+    shader_clock: Instant,
+    shader_frame_index: u64,
     uniform_align: usize,
     scratch_capacity: usize,
     scratch_free: Vec<ScratchBuffer>,
@@ -309,6 +325,9 @@ impl VulkanBackend {
         let queue = unsafe { device.get_device_queue(queue_family, 0) };
         let swapchain_loader = ash::khr::swapchain::Device::new(&instance, &device);
 
+        // Keep the built-in WGSL ABI unchanged. Runtime HLSL uses a separate
+        // layout because its canonical ABI adds a background texture and has
+        // a distinct sampler binding.
         let bindings = [
             vk::DescriptorSetLayoutBinding::default()
                 .binding(0)
@@ -339,6 +358,37 @@ impl VulkanBackend {
             )
         }
         .map_err(|e| format!("create Vulkan pipeline layout: {e}"))?;
+        let custom_bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_count(1)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            sampled_binding(1),
+            sampled_binding(2),
+            sampled_binding(3),
+            sampled_binding(4),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(5)
+                .descriptor_count(1)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+        ];
+        let custom_descriptor_layout = unsafe {
+            device.create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&custom_bindings),
+                None,
+            )
+        }
+        .map_err(|e| format!("create Vulkan custom descriptor layout: {e}"))?;
+        let custom_set_layouts = [custom_descriptor_layout];
+        let custom_pipeline_layout = unsafe {
+            device.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::default().set_layouts(&custom_set_layouts),
+                None,
+            )
+        }
+        .map_err(|e| format!("create Vulkan custom pipeline layout: {e}"))?;
         let sampler = unsafe {
             device.create_sampler(
                 &vk::SamplerCreateInfo::default()
@@ -425,10 +475,13 @@ impl VulkanBackend {
             swapchain_loader,
             descriptor_layout,
             pipeline_layout,
+            custom_descriptor_layout,
+            custom_pipeline_layout,
             sampler,
             shaders,
             render_passes,
             pipelines: HashMap::new(),
+            runtime_shaders: ShaderRegistry::default(),
             quad_vertex,
             quad_index,
             white,
@@ -460,6 +513,8 @@ impl VulkanBackend {
             vertices: Cell::new(0),
             binds: Cell::new(0),
             mesh_bytes: Cell::new(0),
+            shader_clock: Instant::now(),
+            shader_frame_index: 0,
             uniform_align,
             scratch_capacity: SCRATCH_INITIAL,
             scratch_free: Vec::new(),
@@ -539,6 +594,34 @@ impl VulkanBackend {
         let error = format!("Vulkan backend is no longer operational ({context}): {error}");
         crate::core_error!("[VulkanBackend] {error}");
         self.fatal_error.get_or_insert(error);
+    }
+    fn invalidate_shader_pipelines(&mut self, shader: ShaderId) {
+        let keys = self
+            .pipelines
+            .keys()
+            .copied()
+            .filter(|key| key.shader == ShaderKind::Custom(shader))
+            .collect::<Vec<_>>();
+        for key in keys {
+            if let Some(pipeline) = self.pipelines.remove(&key) {
+                self.retire(Retired::Pipeline(pipeline));
+            }
+        }
+    }
+    fn shader_kind(&self, effect: Option<&ShaderEffect>) -> ShaderKind {
+        match effect.map(|effect| effect.name.as_str()) {
+            Some(crate::render_pipeline::shader::ALPHA_MASK_SHADER) => ShaderKind::AlphaMask,
+            Some(crate::render_pipeline::shader::GROUP_COMPOSITE_SHADER) => {
+                ShaderKind::GroupComposite
+            }
+            Some(crate::render_pipeline::shader::RULE_TRANS_SHADER) => ShaderKind::RuleTransition,
+            Some(name) => self
+                .runtime_shaders
+                .id(name)
+                .map(ShaderKind::Custom)
+                .unwrap_or(ShaderKind::Sprite),
+            None => ShaderKind::Sprite,
+        }
     }
     fn retire(&mut self, resource: Retired) {
         self.retired.push_back(PendingRetirement {
@@ -635,6 +718,11 @@ fn create_shaders(device: &Device) -> Result<ShaderModules, String> {
             include_bytes!(concat!(env!("OUT_DIR"), "/vulkan_rule.frag.spv")),
         )?,
     })
+}
+
+fn create_shader_module(device: &Device, words: &[u32]) -> Result<vk::ShaderModule, String> {
+    unsafe { device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(words), None) }
+        .map_err(|error| format!("create Vulkan runtime shader module: {error}"))
 }
 
 fn create_render_pass(device: &Device, format: vk::Format) -> Result<vk::RenderPass, String> {
@@ -1629,6 +1717,8 @@ impl GpuBackend for VulkanBackend {
             name: "Vulkan",
             stability: BackendStability::Experimental,
             capabilities: BackendCapabilities {
+                runtime_shader: true,
+                hlsl_shader: true,
                 offscreen_render_target: true,
                 readback: true,
                 compressed_astc: self.supports_astc_4x4(),
@@ -1636,6 +1726,7 @@ impl GpuBackend for VulkanBackend {
                     .optimal_tiling_features
                     .contains(vk::FormatFeatureFlags::SAMPLED_IMAGE),
                 stencil: true,
+                custom_shader: true,
                 dynamic_mesh: true,
                 ..BackendCapabilities::default()
             },
@@ -1836,6 +1927,7 @@ impl GpuBackend for VulkanBackend {
             pass_framebuffer: vk::Framebuffer::null(),
             resources: vec![],
         });
+        self.shader_frame_index = self.shader_frame_index.wrapping_add(1);
         Ok(())
     }
     fn clear(&mut self, color: [f32; 4]) {
@@ -1984,8 +2076,31 @@ impl GpuBackend for VulkanBackend {
     fn present(&mut self, _: Option<[f32; 4]>) -> Result<(), String> {
         self.present_impl()
     }
-    fn register_hlsl_shader(&mut self, _: &str, _: &[u8]) -> Result<ShaderId, String> {
-        Err("runtime HLSL is not implemented by VulkanBackend".into())
+    fn register_hlsl_shader(
+        &mut self,
+        name: &str,
+        source: &[u8],
+    ) -> Result<ShaderId, ShaderCompileError> {
+        let compiled = ShaderCompiler::compile_hlsl(name, source)?;
+        let module = create_shader_module(&self.device, &compiled.spirv)
+            .map_err(|error| ShaderCompileError::new(name, error))?;
+        let shader = VulkanShader { module, compiled };
+        let (id, old) = self.runtime_shaders.insert_or_replace(name, shader);
+        self.invalidate_shader_pipelines(id);
+        if let Some(old) = old {
+            // A submitted command buffer may still reference the old module.
+            // Retire it with the same serial tracking used for pipelines.
+            self.retire(Retired::ShaderModule(old.module));
+        }
+        Ok(id)
+    }
+    fn unregister_shader(&mut self, name: &str) -> bool {
+        let Some((id, shader)) = self.runtime_shaders.remove(name) else {
+            return false;
+        };
+        self.invalidate_shader_pipelines(id);
+        self.retire(Retired::ShaderModule(shader.module));
+        true
     }
     fn collect_retired_resources(&mut self) {
         self.collect()
@@ -2071,6 +2186,10 @@ impl VulkanBackend {
             Retired::Texture(t) => destroy_image(&self.device, t.image),
             Retired::Buffer(b) => destroy_buffer(&self.device, b),
             Retired::Framebuffer(f) => unsafe { self.device.destroy_framebuffer(f, None) },
+            Retired::Pipeline(p) => unsafe { self.device.destroy_pipeline(p, None) },
+            Retired::ShaderModule(module) => unsafe {
+                self.device.destroy_shader_module(module, None)
+            },
         }
     }
     fn capture_texture(&mut self, n: &str, e: Extent2D) -> Result<TextureId, String> {
@@ -2555,7 +2674,7 @@ impl VulkanBackend {
         } else {
             VertexLayout::IndexedQuad
         };
-        let shader = shader_kind(c.shader.as_ref());
+        let shader = self.shader_kind(c.shader.as_ref());
         let key = PipelineKey {
             shader,
             format: target.format,
@@ -2586,24 +2705,66 @@ impl VulkanBackend {
             .and_then(|id| self.textures.get(&id))
             .map(|t| t.image.view)
             .unwrap_or(self.transparent.view);
-        let uniform = UniformBlock {
-            vertex: vertex_uniforms(c, self.main.image.desc.extent),
-            sprite: sprite_uniforms(c),
-            effect: effect_uniforms(c),
+        let (uniform_bytes, uniform_range) = if let ShaderKind::Custom(id) = shader {
+            let runtime_shader = self
+                .runtime_shaders
+                .get(id)
+                .ok_or_else(|| format!("unknown Vulkan runtime shader {:?}", id))?;
+            let effect = c
+                .shader
+                .as_ref()
+                .ok_or("custom Vulkan pipeline has no shader effect")?;
+            let vertex = vertex_uniforms(c, self.main.image.desc.extent);
+            let parameters = ShaderRuntimeParameters::from_draw(
+                c,
+                [
+                    self.main.image.desc.extent.width as f32,
+                    self.main.image.desc.extent.height as f32,
+                ],
+                vertex.transform,
+                self.shader_clock.elapsed().as_secs_f32(),
+                self.shader_frame_index,
+                &effect.uniforms,
+            );
+            let bytes = runtime_shader
+                .compiled
+                .reflection
+                .encode_uniforms(&parameters);
+            let range = bytes.len() as u64;
+            (bytes, range)
+        } else {
+            let uniform = UniformBlock {
+                vertex: vertex_uniforms(c, self.main.image.desc.extent),
+                sprite: sprite_uniforms(c),
+                effect: effect_uniforms(c),
+            };
+            let bytes = value_bytes(&uniform).to_vec();
+            let range = bytes.len() as u64;
+            (bytes, range)
         };
-        let uniform_bytes = value_bytes(&uniform);
         let (uniform_buffer, uniform_offset, extra_uniform) = self.alloc_scratch(
             uniform_bytes.len(),
             self.uniform_align,
             vk::BufferUsageFlags::UNIFORM_BUFFER,
-            uniform_bytes,
+            &uniform_bytes,
         )?;
         let pool = self
             .active
             .as_ref()
             .map(|a| a.descriptors)
             .ok_or("draw without active frame")?;
-        let layouts = [self.descriptor_layout];
+        let custom = matches!(shader, ShaderKind::Custom(_));
+        let descriptor_layout = if custom {
+            self.custom_descriptor_layout
+        } else {
+            self.descriptor_layout
+        };
+        let pipeline_layout = if custom {
+            self.custom_pipeline_layout
+        } else {
+            self.pipeline_layout
+        };
+        let layouts = [descriptor_layout];
         let set = unsafe {
             self.device.allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
@@ -2615,7 +2776,7 @@ impl VulkanBackend {
         let bi = [vk::DescriptorBufferInfo::default()
             .buffer(uniform_buffer)
             .offset(uniform_offset)
-            .range(std::mem::size_of::<UniformBlock>() as u64)];
+            .range(uniform_range)];
         let src = [vk::DescriptorImageInfo::default()
             .image_view(source)
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
@@ -2625,8 +2786,11 @@ impl VulkanBackend {
         let usr = [vk::DescriptorImageInfo::default()
             .image_view(user)
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        let back = [vk::DescriptorImageInfo::default()
+            .image_view(self.transparent.view)
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
         let sam = [vk::DescriptorImageInfo::default().sampler(self.sampler)];
-        let writes = [
+        let mut writes = vec![
             vk::WriteDescriptorSet::default()
                 .dst_set(set)
                 .dst_binding(0)
@@ -2647,12 +2811,31 @@ impl VulkanBackend {
                 .dst_binding(3)
                 .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                 .image_info(&usr),
-            vk::WriteDescriptorSet::default()
-                .dst_set(set)
-                .dst_binding(4)
-                .descriptor_type(vk::DescriptorType::SAMPLER)
-                .image_info(&sam),
         ];
+        if custom {
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(set)
+                    .dst_binding(4)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .image_info(&back),
+            );
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(set)
+                    .dst_binding(5)
+                    .descriptor_type(vk::DescriptorType::SAMPLER)
+                    .image_info(&sam),
+            );
+        } else {
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(set)
+                    .dst_binding(4)
+                    .descriptor_type(vk::DescriptorType::SAMPLER)
+                    .image_info(&sam),
+            );
+        }
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
         let mesh = if vertex == VertexLayout::Mesh {
             let v = c
@@ -2694,7 +2877,7 @@ impl VulkanBackend {
             self.device.cmd_bind_descriptor_sets(
                 active_cmd,
                 vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline_layout,
+                pipeline_layout,
                 0,
                 &[set],
                 &[],
@@ -2737,10 +2920,33 @@ impl VulkanBackend {
             return Ok(p);
         }
         let (fragment, name) = match key.shader {
-            ShaderKind::Sprite => (self.shaders.sprite, c"sprite_fragment"),
-            ShaderKind::AlphaMask => (self.shaders.alpha_mask, c"alpha_mask_fragment"),
-            ShaderKind::GroupComposite => (self.shaders.group, c"group_composite_fragment"),
-            ShaderKind::RuleTransition => (self.shaders.rule, c"rule_transition_fragment"),
+            ShaderKind::Sprite => (
+                self.shaders.sprite,
+                CString::new("sprite_fragment").unwrap(),
+            ),
+            ShaderKind::AlphaMask => (
+                self.shaders.alpha_mask,
+                CString::new("alpha_mask_fragment").unwrap(),
+            ),
+            ShaderKind::GroupComposite => (
+                self.shaders.group,
+                CString::new("group_composite_fragment").unwrap(),
+            ),
+            ShaderKind::RuleTransition => (
+                self.shaders.rule,
+                CString::new("rule_transition_fragment").unwrap(),
+            ),
+            ShaderKind::Custom(id) => {
+                let shader = self
+                    .runtime_shaders
+                    .get(id)
+                    .ok_or_else(|| format!("Vulkan runtime shader {:?} is missing", id))?;
+                (
+                    shader.module,
+                    CString::new(shader.compiled.reflection.entry_point.clone())
+                        .map_err(|_| "Vulkan runtime shader entry point contains NUL".to_owned())?,
+                )
+            }
         };
         let stages = [
             vk::PipelineShaderStageCreateInfo::default()
@@ -2750,7 +2956,7 @@ impl VulkanBackend {
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::FRAGMENT)
                 .module(fragment)
-                .name(name),
+                .name(&name),
         ];
         let binding = [vk::VertexInputBindingDescription {
             binding: 0,
@@ -2791,6 +2997,11 @@ impl VulkanBackend {
         let cb = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments);
         let dyns = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dy = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyns);
+        let layout = if matches!(key.shader, ShaderKind::Custom(_)) {
+            self.custom_pipeline_layout
+        } else {
+            self.pipeline_layout
+        };
         let info = [vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)
             .vertex_input_state(&vi)
@@ -2800,7 +3011,7 @@ impl VulkanBackend {
             .multisample_state(&ms)
             .color_blend_state(&cb)
             .dynamic_state(&dy)
-            .layout(self.pipeline_layout)
+            .layout(layout)
             .render_pass(pass)
             .subpass(0)];
         let p = unsafe {
@@ -3238,6 +3449,9 @@ impl Drop for VulkanBackend {
                 self.device.destroy_framebuffer(target.framebuffer, None);
             }
         }
+        for shader in self.runtime_shaders.values() {
+            unsafe { self.device.destroy_shader_module(shader.module, None) };
+        }
         let textures = self
             .textures
             .drain()
@@ -3282,6 +3496,10 @@ impl Drop for VulkanBackend {
                 .destroy_pipeline_layout(self.pipeline_layout, None);
             self.device
                 .destroy_descriptor_set_layout(self.descriptor_layout, None);
+            self.device
+                .destroy_pipeline_layout(self.custom_pipeline_layout, None);
+            self.device
+                .destroy_descriptor_set_layout(self.custom_descriptor_layout, None);
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);
         }
@@ -3305,14 +3523,6 @@ fn empty_image() -> Image {
     }
 }
 
-fn shader_kind(e: Option<&ShaderEffect>) -> ShaderKind {
-    match e.map(|x| x.name.as_str()) {
-        Some(crate::render_pipeline::shader::ALPHA_MASK_SHADER) => ShaderKind::AlphaMask,
-        Some(crate::render_pipeline::shader::GROUP_COMPOSITE_SHADER) => ShaderKind::GroupComposite,
-        Some(crate::render_pipeline::shader::RULE_TRANS_SHADER) => ShaderKind::RuleTransition,
-        _ => ShaderKind::Sprite,
-    }
-}
 fn next_group(
     f: &DrawList,
     start: usize,

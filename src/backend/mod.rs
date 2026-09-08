@@ -19,10 +19,11 @@ pub mod types;
 ))]
 pub mod vulkan;
 
+pub use crate::render_pipeline::hlsl::{ShaderCompileError, ShaderId, ShaderSource};
 pub use types::{
     BackendCapabilities, BackendInfo, BackendKind, BackendStability, Extent2D, FrameTarget,
     NativeSurface, NativeSurfaceKind, PipelineId, RenderTarget, RenderTargetDesc, RenderTargetId,
-    ShaderId, TextureData, TextureDesc, TextureFormat, TextureUpdate, TextureUsage,
+    TextureData, TextureDesc, TextureFormat, TextureUpdate, TextureUsage,
 };
 
 /// Resource name to encoded image bytes.
@@ -162,7 +163,28 @@ pub trait GpuBackend: TextureProvider {
     fn clear_native_surface(&mut self);
     fn present(&mut self, damage: Option<[f32; 4]>) -> Result<(), String>;
 
-    fn register_hlsl_shader(&mut self, name: &str, source: &[u8]) -> Result<ShaderId, String>;
+    fn register_hlsl_shader(
+        &mut self,
+        name: &str,
+        source: &[u8],
+    ) -> Result<ShaderId, ShaderCompileError>;
+    /// Recompiles a logical shader while preserving its `ShaderId`. Backends
+    /// must invalidate every native pipeline derived from the old generation.
+    fn replace_hlsl_shader(
+        &mut self,
+        name: &str,
+        source: &[u8],
+    ) -> Result<ShaderId, ShaderCompileError> {
+        self.register_hlsl_shader(name, source)
+    }
+    fn reload_hlsl_shader(
+        &mut self,
+        name: &str,
+        source: &[u8],
+    ) -> Result<ShaderId, ShaderCompileError> {
+        self.replace_hlsl_shader(name, source)
+    }
+    fn unregister_shader(&mut self, name: &str) -> bool;
     /// Gives the backend an explicit opportunity to retire resources whose GPU
     /// submissions have completed. GL may no-op; Vulkan/Metal can poll fences.
     fn collect_retired_resources(&mut self) {}

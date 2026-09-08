@@ -16,8 +16,8 @@ struct VertexUniforms {
 
 struct RasterData {
     float4 position [[position]];
-    float2 uv;
-    float2 model_position;
+    float2 uv [[user(locn0)]];
+    float2 model_position [[user(locn1)]];
 };
 
 struct SpriteUniforms {

@@ -10,6 +10,7 @@ use crate::compositor::build::build_frame_with_content;
 use crate::compositor::reduce::Compositor;
 use crate::compositor::scene::Scene;
 pub mod draw;
+pub mod hlsl;
 pub mod shader;
 pub mod transition;
 

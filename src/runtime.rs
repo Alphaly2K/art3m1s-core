@@ -156,6 +156,36 @@ impl CoreRuntime {
         self.gpu.backend_info()
     }
 
+    /// Registers or replaces a backend-neutral Artemis HLSL effect.
+    pub fn register_hlsl_shader(
+        &mut self,
+        name: &str,
+        source: &[u8],
+    ) -> Result<crate::render_pipeline::hlsl::ShaderId, crate::backend::ShaderCompileError> {
+        self.gpu.register_hlsl_shader(name, source)
+    }
+
+    /// Recompiles an effect while preserving its logical shader identity.
+    pub fn replace_hlsl_shader(
+        &mut self,
+        name: &str,
+        source: &[u8],
+    ) -> Result<crate::render_pipeline::hlsl::ShaderId, crate::backend::ShaderCompileError> {
+        self.gpu.replace_hlsl_shader(name, source)
+    }
+
+    pub fn reload_hlsl_shader(
+        &mut self,
+        name: &str,
+        source: &[u8],
+    ) -> Result<crate::render_pipeline::hlsl::ShaderId, crate::backend::ShaderCompileError> {
+        self.gpu.reload_hlsl_shader(name, source)
+    }
+
+    pub fn unregister_hlsl_shader(&mut self, name: &str) -> bool {
+        self.gpu.unregister_shader(name)
+    }
+
     /// Create a new runtime with the given rendering backend.
     pub fn create(
         stage_width: u32,

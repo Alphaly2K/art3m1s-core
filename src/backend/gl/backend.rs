@@ -495,8 +495,14 @@ impl GpuBackend for GlBackend {
         self.platform_context.present_external_surface()
     }
 
-    fn register_hlsl_shader(&mut self, name: &str, source: &[u8]) -> Result<ShaderId, String> {
-        self.renderer.register_hlsl_shader(name, source)?;
+    fn register_hlsl_shader(
+        &mut self,
+        name: &str,
+        source: &[u8],
+    ) -> Result<ShaderId, crate::backend::ShaderCompileError> {
+        self.renderer
+            .register_hlsl_shader(name, source)
+            .map_err(|error| crate::backend::ShaderCompileError::new(name, error))?;
         if let Some(id) = self.shader_ids.get(name).copied() {
             return Ok(id);
         }
@@ -504,6 +510,11 @@ impl GpuBackend for GlBackend {
         self.next_shader_id = self.next_shader_id.wrapping_add(1).max(1);
         self.shader_ids.insert(name.to_owned(), id);
         Ok(id)
+    }
+
+    fn unregister_shader(&mut self, name: &str) -> bool {
+        self.shader_ids.remove(name);
+        self.renderer.unregister_hlsl_shader(name)
     }
 
     fn set_profile_enabled(&self, enabled: bool) {

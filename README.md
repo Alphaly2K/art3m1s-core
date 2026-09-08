@@ -48,6 +48,8 @@ cargo build --release
 完整 C ABI 声明与协议见 [doc/FFI_REFERENCE.md](doc/FFI_REFERENCE.md)。
 E-Mote 后端选择：默认内置；宿主在加载项目前调用
 `art3m1s_runtime_set_emote_backend(..., 1)` 才切到实验性 Eluna。
+运行时 HLSL 的 ABI、资源 binding、编译流程和限制见
+[doc/SHADER_ABI.md](doc/SHADER_ABI.md)。
 
 ## 状态与限制
 

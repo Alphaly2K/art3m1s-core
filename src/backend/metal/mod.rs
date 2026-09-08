@@ -7,12 +7,16 @@
 use crate::backend::{
     AssetSource, BackendCapabilities, BackendInfo, BackendKind, BackendStability, Extent2D,
     FrameCapture, FrameTarget, GpuBackend, GpuProfileStats, NativeSurface, NativeSurfaceKind,
-    RenderRegion, RenderTarget, RenderTargetDesc, RenderTargetId, ShaderId, TextureData,
-    TextureDesc, TextureFormat, TextureOrigin, TextureUpdate, TextureUsage,
+    RenderRegion, RenderTarget, RenderTargetDesc, RenderTargetId, ShaderCompileError, ShaderId,
+    TextureData, TextureDesc, TextureFormat, TextureOrigin, TextureUpdate, TextureUsage,
 };
 use crate::render_pipeline::draw::{
     BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, ShaderEffect, ShaderGroup, TextureId,
     TextureInfo, TextureProvider,
+};
+use crate::render_pipeline::hlsl::{
+    CompiledShader, ShaderCompiler, ShaderRegistry, ShaderResourceKind, ShaderRuntimeParameters,
+    ShaderTexture,
 };
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -22,7 +26,7 @@ use objc2_io_surface::IOSurfaceRef;
 use objc2_metal::{
     MTLBlendFactor, MTLBlendOperation, MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer,
     MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue, MTLCreateSystemDefaultDevice,
-    MTLDevice, MTLIndexType, MTLLibrary, MTLLoadAction, MTLOrigin, MTLPixelFormat,
+    MTLDevice, MTLFunction, MTLIndexType, MTLLibrary, MTLLoadAction, MTLOrigin, MTLPixelFormat,
     MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
     MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLSamplerAddressMode,
     MTLSamplerDescriptor, MTLSamplerMinMagFilter, MTLSamplerState, MTLScissorRect, MTLSize,
@@ -42,6 +46,7 @@ type RenderCommandEncoder = Retained<ProtocolObject<dyn MTLRenderCommandEncoder>
 type Texture = Retained<ProtocolObject<dyn MTLTexture>>;
 type Buffer = Retained<ProtocolObject<dyn objc2_metal::MTLBuffer>>;
 type PipelineState = Retained<ProtocolObject<dyn MTLRenderPipelineState>>;
+type Function = Retained<ProtocolObject<dyn MTLFunction>>;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -105,6 +110,12 @@ struct PrivateRenderTarget {
 
 struct MetalPipeline {
     raw: PipelineState,
+}
+
+struct MetalShader {
+    _library: Retained<ProtocolObject<dyn MTLLibrary>>,
+    function: Function,
+    compiled: CompiledShader,
 }
 
 struct MetalBuffer {
@@ -176,6 +187,7 @@ struct SubmittedFrame {
 enum RetiredResource {
     Texture(MetalTexture),
     Buffer(MetalBuffer),
+    Pipeline(MetalPipeline),
 }
 
 struct PendingRetirement {
@@ -200,6 +212,7 @@ enum ShaderKind {
     AlphaMask,
     GroupComposite,
     RuleTransition,
+    Custom(ShaderId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -240,6 +253,7 @@ pub struct MetalBackend {
     group_targets: Vec<PrivateRenderTarget>,
     mask_targets: Vec<PrivateRenderTarget>,
     pipelines: HashMap<PipelineKey, MetalPipeline>,
+    runtime_shaders: ShaderRegistry<MetalShader>,
     source: Option<Box<AssetSource>>,
     surface: Option<MetalSurface>,
     next_texture_id: u64,
@@ -259,6 +273,8 @@ pub struct MetalBackend {
     profile_vertices: Cell<u64>,
     profile_texture_binds: Cell<u64>,
     profile_dynamic_mesh_bytes: Cell<u64>,
+    shader_clock: Instant,
+    shader_frame_index: u64,
 }
 
 impl MetalBackend {
@@ -331,6 +347,7 @@ impl MetalBackend {
             group_targets: Vec::new(),
             mask_targets: Vec::new(),
             pipelines: HashMap::new(),
+            runtime_shaders: ShaderRegistry::default(),
             source: None,
             surface: None,
             next_texture_id: 1,
@@ -350,6 +367,8 @@ impl MetalBackend {
             profile_vertices: Cell::new(0),
             profile_texture_binds: Cell::new(0),
             profile_dynamic_mesh_bytes: Cell::new(0),
+            shader_clock: Instant::now(),
+            shader_frame_index: 0,
         })
     }
 
@@ -376,6 +395,23 @@ impl MetalBackend {
             after_serial: self.submitted_serial,
             resource: RetiredResource::Texture(texture),
         });
+    }
+
+    fn invalidate_shader_pipelines(&mut self, shader: ShaderId) {
+        let keys = self
+            .pipelines
+            .keys()
+            .copied()
+            .filter(|key| key.shader == ShaderKind::Custom(shader))
+            .collect::<Vec<_>>();
+        for key in keys {
+            if let Some(pipeline) = self.pipelines.remove(&key) {
+                self.retired.push_back(PendingRetirement {
+                    after_serial: self.submitted_serial,
+                    resource: RetiredResource::Pipeline(pipeline),
+                });
+            }
+        }
     }
 
     fn remove_texture_id(&mut self, texture: TextureId) -> bool {
@@ -845,11 +881,14 @@ impl GpuBackend for MetalBackend {
             name: "Metal",
             stability: BackendStability::Production,
             capabilities: BackendCapabilities {
+                runtime_shader: true,
+                hlsl_shader: true,
                 offscreen_render_target: true,
                 readback: true,
                 compressed_astc: self.supports_astc_4x4(),
                 compressed_bc: cfg!(target_os = "macos"),
                 stencil: true,
+                custom_shader: true,
                 dynamic_mesh: true,
                 ..BackendCapabilities::default()
             },
@@ -1007,6 +1046,7 @@ impl GpuBackend for MetalBackend {
             command_buffer,
             target,
         });
+        self.shader_frame_index = self.shader_frame_index.wrapping_add(1);
         Ok(())
     }
 
@@ -1281,8 +1321,45 @@ impl GpuBackend for MetalBackend {
         }
     }
 
-    fn register_hlsl_shader(&mut self, _name: &str, _source: &[u8]) -> Result<ShaderId, String> {
-        Err("dynamic HLSL compilation is not implemented by MetalBackend".into())
+    fn register_hlsl_shader(
+        &mut self,
+        name: &str,
+        source: &[u8],
+    ) -> Result<ShaderId, ShaderCompileError> {
+        let compiled = ShaderCompiler::compile_hlsl(name, source)?;
+        let source = NSString::from_str(&compiled.msl);
+        let library = self
+            .device
+            .newLibraryWithSource_options_error(&source, None)
+            .map_err(|error| {
+                ShaderCompileError::new(name, format!("Metal MSL compilation failed: {error}"))
+            })?;
+        let entry = NSString::from_str(&compiled.msl_entry_point);
+        let function = library.newFunctionWithName(&entry).ok_or_else(|| {
+            ShaderCompileError::new(
+                name,
+                format!(
+                    "Metal fragment function {} is missing",
+                    compiled.msl_entry_point
+                ),
+            )
+        })?;
+        let shader = MetalShader {
+            _library: library,
+            function,
+            compiled,
+        };
+        let (id, _old) = self.runtime_shaders.insert_or_replace(name, shader);
+        self.invalidate_shader_pipelines(id);
+        Ok(id)
+    }
+
+    fn unregister_shader(&mut self, name: &str) -> bool {
+        let Some((id, _shader)) = self.runtime_shaders.remove(name) else {
+            return false;
+        };
+        self.invalidate_shader_pipelines(id);
+        true
     }
 
     fn collect_retired_resources(&mut self) {
@@ -1311,6 +1388,7 @@ impl GpuBackend for MetalBackend {
                 match pending.resource {
                     RetiredResource::Texture(texture) => drop(texture),
                     RetiredResource::Buffer(buffer) => drop(buffer),
+                    RetiredResource::Pipeline(pipeline) => drop(pipeline),
                 }
             }
         }
@@ -1591,7 +1669,7 @@ impl MetalBackend {
         ) else {
             return Ok(());
         };
-        let shader = shader_kind(command.shader.as_ref());
+        let shader = self.shader_kind(command.shader.as_ref());
         let pipeline_key = PipelineKey {
             shader,
             blend: blend_override.unwrap_or(PipelineBlend::Draw(command.blend)),
@@ -1640,24 +1718,86 @@ impl MetalBackend {
                 std::mem::size_of::<VertexUniforms>(),
                 1,
             );
-            encoder.setFragmentTexture_atIndex(Some(&source), 0);
-            encoder.setFragmentTexture_atIndex(Some(&mask), 1);
-            encoder.setFragmentTexture_atIndex(Some(&user), 3);
         }
 
-        let sprite_uniforms = sprite_uniforms(command);
-        let effect_uniforms = effect_uniforms(command);
-        unsafe {
-            encoder.setFragmentBytes_length_atIndex(
-                value_bytes(&sprite_uniforms),
-                std::mem::size_of::<SpriteUniforms>(),
-                0,
+        if let ShaderKind::Custom(shader_id) = shader {
+            let shader = self
+                .runtime_shaders
+                .get(shader_id)
+                .ok_or_else(|| format!("unknown Metal runtime shader {:?}", shader_id))?;
+            let effect = command
+                .shader
+                .as_ref()
+                .ok_or_else(|| "custom Metal pipeline has no shader effect".to_string())?;
+            let parameters = ShaderRuntimeParameters::from_draw(
+                command,
+                [
+                    self.main_target.extent.width as f32,
+                    self.main_target.extent.height as f32,
+                ],
+                vertex_uniforms.transform,
+                self.shader_clock.elapsed().as_secs_f32(),
+                self.shader_frame_index,
+                &effect.uniforms,
             );
-            encoder.setFragmentBytes_length_atIndex(
-                value_bytes(&effect_uniforms),
-                std::mem::size_of::<EffectUniforms>(),
-                1,
-            );
+            let uniforms = shader.compiled.reflection.encode_uniforms(&parameters);
+            unsafe {
+                if let Some(pointer) = NonNull::new(uniforms.as_ptr().cast_mut().cast()) {
+                    if let Some(resource) = shader
+                        .compiled
+                        .reflection
+                        .resources
+                        .iter()
+                        .find(|resource| resource.kind == ShaderResourceKind::UniformBuffer)
+                    {
+                        encoder.setFragmentBytes_length_atIndex(
+                            pointer,
+                            uniforms.len(),
+                            resource.binding as usize,
+                        );
+                    }
+                }
+                for resource in &shader.compiled.reflection.resources {
+                    match resource.kind {
+                        ShaderResourceKind::Texture(ShaderTexture::Foreground) => encoder
+                            .setFragmentTexture_atIndex(Some(&source), resource.binding as usize),
+                        ShaderResourceKind::Texture(ShaderTexture::Mask) => encoder
+                            .setFragmentTexture_atIndex(Some(&mask), resource.binding as usize),
+                        ShaderResourceKind::Texture(ShaderTexture::User) => encoder
+                            .setFragmentTexture_atIndex(Some(&user), resource.binding as usize),
+                        ShaderResourceKind::Texture(ShaderTexture::Background) => encoder
+                            .setFragmentTexture_atIndex(
+                                Some(&self.transparent_texture),
+                                resource.binding as usize,
+                            ),
+                        ShaderResourceKind::Sampler => encoder.setFragmentSamplerState_atIndex(
+                            Some(&self.sampler),
+                            resource.binding as usize,
+                        ),
+                        ShaderResourceKind::UniformBuffer => {}
+                    }
+                }
+            }
+        } else {
+            unsafe {
+                encoder.setFragmentTexture_atIndex(Some(&source), 0);
+                encoder.setFragmentTexture_atIndex(Some(&mask), 1);
+                encoder.setFragmentTexture_atIndex(Some(&user), 3);
+            }
+            let sprite_uniforms = sprite_uniforms(command);
+            let effect_uniforms = effect_uniforms(command);
+            unsafe {
+                encoder.setFragmentBytes_length_atIndex(
+                    value_bytes(&sprite_uniforms),
+                    std::mem::size_of::<SpriteUniforms>(),
+                    0,
+                );
+                encoder.setFragmentBytes_length_atIndex(
+                    value_bytes(&effect_uniforms),
+                    std::mem::size_of::<EffectUniforms>(),
+                    1,
+                );
+            }
         }
 
         let vertices = if let Some(mesh) = command
@@ -1774,15 +1914,23 @@ impl MetalBackend {
             ShaderKind::AlphaMask => "alpha_mask_fragment",
             ShaderKind::GroupComposite => "group_composite_fragment",
             ShaderKind::RuleTransition => "rule_transition_fragment",
+            ShaderKind::Custom(_) => "",
         });
         let vertex = self
             .library
             .newFunctionWithName(&vertex_name)
             .ok_or_else(|| "Metal vertex function is missing".to_string())?;
-        let fragment = self
-            .library
-            .newFunctionWithName(&fragment_name)
-            .ok_or_else(|| format!("Metal fragment function {fragment_name} is missing"))?;
+        let fragment = match key.shader {
+            ShaderKind::Custom(id) => self
+                .runtime_shaders
+                .get(id)
+                .map(|shader| shader.function.clone())
+                .ok_or_else(|| format!("Metal runtime shader {:?} is missing", id))?,
+            _ => self
+                .library
+                .newFunctionWithName(&fragment_name)
+                .ok_or_else(|| format!("Metal fragment function {fragment_name} is missing"))?,
+        };
         let descriptor = MTLRenderPipelineDescriptor::new();
         descriptor.setVertexFunction(Some(&vertex));
         descriptor.setFragmentFunction(Some(&fragment));
@@ -1796,6 +1944,22 @@ impl MetalBackend {
         self.pipelines
             .insert(key, MetalPipeline { raw: raw.clone() });
         Ok(raw)
+    }
+
+    fn shader_kind(&self, effect: Option<&ShaderEffect>) -> ShaderKind {
+        match effect.map(|effect| effect.name.as_str()) {
+            Some(crate::render_pipeline::shader::ALPHA_MASK_SHADER) => ShaderKind::AlphaMask,
+            Some(crate::render_pipeline::shader::GROUP_COMPOSITE_SHADER) => {
+                ShaderKind::GroupComposite
+            }
+            Some(crate::render_pipeline::shader::RULE_TRANS_SHADER) => ShaderKind::RuleTransition,
+            Some(name) => self
+                .runtime_shaders
+                .id(name)
+                .map(ShaderKind::Custom)
+                .unwrap_or(ShaderKind::Sprite),
+            None => ShaderKind::Sprite,
+        }
     }
 
     fn encode_present(
@@ -2020,15 +2184,6 @@ fn set_factors(
     attachment.setDestinationRGBBlendFactor(destination);
     attachment.setSourceAlphaBlendFactor(source);
     attachment.setDestinationAlphaBlendFactor(destination);
-}
-
-fn shader_kind(effect: Option<&ShaderEffect>) -> ShaderKind {
-    match effect.map(|effect| effect.name.as_str()) {
-        Some(crate::render_pipeline::shader::ALPHA_MASK_SHADER) => ShaderKind::AlphaMask,
-        Some(crate::render_pipeline::shader::GROUP_COMPOSITE_SHADER) => ShaderKind::GroupComposite,
-        Some(crate::render_pipeline::shader::RULE_TRANS_SHADER) => ShaderKind::RuleTransition,
-        _ => ShaderKind::Sprite,
-    }
 }
 
 fn shader_group_blend(group: &ShaderGroup) -> BlendMode {

@@ -337,6 +337,14 @@ impl GlRenderer {
         Ok(())
     }
 
+    pub fn unregister_hlsl_shader(&mut self, name: &str) -> bool {
+        let Some(program) = self.custom_programs.remove(name) else {
+            return false;
+        };
+        unsafe { self.gl.delete_program(program.program) };
+        true
+    }
+
     /// 确保 `targets[depth]` 存在且尺寸匹配，返回其 FBO 与颜色纹理。
     /// 尺寸变化时销毁重建。
     unsafe fn ensure_target_at(

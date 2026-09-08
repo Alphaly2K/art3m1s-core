@@ -36,6 +36,8 @@ glow = { version = "0.16", optional = true }
 libloading = { version = "0.8.9", optional = true }
 # GPU texture asset decoding (PNG only).
 image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
+shaderc = { version = "0.10.1", optional = true, features = ["build-from-source"] }
+spirv-cross2 = { version = "0.7.1", optional = true, default-features = false, features = ["msl"] }
 # 字体光栅化（字形渲染子系统）
 ab_glyph = "0.2"
 
@@ -91,6 +93,7 @@ default = ["gl-backend", "metal-backend", "vulkan-backend", "experimental-eluna"
 gl-backend = ["dep:glow", "dep:image", "dep:libloading"]
 metal-backend = [
     "dep:image",
+    "runtime-shader",
     "dep:objc2",
     "dep:objc2-core-foundation",
     "dep:objc2-foundation",
@@ -98,7 +101,8 @@ metal-backend = [
     "dep:objc2-metal",
     "dep:objc2-quartz-core",
 ]
-vulkan-backend = ["dep:ash", "dep:image", "dep:naga"]
+vulkan-backend = ["dep:ash", "dep:image", "dep:naga", "runtime-shader"]
+runtime-shader = ["dep:shaderc", "dep:spirv-cross2"]
 experimental-eluna = ["dep:eluna"]
 game-probes = ["gl-backend"]
 

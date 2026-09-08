@@ -929,6 +929,134 @@ pub unsafe extern "C" fn art3m1s_runtime_backend_capabilities(rt: *const CoreRun
     unsafe { &*rt }.backend_info().capabilities.bits()
 }
 
+/// Registers an Artemis fragment HLSL shader. Returns its stable logical
+/// ShaderId, or -1 when the name/source is invalid or compilation fails.
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_register_hlsl_shader(
+    rt: *mut CoreRuntime,
+    name: *const c_char,
+    source: *const u8,
+    source_len: c_int,
+) -> i64 {
+    if rt.is_null() || name.is_null() || source.is_null() || source_len < 0 {
+        return -1;
+    }
+    let Some(name) = (unsafe { std::ffi::CStr::from_ptr(name).to_str().ok() }) else {
+        return -1;
+    };
+    let source = unsafe { std::slice::from_raw_parts(source, source_len as usize) };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        unsafe { &mut *rt }.register_hlsl_shader(name, source)
+    }));
+    match result {
+        Ok(Ok(id)) => id.opaque() as i64,
+        Ok(Err(error)) => {
+            core_error!("runtime HLSL shader registration failed: {error}");
+            -1
+        }
+        Err(panic_info) => {
+            core_error!(
+                "runtime HLSL shader registration panicked: {}",
+                panic_msg(&panic_info)
+            );
+            -1
+        }
+    }
+}
+
+/// Replaces an Artemis HLSL shader and invalidates native pipelines derived
+/// from the previous generation. Returns the stable ShaderId or -1.
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_replace_hlsl_shader(
+    rt: *mut CoreRuntime,
+    name: *const c_char,
+    source: *const u8,
+    source_len: c_int,
+) -> i64 {
+    if rt.is_null() || name.is_null() || source.is_null() || source_len < 0 {
+        return -1;
+    }
+    let Some(name) = (unsafe { std::ffi::CStr::from_ptr(name).to_str().ok() }) else {
+        return -1;
+    };
+    let source = unsafe { std::slice::from_raw_parts(source, source_len as usize) };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        unsafe { &mut *rt }.replace_hlsl_shader(name, source)
+    }));
+    match result {
+        Ok(Ok(id)) => id.opaque() as i64,
+        Ok(Err(error)) => {
+            core_error!("runtime HLSL shader replacement failed: {error}");
+            -1
+        }
+        Err(panic_info) => {
+            core_error!(
+                "runtime HLSL shader replacement panicked: {}",
+                panic_msg(&panic_info)
+            );
+            -1
+        }
+    }
+}
+
+/// Alias for replacement used by hosts that model shader updates as reloads.
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_reload_hlsl_shader(
+    rt: *mut CoreRuntime,
+    name: *const c_char,
+    source: *const u8,
+    source_len: c_int,
+) -> i64 {
+    unsafe { art3m1s_runtime_replace_hlsl_shader(rt, name, source, source_len) }
+}
+
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_unregister_hlsl_shader(
+    rt: *mut CoreRuntime,
+    name: *const c_char,
+) -> c_int {
+    if rt.is_null() || name.is_null() {
+        return 0;
+    }
+    let Some(name) = (unsafe { std::ffi::CStr::from_ptr(name).to_str().ok() }) else {
+        return 0;
+    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        (&mut *rt).unregister_hlsl_shader(name)
+    }));
+    match result {
+        Ok(true) => 1,
+        Ok(false) => 0,
+        Err(panic_info) => {
+            core_error!(
+                "runtime HLSL shader removal panicked: {}",
+                panic_msg(&panic_info)
+            );
+            0
+        }
+    }
+}
+
 /// Selects the E-Mote implementation before project loading.
 ///
 /// `backend=0` keeps the built-in renderer. `backend=1` enables the optional
