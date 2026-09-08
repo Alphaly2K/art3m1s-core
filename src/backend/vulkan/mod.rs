@@ -11,6 +11,7 @@ use std::time::Instant;
 
 const FRAMES_IN_FLIGHT: usize = 2;
 const MAX_DRAW_SETS: u32 = 8192;
+const SCRATCH_INITIAL: usize = 2 * 1024 * 1024;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -61,6 +62,32 @@ struct Buffer {
     memory: vk::DeviceMemory,
     size: vk::DeviceSize,
 }
+struct ScratchBuffer {
+    buffer: Buffer,
+    mapped: *mut u8,
+    cursor: usize,
+}
+impl ScratchBuffer {
+    fn alloc(&mut self, size: usize, align: usize) -> Option<u64> {
+        let align = align.max(1);
+        let start = self.cursor.div_ceil(align) * align;
+        let end = start.checked_add(size)?;
+        if end > self.buffer.size as usize {
+            return None;
+        }
+        self.cursor = end;
+        Some(start as u64)
+    }
+    fn write(&mut self, offset: u64, data: &[u8]) {
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                self.mapped.add(offset as usize),
+                data.len(),
+            );
+        }
+    }
+}
 struct Image {
     raw: vk::Image,
     memory: vk::DeviceMemory,
@@ -109,6 +136,9 @@ struct ActiveFrame {
     pool: vk::CommandPool,
     command: vk::CommandBuffer,
     descriptors: vk::DescriptorPool,
+    scratch: ScratchBuffer,
+    pass_open: bool,
+    pass_framebuffer: vk::Framebuffer,
     resources: Vec<Retired>,
 }
 struct Submission {
@@ -116,6 +146,7 @@ struct Submission {
     fence: vk::Fence,
     pool: vk::CommandPool,
     descriptors: Option<vk::DescriptorPool>,
+    scratch: Option<ScratchBuffer>,
     resources: Vec<Retired>,
 }
 enum Retired {
@@ -231,6 +262,9 @@ pub struct VulkanBackend {
     vertices: Cell<u64>,
     binds: Cell<u64>,
     mesh_bytes: Cell<u64>,
+    uniform_align: usize,
+    scratch_capacity: usize,
+    scratch_free: Vec<ScratchBuffer>,
 }
 
 impl VulkanBackend {
@@ -257,6 +291,10 @@ impl VulkanBackend {
         let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
         let (physical, queue_family) = select_physical_device(&instance)?;
         let memory = unsafe { instance.get_physical_device_memory_properties(physical) };
+        let uniform_align = unsafe { instance.get_physical_device_properties(physical) }
+            .limits
+            .min_uniform_buffer_offset_alignment
+            .max(1) as usize;
         let priorities = [1.0f32];
         let queue_info = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family)
@@ -420,6 +458,9 @@ impl VulkanBackend {
             vertices: Cell::new(0),
             binds: Cell::new(0),
             mesh_bytes: Cell::new(0),
+            uniform_align,
+            scratch_capacity: SCRATCH_INITIAL,
+            scratch_free: Vec::new(),
         })
     }
 
@@ -1182,25 +1223,44 @@ impl VulkanBackend {
             false
         }
     }
-    fn wait_submissions(&mut self) -> Result<(), String> {
-        let mut fences = self.submissions.iter().map(|x| x.fence).collect::<Vec<_>>();
-        if let Some(s) = &self.swapchain {
-            fences.extend(s.frames.iter().filter(|f| f.serial != 0).map(|f| f.fence));
+    fn wait_draw_submissions(&mut self) -> Result<(), String> {
+        let fences = self.submissions.iter().map(|x| x.fence).collect::<Vec<_>>();
+        if !fences.is_empty() {
+            unsafe { self.device.wait_for_fences(&fences, true, u64::MAX) }
+                .map_err(|e| format!("wait Vulkan draw submissions: {e}"))?;
         }
+        self.collect_retired_resources();
+        Ok(())
+    }
+    fn wait_submissions(&mut self) -> Result<(), String> {
+        self.wait_draw_submissions()?;
+        let Some((fences, serials)) = self.swapchain.as_ref().map(|s| {
+            (
+                s.frames
+                    .iter()
+                    .filter(|frame| frame.serial != 0)
+                    .map(|frame| frame.fence)
+                    .collect::<Vec<_>>(),
+                s.frames
+                    .iter()
+                    .map(|frame| frame.serial)
+                    .collect::<Vec<_>>(),
+            )
+        }) else {
+            return Ok(());
+        };
         if !fences.is_empty() {
             unsafe { self.device.wait_for_fences(&fences, true, u64::MAX) }
                 .map_err(|e| format!("wait Vulkan submissions: {e}"))?;
         }
-        if let Some(s) = &self.swapchain {
-            for f in &s.frames {
-                self.completed = self.completed.max(f.serial);
-            }
+        for serial in serials {
+            self.completed = self.completed.max(serial);
         }
         self.collect_retired_resources();
         Ok(())
     }
     fn update_image(&mut self, id: TextureId, update: TextureUpdate<'_>) -> Result<(), String> {
-        self.wait_submissions()?;
+        self.wait_draw_submissions()?;
         let t = self.textures.get(&id).ok_or("unknown Vulkan texture")?;
         let end = [
             update.origin[0]
@@ -1718,25 +1778,43 @@ impl GpuBackend for VulkanBackend {
             )
         }
         .map_err(|e| format!("create descriptor pool: {e}"))?;
+        let scratch = match self.take_scratch() {
+            Ok(scratch) => scratch,
+            Err(error) => {
+                unsafe {
+                    self.device.destroy_descriptor_pool(descriptors, None);
+                    self.device.destroy_command_pool(pool, None);
+                }
+                return Err(error);
+            }
+        };
         self.active = Some(ActiveFrame {
             target,
             view,
             pool,
             command,
             descriptors,
+            scratch,
+            pass_open: false,
+            pass_framebuffer: vk::Framebuffer::null(),
             resources: vec![],
         });
         Ok(())
     }
     fn clear(&mut self, color: [f32; 4]) {
-        if let Some(a) = &self.active {
-            clear_target(&self.device, a.command, a.view, color, None)
-        }
+        let Some(target) = self.active.as_ref().map(|a| a.view) else {
+            return;
+        };
+        self.clear_current(target, color, None);
     }
     fn end_frame(&mut self) {
+        self.end_open_pass();
         let Some(mut a) = self.active.take() else {
             return;
         };
+        self.scratch_capacity = self
+            .scratch_capacity
+            .max(a.scratch.cursor.next_power_of_two());
         barrier(
             &self.device,
             a.command,
@@ -1747,13 +1825,7 @@ impl GpuBackend for VulkanBackend {
         self.set_target_layout(a.target, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
         if let Err(error) = unsafe { self.device.end_command_buffer(a.command) } {
             crate::core_warn!("[VulkanBackend] end frame command failed: {error}");
-            for resource in a.resources {
-                self.destroy_retired(resource);
-            }
-            unsafe {
-                self.device.destroy_descriptor_pool(a.descriptors, None);
-                self.device.destroy_command_pool(a.pool, None);
-            }
+            self.discard_active(a);
             return;
         }
         let fence = match unsafe {
@@ -1763,13 +1835,7 @@ impl GpuBackend for VulkanBackend {
             Ok(x) => x,
             Err(error) => {
                 crate::core_warn!("[VulkanBackend] create frame fence failed: {error}");
-                for resource in a.resources {
-                    self.destroy_retired(resource);
-                }
-                unsafe {
-                    self.device.destroy_descriptor_pool(a.descriptors, None);
-                    self.device.destroy_command_pool(a.pool, None);
-                }
+                self.discard_active(a);
                 return;
             }
         };
@@ -1777,14 +1843,8 @@ impl GpuBackend for VulkanBackend {
         let submits = [vk::SubmitInfo::default().command_buffers(&cmds)];
         if let Err(error) = unsafe { self.device.queue_submit(self.queue, &submits, fence) } {
             crate::core_warn!("[VulkanBackend] frame submission failed: {error}");
-            for resource in a.resources {
-                self.destroy_retired(resource);
-            }
-            unsafe {
-                self.device.destroy_fence(fence, None);
-                self.device.destroy_descriptor_pool(a.descriptors, None);
-                self.device.destroy_command_pool(a.pool, None);
-            }
+            unsafe { self.device.destroy_fence(fence, None) };
+            self.discard_active(a);
             return;
         }
         self.submitted = self.submitted.wrapping_add(1).max(1);
@@ -1793,6 +1853,7 @@ impl GpuBackend for VulkanBackend {
             fence,
             pool: a.pool,
             descriptors: Some(a.descriptors),
+            scratch: Some(a.scratch),
             resources: std::mem::take(&mut a.resources),
         })
     }
@@ -1941,6 +2002,9 @@ impl VulkanBackend {
             }
             let s = self.submissions.pop_front().unwrap();
             self.completed = self.completed.max(s.serial);
+            if let Some(scratch) = s.scratch {
+                self.recycle_scratch(scratch);
+            }
             unsafe {
                 self.device.destroy_fence(s.fence, None);
                 if let Some(p) = s.descriptors {
@@ -1969,6 +2033,7 @@ impl VulkanBackend {
         }
     }
     fn capture_texture(&mut self, n: &str, e: Extent2D) -> Result<TextureId, String> {
+        self.end_open_pass();
         let (a_cmd, a_view, a_target) = self
             .active
             .as_ref()
@@ -2122,16 +2187,10 @@ impl VulkanBackend {
             .last_overlay
             .map(|x| x.union(current))
             .unwrap_or(current);
-        let Some((cmd, target)) = self.active.as_ref().map(|a| (a.command, a.view)) else {
+        let Some(target) = self.active.as_ref().map(|a| a.view) else {
             return repaint;
         };
-        clear_target(
-            &self.device,
-            cmd,
-            target,
-            [0., 0., 0., 1.],
-            repaint.damage(),
-        );
+        self.clear_current(target, [0., 0., 0., 1.], repaint.damage());
         if let Err(e) = self.encode_range(
             target,
             frame,
@@ -2177,24 +2236,12 @@ impl VulkanBackend {
                 continue;
             };
             let gt = self.ensure_target(false, depth)?;
-            clear_target(
-                &self.device,
-                self.active.as_ref().unwrap().command,
-                gt,
-                [0.; 4],
-                None,
-            );
+            self.clear_current(gt, [0.; 4], None);
             self.encode_range(gt, frame, g.start, g.end, gi, depth + 1, None)?;
             self.transition_private(false, depth, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
             let mask = if let Some([s, e]) = g.mask_range {
                 let mt = self.ensure_target(true, depth)?;
-                clear_target(
-                    &self.device,
-                    self.active.as_ref().unwrap().command,
-                    mt,
-                    [0.; 4],
-                    None,
-                );
+                self.clear_current(mt, [0.; 4], None);
                 for c in &frame.mask_commands[s..e] {
                     self.encode_draw(mt, c, None, None, None, None)?
                 }
@@ -2237,57 +2284,213 @@ impl VulkanBackend {
     fn ensure_target(&mut self, mask: bool, depth: usize) -> Result<TargetView, String> {
         let extent = self.main.image.desc.extent;
         let pass = self.render_pass(vk::Format::R8G8B8A8_UNORM)?;
-        let list = if mask {
-            &mut self.masks
-        } else {
-            &mut self.groups
-        };
-        while list.len() <= depth {
-            list.push(create_private_target(
-                &self.device,
-                &self.memory,
-                pass,
-                extent,
-                TextureFormat::Rgba8Unorm,
-            )?)
-        }
-        if list[depth].image.desc.extent != extent {
-            let old = std::mem::replace(
-                &mut list[depth],
-                create_private_target(
+        {
+            let list = if mask {
+                &mut self.masks
+            } else {
+                &mut self.groups
+            };
+            while list.len() <= depth {
+                list.push(create_private_target(
                     &self.device,
                     &self.memory,
                     pass,
                     extent,
                     TextureFormat::Rgba8Unorm,
-                )?,
-            );
-            unsafe { self.device.destroy_framebuffer(old.framebuffer, None) };
-            destroy_image(&self.device, old.image)
+                )?)
+            }
+            if list[depth].image.desc.extent != extent {
+                let old = std::mem::replace(
+                    &mut list[depth],
+                    create_private_target(
+                        &self.device,
+                        &self.memory,
+                        pass,
+                        extent,
+                        TextureFormat::Rgba8Unorm,
+                    )?,
+                );
+                unsafe { self.device.destroy_framebuffer(old.framebuffer, None) };
+                destroy_image(&self.device, old.image)
+            }
         }
-        let t = &mut list[depth];
-        let cmd = self.active.as_ref().unwrap().command;
-        if t.image.layout != vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL {
-            barrier(
-                &self.device,
-                cmd,
-                t.image.raw,
-                t.image.layout,
-                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            );
-            t.image.layout = vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+        let (image, old_layout) = {
+            let target = if mask {
+                &self.masks[depth]
+            } else {
+                &self.groups[depth]
+            };
+            (target.image.raw, target.image.layout)
+        };
+        if old_layout != vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL {
+            self.image_barrier(image, old_layout, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+            if mask {
+                self.masks[depth].image.layout = vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
+            } else {
+                self.groups[depth].image.layout = vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
+            }
         }
-        Ok(private_view(t))
+        Ok(private_view(if mask {
+            &self.masks[depth]
+        } else {
+            &self.groups[depth]
+        }))
     }
     fn transition_private(&mut self, mask: bool, depth: usize, new: vk::ImageLayout) {
-        let t = if mask {
-            &mut self.masks[depth]
-        } else {
-            &mut self.groups[depth]
+        let (image, old) = {
+            let target = if mask {
+                &self.masks[depth]
+            } else {
+                &self.groups[depth]
+            };
+            (target.image.raw, target.image.layout)
         };
-        let cmd = self.active.as_ref().unwrap().command;
-        barrier(&self.device, cmd, t.image.raw, t.image.layout, new);
-        t.image.layout = new
+        self.image_barrier(image, old, new);
+        if mask {
+            self.masks[depth].image.layout = new;
+        } else {
+            self.groups[depth].image.layout = new;
+        }
+    }
+    fn end_open_pass(&mut self) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        if !active.pass_open {
+            return;
+        }
+        unsafe { self.device.cmd_end_render_pass(active.command) };
+        active.pass_open = false;
+        active.pass_framebuffer = vk::Framebuffer::null();
+    }
+    fn ensure_pass(&mut self, target: TargetView) {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.pass_open && active.pass_framebuffer == target.framebuffer)
+        {
+            return;
+        }
+        self.end_open_pass();
+        let command = self.active.as_ref().unwrap().command;
+        let area = vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: vk::Extent2D {
+                width: target.extent.width,
+                height: target.extent.height,
+            },
+        };
+        unsafe {
+            self.device.cmd_begin_render_pass(
+                command,
+                &vk::RenderPassBeginInfo::default()
+                    .render_pass(target.pass)
+                    .framebuffer(target.framebuffer)
+                    .render_area(area),
+                vk::SubpassContents::INLINE,
+            );
+        }
+        let active = self.active.as_mut().unwrap();
+        active.pass_open = true;
+        active.pass_framebuffer = target.framebuffer;
+    }
+    fn image_barrier(&mut self, image: vk::Image, old: vk::ImageLayout, new: vk::ImageLayout) {
+        self.end_open_pass();
+        let command = self.active.as_ref().unwrap().command;
+        barrier(&self.device, command, image, old, new);
+    }
+    fn clear_current(&mut self, target: TargetView, color: [f32; 4], rect: Option<[f32; 4]>) {
+        self.ensure_pass(target);
+        let command = self.active.as_ref().unwrap().command;
+        let r = scissor(rect, target.extent, target.extent).unwrap_or(vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: vk::Extent2D {
+                width: target.extent.width,
+                height: target.extent.height,
+            },
+        });
+        unsafe {
+            self.device.cmd_clear_attachments(
+                command,
+                &[vk::ClearAttachment {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    color_attachment: 0,
+                    clear_value: vk::ClearValue {
+                        color: vk::ClearColorValue { float32: color },
+                    },
+                }],
+                &[vk::ClearRect {
+                    rect: r,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                }],
+            );
+        }
+    }
+    fn take_scratch(&mut self) -> Result<ScratchBuffer, String> {
+        let size = self.scratch_capacity.max(SCRATCH_INITIAL);
+        if let Some(index) = self
+            .scratch_free
+            .iter()
+            .position(|scratch| scratch.buffer.size as usize >= size)
+        {
+            let mut scratch = self.scratch_free.swap_remove(index);
+            scratch.cursor = 0;
+            return Ok(scratch);
+        }
+        create_scratch_buffer(&self.device, &self.memory, size)
+    }
+    fn recycle_scratch(&mut self, mut scratch: ScratchBuffer) {
+        if (scratch.buffer.size as usize) < self.scratch_capacity
+            || self.scratch_free.len() >= FRAMES_IN_FLIGHT
+        {
+            destroy_scratch(&self.device, scratch);
+            return;
+        }
+        scratch.cursor = 0;
+        self.scratch_free.push(scratch);
+    }
+    fn alloc_scratch(
+        &mut self,
+        size: usize,
+        align: usize,
+        usage: vk::BufferUsageFlags,
+        data: &[u8],
+    ) -> Result<(vk::Buffer, u64, Option<Buffer>), String> {
+        let grow_to = {
+            let active = self.active.as_mut().ok_or("draw without active frame")?;
+            if let Some(offset) = active.scratch.alloc(size, align) {
+                active.scratch.write(offset, data);
+                return Ok((active.scratch.buffer.raw, offset, None));
+            }
+            active
+                .scratch
+                .cursor
+                .saturating_add(size)
+                .max(self.scratch_capacity.saturating_mul(2))
+                .next_power_of_two()
+        };
+        let buffer = create_buffer(
+            &self.device,
+            &self.memory,
+            size,
+            usage,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )?;
+        write_buffer(&self.device, &buffer, data)?;
+        self.scratch_capacity = self.scratch_capacity.max(grow_to);
+        Ok((buffer.raw, 0, Some(buffer)))
+    }
+    fn discard_active(&mut self, active: ActiveFrame) {
+        destroy_scratch(&self.device, active.scratch);
+        for resource in active.resources {
+            self.destroy_retired(resource);
+        }
+        unsafe {
+            self.device
+                .destroy_descriptor_pool(active.descriptors, None);
+            self.device.destroy_command_pool(active.pool, None);
+        }
     }
     fn encode_draw(
         &mut self,
@@ -2346,18 +2549,17 @@ impl VulkanBackend {
             sprite: sprite_uniforms(c),
             effect: effect_uniforms(c),
         };
-        let ub = create_buffer(
-            &self.device,
-            &self.memory,
-            std::mem::size_of::<UniformBlock>(),
+        let uniform_bytes = value_bytes(&uniform);
+        let (uniform_buffer, uniform_offset, extra_uniform) = self.alloc_scratch(
+            uniform_bytes.len(),
+            self.uniform_align,
             vk::BufferUsageFlags::UNIFORM_BUFFER,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            uniform_bytes,
         )?;
-        write_buffer(&self.device, &ub, value_bytes(&uniform))?;
-        let (active_cmd, pool) = self
+        let pool = self
             .active
             .as_ref()
-            .map(|a| (a.command, a.descriptors))
+            .map(|a| a.descriptors)
             .ok_or("draw without active frame")?;
         let layouts = [self.descriptor_layout];
         let set = unsafe {
@@ -2369,8 +2571,9 @@ impl VulkanBackend {
         }
         .map_err(|e| format!("allocate draw descriptor: {e}"))?[0];
         let bi = [vk::DescriptorBufferInfo::default()
-            .buffer(ub.raw)
-            .range(ub.size)];
+            .buffer(uniform_buffer)
+            .offset(uniform_offset)
+            .range(std::mem::size_of::<UniformBlock>() as u64)];
         let src = [vk::DescriptorImageInfo::default()
             .image_view(source)
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
@@ -2421,34 +2624,16 @@ impl VulkanBackend {
                     uv: [x[2], x[3]],
                 })
                 .collect::<Vec<_>>();
-            let b = create_buffer(
-                &self.device,
-                &self.memory,
-                std::mem::size_of_val(v.as_slice()),
-                vk::BufferUsageFlags::VERTEX_BUFFER,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            )?;
-            write_buffer(&self.device, &b, bytes(&v))?;
-            Some((b, v.len() as u32))
+            let bytes = bytes(&v);
+            let (buffer, offset, extra) =
+                self.alloc_scratch(bytes.len(), 16, vk::BufferUsageFlags::VERTEX_BUFFER, bytes)?;
+            Some((buffer, offset, extra, v.len() as u32, bytes.len() as u64))
         } else {
             None
         };
-        let area = vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent: vk::Extent2D {
-                width: target.extent.width,
-                height: target.extent.height,
-            },
-        };
+        self.ensure_pass(target);
+        let active_cmd = self.active.as_ref().unwrap().command;
         unsafe {
-            self.device.cmd_begin_render_pass(
-                active_cmd,
-                &vk::RenderPassBeginInfo::default()
-                    .render_pass(target.pass)
-                    .framebuffer(target.framebuffer)
-                    .render_area(area),
-                vk::SubpassContents::INLINE,
-            );
             self.device
                 .cmd_bind_pipeline(active_cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
             self.device.cmd_set_viewport(
@@ -2472,9 +2657,9 @@ impl VulkanBackend {
                 &[set],
                 &[],
             );
-            if let Some((b, n)) = &mesh {
+            if let Some((buffer, offset, _, n, _)) = &mesh {
                 self.device
-                    .cmd_bind_vertex_buffers(active_cmd, 0, &[b.raw], &[0]);
+                    .cmd_bind_vertex_buffers(active_cmd, 0, &[*buffer], &[*offset]);
                 self.device.cmd_draw(active_cmd, *n, 1, 0, 0)
             } else {
                 self.device
@@ -2487,14 +2672,15 @@ impl VulkanBackend {
                 );
                 self.device.cmd_draw_indexed(active_cmd, 6, 1, 0, 0, 0)
             }
-            self.device.cmd_end_render_pass(active_cmd)
         };
-        let count = mesh.as_ref().map_or(6, |x| x.1 as u64);
-        let mb = mesh.as_ref().map_or(0, |x| x.0.size);
+        let count = mesh.as_ref().map_or(6, |x| x.3 as u64);
+        let mb = mesh.as_ref().map_or(0, |x| x.4);
         let a = self.active.as_mut().unwrap();
-        a.resources.push(Retired::Buffer(ub));
-        if let Some((b, _)) = mesh {
-            a.resources.push(Retired::Buffer(b))
+        if let Some(buffer) = extra_uniform {
+            a.resources.push(Retired::Buffer(buffer));
+        }
+        if let Some((_, _, Some(buffer), _, _)) = mesh {
+            a.resources.push(Retired::Buffer(buffer));
         }
         if self.profiling.get() {
             self.draws.set(self.draws.get() + 1);
@@ -2682,10 +2868,13 @@ impl VulkanBackend {
                     .clamp(caps.min_image_extent.height, caps.max_image_extent.height),
             }
         };
-        let mut count = caps.min_image_count + 1;
-        if caps.max_image_count > 0 {
-            count = count.min(caps.max_image_count)
+        let modes = unsafe {
+            self.surface_loader
+                .get_physical_device_surface_present_modes(self.physical, surface)
         }
+        .map_err(|e| format!("query surface present modes: {e}"))?;
+        let present_mode = choose_present_mode(&modes);
+        let count = preferred_swapchain_image_count(caps.min_image_count, caps.max_image_count);
         let alpha = [
             vk::CompositeAlphaFlagsKHR::OPAQUE,
             vk::CompositeAlphaFlagsKHR::INHERIT,
@@ -2706,7 +2895,7 @@ impl VulkanBackend {
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
             .pre_transform(caps.current_transform)
             .composite_alpha(alpha)
-            .present_mode(vk::PresentModeKHR::FIFO)
+            .present_mode(present_mode)
             .clipped(true);
         let raw = unsafe { self.swapchain_loader.create_swapchain(&info, None) }
             .map_err(|e| format!("create Vulkan swapchain: {e}"))?;
@@ -2977,16 +3166,12 @@ impl Drop for VulkanBackend {
         let _ = unsafe { self.device.device_wait_idle() };
         self.destroy_swapchain();
         if let Some(active) = self.active.take() {
-            for resource in active.resources {
-                self.destroy_retired(resource);
-            }
-            unsafe {
-                self.device
-                    .destroy_descriptor_pool(active.descriptors, None);
-                self.device.destroy_command_pool(active.pool, None);
-            }
+            self.discard_active(active);
         }
         while let Some(submission) = self.submissions.pop_front() {
+            if let Some(scratch) = submission.scratch {
+                destroy_scratch(&self.device, scratch);
+            }
             for resource in submission.resources {
                 self.destroy_retired(resource);
             }
@@ -2997,6 +3182,9 @@ impl Drop for VulkanBackend {
                 }
                 self.device.destroy_command_pool(submission.pool, None);
             }
+        }
+        for scratch in self.scratch_free.drain(..) {
+            destroy_scratch(&self.device, scratch);
         }
         while let Some(resource) = self.retired.pop_front() {
             self.destroy_retired(resource.resource);
@@ -3356,52 +3544,54 @@ fn destroy_image(device: &Device, i: Image) {
         device.free_memory(i.memory, None)
     }
 }
-fn clear_target(
+fn create_scratch_buffer(
     device: &Device,
-    cmd: vk::CommandBuffer,
-    t: TargetView,
-    color: [f32; 4],
-    rect: Option<[f32; 4]>,
-) {
-    let r = scissor(rect, t.extent, t.extent).unwrap_or(vk::Rect2D {
-        offset: vk::Offset2D { x: 0, y: 0 },
-        extent: vk::Extent2D {
-            width: t.extent.width,
-            height: t.extent.height,
-        },
-    });
-    let area = vk::Rect2D {
-        offset: vk::Offset2D { x: 0, y: 0 },
-        extent: vk::Extent2D {
-            width: t.extent.width,
-            height: t.extent.height,
-        },
+    memory: &vk::PhysicalDeviceMemoryProperties,
+    size: usize,
+) -> Result<ScratchBuffer, String> {
+    let buffer = create_buffer(
+        device,
+        memory,
+        size.max(1),
+        vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::VERTEX_BUFFER,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+    )?;
+    let mapped = match unsafe {
+        device.map_memory(buffer.memory, 0, buffer.size, vk::MemoryMapFlags::empty())
+    } {
+        Ok(pointer) => pointer.cast(),
+        Err(error) => {
+            destroy_buffer(device, buffer);
+            return Err(format!("map Vulkan scratch: {error}"));
+        }
     };
-    unsafe {
-        device.cmd_begin_render_pass(
-            cmd,
-            &vk::RenderPassBeginInfo::default()
-                .render_pass(t.pass)
-                .framebuffer(t.framebuffer)
-                .render_area(area),
-            vk::SubpassContents::INLINE,
-        );
-        device.cmd_clear_attachments(
-            cmd,
-            &[vk::ClearAttachment {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                color_attachment: 0,
-                clear_value: vk::ClearValue {
-                    color: vk::ClearColorValue { float32: color },
-                },
-            }],
-            &[vk::ClearRect {
-                rect: r,
-                base_array_layer: 0,
-                layer_count: 1,
-            }],
-        );
-        device.cmd_end_render_pass(cmd)
+    Ok(ScratchBuffer {
+        buffer,
+        mapped,
+        cursor: 0,
+    })
+}
+fn destroy_scratch(device: &Device, scratch: ScratchBuffer) {
+    unsafe { device.unmap_memory(scratch.buffer.memory) };
+    destroy_buffer(device, scratch.buffer);
+}
+fn choose_present_mode(modes: &[vk::PresentModeKHR]) -> vk::PresentModeKHR {
+    const PREFERRED: [vk::PresentModeKHR; 3] = [
+        vk::PresentModeKHR::MAILBOX,
+        vk::PresentModeKHR::IMMEDIATE,
+        vk::PresentModeKHR::FIFO_RELAXED,
+    ];
+    PREFERRED
+        .into_iter()
+        .find(|mode| modes.contains(mode))
+        .unwrap_or(vk::PresentModeKHR::FIFO)
+}
+fn preferred_swapchain_image_count(min_image_count: u32, max_image_count: u32) -> u32 {
+    let count = min_image_count.max(3);
+    if max_image_count > 0 {
+        count.min(max_image_count)
+    } else {
+        count
     }
 }
 
@@ -3492,5 +3682,33 @@ mod tests {
         let bottom_right = transform * glam::Vec4::new(100.0, 50.0, 0.0, 1.0);
         assert!((top_left.x + 1.0).abs() < 1e-5 && (top_left.y - 1.0).abs() < 1e-5);
         assert!((bottom_right.x - 1.0).abs() < 1e-5 && (bottom_right.y + 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn present_mode_prefers_non_blocking_modes() {
+        assert_eq!(
+            choose_present_mode(&[vk::PresentModeKHR::FIFO, vk::PresentModeKHR::MAILBOX]),
+            vk::PresentModeKHR::MAILBOX
+        );
+        assert_eq!(
+            choose_present_mode(&[vk::PresentModeKHR::FIFO, vk::PresentModeKHR::IMMEDIATE]),
+            vk::PresentModeKHR::IMMEDIATE
+        );
+        assert_eq!(
+            choose_present_mode(&[vk::PresentModeKHR::FIFO, vk::PresentModeKHR::FIFO_RELAXED]),
+            vk::PresentModeKHR::FIFO_RELAXED
+        );
+        assert_eq!(
+            choose_present_mode(&[vk::PresentModeKHR::FIFO]),
+            vk::PresentModeKHR::FIFO
+        );
+    }
+
+    #[test]
+    fn swapchain_image_count_prefers_triple_buffering() {
+        assert_eq!(preferred_swapchain_image_count(1, 0), 3);
+        assert_eq!(preferred_swapchain_image_count(2, 8), 3);
+        assert_eq!(preferred_swapchain_image_count(3, 3), 3);
+        assert_eq!(preferred_swapchain_image_count(2, 2), 2);
     }
 }
