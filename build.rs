@@ -41,6 +41,16 @@ fn compile_vulkan_shaders() {
         .validate(&module)
         .expect("validate Vulkan WGSL shaders");
     let output = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
+    // Keep naga's Y-up clip-space rewrite. VulkanBackend's CPU projection
+    // is authored for WGSL/Metal (stage y=0 -> clip y=+1); this flag then
+    // flips Position.y for SPIR-V. Turning it off would invert sprites.
+    let options = spv::Options::default();
+    assert!(
+        options
+            .flags
+            .contains(spv::WriterFlags::ADJUST_COORDINATE_SPACE),
+        "Vulkan vertex uniforms assume naga ADJUST_COORDINATE_SPACE",
+    );
     for (entry_point, stage, file) in [
         (
             "sprite_vertex",
@@ -71,7 +81,7 @@ fn compile_vulkan_shaders() {
         let words = spv::write_vec(
             &module,
             &info,
-            &spv::Options::default(),
+            &options,
             Some(&spv::PipelineOptions {
                 shader_stage: stage,
                 entry_point: entry_point.into(),

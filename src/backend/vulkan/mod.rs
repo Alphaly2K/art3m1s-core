@@ -3152,11 +3152,15 @@ fn vertex_uniforms(c: &DrawCommand, stage: Extent2D) -> VertexUniforms {
         glam::Vec4::new(0., 0., 1., 0.),
         glam::Vec4::new(t.x, t.y, 0., 1.),
     );
+    // WGSL clip space is Y-up, matching Metal. naga's SPIR-V writer keeps
+    // ADJUST_COORDINATE_SPACE by default and flips Position.y for Vulkan.
+    // Using a Vulkan-native Y-down projection here double-flips rasterized
+    // sprites, while render-to-texture groups get flipped twice and look upright.
     let proj = glam::Mat4::from_cols(
         glam::Vec4::new(2. / stage.width as f32, 0., 0., 0.),
-        glam::Vec4::new(0., 2. / stage.height as f32, 0., 0.),
+        glam::Vec4::new(0., -2. / stage.height as f32, 0., 0.),
         glam::Vec4::new(0., 0., 1., 0.),
-        glam::Vec4::new(-1., -1., 0., 1.),
+        glam::Vec4::new(-1., 1., 0., 1.),
     );
     VertexUniforms {
         transform: (proj * model).to_cols_array(),
@@ -3475,5 +3479,18 @@ mod tests {
         assert_eq!(std::mem::size_of::<SpriteUniforms>(), 160);
         assert_eq!(std::mem::size_of::<EffectUniforms>(), 48);
         assert_eq!(std::mem::size_of::<UniformBlock>(), 304);
+    }
+
+    #[test]
+    fn vertex_projection_matches_wgsl_y_up_clip_space() {
+        let uniforms = vertex_uniforms(
+            &solid_command(Extent2D::new(100, 50), [1.0, 1.0, 1.0], 1.0, None),
+            Extent2D::new(100, 50),
+        );
+        let transform = glam::Mat4::from_cols_array(&uniforms.transform);
+        let top_left = transform * glam::Vec4::new(0.0, 0.0, 0.0, 1.0);
+        let bottom_right = transform * glam::Vec4::new(100.0, 50.0, 0.0, 1.0);
+        assert!((top_left.x + 1.0).abs() < 1e-5 && (top_left.y - 1.0).abs() < 1e-5);
+        assert!((bottom_right.x - 1.0).abs() < 1e-5 && (bottom_right.y + 1.0).abs() < 1e-5);
     }
 }
