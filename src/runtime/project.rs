@@ -2,6 +2,7 @@ use super::CoreRuntime;
 use super::callbacks::FfiCallbacks;
 use super::magic_path;
 use crate::Project;
+use crate::backend::{TextureData, TextureDesc, TextureUsage};
 use crate::runtime::save_io;
 use crate::text::GlyphTextRenderer;
 use asb_interpreter::{CallbackResult, Event};
@@ -254,12 +255,16 @@ impl CoreRuntime {
     }
 
     fn register_builtin_textures(&mut self) {
+        let mut desc = TextureDesc::sampled_rgba8(2, 2);
+        desc.usage |= TextureUsage::CPU_READABLE;
+        let black = [0, 0, 0, 255].repeat(4);
+        let white = [255, 255, 255, 255].repeat(4);
         let _ = self
             .gpu
-            .upload_rgba(":bg/black", 2, 2, &[0, 0, 0, 255].repeat(4));
+            .create_texture(":bg/black", desc, TextureData::Rgba8(&black));
         let _ = self
             .gpu
-            .upload_rgba(":bg/white", 2, 2, &[255, 255, 255, 255].repeat(4));
+            .create_texture(":bg/white", desc, TextureData::Rgba8(&white));
     }
 
     fn seed_savepath_and_sysload(&mut self) {

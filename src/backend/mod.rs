@@ -9,6 +9,13 @@ use std::collections::HashSet;
 
 #[cfg(feature = "gl-backend")]
 pub mod gl;
+pub mod types;
+
+pub use types::{
+    Extent2D, FrameTarget, NativeSurface, NativeSurfaceKind, PipelineId, RenderTarget,
+    RenderTargetDesc, RenderTargetId, ShaderId, TextureData, TextureDesc, TextureFormat,
+    TextureUpdate, TextureUsage,
+};
 
 /// Resource name to encoded image bytes.
 pub type AssetSource = dyn Fn(&str) -> Option<Vec<u8>>;
@@ -70,79 +77,63 @@ pub struct GpuProfileStats {
     pub texture_cpu_bytes: u64,
 }
 
-/// Host-owned destination used for zero-copy presentation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputSurfaceKind {
-    AndroidNativeWindow,
-    AppleIoSurface,
-    AppleMetalTexture,
-}
-
-impl OutputSurfaceKind {
-    pub fn from_legacy_int(value: i32) -> Result<Self, String> {
-        match value {
-            1 => Ok(Self::AndroidNativeWindow),
-            2 => Ok(Self::AppleIoSurface),
-            3 => Ok(Self::AppleMetalTexture),
-            _ => Err(format!("unsupported external surface kind: {value}")),
-        }
-    }
-
-    #[cfg(feature = "gl-backend")]
-    pub(crate) fn legacy_int(self) -> i32 {
-        match self {
-            Self::AndroidNativeWindow => 1,
-            Self::AppleIoSurface => 2,
-            Self::AppleMetalTexture => 3,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct OutputSurface {
-    pub kind: OutputSurfaceKind,
-    pub handle: *mut std::ffi::c_void,
-    pub width: u32,
-    pub height: u32,
-}
-
-impl OutputSurface {
-    pub fn from_legacy_parts(
-        kind: i32,
-        handle: *mut std::ffi::c_void,
-        width: u32,
-        height: u32,
-    ) -> Result<Self, String> {
-        if handle.is_null() || width == 0 || height == 0 {
-            return Err("invalid external surface".into());
-        }
-        Ok(Self {
-            kind: OutputSurfaceKind::from_legacy_int(kind)?,
-            handle,
-            width,
-            height,
-        })
-    }
-}
-
 /// Complete GPU ownership boundary used by [`crate::runtime::CoreRuntime`].
 ///
 /// The trait deliberately covers only responsibilities that currently cross
 /// the runtime/backend boundary. It keeps [`TextureId`] and [`DrawList`]
 /// stable while allowing a future Metal or Vulkan implementation to own its
 /// native device, render targets and presentation objects.
+/// [`TextureProvider`] is only the draw-list construction view of this same
+/// owner, so texture resolution and submission share one synchronization domain.
 pub trait GpuBackend: TextureProvider {
     /// Save the host graphics state and make this backend ready for work.
     /// Calls may nest; every call must be paired with [`Self::end_access`].
     fn begin_access(&mut self);
     fn end_access(&mut self);
 
-    fn resize(&mut self, width: u32, height: u32) -> Result<(), String>;
-    fn begin_frame(&mut self);
+    /// Creates a named texture resource. Names are for cache/debug identity and
+    /// are not backend handles.
+    fn create_texture(
+        &mut self,
+        name: &str,
+        desc: TextureDesc,
+        data: TextureData<'_>,
+    ) -> Result<TextureId, String>;
+    fn update_texture(
+        &mut self,
+        texture: TextureId,
+        update: TextureUpdate<'_>,
+    ) -> Result<(), String>;
+    /// Releases logical ownership. Implementations may defer physical deletion
+    /// until every in-flight frame that references the texture has completed.
+    fn destroy_texture(&mut self, texture: TextureId);
+
+    fn create_render_target(
+        &mut self,
+        name: &str,
+        desc: RenderTargetDesc,
+    ) -> Result<RenderTarget, String>;
+    /// Like [`Self::destroy_texture`], this may enqueue deferred retirement.
+    fn destroy_render_target(&mut self, target: RenderTargetId);
+
+    fn resize(&mut self, extent: Extent2D) -> Result<(), String>;
+    fn begin_frame(&mut self, target: FrameTarget) -> Result<(), String>;
+    /// Clears the currently selected frame target.
+    fn clear(&mut self, color: [f32; 4]);
     fn end_frame(&mut self);
-    fn capture_frame(&mut self, name: &str, width: u32, height: u32) -> FrameCapture;
-    fn read_frame_into(&mut self, width: u32, height: u32, out: &mut [u8]) -> usize;
-    fn read_frame(&mut self, width: u32, height: u32) -> Vec<u8>;
+    fn capture_frame(&mut self, name: &str, extent: Extent2D) -> FrameCapture;
+    fn readback(
+        &mut self,
+        target: FrameTarget,
+        extent: Extent2D,
+        out: &mut [u8],
+    ) -> Result<usize, String>;
+    fn readback_owned(&mut self, target: FrameTarget, extent: Extent2D) -> Result<Vec<u8>, String> {
+        let mut pixels = vec![0; extent.rgba8_len().ok_or("readback size overflow")?];
+        let written = self.readback(target, extent, &mut pixels)?;
+        pixels.truncate(written);
+        Ok(pixels)
+    }
 
     fn render(&mut self, frame: &DrawList) -> RenderRegion;
     fn render_damage(&mut self, frame: &DrawList, damage: [f32; 4]) -> RenderRegion;
@@ -157,11 +148,14 @@ pub trait GpuBackend: TextureProvider {
     fn evict_texture_prefix(&mut self, prefix: &str) -> usize;
     fn upload_video_rgba(&mut self, name: &str, width: u32, height: u32, rgba: &[u8]) -> bool;
 
-    fn set_output_surface(&mut self, surface: OutputSurface) -> Result<(), String>;
-    fn clear_output_surface(&mut self);
+    fn set_native_surface(&mut self, surface: NativeSurface) -> Result<(), String>;
+    fn clear_native_surface(&mut self);
     fn present(&mut self, damage: Option<[f32; 4]>) -> Result<(), String>;
 
-    fn register_hlsl_shader(&mut self, name: &str, source: &[u8]) -> Result<(), String>;
+    fn register_hlsl_shader(&mut self, name: &str, source: &[u8]) -> Result<ShaderId, String>;
+    /// Gives the backend an explicit opportunity to retire resources whose GPU
+    /// submissions have completed. GL may no-op; Vulkan/Metal can poll fences.
+    fn collect_retired_resources(&mut self) {}
     fn set_profile_enabled(&self, enabled: bool);
     fn take_profile_stats(&self) -> GpuProfileStats;
 

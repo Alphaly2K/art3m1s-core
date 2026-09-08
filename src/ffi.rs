@@ -1232,8 +1232,8 @@ pub unsafe extern "C" fn art3m1s_runtime_set_external_surface(
     }
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let surface =
-            crate::backend::OutputSurface::from_legacy_parts(kind, handle, width, height)?;
-        unsafe { &mut *rt }.set_output_surface(surface)
+            crate::backend::NativeSurface::from_legacy_parts(kind, handle, width, height)?;
+        unsafe { &mut *rt }.set_native_surface(surface)
     }));
     match result {
         Ok(Ok(())) => 1,
@@ -1258,7 +1258,7 @@ pub unsafe extern "C" fn art3m1s_runtime_clear_external_surface(rt: *mut CoreRun
         return;
     }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        unsafe { &mut *rt }.clear_output_surface();
+        unsafe { &mut *rt }.clear_native_surface();
     }));
 }
 

@@ -1,5 +1,5 @@
 use super::CoreRuntime;
-use crate::backend::{FrameCapture, RenderRegion};
+use crate::backend::{Extent2D, FrameCapture, FrameTarget, RenderRegion};
 use crate::render_pipeline::RenderPipeline;
 use crate::render_pipeline::draw::DrawList;
 use asb_interpreter::event::WaitReason;
@@ -8,7 +8,7 @@ impl CoreRuntime {
     /// Recreate the backend-owned render target and viewport/projection state.
     /// 当舞台尺寸改变时调用（例如加载不同分辨率的项目）。
     pub(super) fn resize_stage(&mut self, new_width: u32, new_height: u32) -> Result<(), String> {
-        self.gpu.resize(new_width, new_height)?;
+        self.gpu.resize(Extent2D::new(new_width, new_height))?;
         self.stage_w = new_width;
         self.stage_h = new_height;
         self.last_rendered_scene = None;
@@ -23,16 +23,19 @@ impl CoreRuntime {
         &mut self,
         profile: &mut crate::profiler::FrameProfile,
     ) -> Option<RenderRegion> {
-        self.gpu.begin_frame();
+        if let Err(error) = self.gpu.begin_frame(FrameTarget::Main) {
+            crate::core_warn!("[runtime] begin GPU frame failed: {error}");
+            return None;
+        }
 
         // 转场捕获：在渲染新帧前，若合成器需要捕捉旧画面，则从当前 FBO 读取
         let pipeline = RenderPipeline::new(&self.compositor);
         if pipeline.needs_trans_capture() {
             let capture_started = profile.mark();
-            match self
-                .gpu
-                .capture_frame("__trans_capture__", self.stage_w, self.stage_h)
-            {
+            match self.gpu.capture_frame(
+                "__trans_capture__",
+                Extent2D::new(self.stage_w, self.stage_h),
+            ) {
                 FrameCapture::Texture(texture, info) => {
                     pipeline.capture_trans_gpu_texture(texture, info);
                 }
@@ -153,8 +156,17 @@ impl CoreRuntime {
     }
 
     pub(super) fn read_current_frame_into(&mut self, out_pixels: &mut [u8]) -> usize {
-        self.gpu
-            .read_frame_into(self.stage_w, self.stage_h, out_pixels)
+        match self.gpu.readback(
+            FrameTarget::Main,
+            Extent2D::new(self.stage_w, self.stage_h),
+            out_pixels,
+        ) {
+            Ok(written) => written,
+            Err(error) => {
+                crate::core_warn!("[runtime] GPU readback failed: {error}");
+                0
+            }
+        }
     }
 
     /// 用上一帧场景重建转场源画面。
@@ -166,7 +178,10 @@ impl CoreRuntime {
             // 首帧尚无场景快照时保留 FBO 原内容，沿用原有捕获行为。
             return;
         };
-        self.gpu.begin_frame();
+        if let Err(error) = self.gpu.begin_frame(FrameTarget::Main) {
+            crate::core_warn!("[runtime] transition source begin-frame failed: {error}");
+            return;
+        }
         let (frame, text_layers, text_commands) =
             self.build_bound_scene(false, Some((&scene, self.last_rendered_clock_ms)));
         self.gpu.render(&frame);

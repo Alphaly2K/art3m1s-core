@@ -1,4 +1,4 @@
-//! Translator for the small Direct3D9 HLSL effect subset used by Artemis.
+//! GL-backend translator for the small Direct3D9 HLSL effect subset used by Artemis.
 //!
 //! Artemis shader files contain a fixed pass/vertex wrapper and a compact
 //! `ps()` pixel function. The renderer supplies its own vertex stage and turns

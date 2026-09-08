@@ -26,8 +26,8 @@ pub mod reduce;
 pub mod scene;
 
 pub use crate::render_pipeline::draw::{
-    BlendMode, ColorFilter, DrawCommand, DrawList, DrawMesh, Renderer, ShaderEffect, ShaderGroup,
-    TextureId, TextureInfo, TextureProvider,
+    BlendMode, ColorFilter, DrawCommand, DrawList, DrawMesh, ShaderEffect, ShaderGroup, TextureId,
+    TextureInfo, TextureProvider,
 };
 pub use anim::{Easing, Tween, TweenHandler};
 pub use events::{CompositorEvent, IntoCompositorEvent};

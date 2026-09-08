@@ -868,7 +868,7 @@ mod tests {
     #[ignore = "requires EMOTE_TEST_MODEL pointing at a NekoMiko PSB"]
     fn model_blink_reaches_eyelids_and_renders_distinct_frames() {
         use crate::backend::gl::{GlRenderer, GlTextureProvider, ShaderProfile, platform};
-        use crate::render_pipeline::draw::{DrawList, Renderer};
+        use crate::render_pipeline::draw::DrawList;
         use glow::HasContext;
 
         let path = std::env::var("EMOTE_TEST_MODEL").unwrap();

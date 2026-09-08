@@ -537,7 +537,7 @@ impl CoreRuntime {
             }
         };
         match self.gpu.register_hlsl_shader(id, &source) {
-            Ok(()) => {
+            Ok(_) => {
                 crate::core_info!("[shader] 已加载 id={} file={}", id, file);
             }
             Err(error) => {

@@ -21,8 +21,7 @@
 
 use crate::backend::RenderRegion;
 use crate::render_pipeline::draw::{
-    BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, Renderer, ShaderGroup, TextureId,
-    TextureInfo,
+    BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, ShaderGroup, TextureId, TextureInfo,
 };
 use glow::HasContext;
 use std::cell::Cell;
@@ -31,13 +30,15 @@ use std::num::NonZeroU32;
 use std::rc::Rc;
 
 mod backend;
+mod hlsl;
 pub mod platform;
 mod provider;
 mod shader;
+mod shader_source;
 
-pub use crate::render_pipeline::ShaderProfile;
 pub use backend::GlBackend;
 pub use provider::{GlTextureProvider, PlaceholderKind};
+pub use shader::ShaderProfile;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct RenderProfile {
@@ -1109,8 +1110,8 @@ impl GlRenderer {
     }
 }
 
-impl Renderer for GlRenderer {
-    fn render(&mut self, frame: &DrawList) {
+impl GlRenderer {
+    pub(crate) fn render(&mut self, frame: &DrawList) {
         let _ = self.render_internal(frame, None, false);
     }
 }

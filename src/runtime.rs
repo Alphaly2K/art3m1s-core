@@ -3,7 +3,7 @@
 //! that the Flutter frontend calls from its game loop.
 
 use crate::audio::AudioBackend;
-use crate::backend::{BackendSelection, GpuBackend, OutputSurface};
+use crate::backend::{BackendSelection, GpuBackend, NativeSurface};
 use crate::compositor::Compositor;
 use crate::text::TextRenderer;
 use crate::video::VideoBackend;
@@ -286,6 +286,7 @@ impl CoreRuntime {
         self.clear_input_edges();
 
         // Restore the host graphics state after backend work.
+        self.gpu.collect_retired_resources();
         self.gpu.end_access();
         self.finish_profile_frame(&mut profile);
 
@@ -293,9 +294,9 @@ impl CoreRuntime {
     }
 
     /// Configures a host-owned output surface as the presentation target.
-    pub fn set_output_surface(&mut self, surface: OutputSurface) -> Result<(), String> {
+    pub fn set_native_surface(&mut self, surface: NativeSurface) -> Result<(), String> {
         self.gpu.begin_access();
-        let result = self.gpu.set_output_surface(surface);
+        let result = self.gpu.set_native_surface(surface);
         if result.is_ok() {
             // A newly attached or recreated host surface has no previous frame.
             self.last_submitted_frame = None;
@@ -304,9 +305,9 @@ impl CoreRuntime {
         result
     }
 
-    pub fn clear_output_surface(&mut self) {
+    pub fn clear_native_surface(&mut self) {
         self.gpu.begin_access();
-        self.gpu.clear_output_surface();
+        self.gpu.clear_native_surface();
         self.gpu.end_access();
     }
 
@@ -331,6 +332,7 @@ impl CoreRuntime {
             self.frame_visual_dirty = false;
         }
         self.clear_input_edges();
+        self.gpu.collect_retired_resources();
         self.gpu.end_access();
         self.finish_profile_frame(&mut profile);
         result
@@ -345,6 +347,7 @@ impl CoreRuntime {
         self.gpu.begin_access();
         self.advance_logic(delta_ms, &mut profile);
         self.clear_input_edges();
+        self.gpu.collect_retired_resources();
         self.gpu.end_access();
         self.finish_profile_frame(&mut profile);
     }
@@ -595,7 +598,7 @@ mod tests {
     #[cfg(all(target_os = "macos", feature = "gl-backend"))]
     use super::CoreRuntime;
     #[cfg(all(target_os = "macos", feature = "gl-backend"))]
-    use crate::backend::BackendSelection;
+    use crate::backend::{BackendSelection, FrameTarget};
     #[cfg(all(target_os = "macos", feature = "gl-backend"))]
     use asb_interpreter::event::{Event, LayerEvent};
     #[cfg(all(target_os = "macos", feature = "gl-backend"))]
@@ -795,7 +798,7 @@ mod tests {
             initial.len()
         );
         let frame = runtime.last_submitted_frame.clone().unwrap();
-        runtime.gpu.begin_frame();
+        runtime.gpu.begin_frame(FrameTarget::Main).unwrap();
         runtime.gpu.render(&frame);
         runtime
             .gpu
@@ -803,12 +806,12 @@ mod tests {
         let mut flashed = vec![0; runtime.pixel_buffer_size()];
         runtime.read_current_frame_into(&mut flashed);
 
-        runtime.gpu.begin_frame();
+        runtime.gpu.begin_frame(FrameTarget::Main).unwrap();
         assert!(runtime.gpu.clear_damage_overlay(&frame).is_some());
         let mut cleaned = vec![0; runtime.pixel_buffer_size()];
         runtime.read_current_frame_into(&mut cleaned);
 
-        runtime.gpu.begin_frame();
+        runtime.gpu.begin_frame(FrameTarget::Main).unwrap();
         runtime.gpu.render(&frame);
         let mut full = vec![0; runtime.pixel_buffer_size()];
         runtime.read_current_frame_into(&mut full);
