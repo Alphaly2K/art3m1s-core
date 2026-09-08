@@ -418,6 +418,10 @@ impl CoreRuntime {
                 end
                 scr = restore_table("scr", scr)
                 log = restore_table("log", log)
+                -- The first numbered slot can be loaded before the save UI
+                -- rebuilds its button state.  save.lua/getBtnID expects the
+                -- shared button table to exist even when no button is active.
+                if type(btn) ~= "table" then btn = {} end
                 if type(sys) ~= "table" then sys = {} end
                 if type(gscr) ~= "table" then gscr = {} end
                 if type(conf) ~= "table" then conf = {} end
