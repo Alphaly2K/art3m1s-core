@@ -166,6 +166,9 @@ pub enum NativeSurfaceKind {
     AndroidNativeWindow,
     AppleIoSurface,
     AppleMetalTexture,
+    /// Host-owned CAMetalLayer. MetalBackend retains the layer and obtains a
+    /// fresh drawable for each presentation.
+    AppleMetalLayer,
 }
 
 impl NativeSurfaceKind {
@@ -174,6 +177,7 @@ impl NativeSurfaceKind {
             1 => Ok(Self::AndroidNativeWindow),
             2 => Ok(Self::AppleIoSurface),
             3 => Ok(Self::AppleMetalTexture),
+            4 => Ok(Self::AppleMetalLayer),
             _ => Err(format!("unsupported native surface kind: {value}")),
         }
     }
@@ -184,6 +188,7 @@ impl NativeSurfaceKind {
             Self::AndroidNativeWindow => 1,
             Self::AppleIoSurface => 2,
             Self::AppleMetalTexture => 3,
+            Self::AppleMetalLayer => 4,
         }
     }
 }

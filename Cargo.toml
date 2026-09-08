@@ -30,17 +30,52 @@ encoding_rs = "0.8"
 glam = "0.30"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-# GL 渲染后端：实现合成器的 Renderer / TextureProvider trait。
-# 关闭 gl-backend feature 时核心合成器保持零 GPU 依赖。
+# GL reference backend. Native Apple builds select Metal by default, but keep
+# this feature available for explicit A/B comparison.
 glow = { version = "0.16", optional = true }
 libloading = { version = "0.8.9", optional = true }
-# 素材解码（PNG 等）。只随 gl-backend 启用，且只开 png 解码以保持精简。
+# GPU texture asset decoding (PNG only).
 image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
 # 字体光栅化（字形渲染子系统）
 ab_glyph = "0.2"
 
 [target.'cfg(target_os = "ios")'.dependencies]
 asb-interpreter = { path = "crates/asb-interpreter", default-features = false, features = ["backend-luau"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+objc2 = { version = "0.6.4", optional = true }
+objc2-core-foundation = { version = "0.3.2", optional = true, default-features = false, features = ["CFCGTypes"] }
+objc2-foundation = { version = "0.3.2", optional = true, default-features = false, features = ["NSString"] }
+objc2-io-surface = { version = "0.3.2", optional = true, default-features = false, features = ["IOSurfaceRef", "objc2"] }
+objc2-metal = { version = "0.3.2", optional = true, default-features = false, features = [
+    "std",
+    "MTLAllocation",
+    "MTLArgument",
+    "MTLBlitCommandEncoder",
+    "MTLBuffer",
+    "MTLCommandBuffer",
+    "MTLCommandEncoder",
+    "MTLCommandQueue",
+    "MTLDepthStencil",
+    "MTLDevice",
+    "MTLDrawable",
+    "MTLLibrary",
+    "MTLPixelFormat",
+    "MTLRenderCommandEncoder",
+    "MTLRenderPass",
+    "MTLRenderPipeline",
+    "MTLResource",
+    "MTLSampler",
+    "MTLTexture",
+    "MTLTypes",
+    "objc2-io-surface",
+] }
+objc2-quartz-core = { version = "0.3.2", optional = true, default-features = false, features = [
+    "CALayer",
+    "CAMetalLayer",
+    "objc2-core-foundation",
+    "objc2-metal",
+] }
 
 [target.'cfg(any(target_os = "android", target_os = "ios", all(target_os = "macos", target_arch = "aarch64")))'.dependencies]
 ctt-astcenc = "0.5"
@@ -49,8 +84,17 @@ ctt-astcenc = "0.5"
 asb-interpreter = { path = "crates/asb-interpreter", default-features = false, features = ["backend-lua51"] }
 
 [features]
-default = ["gl-backend", "experimental-eluna"]
+default = ["gl-backend", "metal-backend", "experimental-eluna"]
 gl-backend = ["dep:glow", "dep:image", "dep:libloading"]
+metal-backend = [
+    "dep:image",
+    "dep:objc2",
+    "dep:objc2-core-foundation",
+    "dep:objc2-foundation",
+    "dep:objc2-io-surface",
+    "dep:objc2-metal",
+    "dep:objc2-quartz-core",
+]
 experimental-eluna = ["dep:eluna"]
 game-probes = ["gl-backend"]
 

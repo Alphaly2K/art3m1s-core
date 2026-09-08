@@ -18,6 +18,14 @@ pub struct TextureInfo {
     pub height: u32,
 }
 
+/// Texel origin used when a backend-owned capture is sampled as a DrawList
+/// texture. This avoids baking GL row orientation into the render pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextureOrigin {
+    TopLeft,
+    BottomLeft,
+}
+
 /// Draw-list construction view of the active GPU backend.
 ///
 /// Production code implements this on the same object as `GpuBackend`; it is
@@ -136,7 +144,7 @@ pub fn masked_texture_name(file: &str, mask: &str) -> String {
     format!("{file}\u{1f}mask\u{1f}{mask}")
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum BlendMode {
     #[default]
     Alpha,

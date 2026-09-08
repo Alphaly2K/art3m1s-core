@@ -803,16 +803,19 @@ mod tests {
         runtime
             .gpu
             .render_damage_visualized(&frame, [4.0, 4.0, 12.0, 12.0]);
+        runtime.gpu.end_frame();
         let mut flashed = vec![0; runtime.pixel_buffer_size()];
         runtime.read_current_frame_into(&mut flashed);
 
         runtime.gpu.begin_frame(FrameTarget::Main).unwrap();
         assert!(runtime.gpu.clear_damage_overlay(&frame).is_some());
+        runtime.gpu.end_frame();
         let mut cleaned = vec![0; runtime.pixel_buffer_size()];
         runtime.read_current_frame_into(&mut cleaned);
 
         runtime.gpu.begin_frame(FrameTarget::Main).unwrap();
         runtime.gpu.render(&frame);
+        runtime.gpu.end_frame();
         let mut full = vec![0; runtime.pixel_buffer_size()];
         runtime.read_current_frame_into(&mut full);
 

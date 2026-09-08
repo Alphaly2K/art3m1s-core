@@ -3,7 +3,7 @@ use super::{GlRenderer, GlTextureProvider, ShaderProfile};
 use crate::backend::{
     AssetSource, Extent2D, FrameCapture, FrameTarget, GpuBackend, GpuProfileStats, NativeSurface,
     NativeSurfaceKind, RenderRegion, RenderTarget, RenderTargetDesc, RenderTargetId, ShaderId,
-    TextureData, TextureDesc, TextureFormat, TextureUpdate, TextureUsage,
+    TextureData, TextureDesc, TextureFormat, TextureOrigin, TextureUpdate, TextureUsage,
 };
 use crate::render_pipeline::draw::{DrawList, TextureId, TextureInfo, TextureProvider};
 use glow::HasContext;
@@ -351,7 +351,7 @@ impl GpuBackend for GlBackend {
     fn capture_frame(&mut self, name: &str, extent: Extent2D) -> FrameCapture {
         self.textures
             .copy_bound_framebuffer_render_only(name, extent.width, extent.height)
-            .map(|(texture, info)| FrameCapture::Texture(texture, info))
+            .map(|(texture, info)| FrameCapture::Texture(texture, info, TextureOrigin::BottomLeft))
             .unwrap_or_else(|| {
                 FrameCapture::Pixels(unsafe {
                     platform::read_pixels(&self.gl, extent.width as i32, extent.height as i32)

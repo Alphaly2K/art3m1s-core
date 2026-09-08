@@ -1,6 +1,6 @@
 use crate::render_pipeline::draw::{
     BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, ShaderEffect, TextureId, TextureInfo,
-    TextureProvider,
+    TextureOrigin, TextureProvider,
 };
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -148,6 +148,7 @@ pub(crate) fn capture_gpu_texture(
     clock_ms: u64,
     texture: TextureId,
     info: TextureInfo,
+    origin: TextureOrigin,
 ) {
     let mut state = slot.borrow_mut();
     let Some(transition) = state.as_mut() else {
@@ -158,7 +159,7 @@ pub(crate) fn capture_gpu_texture(
     }
     transition.captured_texture = Some(texture);
     transition.captured_info = Some(info);
-    transition.captured_flipped_y = true;
+    transition.captured_flipped_y = origin == TextureOrigin::BottomLeft;
     transition.needs_capture = false;
     transition.start_ms = clock_ms;
 }
@@ -368,12 +369,45 @@ mod tests {
                 width: 1600,
                 height: 900,
             },
+            TextureOrigin::BottomLeft,
         );
 
         let mut frame = DrawList::new();
         overlay_old_frame(&slot, 0, &mut frame, &mut provider);
         assert_eq!(frame.commands[0].clip.uv_offset, [0.0, 1.0]);
         assert_eq!(frame.commands[0].clip.uv_scale, [1.0, -1.0]);
+    }
+
+    #[test]
+    fn top_left_gpu_capture_keeps_texture_rows() {
+        let slot = RefCell::new(None);
+        let mut provider = MockProvider::new();
+        start(
+            &slot,
+            0,
+            TransitionRequest {
+                trans_type: 1,
+                time: Some(1000),
+                rule: None,
+                vague: None,
+                input: 1,
+            },
+        );
+        capture_gpu_texture(
+            &slot,
+            0,
+            TextureId(8),
+            TextureInfo {
+                width: 1600,
+                height: 900,
+            },
+            TextureOrigin::TopLeft,
+        );
+
+        let mut frame = DrawList::new();
+        overlay_old_frame(&slot, 0, &mut frame, &mut provider);
+        assert_eq!(frame.commands[0].clip.uv_offset, [0.0, 0.0]);
+        assert_eq!(frame.commands[0].clip.uv_scale, [1.0, 1.0]);
     }
 
     #[test]

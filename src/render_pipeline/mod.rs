@@ -15,7 +15,8 @@ pub mod transition;
 
 pub use draw::{
     BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, DrawMesh, LayerDrawSource,
-    ShaderEffect, ShaderGroup, StencilMetadata, TextureId, TextureInfo, TextureProvider,
+    ShaderEffect, ShaderGroup, StencilMetadata, TextureId, TextureInfo, TextureOrigin,
+    TextureProvider,
 };
 pub use shader::{ALPHA_MASK_SHADER, GROUP_COMPOSITE_SHADER, RULE_TRANS_SHADER, SPRITE_SHADER};
 
@@ -102,12 +103,18 @@ impl<'a> RenderPipeline<'a> {
         );
     }
 
-    pub fn capture_trans_gpu_texture(&self, texture: TextureId, info: TextureInfo) {
+    pub fn capture_trans_gpu_texture(
+        &self,
+        texture: TextureId,
+        info: TextureInfo,
+        origin: TextureOrigin,
+    ) {
         transition::capture_gpu_texture(
             &self.compositor.trans_state,
             self.compositor.clock_ms,
             texture,
             info,
+            origin,
         );
     }
 

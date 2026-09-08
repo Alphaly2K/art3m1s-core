@@ -4,11 +4,14 @@
 //! state (contexts, command encoders, framebuffers, swapchains and native
 //! texture handles) belongs to an implementation below this module.
 
+pub use crate::render_pipeline::draw::TextureOrigin;
 use crate::render_pipeline::draw::{DrawList, TextureId, TextureInfo, TextureProvider};
 use std::collections::HashSet;
 
 #[cfg(feature = "gl-backend")]
 pub mod gl;
+#[cfg(all(feature = "metal-backend", any(target_os = "macos", target_os = "ios")))]
+pub mod metal;
 pub mod types;
 
 pub use types::{
@@ -57,7 +60,7 @@ fn union_rect(left: [f32; 4], right: [f32; 4]) -> [f32; 4] {
 
 /// A transition capture can stay on the GPU or fall back to CPU pixels.
 pub enum FrameCapture {
-    Texture(TextureId, TextureInfo),
+    Texture(TextureId, TextureInfo, TextureOrigin),
     Pixels(Vec<u8>),
 }
 
@@ -181,20 +184,44 @@ pub trait GpuBackend: TextureProvider {
     fn end_external_render(&mut self) {}
 }
 
-/// Creation choice kept outside `CoreRuntime`. This stage contains only the
-/// existing reference GL backend; native Metal/Vulkan variants are intentionally
-/// not introduced yet.
-#[cfg(feature = "gl-backend")]
+/// Backend choice kept outside `CoreRuntime`.
+#[cfg(any(feature = "gl-backend", feature = "metal-backend"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendSelection {
+    #[cfg(all(feature = "metal-backend", any(target_os = "macos", target_os = "ios")))]
+    NativeMetal,
+    #[cfg(feature = "gl-backend")]
     ReferenceGl(gl::platform::GfxBackend),
 }
 
-#[cfg(feature = "gl-backend")]
+#[cfg(any(feature = "gl-backend", feature = "metal-backend"))]
 impl BackendSelection {
-    /// Preserves the existing C ABI values used by the Flutter host.
+    /// Preserves legacy ANGLE selections while making native Metal the Apple
+    /// default. On Apple, values 0 and 3 select Metal; value 5 explicitly
+    /// selects CGL and value 6 explicitly selects ANGLE-Metal for A/B
+    /// comparison. `ART3M1S_FORCE_GL` also forces GL; an iOS default selection
+    /// is routed to ANGLE-Metal because CGL is absent.
     pub fn from_legacy_int(value: i32) -> Self {
-        Self::ReferenceGl(gl::platform::GfxBackend::from_int(value))
+        #[cfg(all(feature = "metal-backend", any(target_os = "macos", target_os = "ios")))]
+        if std::env::var_os("ART3M1S_FORCE_GL").is_none() && matches!(value, 0 | 3) {
+            return Self::NativeMetal;
+        }
+
+        #[cfg(feature = "gl-backend")]
+        {
+            #[cfg(target_os = "ios")]
+            if std::env::var_os("ART3M1S_FORCE_GL").is_some() && value == 0 {
+                return Self::ReferenceGl(gl::platform::GfxBackend::Angle(
+                    gl::platform::AngleBackend::Metal,
+                ));
+            }
+            Self::ReferenceGl(gl::platform::GfxBackend::from_int(value))
+        }
+
+        #[cfg(not(feature = "gl-backend"))]
+        {
+            panic!("no GPU backend is enabled for selection {value}")
+        }
     }
 }
 
@@ -205,13 +232,16 @@ impl From<gl::platform::GfxBackend> for BackendSelection {
     }
 }
 
-#[cfg(feature = "gl-backend")]
+#[cfg(any(feature = "gl-backend", feature = "metal-backend"))]
 pub(crate) fn create_backend(
     selection: BackendSelection,
     width: u32,
     height: u32,
 ) -> Result<Box<dyn GpuBackend>, String> {
     match selection {
+        #[cfg(all(feature = "metal-backend", any(target_os = "macos", target_os = "ios")))]
+        BackendSelection::NativeMetal => Ok(Box::new(metal::MetalBackend::new(width, height)?)),
+        #[cfg(feature = "gl-backend")]
         BackendSelection::ReferenceGl(config) => {
             Ok(Box::new(gl::GlBackend::new(config, width, height)?))
         }

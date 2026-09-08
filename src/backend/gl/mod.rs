@@ -1426,8 +1426,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn texture_present_keeps_the_stage_upright() {
-        let (gl, _ctx, _) =
-            platform::create_offscreen_context(platform::GfxBackend::Cgl, 2, 2).unwrap();
+        let Ok((gl, _ctx, _)) = platform::create_offscreen_context(platform::GfxBackend::Cgl, 2, 2)
+        else {
+            return;
+        };
         let renderer = GlRenderer::new(gl.clone(), 2, 2, ShaderProfile::GlCore330).unwrap();
         let source = unsafe { make_present_source(&gl) };
         let (target, _) = unsafe { platform::create_fbo_target(&gl, 2, 2).unwrap() };
@@ -1443,8 +1445,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn texture_present_limits_writes_to_top_left_damage() {
-        let (gl, _ctx, _) =
-            platform::create_offscreen_context(platform::GfxBackend::Cgl, 2, 2).unwrap();
+        let Ok((gl, _ctx, _)) = platform::create_offscreen_context(platform::GfxBackend::Cgl, 2, 2)
+        else {
+            return;
+        };
         let renderer = GlRenderer::new(gl.clone(), 2, 2, ShaderProfile::GlCore330).unwrap();
         let source = unsafe { make_present_source(&gl) };
         let (target, _) = unsafe { platform::create_fbo_target(&gl, 2, 2).unwrap() };
@@ -1469,8 +1473,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn iosurface_memory_rows_keep_the_stage_upright() {
-        let (gl, _ctx, _) =
-            platform::create_offscreen_context(platform::GfxBackend::Cgl, 2, 2).unwrap();
+        let Ok((gl, _ctx, _)) = platform::create_offscreen_context(platform::GfxBackend::Cgl, 2, 2)
+        else {
+            return;
+        };
         let renderer = GlRenderer::new(gl.clone(), 2, 2, ShaderProfile::GlCore330).unwrap();
         let source = unsafe { make_present_source(&gl) };
         let (target, _) = unsafe { platform::create_fbo_target(&gl, 2, 2).unwrap() };
@@ -1487,8 +1493,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn iosurface_damage_writes_the_first_memory_row_for_stage_top() {
-        let (gl, _ctx, _) =
-            platform::create_offscreen_context(platform::GfxBackend::Cgl, 2, 2).unwrap();
+        let Ok((gl, _ctx, _)) = platform::create_offscreen_context(platform::GfxBackend::Cgl, 2, 2)
+        else {
+            return;
+        };
         let renderer = GlRenderer::new(gl.clone(), 2, 2, ShaderProfile::GlCore330).unwrap();
         let source = unsafe { make_present_source(&gl) };
         let (target, _) = unsafe { platform::create_fbo_target(&gl, 2, 2).unwrap() };

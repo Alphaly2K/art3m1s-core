@@ -105,6 +105,7 @@ impl GfxBackend {
             2 => GfxBackend::Angle(AngleBackend::Vulkan),
             3 => GfxBackend::Angle(AngleBackend::Metal),
             4 => GfxBackend::Angle(AngleBackend::D3D11),
+            6 => GfxBackend::Angle(AngleBackend::Metal),
             _ => GfxBackend::Cgl,
         }
     }

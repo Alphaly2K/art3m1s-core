@@ -36,8 +36,8 @@ impl CoreRuntime {
                 "__trans_capture__",
                 Extent2D::new(self.stage_w, self.stage_h),
             ) {
-                FrameCapture::Texture(texture, info) => {
-                    pipeline.capture_trans_gpu_texture(texture, info);
+                FrameCapture::Texture(texture, info, origin) => {
+                    pipeline.capture_trans_gpu_texture(texture, info, origin);
                 }
                 FrameCapture::Pixels(pixels) => pipeline.capture_trans_texture(
                     &pixels,
