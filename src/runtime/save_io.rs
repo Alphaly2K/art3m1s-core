@@ -1,5 +1,5 @@
 use super::CoreRuntime;
-use crate::backend::{Extent2D, FrameTarget, TextureData, TextureDesc};
+use crate::backend::{TextureData, TextureDesc};
 use crate::save::AudioSnapshot;
 use image::ImageEncoder;
 use std::collections::HashMap;
@@ -493,14 +493,12 @@ impl CoreRuntime {
     }
 
     pub(super) fn capture_save_screenshot(&mut self) {
-        let extent = Extent2D::new(self.stage_w, self.stage_h);
-        let rgba = match self.gpu.readback_owned(FrameTarget::Main, extent) {
-            Ok(rgba) => rgba,
-            Err(error) => {
-                crate::core_warn!("[runtime] takess screenshot readback failed: {error}");
-                return;
-            }
-        };
+        let mut rgba = vec![0; self.pixel_buffer_size()];
+        let expected = rgba.len();
+        if self.read_current_frame_into(&mut rgba) != expected {
+            crate::core_warn!("[runtime] takess screenshot readback failed");
+            return;
+        }
         self.save_screenshot = Some(ScreenshotBuffer {
             width: self.stage_w,
             height: self.stage_h,

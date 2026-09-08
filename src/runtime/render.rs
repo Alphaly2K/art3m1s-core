@@ -32,17 +32,20 @@ impl CoreRuntime {
         let pipeline = RenderPipeline::new(&self.compositor);
         if pipeline.needs_trans_capture() {
             let capture_started = profile.mark();
-            match self.gpu.capture_frame(
-                "__trans_capture__",
-                Extent2D::new(self.stage_w, self.stage_h),
-            ) {
+            let capture_size = self
+                .gpu
+                .render_dimensions()
+                .map_or(Extent2D::new(self.stage_w, self.stage_h), |dimensions| {
+                    dimensions.render_size
+                });
+            match self.gpu.capture_frame("__trans_capture__", capture_size) {
                 FrameCapture::Texture(texture, info, origin) => {
                     pipeline.capture_trans_gpu_texture(texture, info, origin);
                 }
                 FrameCapture::Pixels(pixels) => pipeline.capture_trans_texture(
                     &pixels,
-                    self.stage_w,
-                    self.stage_h,
+                    capture_size.width,
+                    capture_size.height,
                     &mut *self.gpu,
                 ),
             }
@@ -156,17 +159,45 @@ impl CoreRuntime {
     }
 
     pub(super) fn read_current_frame_into(&mut self, out_pixels: &mut [u8]) -> usize {
-        match self.gpu.readback(
-            FrameTarget::Main,
-            Extent2D::new(self.stage_w, self.stage_h),
-            out_pixels,
-        ) {
-            Ok(written) => written,
-            Err(error) => {
-                crate::core_warn!("[runtime] GPU readback failed: {error}");
-                0
-            }
+        let render_size = self
+            .gpu
+            .render_dimensions()
+            .map_or(Extent2D::new(self.stage_w, self.stage_h), |dimensions| {
+                dimensions.render_size
+            });
+        if render_size == Extent2D::new(self.stage_w, self.stage_h) {
+            return match self
+                .gpu
+                .readback(FrameTarget::Main, render_size, out_pixels)
+            {
+                Ok(written) => written,
+                Err(error) => {
+                    crate::core_warn!("[runtime] GPU readback failed: {error}");
+                    0
+                }
+            };
         }
+
+        let Ok(scene) = self.gpu.readback_owned(FrameTarget::Main, render_size) else {
+            crate::core_warn!("[runtime] scaled SceneColor readback failed");
+            return 0;
+        };
+        let Some(expected) = Extent2D::new(self.stage_w, self.stage_h).rgba8_len() else {
+            return 0;
+        };
+        if out_pixels.len() < expected {
+            return 0;
+        }
+        if !resize_rgba_linear(
+            &scene,
+            render_size,
+            &mut out_pixels[..expected],
+            Extent2D::new(self.stage_w, self.stage_h),
+        ) {
+            crate::core_warn!("[runtime] scaled SceneColor has an invalid RGBA8 length");
+            return 0;
+        }
+        expected
     }
 
     /// 用上一帧场景重建转场源画面。
@@ -263,6 +294,27 @@ impl CoreRuntime {
             self.exit_click_wait_icon()
         }
     }
+}
+
+fn resize_rgba_linear(
+    source: &[u8],
+    source_size: Extent2D,
+    output: &mut [u8],
+    output_size: Extent2D,
+) -> bool {
+    let Some(source) =
+        image::RgbaImage::from_raw(source_size.width, source_size.height, source.to_vec())
+    else {
+        return false;
+    };
+    let resized = image::imageops::resize(
+        &source,
+        output_size.width,
+        output_size.height,
+        image::imageops::FilterType::Triangle,
+    );
+    output.copy_from_slice(resized.as_raw());
+    true
 }
 
 fn record_render_region(
@@ -882,15 +934,32 @@ fn union_rect(left: [f32; 4], right: [f32; 4]) -> [f32; 4] {
 #[cfg(test)]
 mod tests {
     use super::{
-        DamageDecision, command_bounds, frame_damage, frame_requires_render,
+        DamageDecision, command_bounds, frame_damage, frame_requires_render, resize_rgba_linear,
         wait_reason_is_click_wait,
     };
+    use crate::backend::Extent2D;
     use crate::render_pipeline::draw::{
         BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, DrawMesh, LayerCommandKind,
         LayerShaderGroupKind, ShaderEffect, ShaderGroup, ShaderGroupKey, TextureId, TextureInfo,
     };
     use asb_interpreter::event::WaitReason;
     use std::collections::HashSet;
+
+    #[test]
+    fn scaled_scene_readback_returns_output_sized_rgba() {
+        let mut output = vec![0; 2 * 2 * 4];
+        assert!(resize_rgba_linear(
+            &[12, 34, 56, 255],
+            Extent2D::new(1, 1),
+            &mut output,
+            Extent2D::new(2, 2),
+        ));
+        assert!(
+            output
+                .chunks_exact(4)
+                .all(|pixel| pixel == [12, 34, 56, 255])
+        );
+    }
 
     #[test]
     fn click_wait_covers_generic_variants_only() {
