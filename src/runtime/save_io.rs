@@ -116,7 +116,7 @@ impl CoreRuntime {
                 data = data.with_message_text(message_text);
             }
         } else {
-            data = data.with_scene(self.compositor.scene_snapshot());
+            data = data.with_scene(self.compositor.scene_snapshot_with_animations());
             if let Some(message_text) = self.capture_message_text_snapshot() {
                 data = data.with_message_text(message_text);
             }
@@ -505,7 +505,7 @@ impl CoreRuntime {
             width: self.stage_w,
             height: self.stage_h,
             rgba,
-            scene: self.compositor.scene_snapshot(),
+            scene: self.compositor.scene_snapshot_with_animations(),
             message_text: self.capture_message_text_snapshot(),
         });
         crate::core_info!(

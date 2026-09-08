@@ -166,6 +166,23 @@ impl Compositor {
         self.scene.clone()
     }
 
+    /// Snapshot the scene together with active frame animations for save/load.
+    /// Store elapsed time rather than the runtime clock so snapshots survive a
+    /// process restart and are rebased by `restore_scene`.
+    pub fn scene_snapshot_with_animations(&self) -> Scene {
+        let mut scene = self.scene.clone();
+        scene.anime_states = self
+            .anime_states
+            .iter()
+            .map(|(id, state)| {
+                let mut state = state.clone();
+                state.start_ms = self.clock_ms.saturating_sub(state.start_ms);
+                (id.clone(), state)
+            })
+            .collect();
+        scene
+    }
+
     /// Refresh the CPU-only projection used by synchronous script queries.
     /// Render targets, transition captures and input callbacks are not copied.
     pub(crate) fn sync_query_scene_from(&mut self, other: &Self) {
@@ -195,7 +212,17 @@ impl Compositor {
     }
 
     pub fn restore_scene(&mut self, scene: Scene) {
+        self.anime_states = scene
+            .anime_states
+            .iter()
+            .map(|(id, state)| {
+                let mut state = state.clone();
+                state.start_ms = self.clock_ms.saturating_sub(state.start_ms);
+                (id.clone(), state)
+            })
+            .collect();
         self.scene.replace_with(scene);
+        self.scene.anime_states.clear();
         self.pending_tween_events.clear();
     }
 
@@ -1482,6 +1509,37 @@ mod tests {
         c.advance(100);
         assert_eq!(c.scene().get("90").unwrap().file.as_deref(), Some("g1"));
         assert!(c.anime_states.is_empty());
+    }
+
+    #[test]
+    fn anime_state_survives_scene_snapshot_restore() {
+        let mut source = Compositor::new();
+        let anime = |mode: &str, file: Option<&str>, time: Option<u64>| Event::Anime {
+            id: "90".into(),
+            mode: mode.into(),
+            file: file.map(str::to_string),
+            mask: None,
+            time,
+            loop_count: Some(-1),
+            props: HashMap::new(),
+        };
+        source.apply_event(&anime("init", Some("g0"), None));
+        source.apply_event(&anime("add", Some("g1"), Some(100)));
+        source.apply_event(&anime("end", None, Some(200)));
+        source.advance(75);
+
+        let snapshot = source.scene_snapshot_with_animations();
+        let mut restored = Compositor::new();
+        restored.restore_scene(
+            serde_json::from_value(serde_json::to_value(snapshot).unwrap()).unwrap(),
+        );
+        restored.advance(100);
+
+        assert_eq!(
+            restored.scene().get("90").unwrap().file.as_deref(),
+            Some("g1")
+        );
+        assert!(restored.anime_states.contains_key("90"));
     }
 
     fn set_tween(id: &str, param: &str, from: &str, to: &str, time: u64) -> Event {
