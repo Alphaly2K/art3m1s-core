@@ -408,8 +408,16 @@ impl CoreRuntime {
             .lua()
             .load(
                 r#"
-                if type(scr) ~= "table" then scr = {} end
-                if type(log) ~= "table" then log = {} end
+                local function restore_table(name, current)
+                    if type(fload_pluto) == "function" then
+                        local ok, loaded = pcall(fload_pluto, name)
+                        if ok and type(loaded) == "table" then return loaded end
+                    end
+                    if type(current) == "table" then return current end
+                    return {}
+                end
+                scr = restore_table("scr", scr)
+                log = restore_table("log", log)
                 if type(sys) ~= "table" then sys = {} end
                 if type(gscr) ~= "table" then gscr = {} end
                 if type(conf) ~= "table" then conf = {} end
