@@ -182,10 +182,10 @@ struct PendingRetirement {
 }
 
 enum MetalSurface {
-    IoSurface {
-        texture: Texture,
-        extent: Extent2D,
-    },
+    /// Host-shared IOSurface or imported MTLTexture. Flutter may sample this
+    /// object at any time, so presents must not clear it and must finish GPU
+    /// work before `frameAvailable`.
+    Shared { texture: Texture, extent: Extent2D },
     Layer {
         layer: Retained<CAMetalLayer>,
         extent: Extent2D,
@@ -1190,7 +1190,7 @@ impl GpuBackend for MetalBackend {
                     .device
                     .newTextureWithDescriptor_iosurface_plane(&descriptor, io_surface, 0)
                     .ok_or_else(|| "failed to create Metal texture from IOSurface".to_string())?;
-                self.surface = Some(MetalSurface::IoSurface {
+                self.surface = Some(MetalSurface::Shared {
                     texture,
                     extent: surface.extent,
                 });
@@ -1213,7 +1213,15 @@ impl GpuBackend for MetalBackend {
                 Ok(())
             }
             NativeSurfaceKind::AppleMetalTexture => {
-                Err("external MTLTexture import is not implemented by MetalBackend".into())
+                let texture = unsafe {
+                    Retained::retain(surface.handle.cast::<ProtocolObject<dyn MTLTexture>>())
+                }
+                .ok_or_else(|| "invalid MTLTexture pointer".to_string())?;
+                self.surface = Some(MetalSurface::Shared {
+                    texture,
+                    extent: surface.extent,
+                });
+                Ok(())
             }
             NativeSurfaceKind::AndroidNativeWindow => {
                 Err("ANativeWindow is unsupported by MetalBackend".into())
@@ -1225,16 +1233,19 @@ impl GpuBackend for MetalBackend {
         self.surface = None;
     }
 
-    fn present(&mut self, _damage: Option<[f32; 4]>) -> Result<(), String> {
+    fn present(&mut self, damage: Option<[f32; 4]>) -> Result<(), String> {
         let source = self.main_target.texture.clone();
         match self.surface.as_ref() {
-            Some(MetalSurface::IoSurface { texture, extent }) => {
+            Some(MetalSurface::Shared { texture, extent }) => {
                 let target = PrivateRenderTarget {
                     texture: texture.clone(),
                     extent: *extent,
-                    format: MTLPixelFormat::BGRA8Unorm,
+                    format: texture.pixelFormat(),
                 };
-                self.encode_present(&source, &target, None)
+                // Shared textures are displayed by Flutter from the same object.
+                // Copy only the damaged region, keep untouched pixels, and wait
+                // so `frameAvailable` cannot observe a half-written surface.
+                self.encode_present(&source, &target, None, damage, true)
             }
             Some(MetalSurface::Layer { layer, extent }) => {
                 let drawable = layer
@@ -1245,7 +1256,7 @@ impl GpuBackend for MetalBackend {
                     extent: *extent,
                     format: layer.pixelFormat(),
                 };
-                self.encode_present(&source, &target, Some(&drawable))
+                self.encode_present(&source, &target, Some(&drawable), None, false)
             }
             None => Err("native Metal surface is not configured".into()),
         }
@@ -1724,12 +1735,13 @@ impl MetalBackend {
         source: &Texture,
         target: &PrivateRenderTarget,
         drawable: Option<&ProtocolObject<dyn CAMetalDrawable>>,
+        damage: Option<[f32; 4]>,
+        wait: bool,
     ) -> Result<(), String> {
         let command_buffer = self
             .queue
             .commandBuffer()
             .ok_or_else(|| "failed to create Metal present command buffer".to_string())?;
-        encode_clear(&command_buffer, target, [0.0, 0.0, 0.0, 1.0])?;
         let command = DrawCommand {
             texture: TextureId(0),
             size: TextureInfo {
@@ -1745,7 +1757,7 @@ impl MetalBackend {
                 uv_scale: [1.0, 1.0],
                 quad_size: [target.extent.width as f32, target.extent.height as f32],
             },
-            clip_bounds: None,
+            clip_bounds: damage,
             shader: None,
             mesh: None,
             stencil: None,
@@ -1765,10 +1777,18 @@ impl MetalBackend {
         }
         command_buffer.commit();
         self.submitted_serial = self.submitted_serial.wrapping_add(1).max(1);
-        self.inflight.push_back(SubmittedFrame {
-            serial: self.submitted_serial,
-            command_buffer,
-        });
+        if wait {
+            command_buffer.waitUntilCompleted();
+            if command_buffer.status() == MTLCommandBufferStatus::Error {
+                return Err(format_command_error(&command_buffer));
+            }
+            self.completed_serial = self.submitted_serial;
+        } else {
+            self.inflight.push_back(SubmittedFrame {
+                serial: self.submitted_serial,
+                command_buffer,
+            });
+        }
         Ok(())
     }
 }
@@ -2472,5 +2492,77 @@ mod tests {
         assert!(pixels.chunks_exact(4).all(|pixel| {
             (127..=128).contains(&pixel[0]) && pixel[1] == 0 && pixel[2] == 0 && pixel[3] == 255
         }));
+    }
+
+    #[test]
+    fn shared_present_keeps_undamaged_pixels() {
+        let Ok(mut backend) = MetalBackend::new(2, 2) else {
+            return;
+        };
+        let surface = backend
+            .create_render_target("present-surface", RenderTargetDesc::sampled_rgba8(2, 2))
+            .unwrap();
+        backend
+            .begin_frame(FrameTarget::Offscreen(surface.id))
+            .unwrap();
+        backend.clear([0.0, 1.0, 0.0, 1.0]);
+        backend.end_frame();
+
+        let red = backend
+            .create_texture(
+                "red",
+                TextureDesc::sampled_rgba8(1, 1),
+                TextureData::Rgba8(&[255, 0, 0, 255]),
+            )
+            .expect("red texture");
+        let mut frame = DrawList::new();
+        frame.push(DrawCommand {
+            texture: red,
+            size: TextureInfo {
+                width: 1,
+                height: 1,
+            },
+            transform: glam::Affine2::IDENTITY,
+            opacity: 1.0,
+            blend: BlendMode::Alpha,
+            color: ColorFilter::default(),
+            clip: ClipRect {
+                uv_offset: [0.0, 0.0],
+                uv_scale: [1.0, 1.0],
+                quad_size: [2.0, 2.0],
+            },
+            clip_bounds: None,
+            shader: None,
+            mesh: None,
+            stencil: None,
+            native_emote: None,
+        });
+        backend.begin_frame(FrameTarget::Main).unwrap();
+        backend.render(&frame);
+        backend.end_frame();
+
+        let texture = backend
+            .textures
+            .get(&surface.color)
+            .expect("present surface texture")
+            .raw
+            .clone();
+        let handle = Retained::as_ptr(&texture) as *mut std::ffi::c_void;
+        backend
+            .set_native_surface(NativeSurface {
+                kind: NativeSurfaceKind::AppleMetalTexture,
+                handle,
+                extent: Extent2D::new(2, 2),
+            })
+            .unwrap();
+        backend.present(Some([0.0, 0.0, 1.0, 1.0])).unwrap();
+
+        let pixels = backend
+            .readback_owned(FrameTarget::Offscreen(surface.id), Extent2D::new(2, 2))
+            .unwrap();
+        assert_eq!(&pixels[0..4], &[255, 0, 0, 255]);
+        assert_eq!(&pixels[4..8], &[0, 255, 0, 255]);
+        assert_eq!(&pixels[8..12], &[0, 255, 0, 255]);
+        assert_eq!(&pixels[12..16], &[0, 255, 0, 255]);
     }
 }
