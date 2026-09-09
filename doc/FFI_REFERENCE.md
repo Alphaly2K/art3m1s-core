@@ -201,6 +201,9 @@ CGL 仅 macOS 可用。ANGLE 创建失败会尝试 CGL，因此 create 成功不
 `art3m1s_runtime_set_render_scale(rt, scale)` 设置 SceneColor 相对 native output 的物理比例，
 范围为 `[0.1,1.0]`，且 native backend 的实际 render size 不会低于游戏逻辑舞台尺寸。
 只有 Host 提供的 output surface 大于逻辑舞台时，MetalFX 才可能执行真正的超分。
+`art3m1s_runtime_configure_spatial_upscale(rt, scale, sharpness)` 原子设置 spatial pass 与
+SceneColor 比例，供 Host 实现固定 1.5x、2x 或固定输出分辨率；不支持 spatial 的 backend
+应由 Host 根据 capabilities 选择 native fallback。
 
 ## Runtime HLSL shader
 

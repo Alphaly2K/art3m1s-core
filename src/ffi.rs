@@ -1527,6 +1527,41 @@ pub unsafe extern "C" fn art3m1s_runtime_set_render_scale(
     }
 }
 
+/// Configures a backend-native spatial pass with an explicit SceneColor scale
+/// relative to the output surface. This combines mode and scale atomically so
+/// one setting cannot reset the other. Returns 1 on success, otherwise 0.
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_configure_spatial_upscale(
+    rt: *mut CoreRuntime,
+    render_scale: f32,
+    sharpness: f32,
+) -> c_int {
+    if rt.is_null() {
+        return 0;
+    }
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        (&mut *rt).configure_spatial_upscale(render_scale, sharpness)
+    })) {
+        Ok(Ok(())) => 1,
+        Ok(Err(error)) => {
+            core_warn!("spatial upscale configuration rejected: {error}");
+            0
+        }
+        Err(panic_info) => {
+            core_error!(
+                "spatial upscale configuration panicked: {}",
+                panic_msg(&panic_info)
+            );
+            0
+        }
+    }
+}
+
 /// 设置统一渲染质量：0 Native，1 Quality，2 Balanced，3 Performance。
 /// MetalFX 不可用时返回成功并由 Metal backend 回退到 native。
 #[cfg(any(
