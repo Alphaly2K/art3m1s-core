@@ -88,13 +88,14 @@ pub(super) struct RuntimeControlState {
 }
 
 /// keyconfig 的默认按键分配（docs/spec/key_assign.md，Windows 缺省）：
-/// Enter=前进、Space=隐藏、↑=日志、A=自动、Shift=跳过切换、Ctrl=临时跳过。
+/// Enter/滚轮下=前进、Space=隐藏、↑/滚轮上=日志、A=自动、
+/// Shift=跳过切换、Ctrl=临时跳过。
 fn default_keymap() -> HashMap<i32, Vec<u32>> {
     HashMap::from([
-        (ROLE_ADVANCE, vec![13]),
+        (ROLE_ADVANCE, vec![13, 137]),
         (ROLE_HIDE_IN, vec![32]),
         (ROLE_HIDE_OUT, vec![32]),
-        (ROLE_BACKLOG_IN, vec![38]),
+        (ROLE_BACKLOG_IN, vec![38, 136]),
         (ROLE_AUTOMODE_IN, vec![65]),
         (ROLE_SKIP_IN, vec![16]),
         (ROLE_SKIP_OUT, vec![16]),
@@ -950,8 +951,9 @@ fn control_skip_transition_event(was_active: bool, is_active: bool) -> Option<&'
 #[cfg(test)]
 mod tests {
     use super::{
-        ROLE_ADVANCE, ROLE_AVOID_IN, ROLE_AVOID_OUT, ROLE_CONTROL_SKIP, ROLE_HIDE_IN, ROLE_SKIP_IN,
-        RuntimeControlState, control_skip_transition_event, exec_input_route, parse_keyconfig,
+        ROLE_ADVANCE, ROLE_AVOID_IN, ROLE_AVOID_OUT, ROLE_BACKLOG_IN, ROLE_CONTROL_SKIP,
+        ROLE_HIDE_IN, ROLE_SKIP_IN, RuntimeControlState, control_skip_transition_event,
+        exec_input_route, parse_keyconfig,
     };
     use std::collections::HashMap;
 
@@ -1081,9 +1083,12 @@ mod tests {
 
     #[test]
     fn default_keymap_matches_key_assign_spec() {
-        // docs/spec/key_assign.md：Enter 前进、Space 隐藏、Shift 跳过、Ctrl 临时跳过
+        // docs/spec/key_assign.md：Enter/滚轮下前进、↑/滚轮上进日志、
+        // Space 隐藏、Shift 跳过、Ctrl 临时跳过。
         let control = RuntimeControlState::default();
         assert_eq!(control.roles_for_key(13), vec![ROLE_ADVANCE]);
+        assert_eq!(control.roles_for_key(137), vec![ROLE_ADVANCE]);
+        assert_eq!(control.roles_for_key(136), vec![ROLE_BACKLOG_IN]);
         assert!(control.roles_for_key(32).contains(&ROLE_HIDE_IN));
         assert!(control.roles_for_key(16).contains(&ROLE_SKIP_IN));
         assert_eq!(control.roles_for_key(17), vec![ROLE_CONTROL_SKIP]);
