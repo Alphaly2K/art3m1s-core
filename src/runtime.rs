@@ -195,6 +195,23 @@ impl CoreRuntime {
         self.configure_post_process(pipeline)
     }
 
+    /// Configures one backend-native spatial pass with an explicit SceneColor
+    /// scale relative to the output surface. Hosts use this for fixed upscale
+    /// ratios or fixed output resolutions without exposing native GPU handles.
+    pub fn configure_spatial_upscale(
+        &mut self,
+        render_scale: f32,
+        sharpness: f32,
+    ) -> Result<(), String> {
+        let mut pipeline = PostProcessPipeline::default();
+        pipeline.render_scale = render_scale;
+        pipeline.passes[0] = PostProcessPass::Upscale(UpscaleConfig {
+            mode: crate::render_pipeline::UpscaleMode::Spatial,
+            sharpness,
+        });
+        self.configure_post_process(pipeline)
+    }
+
     /// Registers or replaces a backend-neutral Artemis HLSL effect.
     pub fn register_hlsl_shader(
         &mut self,

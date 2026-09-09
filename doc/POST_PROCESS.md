@@ -56,11 +56,11 @@ Metal production backend 在 macOS 13+/iOS 16+ 且设备支持时使用原生
 路径不经过 ANGLE、OpenGL 或 CPU readback。MetalFX 不可用时自动回退到 native
 render + 线性 present，不会导致 runtime 崩溃。
 
-统一质量档位由 `RenderQualityPreset` 定义：Native=1.0（线性）、Quality=2/3、
-Balanced=0.58、Performance=0.5（后三者请求 MetalFX Spatial）。比例相对于
-`output_size` 解析，并以游戏逻辑舞台尺寸为下限，避免把游戏先降到低于原始分辨率再
-放回原始分辨率。Host 必须创建大于逻辑舞台的 output surface；比例只存在于策略层，
-Host 通过 `art3m1s_runtime_set_render_quality_preset` 选择档位。
+生产 Host 直接选择输出目标：原始分辨率、跟随显示器、固定 1.5x、固定 2x 或自定义
+分辨率。Host 创建对应尺寸的 output surface，并通过
+`art3m1s_runtime_configure_spatial_upscale` 原子设置 spatial pass 与 SceneColor 比例。
+SceneColor 以游戏逻辑舞台尺寸为下限，避免把游戏先降到低于原始分辨率再放大。
+`RenderQualityPreset` 仅保留为旧 Host 的兼容入口。
 
 `BackendCapabilities.spatial_upscaling` 只在实际支持时为 true。Vulkan 当前仍为
 Experimental，FSR1 EASU/RCAS 尚未实现，capability 保持 false；这不影响 Metal。
