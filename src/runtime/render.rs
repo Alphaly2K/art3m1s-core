@@ -1,7 +1,7 @@
 use super::CoreRuntime;
 use crate::backend::{Extent2D, FrameCapture, FrameTarget, RenderRegion};
 use crate::render_pipeline::RenderPipeline;
-use crate::render_pipeline::draw::DrawList;
+use crate::render_pipeline::draw::{DrawList, TextureInfo};
 use asb_interpreter::event::WaitReason;
 
 impl CoreRuntime {
@@ -38,14 +38,19 @@ impl CoreRuntime {
                 .map_or(Extent2D::new(self.stage_w, self.stage_h), |dimensions| {
                     dimensions.render_size
                 });
+            let capture_draw_size = TextureInfo {
+                width: self.stage_w,
+                height: self.stage_h,
+            };
             match self.gpu.capture_frame("__trans_capture__", capture_size) {
                 FrameCapture::Texture(texture, info, origin) => {
-                    pipeline.capture_trans_gpu_texture(texture, info, origin);
+                    pipeline.capture_trans_gpu_texture(texture, info, capture_draw_size, origin);
                 }
                 FrameCapture::Pixels(pixels) => pipeline.capture_trans_texture(
                     &pixels,
                     capture_size.width,
                     capture_size.height,
+                    capture_draw_size,
                     &mut *self.gpu,
                 ),
             }

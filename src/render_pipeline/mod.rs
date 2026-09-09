@@ -97,6 +97,7 @@ impl<'a> RenderPipeline<'a> {
         pixels: &[u8],
         width: u32,
         height: u32,
+        draw_size: TextureInfo,
         provider: &mut dyn TextureProvider,
     ) {
         transition::capture_texture(
@@ -105,6 +106,7 @@ impl<'a> RenderPipeline<'a> {
             pixels,
             width,
             height,
+            draw_size,
             provider,
         );
     }
@@ -113,6 +115,7 @@ impl<'a> RenderPipeline<'a> {
         &self,
         texture: TextureId,
         info: TextureInfo,
+        draw_size: TextureInfo,
         origin: TextureOrigin,
     ) {
         transition::capture_gpu_texture(
@@ -120,6 +123,7 @@ impl<'a> RenderPipeline<'a> {
             self.compositor.clock_ms,
             texture,
             info,
+            draw_size,
             origin,
         );
     }

@@ -99,9 +99,9 @@ pub enum PostProcessPass {
 pub struct PostProcessPipeline {
     pub scene_format: TextureFormat,
     pub output_format: TextureFormat,
-    /// Fraction of the logical scene size used for SceneColor. `1.0` keeps
-    /// the current native scene target; lower values request a cheaper scene
-    /// render followed by the configured upscale pass.
+    /// Fraction of the presentation output used for SceneColor. The resolved
+    /// target is never smaller than the logical game scene, so spatial modes
+    /// upscale original-or-better game content instead of first degrading it.
     pub render_scale: f32,
     pub passes: Vec<PostProcessPass>,
 }
@@ -118,6 +118,24 @@ impl Default for PostProcessPipeline {
 }
 
 impl PostProcessPipeline {
+    /// Resolves the physical SceneColor extent from the logical game size and
+    /// the presentation output. This policy is shared by native backends so
+    /// Host/business code never needs backend-specific size calculations.
+    pub fn resolve_render_size(
+        &self,
+        logical_scene_size: Extent2D,
+        output_size: Extent2D,
+    ) -> Extent2D {
+        let scaled_output = Extent2D::new(
+            ((output_size.width as f32 * self.render_scale).round() as u32).max(1),
+            ((output_size.height as f32 * self.render_scale).round() as u32).max(1),
+        );
+        Extent2D::new(
+            logical_scene_size.width.max(scaled_output.width),
+            logical_scene_size.height.max(scaled_output.height),
+        )
+    }
+
     pub fn validate(&self, dimensions: RenderDimensions) -> Result<(), String> {
         if dimensions.render_size.is_empty() || dimensions.output_size.is_empty() {
             return Err("post-process dimensions must be non-zero".into());
@@ -186,5 +204,22 @@ mod tests {
             sharpness: 0.0,
         });
         assert!(pipeline.validate(dimensions).is_ok());
+    }
+
+    #[test]
+    fn render_scale_is_relative_to_output_but_never_below_game_size() {
+        let mut pipeline = PostProcessPipeline::default();
+        pipeline.render_scale = 0.5;
+        let game = Extent2D::new(1920, 1080);
+
+        assert_eq!(
+            pipeline.resolve_render_size(game, Extent2D::new(3840, 2160)),
+            game
+        );
+        assert_eq!(
+            pipeline.resolve_render_size(game, Extent2D::new(5120, 2880)),
+            Extent2D::new(2560, 1440)
+        );
+        assert_eq!(pipeline.resolve_render_size(game, game), game);
     }
 }

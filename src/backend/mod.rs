@@ -139,9 +139,10 @@ pub trait GpuBackend: TextureProvider {
     fn render_dimensions(&self) -> Option<RenderDimensions> {
         None
     }
-    /// Changes the physical SceneColor scale while preserving logical scene
-    /// coordinates. Backends recreate the cached scene target only when the
-    /// resulting extent changes.
+    /// Changes SceneColor scale relative to the output surface while
+    /// preserving logical scene coordinates. Native backends keep the result
+    /// at least as large as the logical scene and recreate cached targets only
+    /// when the resolved extent changes.
     fn set_render_scale(&mut self, scale: f32) -> Result<(), String> {
         if (scale - 1.0).abs() <= f32::EPSILON {
             Ok(())

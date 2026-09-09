@@ -615,6 +615,24 @@ impl VulkanBackend {
             }
         }
     }
+
+    fn replace_scene_target(&mut self, extent: Extent2D) -> Result<(), String> {
+        self.wait_submissions()?;
+        let pass = self.render_pass(vk::Format::R8G8B8A8_UNORM)?;
+        let new = create_private_target(
+            &self.device,
+            &self.memory,
+            pass,
+            extent,
+            TextureFormat::Rgba8Unorm,
+        )?;
+        let old = std::mem::replace(&mut self.main, new);
+        self.destroy_private(old);
+        self.clear_private_caches();
+        self.last_overlay = None;
+        Ok(())
+    }
+
     fn shader_kind(&self, effect: Option<&ShaderEffect>) -> ShaderKind {
         match effect.map(|effect| effect.name.as_str()) {
             Some(crate::render_pipeline::shader::ALPHA_MASK_SHADER) => ShaderKind::AlphaMask,
@@ -1826,34 +1844,21 @@ impl GpuBackend for VulkanBackend {
             self.remove_texture(t.color);
         }
     }
-    fn replace_scene_target(&mut self, extent: Extent2D) -> Result<(), String> {
-        self.wait_submissions()?;
-        let pass = self.render_pass(vk::Format::R8G8B8A8_UNORM)?;
-        let new = create_private_target(
-            &self.device,
-            &self.memory,
-            pass,
-            extent,
-            TextureFormat::Rgba8Unorm,
-        )?;
-        let old = std::mem::replace(&mut self.main, new);
-        self.destroy_private(old);
-        self.clear_private_caches();
-        self.last_overlay = None;
-        Ok(())
-    }
     fn resize(&mut self, e: Extent2D) -> Result<(), String> {
         if e.is_empty() {
             return Err("empty Vulkan extent".into());
         }
         let had_surface = self.swapchain.is_some();
         self.scene_size = e;
-        self.replace_scene_target(scaled_extent(e, self.post_process.render_scale))?;
         if !had_surface {
             self.output_size = e;
         } else {
             self.recreate_swapchain(self.output_size)?;
         }
+        let render_size = self
+            .post_process
+            .resolve_render_size(self.scene_size, self.output_size);
+        self.replace_scene_target(render_size)?;
         Ok(())
     }
     fn render_dimensions(&self) -> Option<RenderDimensions> {
@@ -1874,7 +1879,9 @@ impl GpuBackend for VulkanBackend {
         if !scale.is_finite() || !(0.1..=1.0).contains(&scale) {
             return Err("render scale must be finite and in [0.1, 1.0]".into());
         }
-        let extent = scaled_extent(self.scene_size, scale);
+        let mut pipeline = self.post_process.clone();
+        pipeline.render_scale = scale;
+        let extent = pipeline.resolve_render_size(self.scene_size, self.output_size);
         if extent != self.main.image.desc.extent {
             self.replace_scene_target(extent)?;
         }
@@ -2110,12 +2117,26 @@ impl GpuBackend for VulkanBackend {
         let result = self.attach_surface(s);
         if result.is_ok() {
             self.output_size = s.extent;
+            let extent = self
+                .post_process
+                .resolve_render_size(self.scene_size, self.output_size);
+            if extent != self.main.image.desc.extent {
+                self.replace_scene_target(extent)?;
+            }
         }
         result
     }
     fn clear_native_surface(&mut self) {
         self.destroy_swapchain();
         self.output_size = self.scene_size;
+        let extent = self
+            .post_process
+            .resolve_render_size(self.scene_size, self.output_size);
+        if extent != self.main.image.desc.extent
+            && let Err(error) = self.replace_scene_target(extent)
+        {
+            crate::core_warn!("[VulkanBackend] failed to restore scene target: {error}");
+        }
     }
     fn present(&mut self, _: Option<[f32; 4]>) -> Result<(), String> {
         self.post_process.validate(RenderDimensions::new(
@@ -3626,13 +3647,6 @@ fn scissor(r: Option<[f32; 4]>, stage: Extent2D, target: Extent2D) -> Option<vk:
             height: (dd - y) as u32,
         },
     })
-}
-
-fn scaled_extent(logical: Extent2D, scale: f32) -> Extent2D {
-    Extent2D::new(
-        ((logical.width as f32 * scale).round() as u32).max(1),
-        ((logical.height as f32 * scale).round() as u32).max(1),
-    )
 }
 
 fn vertex_uniforms(c: &DrawCommand, stage: Extent2D) -> VertexUniforms {

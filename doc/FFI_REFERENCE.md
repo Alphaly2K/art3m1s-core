@@ -196,10 +196,11 @@ CGL 仅 macOS 可用。ANGLE 创建失败会尝试 CGL，因此 create 成功不
 `art3m1s_runtime_render_width/height` 返回 SceneColor 的 render size，
 `art3m1s_runtime_output_width/height` 返回 native presentation output size。
 两者可以不同；post-process 设计见 [`doc/POST_PROCESS.md`](POST_PROCESS.md)。
-`art3m1s_runtime_set_upscale_mode(rt, mode, sharpness)` 中 `mode=0` 为当前支持的线性采样，
-`mode=1` 预留给 spatial upscaler，当前会返回失败；`sharpness` 必须在 `[0,1]`。
-`art3m1s_runtime_set_render_scale(rt, scale)` 设置 SceneColor 的物理比例，范围为 `[0.1,1.0]`，
-不会改变逻辑舞台或 native output 尺寸。
+`art3m1s_runtime_set_upscale_mode(rt, mode, sharpness)` 中 `mode=0` 为线性采样，
+`mode=1` 请求 backend-native spatial upscaler；`sharpness` 必须在 `[0,1]`。
+`art3m1s_runtime_set_render_scale(rt, scale)` 设置 SceneColor 相对 native output 的物理比例，
+范围为 `[0.1,1.0]`，且 native backend 的实际 render size 不会低于游戏逻辑舞台尺寸。
+只有 Host 提供的 output surface 大于逻辑舞台时，MetalFX 才可能执行真正的超分。
 
 ## Runtime HLSL shader
 

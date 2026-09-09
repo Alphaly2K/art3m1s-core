@@ -126,7 +126,12 @@ impl MetalFxSpatialScaler {
         input: Extent2D,
         output: Extent2D,
     ) -> Option<Self> {
-        if input.is_empty() || output.is_empty() || input == output {
+        if input.is_empty()
+            || output.is_empty()
+            || output.width < input.width
+            || output.height < input.height
+            || input == output
+        {
             return None;
         }
         let class = AnyClass::get(c"MTLFXSpatialScalerDescriptor")?;
@@ -356,6 +361,12 @@ impl MetalBackend {
         let metalfx_supported = AnyClass::get(c"MTLFXSpatialScalerDescriptor")
             .map(|class| unsafe { msg_send![class, supportsDevice: &*device] })
             .unwrap_or(false);
+        crate::core_info!(
+            "[MetalFX] device_support={} logical_scene={}x{}",
+            metalfx_supported,
+            width,
+            height
+        );
         let source = NSString::from_str(include_str!("shaders.metal"));
         let library = device
             .newLibraryWithSource_options_error(&source, None)
@@ -510,7 +521,13 @@ impl MetalBackend {
     }
 
     fn ensure_spatial_resources(&mut self) -> Result<bool, String> {
-        if !self.metalfx_supported || self.main_target.extent == self.output_size {
+        let input = self.main_target.extent;
+        let output = self.output_size;
+        if !self.metalfx_supported
+            || output.width < input.width
+            || output.height < input.height
+            || input == output
+        {
             self.spatial_scaler = None;
             return Ok(false);
         }
@@ -526,6 +543,13 @@ impl MetalBackend {
                 self.spatial_scaler = None;
                 return Ok(false);
             };
+            crate::core_info!(
+                "[MetalFX] spatial scaler created input={}x{} output={}x{}",
+                self.main_target.extent.width,
+                self.main_target.extent.height,
+                self.output_size.width,
+                self.output_size.height
+            );
             self.spatial_scaler = Some(scaler);
             let replacement =
                 create_private_target(&self.device, self.output_size, MTLPixelFormat::RGBA8Unorm)?;
@@ -1152,11 +1176,13 @@ impl GpuBackend for MetalBackend {
     fn resize(&mut self, extent: Extent2D) -> Result<(), String> {
         let had_surface = self.surface.is_some();
         self.scene_size = extent;
-        let target_extent = scaled_extent(extent, self.post_process.render_scale);
-        self.replace_scene_target(target_extent)?;
         if !had_surface {
             self.output_size = extent;
         }
+        let target_extent = self
+            .post_process
+            .resolve_render_size(self.scene_size, self.output_size);
+        self.replace_scene_target(target_extent)?;
         Ok(())
     }
 
@@ -1176,9 +1202,33 @@ impl GpuBackend for MetalBackend {
         if spatial_requested && !self.metalfx_supported {
             self.set_render_scale(1.0)?;
             self.post_process = PostProcessPipeline::default();
+            crate::core_info!(
+                "[MetalFX] spatial requested but unavailable; native render selected"
+            );
             return Ok(());
         }
         self.set_render_scale(pipeline.render_scale)?;
+        let mode = if spatial_requested {
+            "spatial"
+        } else {
+            "linear"
+        };
+        crate::core_info!(
+            "[MetalFX] configure mode={} scale={:.3} logical={}x{} render={}x{} output={}x{} active={}",
+            mode,
+            pipeline.render_scale,
+            self.scene_size.width,
+            self.scene_size.height,
+            self.main_target.extent.width,
+            self.main_target.extent.height,
+            self.output_size.width,
+            self.output_size.height,
+            spatial_requested
+                && self.metalfx_supported
+                && self.output_size.width >= self.main_target.extent.width
+                && self.output_size.height >= self.main_target.extent.height
+                && self.output_size != self.main_target.extent
+        );
         self.post_process = pipeline;
         Ok(())
     }
@@ -1187,7 +1237,9 @@ impl GpuBackend for MetalBackend {
         if !scale.is_finite() || !(0.1..=1.0).contains(&scale) {
             return Err("render scale must be finite and in [0.1, 1.0]".into());
         }
-        let extent = scaled_extent(self.scene_size, scale);
+        let mut pipeline = self.post_process.clone();
+        pipeline.render_scale = scale;
+        let extent = pipeline.resolve_render_size(self.scene_size, self.output_size);
         if extent != self.main_target.extent {
             self.replace_scene_target(extent)?;
         }
@@ -1449,6 +1501,21 @@ impl GpuBackend for MetalBackend {
         };
         if result.is_ok() {
             self.output_size = surface.extent;
+            let extent = self
+                .post_process
+                .resolve_render_size(self.scene_size, self.output_size);
+            if extent != self.main_target.extent {
+                self.replace_scene_target(extent)?;
+            }
+            crate::core_info!(
+                "[MetalFX] output surface={}x{} logical={}x{} render={}x{}",
+                self.output_size.width,
+                self.output_size.height,
+                self.scene_size.width,
+                self.scene_size.height,
+                self.main_target.extent.width,
+                self.main_target.extent.height
+            );
         }
         result
     }
@@ -1456,6 +1523,14 @@ impl GpuBackend for MetalBackend {
     fn clear_native_surface(&mut self) {
         self.surface = None;
         self.output_size = self.scene_size;
+        let extent = self
+            .post_process
+            .resolve_render_size(self.scene_size, self.output_size);
+        if extent != self.main_target.extent
+            && let Err(error) = self.replace_scene_target(extent)
+        {
+            crate::core_warn!("[MetalFX] failed to restore scene target: {error}");
+        }
     }
 
     fn present(&mut self, damage: Option<[f32; 4]>) -> Result<(), String> {
@@ -1470,8 +1545,7 @@ impl GpuBackend for MetalBackend {
                     format: texture.pixelFormat(),
                 };
                 // Shared textures are displayed by Flutter from the same object.
-                // Copy only the damaged region, keep untouched pixels, and wait
-                // so `frameAvailable` cannot observe a half-written surface.
+                // Wait so `frameAvailable` cannot observe a half-written surface.
                 self.execute_post_process(&source, &target, None, damage, true)
             }
             Some(MetalSurface::Layer { layer, extent }) => {
@@ -2151,7 +2225,11 @@ impl MetalBackend {
         let spatial = self.post_process.passes.iter().any(|pass| {
             matches!(pass, PostProcessPass::Upscale(config) if config.mode == UpscaleMode::Spatial)
         });
-        if spatial {
+        let spatial_has_work = self.metalfx_supported
+            && self.output_size.width >= self.main_target.extent.width
+            && self.output_size.height >= self.main_target.extent.height
+            && self.output_size != self.main_target.extent;
+        if spatial && spatial_has_work {
             if self.ensure_spatial_resources()? {
                 let command_buffer = self
                     .queue
@@ -2178,11 +2256,14 @@ impl MetalBackend {
                     &upscaled_texture,
                     target,
                     drawable,
-                    damage,
+                    // MetalFX produces a complete output texture. Present it as
+                    // one complete frame so a transition cannot expose stale,
+                    // pre-upscale pixels outside a logical damage rectangle.
+                    None,
                     wait,
                 );
             }
-            crate::core_warn!("[MetalBackend] MetalFX 不可用，回退线性/native 渲染");
+            crate::core_warn!("[MetalFX] scaler creation failed; using linear present");
         }
         self.encode_present(source, target, drawable, damage, wait)
     }
@@ -2214,8 +2295,8 @@ impl MetalBackend {
         let command = DrawCommand {
             texture: TextureId(0),
             size: TextureInfo {
-                width: self.main_target.extent.width,
-                height: self.main_target.extent.height,
+                width: source.width() as u32,
+                height: source.height() as u32,
             },
             transform: glam::Affine2::IDENTITY,
             opacity: 1.0,
@@ -2224,7 +2305,7 @@ impl MetalBackend {
             clip: ClipRect {
                 uv_offset: [0.0, 0.0],
                 uv_scale: [1.0, 1.0],
-                quad_size: [target.extent.width as f32, target.extent.height as f32],
+                quad_size: [self.scene_size.width as f32, self.scene_size.height as f32],
             },
             clip_bounds: damage,
             shader: None,
@@ -2240,7 +2321,7 @@ impl MetalBackend {
             Some(source),
             None,
             Some(PipelineBlend::Replace),
-            Some(target.extent),
+            Some(self.scene_size),
         )?;
         if let Some(drawable) = drawable {
             command_buffer.presentDrawable(drawable.as_ref());
@@ -2597,13 +2678,6 @@ fn metal_scissor(
         width: right - left,
         height: bottom - top,
     })
-}
-
-fn scaled_extent(logical: Extent2D, scale: f32) -> Extent2D {
-    Extent2D::new(
-        ((logical.width as f32 * scale).round() as u32).max(1),
-        ((logical.height as f32 * scale).round() as u32).max(1),
-    )
 }
 
 fn solid_command(
@@ -3033,5 +3107,89 @@ mod tests {
         assert_eq!(&pixels[4..8], &[0, 255, 0, 255]);
         assert_eq!(&pixels[8..12], &[0, 255, 0, 255]);
         assert_eq!(&pixels[12..16], &[0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn metalfx_present_writes_one_complete_upscaled_frame() {
+        let Ok(mut backend) = MetalBackend::new(2, 2) else {
+            return;
+        };
+        if !backend.metalfx_supported {
+            return;
+        }
+
+        let surface = backend
+            .create_render_target("metalfx-surface", RenderTargetDesc::sampled_rgba8(4, 4))
+            .unwrap();
+        let texture = backend
+            .textures
+            .get(&surface.color)
+            .expect("present surface texture")
+            .raw
+            .clone();
+        backend
+            .set_native_surface(NativeSurface {
+                kind: NativeSurfaceKind::AppleMetalTexture,
+                handle: Retained::as_ptr(&texture) as *mut std::ffi::c_void,
+                extent: Extent2D::new(4, 4),
+            })
+            .unwrap();
+
+        let mut pipeline = PostProcessPipeline::default();
+        pipeline.render_scale = 0.5;
+        pipeline.passes[0] = PostProcessPass::Upscale(crate::render_pipeline::UpscaleConfig {
+            mode: UpscaleMode::Spatial,
+            sharpness: 0.0,
+        });
+        backend.configure_post_process(pipeline).unwrap();
+        assert_eq!(
+            backend.render_dimensions(),
+            Some(RenderDimensions::new(
+                Extent2D::new(2, 2),
+                Extent2D::new(4, 4)
+            ))
+        );
+
+        let red = backend
+            .upload_rgba("metalfx-red", 1, 1, &[255, 0, 0, 255])
+            .unwrap()
+            .0;
+        let mut frame = DrawList::new();
+        frame.push(DrawCommand {
+            texture: red,
+            size: TextureInfo {
+                width: 1,
+                height: 1,
+            },
+            transform: glam::Affine2::IDENTITY,
+            opacity: 1.0,
+            blend: BlendMode::Alpha,
+            color: ColorFilter::default(),
+            clip: ClipRect {
+                uv_offset: [0.0, 0.0],
+                uv_scale: [1.0, 1.0],
+                quad_size: [2.0, 2.0],
+            },
+            clip_bounds: None,
+            shader: None,
+            mesh: None,
+            stencil: None,
+            native_emote: None,
+        });
+        backend.begin_frame(FrameTarget::Main).unwrap();
+        backend.render(&frame);
+        backend.end_frame();
+
+        // A logical partial-damage hint must not expose untouched pixels after
+        // MetalFX, because the scaler has produced a complete output image.
+        backend.present(Some([0.0, 0.0, 1.0, 1.0])).unwrap();
+        let pixels = backend
+            .readback_owned(FrameTarget::Offscreen(surface.id), Extent2D::new(4, 4))
+            .unwrap();
+        assert!(
+            pixels.chunks_exact(4).all(|pixel| {
+                pixel[0] >= 250 && pixel[1] <= 5 && pixel[2] <= 5 && pixel[3] >= 250
+            })
+        );
     }
 }

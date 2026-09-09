@@ -24,6 +24,8 @@ pub(crate) struct TransitionState {
     duration_ms: u64,
     captured_texture: Option<TextureId>,
     captured_info: Option<TextureInfo>,
+    /// Logical scene extent used to draw the physical capture texture.
+    captured_draw_size: Option<TextureInfo>,
     captured_flipped_y: bool,
     needs_capture: bool,
     /// type=2 的规则灰度图路径（type 0/1 忽略）。
@@ -50,6 +52,7 @@ pub(crate) fn start(
         duration_ms: request.time.unwrap_or(1000),
         captured_texture: None,
         captured_info: None,
+        captured_draw_size: None,
         captured_flipped_y: false,
         needs_capture: true,
         rule: request.rule.map(str::to_string),
@@ -123,6 +126,7 @@ pub(crate) fn capture_texture(
     pixels: &[u8],
     width: u32,
     height: u32,
+    draw_size: TextureInfo,
     provider: &mut dyn TextureProvider,
 ) {
     let mut state = slot.borrow_mut();
@@ -137,6 +141,7 @@ pub(crate) fn capture_texture(
     {
         transition.captured_texture = Some(texture);
         transition.captured_info = Some(info);
+        transition.captured_draw_size = Some(draw_size);
         transition.captured_flipped_y = false;
         transition.needs_capture = false;
         transition.start_ms = clock_ms;
@@ -148,6 +153,7 @@ pub(crate) fn capture_gpu_texture(
     clock_ms: u64,
     texture: TextureId,
     info: TextureInfo,
+    draw_size: TextureInfo,
     origin: TextureOrigin,
 ) {
     let mut state = slot.borrow_mut();
@@ -159,6 +165,7 @@ pub(crate) fn capture_gpu_texture(
     }
     transition.captured_texture = Some(texture);
     transition.captured_info = Some(info);
+    transition.captured_draw_size = Some(draw_size);
     transition.captured_flipped_y = origin == TextureOrigin::BottomLeft;
     transition.needs_capture = false;
     transition.start_ms = clock_ms;
@@ -194,14 +201,18 @@ pub(crate) fn overlay_old_frame(
     if transition.needs_capture {
         return;
     }
-    let (Some(texture), Some(info)) = (transition.captured_texture, transition.captured_info)
-    else {
+    let (Some(texture), Some(info), Some(draw_size)) = (
+        transition.captured_texture,
+        transition.captured_info,
+        transition.captured_draw_size,
+    ) else {
         return;
     };
 
     let elapsed = clock_ms.saturating_sub(transition.start_ms);
     let progress = (elapsed as f32 / transition.duration_ms as f32).clamp(0.0, 1.0);
     let mut capture_clip = ClipRect::full(info);
+    capture_clip.quad_size = [draw_size.width as f32, draw_size.height as f32];
     if transition.captured_flipped_y {
         capture_clip.uv_offset[1] = 1.0;
         capture_clip.uv_scale[1] = -1.0;
@@ -293,7 +304,18 @@ mod tests {
     }
 
     fn capture(slot: &RefCell<Option<TransitionState>>, provider: &mut MockProvider) {
-        capture_texture(slot, 0, &[0u8; 16], 2, 2, provider);
+        capture_texture(
+            slot,
+            0,
+            &[0u8; 16],
+            2,
+            2,
+            TextureInfo {
+                width: 2,
+                height: 2,
+            },
+            provider,
+        );
     }
 
     #[test]
@@ -369,6 +391,10 @@ mod tests {
                 width: 1600,
                 height: 900,
             },
+            TextureInfo {
+                width: 1280,
+                height: 720,
+            },
             TextureOrigin::BottomLeft,
         );
 
@@ -376,6 +402,7 @@ mod tests {
         overlay_old_frame(&slot, 0, &mut frame, &mut provider);
         assert_eq!(frame.commands[0].clip.uv_offset, [0.0, 1.0]);
         assert_eq!(frame.commands[0].clip.uv_scale, [1.0, -1.0]);
+        assert_eq!(frame.commands[0].clip.quad_size, [1280.0, 720.0]);
     }
 
     #[test]
@@ -400,6 +427,10 @@ mod tests {
             TextureInfo {
                 width: 1600,
                 height: 900,
+            },
+            TextureInfo {
+                width: 1280,
+                height: 720,
             },
             TextureOrigin::TopLeft,
         );

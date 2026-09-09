@@ -1450,8 +1450,8 @@ pub unsafe extern "C" fn art3m1s_runtime_output_height(rt: *const CoreRuntime) -
     )
 }
 
-/// Configures the current linear upscale pass. `mode=0` selects the supported
-/// linear sampler; `mode=1` reserves spatial upscaling and currently returns 0.
+/// Configures the current upscale pass. `mode=0` selects linear sampling;
+/// `mode=1` requests a backend-native spatial upscaler when available.
 #[cfg(any(
     feature = "gl-backend",
     feature = "metal-backend",
@@ -1493,8 +1493,9 @@ pub unsafe extern "C" fn art3m1s_runtime_set_upscale_mode(
     }
 }
 
-/// Changes the physical SceneColor scale. The value must be finite and in
-/// `[0.1, 1.0]`; the native output size is unchanged.
+/// Changes SceneColor scale relative to the native output. The value must be
+/// finite and in `[0.1, 1.0]`; native backends clamp the resolved render size
+/// to at least the logical game size.
 #[cfg(any(
     feature = "gl-backend",
     feature = "metal-backend",

@@ -174,8 +174,9 @@ impl CoreRuntime {
         result
     }
 
-    /// Changes the physical SceneColor scale while preserving the logical
-    /// scene and native output sizes.
+    /// Changes SceneColor scale relative to the native output while preserving
+    /// logical coordinates. Native backends never resolve below the game's
+    /// logical scene size.
     pub fn set_render_scale(&mut self, scale: f32) -> Result<(), String> {
         let mut pipeline = PostProcessPipeline::default();
         pipeline.render_scale = scale;
@@ -231,6 +232,16 @@ impl CoreRuntime {
         backend: impl Into<BackendSelection>,
     ) -> Result<Self, String> {
         let gpu = crate::backend::create_backend(backend.into(), stage_width, stage_height)?;
+        let backend_info = gpu.backend_info();
+        crate::core_info!(
+            "[GpuBackend] selected name={} kind={:?} stability={:?} capabilities=0x{:x} stage={}x{}",
+            backend_info.name,
+            backend_info.kind,
+            backend_info.stability,
+            backend_info.capabilities.bits(),
+            stage_width,
+            stage_height
+        );
 
         let compositor = Compositor::new();
         let audio = Box::new(crate::audio::AudioStateBackend::new()) as Box<dyn AudioBackend>;
