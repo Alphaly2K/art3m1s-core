@@ -21,8 +21,9 @@ use crate::render_pipeline::hlsl::{
 use crate::render_pipeline::post_process::{
     PostProcessPass, PostProcessPipeline, RenderDimensions, UpscaleMode,
 };
+use objc2::msg_send;
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::runtime::{AnyClass, AnyObject, ProtocolObject};
 use objc2_core_foundation::CGSize;
 use objc2_foundation::NSString;
 use objc2_io_surface::IOSurfaceRef;
@@ -109,6 +110,60 @@ struct PrivateRenderTarget {
     texture: Texture,
     extent: Extent2D,
     format: MTLPixelFormat,
+}
+
+/// 薄 MetalFX 绑定。MetalFX 没有稳定的 Rust crate，使用 Objective-C runtime
+/// 动态查找类，从而在 macOS 12/旧设备上安全地回退而不触发链接或启动崩溃。
+struct MetalFxSpatialScaler {
+    raw: Retained<AnyObject>,
+    input: Extent2D,
+    output: Extent2D,
+}
+
+impl MetalFxSpatialScaler {
+    fn create(
+        device: &ProtocolObject<dyn MTLDevice>,
+        input: Extent2D,
+        output: Extent2D,
+    ) -> Option<Self> {
+        if input.is_empty() || output.is_empty() || input == output {
+            return None;
+        }
+        let class = AnyClass::get(c"MTLFXSpatialScalerDescriptor")?;
+        let supported: bool = unsafe { msg_send![class, supportsDevice: device] };
+        if !supported {
+            return None;
+        }
+        let descriptor: Retained<AnyObject> = unsafe { msg_send![class, new] };
+        unsafe {
+            let _: () = msg_send![&*descriptor, setColorTextureFormat: MTLPixelFormat::RGBA8Unorm];
+            let _: () = msg_send![&*descriptor, setOutputTextureFormat: MTLPixelFormat::RGBA8Unorm];
+            let _: () = msg_send![&*descriptor, setInputWidth: input.width as usize];
+            let _: () = msg_send![&*descriptor, setInputHeight: input.height as usize];
+            let _: () = msg_send![&*descriptor, setOutputWidth: output.width as usize];
+            let _: () = msg_send![&*descriptor, setOutputHeight: output.height as usize];
+            // Linear is correct for the current RGBA8 SceneColor contract.
+            let _: () = msg_send![&*descriptor, setColorProcessingMode: 1isize];
+        }
+        let raw: Option<Retained<AnyObject>> =
+            unsafe { msg_send![&*descriptor, newSpatialScalerWithDevice: device] };
+        raw.map(|raw| Self { raw, input, output })
+    }
+
+    fn encode(
+        &self,
+        command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+        source: &ProtocolObject<dyn MTLTexture>,
+        destination: &ProtocolObject<dyn MTLTexture>,
+    ) {
+        unsafe {
+            let _: () = msg_send![&*self.raw, setColorTexture: source];
+            let _: () = msg_send![&*self.raw, setOutputTexture: destination];
+            let _: () = msg_send![&*self.raw, setInputContentWidth: self.input.width as usize];
+            let _: () = msg_send![&*self.raw, setInputContentHeight: self.input.height as usize];
+            let _: () = msg_send![&*self.raw, encodeToCommandBuffer: command_buffer];
+        }
+    }
 }
 
 struct MetalPipeline {
@@ -252,6 +307,9 @@ pub struct MetalBackend {
     scene_size: Extent2D,
     output_size: Extent2D,
     post_process: PostProcessPipeline,
+    metalfx_supported: bool,
+    spatial_scaler: Option<MetalFxSpatialScaler>,
+    upscaled_scene: Option<PrivateRenderTarget>,
     active_frame: Option<ActiveFrame>,
     textures: HashMap<TextureId, MetalTexture>,
     names: HashMap<String, TextureId>,
@@ -279,6 +337,8 @@ pub struct MetalBackend {
     profile_vertices: Cell<u64>,
     profile_texture_binds: Cell<u64>,
     profile_dynamic_mesh_bytes: Cell<u64>,
+    profile_upscale_enabled: Cell<bool>,
+    profile_upscale_cpu_encode_ns: Cell<u64>,
     shader_clock: Instant,
     shader_frame_index: u64,
 }
@@ -293,6 +353,9 @@ impl MetalBackend {
         let queue = device
             .newCommandQueue()
             .ok_or_else(|| "failed to create Metal command queue".to_string())?;
+        let metalfx_supported = AnyClass::get(c"MTLFXSpatialScalerDescriptor")
+            .map(|class| unsafe { msg_send![class, supportsDevice: &*device] })
+            .unwrap_or(false);
         let source = NSString::from_str(include_str!("shaders.metal"));
         let library = device
             .newLibraryWithSource_options_error(&source, None)
@@ -349,6 +412,9 @@ impl MetalBackend {
             scene_size: Extent2D::new(width, height),
             output_size: Extent2D::new(width, height),
             post_process: PostProcessPipeline::default(),
+            metalfx_supported,
+            spatial_scaler: None,
+            upscaled_scene: None,
             active_frame: None,
             textures: HashMap::new(),
             names: HashMap::new(),
@@ -376,6 +442,8 @@ impl MetalBackend {
             profile_vertices: Cell::new(0),
             profile_texture_binds: Cell::new(0),
             profile_dynamic_mesh_bytes: Cell::new(0),
+            profile_upscale_enabled: Cell::new(false),
+            profile_upscale_cpu_encode_ns: Cell::new(0),
             shader_clock: Instant::now(),
             shader_frame_index: 0,
         })
@@ -433,8 +501,39 @@ impl MetalBackend {
         for target in std::mem::take(&mut self.mask_targets) {
             self.retire_private_target(target);
         }
+        self.spatial_scaler = None;
+        if let Some(target) = self.upscaled_scene.take() {
+            self.retire_private_target(target);
+        }
         self.last_damage_overlay = None;
         Ok(())
+    }
+
+    fn ensure_spatial_resources(&mut self) -> Result<bool, String> {
+        if !self.metalfx_supported || self.main_target.extent == self.output_size {
+            self.spatial_scaler = None;
+            return Ok(false);
+        }
+        let needs_rebuild = self.spatial_scaler.as_ref().is_none_or(|scaler| {
+            scaler.input != self.main_target.extent || scaler.output != self.output_size
+        });
+        if needs_rebuild {
+            let Some(scaler) = MetalFxSpatialScaler::create(
+                &self.device,
+                self.main_target.extent,
+                self.output_size,
+            ) else {
+                self.spatial_scaler = None;
+                return Ok(false);
+            };
+            self.spatial_scaler = Some(scaler);
+            let replacement =
+                create_private_target(&self.device, self.output_size, MTLPixelFormat::RGBA8Unorm)?;
+            if let Some(old) = self.upscaled_scene.replace(replacement) {
+                self.retire_private_target(old);
+            }
+        }
+        Ok(self.spatial_scaler.is_some() && self.upscaled_scene.is_some())
     }
 
     fn invalidate_shader_pipelines(&mut self, shader: ShaderId) {
@@ -635,7 +734,9 @@ fn create_private_target(
     };
     descriptor.setTextureType(MTLTextureType::Type2D);
     descriptor.setStorageMode(MTLStorageMode::Private);
-    descriptor.setUsage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
+    descriptor.setUsage(
+        MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite,
+    );
     let texture = device
         .newTextureWithDescriptor(&descriptor)
         .ok_or_else(|| "failed to allocate Metal render target".to_string())?;
@@ -930,6 +1031,7 @@ impl GpuBackend for MetalBackend {
                 stencil: true,
                 custom_shader: true,
                 dynamic_mesh: true,
+                spatial_upscaling: self.metalfx_supported,
                 ..BackendCapabilities::default()
             },
         }
@@ -1068,6 +1170,14 @@ impl GpuBackend for MetalBackend {
     fn configure_post_process(&mut self, pipeline: PostProcessPipeline) -> Result<(), String> {
         let dimensions = RenderDimensions::new(self.main_target.extent, self.output_size);
         pipeline.validate(dimensions)?;
+        let spatial_requested = pipeline.passes.iter().any(|pass| {
+            matches!(pass, PostProcessPass::Upscale(config) if config.mode == UpscaleMode::Spatial)
+        });
+        if spatial_requested && !self.metalfx_supported {
+            self.set_render_scale(1.0)?;
+            self.post_process = PostProcessPipeline::default();
+            return Ok(());
+        }
         self.set_render_scale(pipeline.render_scale)?;
         self.post_process = pipeline;
         Ok(())
@@ -1476,6 +1586,8 @@ impl GpuBackend for MetalBackend {
             texture_count: self.textures.len() as u64,
             texture_gpu_bytes,
             texture_cpu_bytes,
+            upscale_enabled: self.profile_upscale_enabled.replace(false),
+            upscale_cpu_encode_ns: self.profile_upscale_cpu_encode_ns.replace(0),
             ..GpuProfileStats::default()
         }
     }
@@ -2032,12 +2144,46 @@ impl MetalBackend {
         for pass in &self.post_process.passes {
             match pass {
                 PostProcessPass::Upscale(config) if config.mode == UpscaleMode::Linear => {}
+                PostProcessPass::Upscale(config) if config.mode == UpscaleMode::Spatial => {}
                 _ => return Err("unsupported Metal post-process pass".into()),
             }
         }
-        // The current linear pass is the cached fullscreen draw below. It does
-        // not allocate an intermediate texture; the output target is the pass
-        // destination and the shared sampler provides the resampling.
+        let spatial = self.post_process.passes.iter().any(|pass| {
+            matches!(pass, PostProcessPass::Upscale(config) if config.mode == UpscaleMode::Spatial)
+        });
+        if spatial {
+            if self.ensure_spatial_resources()? {
+                let command_buffer = self
+                    .queue
+                    .commandBuffer()
+                    .ok_or_else(|| "failed to create MetalFX command buffer".to_string())?;
+                let encode_started = Instant::now();
+                let upscaled = self
+                    .upscaled_scene
+                    .as_ref()
+                    .ok_or_else(|| "MetalFX output texture is unavailable".to_string())?;
+                let upscaled_texture = upscaled.texture.clone();
+                self.spatial_scaler
+                    .as_ref()
+                    .ok_or_else(|| "MetalFX spatial scaler is unavailable".to_string())?
+                    .encode(&command_buffer, &**source, &*upscaled.texture);
+                self.profile_upscale_enabled.set(true);
+                self.profile_upscale_cpu_encode_ns.set(
+                    self.profile_upscale_cpu_encode_ns
+                        .get()
+                        .saturating_add(elapsed_ns(encode_started)),
+                );
+                return self.encode_present_command(
+                    &command_buffer,
+                    &upscaled_texture,
+                    target,
+                    drawable,
+                    damage,
+                    wait,
+                );
+            }
+            crate::core_warn!("[MetalBackend] MetalFX 不可用，回退线性/native 渲染");
+        }
         self.encode_present(source, target, drawable, damage, wait)
     }
 
@@ -2053,6 +2199,18 @@ impl MetalBackend {
             .queue
             .commandBuffer()
             .ok_or_else(|| "failed to create Metal present command buffer".to_string())?;
+        self.encode_present_command(&command_buffer, source, target, drawable, damage, wait)
+    }
+
+    fn encode_present_command(
+        &mut self,
+        command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+        source: &Texture,
+        target: &PrivateRenderTarget,
+        drawable: Option<&ProtocolObject<dyn CAMetalDrawable>>,
+        damage: Option<[f32; 4]>,
+        wait: bool,
+    ) -> Result<(), String> {
         let command = DrawCommand {
             texture: TextureId(0),
             size: TextureInfo {
@@ -2075,7 +2233,7 @@ impl MetalBackend {
             native_emote: None,
         };
         self.encode_draw(
-            &command_buffer,
+            command_buffer,
             target,
             &command,
             None,
@@ -2098,7 +2256,7 @@ impl MetalBackend {
         } else {
             self.inflight.push_back(SubmittedFrame {
                 serial: self.submitted_serial,
-                command_buffer,
+                command_buffer: command_buffer.to_owned().into(),
             });
         }
         Ok(())

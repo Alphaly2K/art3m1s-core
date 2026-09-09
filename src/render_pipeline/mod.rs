@@ -21,8 +21,8 @@ pub use draw::{
     TextureProvider,
 };
 pub use post_process::{
-    PostProcessContext, PostProcessPass, PostProcessPipeline, RenderDimensions, SceneTarget,
-    UpscaleConfig, UpscaleMode,
+    PostProcessContext, PostProcessPass, PostProcessPipeline, RenderDimensions,
+    RenderQualityPreset, SceneTarget, UpscaleConfig, UpscaleMode,
 };
 pub use shader::{ALPHA_MASK_SHADER, GROUP_COMPOSITE_SHADER, RULE_TRANS_SHADER, SPRITE_SHADER};
 

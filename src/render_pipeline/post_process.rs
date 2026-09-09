@@ -40,6 +40,37 @@ pub enum UpscaleMode {
     Spatial,
 }
 
+/// 统一的运行时渲染质量策略。比例只在这里定义，Host/业务层不应自行
+/// 计算 render_size。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RenderQualityPreset {
+    Native,
+    Quality,
+    Balanced,
+    Performance,
+}
+
+impl RenderQualityPreset {
+    pub const fn policy(self) -> (f32, UpscaleMode) {
+        match self {
+            Self::Native => (1.0, UpscaleMode::Linear),
+            Self::Quality => (2.0 / 3.0, UpscaleMode::Spatial),
+            Self::Balanced => (0.58, UpscaleMode::Spatial),
+            Self::Performance => (0.5, UpscaleMode::Spatial),
+        }
+    }
+
+    pub const fn from_ffi(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Native),
+            1 => Some(Self::Quality),
+            2 => Some(Self::Balanced),
+            3 => Some(Self::Performance),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UpscaleConfig {
     pub mode: UpscaleMode,
@@ -100,9 +131,6 @@ impl PostProcessPipeline {
                     if !config.sharpness.is_finite() || !(0.0..=1.0).contains(&config.sharpness) {
                         return Err("upscale sharpness must be finite and in [0, 1]".into());
                     }
-                    if config.mode == UpscaleMode::Spatial {
-                        return Err("spatial upscaling is not implemented yet".into());
-                    }
                 }
                 PostProcessPass::Sharpen { amount } => {
                     if !amount.is_finite() || !(0.0..=1.0).contains(amount) {
@@ -150,13 +178,13 @@ mod tests {
     }
 
     #[test]
-    fn future_spatial_and_sharpen_passes_fail_without_claiming_support() {
+    fn spatial_pass_is_backend_capability_checked() {
         let dimensions = RenderDimensions::same(Extent2D::new(16, 16));
         let mut pipeline = PostProcessPipeline::default();
         pipeline.passes[0] = PostProcessPass::Upscale(UpscaleConfig {
             mode: UpscaleMode::Spatial,
             sharpness: 0.0,
         });
-        assert!(pipeline.validate(dimensions).is_err());
+        assert!(pipeline.validate(dimensions).is_ok());
     }
 }

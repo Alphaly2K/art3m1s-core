@@ -539,6 +539,7 @@ impl GpuBackend for GlBackend {
             texture_count: texture_count as u64,
             texture_gpu_bytes,
             texture_cpu_bytes,
+            ..GpuProfileStats::default()
         }
     }
 

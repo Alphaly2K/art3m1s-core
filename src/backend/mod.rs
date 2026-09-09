@@ -87,6 +87,9 @@ pub struct GpuProfileStats {
     pub texture_count: u64,
     pub texture_gpu_bytes: u64,
     pub texture_cpu_bytes: u64,
+    pub upscale_enabled: bool,
+    pub upscale_cpu_encode_ns: u64,
+    pub upscale_gpu_ns: u64,
 }
 
 /// Complete GPU ownership boundary used by [`crate::runtime::CoreRuntime`].

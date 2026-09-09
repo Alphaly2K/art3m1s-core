@@ -12,6 +12,14 @@
 
 fn main() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if (target_os == "macos" || target_os == "ios")
+        && std::env::var_os("CARGO_FEATURE_METAL_BACKEND").is_some()
+    {
+        // MetalFX is optional at runtime (macOS 13/iOS 16 and supported GPU),
+        // so keep the framework weak-linked and let the Objective-C wrapper
+        // fall back when the class is absent.
+        println!("cargo:rustc-link-arg=-Wl,-weak_framework,MetalFX");
+    }
     if target_os == "android" {
         // 链接 NDK 自带的动态 C++ 标准库（libc++_shared.so）。
         println!("cargo:rustc-link-lib=dylib=c++_shared");

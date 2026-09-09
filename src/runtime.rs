@@ -5,7 +5,9 @@
 use crate::audio::AudioBackend;
 use crate::backend::{BackendInfo, BackendSelection, GpuBackend, NativeSurface};
 use crate::compositor::Compositor;
-use crate::render_pipeline::post_process::{PostProcessPipeline, RenderDimensions};
+use crate::render_pipeline::post_process::{
+    PostProcessPass, PostProcessPipeline, RenderDimensions, RenderQualityPreset, UpscaleConfig,
+};
 use crate::text::TextRenderer;
 use crate::video::VideoBackend;
 use asb_interpreter::event::WaitReason;
@@ -177,6 +179,18 @@ impl CoreRuntime {
     pub fn set_render_scale(&mut self, scale: f32) -> Result<(), String> {
         let mut pipeline = PostProcessPipeline::default();
         pipeline.render_scale = scale;
+        self.configure_post_process(pipeline)
+    }
+
+    /// 应用统一渲染质量策略。MetalFX 不可用时由 backend 自动回退 native。
+    pub fn set_render_quality_preset(&mut self, preset: RenderQualityPreset) -> Result<(), String> {
+        let (scale, mode) = preset.policy();
+        let mut pipeline = PostProcessPipeline::default();
+        pipeline.render_scale = scale;
+        pipeline.passes[0] = PostProcessPass::Upscale(UpscaleConfig {
+            mode,
+            sharpness: 0.0,
+        });
         self.configure_post_process(pipeline)
     }
 
@@ -535,6 +549,9 @@ impl CoreRuntime {
         profile.texture_count = gpu.texture_count;
         profile.texture_gpu_bytes = gpu.texture_gpu_bytes;
         profile.texture_cpu_bytes = gpu.texture_cpu_bytes;
+        profile.upscale_enabled = gpu.upscale_enabled;
+        profile.upscale_cpu_encode_ns = gpu.upscale_cpu_encode_ns;
+        profile.upscale_gpu_ns = gpu.upscale_gpu_ns;
         let emote = self.emote.lock().unwrap();
         let (emote_layers, emote_source_bytes) = emote.profile_memory();
         let emote_stats = emote.take_profile_stats();
