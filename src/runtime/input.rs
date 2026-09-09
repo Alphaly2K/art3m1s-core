@@ -88,7 +88,7 @@ impl CoreRuntime {
         let left_down = mouse_buttons.contains(&1);
         let pointer_position = (mouse_x as i32, mouse_y as i32);
         let pointer_moved = self.last_pointer_hit_position != Some(pointer_position);
-        let texture_revision = self.texture_provider.content_revision();
+        let texture_revision = self.gpu.texture_content_revision();
         let refresh_pointer_hit_test = pointer_hit_test_required(
             self.last_pointer_hit_position,
             pointer_position,
@@ -124,7 +124,7 @@ impl CoreRuntime {
             self.last_pointer_hit_texture_revision = texture_revision;
             self.pointer_hit_test_dirty = false;
             self.compositor
-                .hit_test_all(mouse_x, mouse_y, &mut self.texture_provider)
+                .hit_test_all(mouse_x, mouse_y, &mut *self.gpu)
         } else {
             Vec::new()
         };

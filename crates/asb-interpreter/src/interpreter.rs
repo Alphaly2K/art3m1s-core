@@ -2284,7 +2284,11 @@ impl Interpreter {
     fn prune_queued_wait_checkpoints_for_jump(&mut self) {
         let depth = self.call_stack.len();
         self.queued_wait_checkpoints
-            .retain(|checkpoint| checkpoint.stack.len() < depth);
+            // A load-restored click wait is deliberately held while onLoad
+            // follow-up helpers jump through another script.  Keep that
+            // checkpoint until the helper returns to the saved PC; ordinary
+            // queued waits still follow the stack-depth pruning rule.
+            .retain(|checkpoint| checkpoint.allow_queue || checkpoint.stack.len() < depth);
         self.active_queued_wait = None;
     }
 
@@ -2790,6 +2794,42 @@ mod tests {
         assert_eq!(it.get_variable("onload"), Some(Value::Int(1)));
         assert!(it.get_variable("after_wait").is_none());
         assert_eq!(it.current_line(), 2);
+
+        it.advance_line();
+        it.run().unwrap();
+        assert_eq!(it.get_variable("after_wait"), Some(Value::Int(1)));
+    }
+
+    #[test]
+    fn load_restored_click_wait_survives_onload_helper_jump() {
+        let mut it = Interpreter::new(InterpreterConfig::default());
+        it.load_script(
+            "story",
+            "*main\n[wait input=1]\n[@]\n[var name=after_wait data=1]\n[stop]\n",
+        )
+        .unwrap();
+        it.load_script(
+            "helper",
+            "*main\n[var name=onload_helper data=1]\n[return]\n",
+        )
+        .unwrap();
+        it.start("story", "main").unwrap();
+        it.restore_position("story", 2, Vec::new()).unwrap();
+        it.hold_queued_input_wait();
+        it.push_inline_event_frame().unwrap();
+        it.lua()
+            .load("__engine:enqueueTag{'jump', file='helper', label='main'}")
+            .exec()
+            .unwrap();
+
+        assert!(matches!(
+            it.run().unwrap(),
+            ExecutionResult::Wait(Event::Wait {
+                reason: WaitReason::Generic
+            })
+        ));
+        assert_eq!(it.get_variable("onload_helper"), Some(Value::Int(1)));
+        assert!(it.get_variable("after_wait").is_none());
 
         it.advance_line();
         it.run().unwrap();

@@ -529,6 +529,17 @@ impl CoreRuntime {
     }
 
     fn load_shader(&mut self, id: &str, file: &str) {
+        let backend = self.gpu.backend_info();
+        if !backend.capabilities.hlsl_shader {
+            crate::core_warn!(
+                "[shader] backend={} stability={:?} 不支持运行时 HLSL，跳过 id={} file={}",
+                backend.name,
+                backend.stability,
+                id,
+                file
+            );
+            return;
+        }
         let source = match crate::ffi::request_file(file) {
             Ok(source) => source,
             Err(error) => {
@@ -536,8 +547,8 @@ impl CoreRuntime {
                 return;
             }
         };
-        match self.renderer.register_hlsl_shader(id, &source) {
-            Ok(()) => {
+        match self.gpu.register_hlsl_shader(id, &source) {
+            Ok(_) => {
                 crate::core_info!("[shader] 已加载 id={} file={}", id, file);
             }
             Err(error) => {
@@ -584,9 +595,7 @@ impl CoreRuntime {
         self.layer_info
             .lock()
             .unwrap()
-            .sync(&self.compositor, |file| {
-                self.texture_provider.cached_info(file)
-            });
+            .sync(&self.compositor, |file| self.gpu.cached_texture_info(file));
         self.layer_info_dirty = false;
     }
 
@@ -595,7 +604,7 @@ impl CoreRuntime {
             .lock()
             .unwrap()
             .sync_layer(&self.compositor, id, |file| {
-                self.texture_provider.cached_info(file)
+                self.gpu.cached_texture_info(file)
             });
     }
 

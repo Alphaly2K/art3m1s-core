@@ -1,10 +1,25 @@
 //! GL shader compilation and program linking.
 //!
-//! Shader assets live in [`crate::render_pipeline::shader`].  This module only
-//! compiles and links the shader program selected by the render pipeline.
+//! Semantic shader identities come from [`crate::render_pipeline::shader`];
+//! GLSL source and compiler profiles stay private to this backend.
 
-use crate::render_pipeline::shader::{BuiltinShaderManager, ShaderManager, ShaderProfile};
+use super::shader_source;
 use glow::HasContext;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShaderProfile {
+    Gles300,
+    GlCore330,
+}
+
+impl ShaderProfile {
+    pub fn version_header(self) -> &'static str {
+        match self {
+            ShaderProfile::Gles300 => "#version 300 es\nprecision highp float;\n",
+            ShaderProfile::GlCore330 => "#version 330 core\n",
+        }
+    }
+}
 
 /// 编译并链接渲染器用的着色器程序。
 ///
@@ -15,9 +30,7 @@ pub unsafe fn build_program(
     profile: ShaderProfile,
 ) -> Result<glow::Program, String> {
     unsafe {
-        let manager = BuiltinShaderManager;
-        let source = manager
-            .program(crate::render_pipeline::shader::SPRITE_SHADER)
+        let source = shader_source::program(crate::render_pipeline::shader::SPRITE_SHADER)
             .ok_or_else(|| "sprite shader asset missing".to_string())?;
         build_program_from_bodies(gl, profile, source.vertex_body, source.fragment_body)
     }
@@ -28,9 +41,7 @@ pub unsafe fn build_builtin_program(
     profile: ShaderProfile,
     name: &str,
 ) -> Result<glow::Program, String> {
-    let manager = BuiltinShaderManager;
-    let source = manager
-        .program(name)
+    let source = shader_source::program(name)
         .ok_or_else(|| format!("built-in shader asset missing: {name}"))?;
     unsafe { build_program_from_bodies(gl, profile, source.vertex_body, source.fragment_body) }
 }
@@ -40,11 +51,9 @@ pub unsafe fn build_effect_program(
     profile: ShaderProfile,
     hlsl: &[u8],
 ) -> Result<glow::Program, String> {
-    let manager = BuiltinShaderManager;
-    let source = manager
-        .program(crate::render_pipeline::shader::SPRITE_SHADER)
+    let source = shader_source::program(crate::render_pipeline::shader::SPRITE_SHADER)
         .ok_or_else(|| "sprite shader asset missing".to_string())?;
-    let fragment = crate::render_pipeline::hlsl::translate_effect(hlsl)?;
+    let fragment = super::hlsl::translate_effect(hlsl)?;
     unsafe { build_program_from_bodies(gl, profile, source.vertex_body, &fragment) }
 }
 

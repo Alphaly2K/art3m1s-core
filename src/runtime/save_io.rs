@@ -1,7 +1,6 @@
 use super::CoreRuntime;
-use crate::backend::gl::platform;
+use crate::backend::{TextureData, TextureDesc};
 use crate::save::AudioSnapshot;
-use glow::HasContext;
 use image::ImageEncoder;
 use std::collections::HashMap;
 
@@ -117,7 +116,7 @@ impl CoreRuntime {
                 data = data.with_message_text(message_text);
             }
         } else {
-            data = data.with_scene(self.compositor.scene_snapshot());
+            data = data.with_scene(self.compositor.scene_snapshot_with_animations());
             if let Some(message_text) = self.capture_message_text_snapshot() {
                 data = data.with_message_text(message_text);
             }
@@ -316,6 +315,14 @@ impl CoreRuntime {
         data.restore(&mut self.interpreter)
             .map_err(|e| format!("恢复存档状态失败: {e:?}"))?;
 
+        // A reset keeps the Lua VM, but the game's boot flow may have cleared
+        // its persistent globals before the next load.  The onLoad handler is
+        // allowed to populate these tables from the restored variables, yet
+        // real projects also touch `scr` while doing so.  Provide the empty
+        // table shape without replacing any existing game state.
+        self.ensure_load_lua_tables()
+            .map_err(|e| format!("准备读档 Lua 状态失败: {e}"))?;
+
         // onLoad（restore）把恢复的变量经 pluto 反序列化回 sys/gscr/scr/log 等表，
         // 否则承载游戏态与存档槽位的 Lua 表仍是旧的。
         self.interpreter
@@ -396,6 +403,34 @@ impl CoreRuntime {
             .map_err(|e| e.to_string())
     }
 
+    fn ensure_load_lua_tables(&mut self) -> Result<(), String> {
+        self.interpreter
+            .lua()
+            .load(
+                r#"
+                local function restore_table(name, current)
+                    if type(fload_pluto) == "function" then
+                        local ok, loaded = pcall(fload_pluto, name)
+                        if ok and type(loaded) == "table" then return loaded end
+                    end
+                    if type(current) == "table" then return current end
+                    return {}
+                end
+                scr = restore_table("scr", scr)
+                log = restore_table("log", log)
+                -- The first numbered slot can be loaded before the save UI
+                -- rebuilds its button state.  save.lua/getBtnID expects the
+                -- shared button table to exist even when no button is active.
+                if type(btn) ~= "table" then btn = {} end
+                if type(sys) ~= "table" then sys = {} end
+                if type(gscr) ~= "table" then gscr = {} end
+                if type(conf) ~= "table" then conf = {} end
+                "#,
+            )
+            .exec()
+            .map_err(|e| e.to_string())
+    }
+
     /// 执行一次自动保存（[autosave] 语义）。存档文件固定为 __Autosave.dat。
     fn autosave_now(&mut self, reason: &str) {
         crate::core_info!("[autosave] 触发（{reason}）→ {AUTOSAVE_FILE}");
@@ -458,22 +493,17 @@ impl CoreRuntime {
     }
 
     pub(super) fn capture_save_screenshot(&mut self) {
-        // 确保 FBO 已绑定并渲染完成
-        unsafe {
-            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
-            self.gl.finish();
-        }
-        // 从 FBO 读取像素（使用 glReadPixels，对所有后端都可靠）
-        let rgba =
-            unsafe { platform::read_pixels(&self.gl, self.stage_w as i32, self.stage_h as i32) };
-        unsafe {
-            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        let mut rgba = vec![0; self.pixel_buffer_size()];
+        let expected = rgba.len();
+        if self.read_current_frame_into(&mut rgba) != expected {
+            crate::core_warn!("[runtime] takess screenshot readback failed");
+            return;
         }
         self.save_screenshot = Some(ScreenshotBuffer {
             width: self.stage_w,
             height: self.stage_h,
             rgba,
-            scene: self.compositor.scene_snapshot(),
+            scene: self.compositor.scene_snapshot_with_animations(),
             message_text: self.capture_message_text_snapshot(),
         });
         crate::core_info!(
@@ -500,12 +530,10 @@ impl CoreRuntime {
         let (resource_name, path) = self.screenshot_paths_for(file)?;
 
         crate::ffi::request_write(&path, &png)?;
-        let _ = self.texture_provider.upload_rgba_render_only(
-            &resource_name,
-            target_width,
-            target_height,
-            &rgba,
-        );
+        let desc = TextureDesc::sampled_rgba8(target_width, target_height);
+        let _ = self
+            .gpu
+            .create_texture(&resource_name, desc, TextureData::Rgba8(&rgba));
         crate::core_info!(
             "[runtime] 已保存缩略图: {} (resource={}, {}x{})",
             path,

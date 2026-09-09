@@ -9,7 +9,7 @@ const PUBLISH_INTERVAL: Duration = Duration::from_millis(500);
 const SAMPLE_WINDOW: Duration = Duration::from_secs(10);
 const QUEUE_CAPACITY: usize = 256;
 const MAX_WINDOW_SAMPLES: usize = 4096;
-const TIMING_COUNT: usize = 31;
+const TIMING_COUNT: usize = 33;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct FrameProfile {
@@ -46,6 +46,8 @@ pub(crate) struct FrameProfile {
     pub present_ns: u64,
     pub readback_ns: u64,
     pub host_ffi_ns: u64,
+    pub upscale_cpu_encode_ns: u64,
+    pub upscale_gpu_ns: u64,
     pub host_ffi_calls: u64,
     pub host_ffi_bytes: u64,
     pub rendered: bool,
@@ -62,6 +64,7 @@ pub(crate) struct FrameProfile {
     pub texture_count: u64,
     pub texture_gpu_bytes: u64,
     pub texture_cpu_bytes: u64,
+    pub upscale_enabled: bool,
     pub emote_layers: u64,
     pub emote_source_bytes: u64,
     pub emote_worker_updates: u64,
@@ -129,6 +132,8 @@ pub struct ProfileTimings {
     pub present_ms: f64,
     pub readback_ms: f64,
     pub host_ffi_ms: f64,
+    pub upscale_cpu_encode_ms: f64,
+    pub upscale_gpu_ms: f64,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -172,6 +177,9 @@ pub struct ProfilerSnapshot {
     pub emote_mesh_sprites: u64,
     pub emote_mesh_vertices: u64,
     pub dropped_samples: u64,
+    pub render_resolution: String,
+    pub output_resolution: String,
+    pub upscale_enabled: bool,
 }
 
 enum Message {
@@ -401,6 +409,9 @@ impl RollingWindow {
             emote_mesh_sprites: latest.emote_mesh_sprites,
             emote_mesh_vertices: latest.emote_mesh_vertices,
             dropped_samples: dropped,
+            render_resolution: String::new(),
+            output_resolution: String::new(),
+            upscale_enabled: latest.upscale_enabled,
         }
     }
 }
@@ -490,6 +501,8 @@ fn timing_values(frame: &FrameProfile) -> [u64; TIMING_COUNT] {
         frame.present_ns,
         frame.readback_ns,
         frame.host_ffi_ns,
+        frame.upscale_cpu_encode_ns,
+        frame.upscale_gpu_ns,
     ]
 }
 
@@ -527,6 +540,8 @@ fn timings_from_values(values: [f64; TIMING_COUNT]) -> ProfileTimings {
         present_ms: ms(values[28]),
         readback_ms: ms(values[29]),
         host_ffi_ms: ms(values[30]),
+        upscale_cpu_encode_ms: ms(values[31]),
+        upscale_gpu_ms: ms(values[32]),
     }
 }
 

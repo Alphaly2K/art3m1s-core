@@ -478,7 +478,7 @@ pub(crate) struct AnimeRequest<'a> {
 }
 
 /// `[anime]` 帧动画的单帧数据。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AnimeFrame {
     pub(crate) time_ms: u64,
     pub(crate) file: String,
@@ -489,7 +489,7 @@ pub(crate) struct AnimeFrame {
 }
 
 /// `[anime]` 图层的帧动画播放状态。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AnimeState {
     pub(crate) frames: Vec<AnimeFrame>,
     /// -1=无限循环, 0=不循环(播一次), N=循环 N 次

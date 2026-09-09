@@ -10,6 +10,7 @@
 //! 因此默认无字节源、一律回退占位，让整条绘制管线无需素材即可端到端验证。
 
 use super::platform;
+use crate::backend::{AssetSource, Extent2D, RenderTargetId, TextureData, TextureUpdate};
 use crate::render_pipeline::draw::{TextureId, TextureInfo, TextureProvider};
 use glow::HasContext;
 use std::cell::Cell;
@@ -17,9 +18,6 @@ use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::time::Instant;
-
-/// 资源名 → 原始字节的来源。返回 `None` 表示该资源不存在（将回退占位）。
-pub type AssetSource = dyn Fn(&str) -> Option<Vec<u8>>;
 
 /// 占位纹理的外观。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,7 +38,7 @@ pub(crate) struct TextureUploadProfile {
 }
 
 #[derive(Clone, Copy)]
-struct VideoRenderTarget {
+struct GlRenderTarget {
     framebuffer: glow::Framebuffer,
     texture: TextureId,
     info: TextureInfo,
@@ -114,6 +112,46 @@ impl CpuTexturePixels {
             PixelStorage::Rgba(rgba) => rgba.len(),
         }
     }
+
+    fn update_rgba(&mut self, origin: [u32; 2], extent: Extent2D, rgba: &[u8]) {
+        let [origin_x, origin_y] = origin;
+        match &mut self.storage {
+            PixelStorage::Rgba(pixels) => {
+                for row in 0..extent.height as usize {
+                    let src = row * extent.width as usize * 4;
+                    let dst =
+                        ((origin_y as usize + row) * self.width as usize + origin_x as usize) * 4;
+                    pixels[dst..dst + extent.width as usize * 4]
+                        .copy_from_slice(&rgba[src..src + extent.width as usize * 4]);
+                }
+            }
+            PixelStorage::Alpha(alpha) => {
+                for row in 0..extent.height as usize {
+                    for column in 0..extent.width as usize {
+                        let src = (row * extent.width as usize + column) * 4 + 3;
+                        let dst = (origin_y as usize + row) * self.width as usize
+                            + origin_x as usize
+                            + column;
+                        alpha[dst] = rgba[src];
+                    }
+                }
+            }
+            PixelStorage::Opaque if rgba_is_opaque(rgba) => {}
+            PixelStorage::Opaque => {
+                let mut alpha = vec![255; self.width as usize * self.height as usize];
+                for row in 0..extent.height as usize {
+                    for column in 0..extent.width as usize {
+                        let src = (row * extent.width as usize + column) * 4 + 3;
+                        let dst = (origin_y as usize + row) * self.width as usize
+                            + origin_x as usize
+                            + column;
+                        alpha[dst] = rgba[src];
+                    }
+                }
+                self.storage = PixelStorage::Alpha(alpha);
+            }
+        }
+    }
 }
 
 /// 把资源名解析为 GL 纹理并缓存的提供者。
@@ -137,7 +175,7 @@ pub struct GlTextureProvider {
     texture_revisions: HashMap<TextureId, u64>,
     /// Texture handles whose uploaded pixels are known to have alpha 255.
     opaque_textures: HashSet<TextureId>,
-    video_render_targets: HashMap<String, VideoRenderTarget>,
+    render_targets: HashMap<String, GlRenderTarget>,
     profiling_enabled: Cell<bool>,
     profile_upload_elapsed_ns: Cell<u64>,
     profile_upload_bytes: Cell<u64>,
@@ -158,7 +196,7 @@ impl GlTextureProvider {
             content_revision: 0,
             texture_revisions: HashMap::new(),
             opaque_textures: HashSet::new(),
-            video_render_targets: HashMap::new(),
+            render_targets: HashMap::new(),
             profiling_enabled: Cell::new(false),
             profile_upload_elapsed_ns: Cell::new(0),
             profile_upload_bytes: Cell::new(0),
@@ -186,7 +224,7 @@ impl GlTextureProvider {
     /// Ensures a color-renderable FBO whose attached texture is exposed under
     /// the reserved video-layer texture name. The caller must have made this
     /// provider's GL context current.
-    pub(crate) fn ensure_video_render_target(
+    pub(crate) fn ensure_render_target(
         &mut self,
         name: &str,
         width: u32,
@@ -195,7 +233,7 @@ impl GlTextureProvider {
         if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 {
             return Err("invalid video render target dimensions".into());
         }
-        if let Some(target) = self.video_render_targets.get(name)
+        if let Some(target) = self.render_targets.get(name)
             && target.info.width == width
             && target.info.height == height
         {
@@ -210,10 +248,9 @@ impl GlTextureProvider {
         let texture = TextureId(texture.0.get() as u64);
         let info = TextureInfo { width, height };
         self.cache.insert(name.to_owned(), (texture, info));
-        self.opaque_textures.insert(texture);
-        self.video_render_targets.insert(
+        self.render_targets.insert(
             name.to_owned(),
-            VideoRenderTarget {
+            GlRenderTarget {
                 framebuffer,
                 texture,
                 info,
@@ -223,11 +260,122 @@ impl GlTextureProvider {
     }
 
     pub(crate) fn commit_video_render_target(&mut self, name: &str) -> bool {
-        let Some(target) = self.video_render_targets.get(name).copied() else {
+        let Some(target) = self.render_targets.get(name).copied() else {
             return false;
         };
+        self.opaque_textures.insert(target.texture);
         self.mark_texture_changed(target.texture);
         true
+    }
+
+    pub(crate) fn bind_render_target(&self, target: RenderTargetId) -> Result<(), String> {
+        let framebuffer = self
+            .render_targets
+            .values()
+            .find(|entry| entry.framebuffer.0.get() as u64 == target.opaque())
+            .map(|entry| entry.framebuffer)
+            .ok_or_else(|| "unknown render target".to_string())?;
+        unsafe {
+            self.gl
+                .bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn destroy_render_target(&mut self, target: RenderTargetId) {
+        let name = self
+            .render_targets
+            .iter()
+            .find(|(_, entry)| entry.framebuffer.0.get() as u64 == target.opaque())
+            .map(|(name, _)| name.clone());
+        if let Some(name) = name {
+            self.remove_if_cached(&name);
+            self.mark_content_changed();
+        }
+    }
+
+    pub(crate) fn destroy_texture(&mut self, texture: TextureId) {
+        let names = self
+            .cache
+            .iter()
+            .filter_map(|(name, (id, _))| (*id == texture).then_some(name.clone()))
+            .collect::<Vec<_>>();
+        if names.is_empty() {
+            return;
+        }
+        for name in names {
+            self.remove_if_cached(&name);
+        }
+        self.mark_content_changed();
+    }
+
+    pub(crate) fn update_texture(
+        &mut self,
+        texture: TextureId,
+        update: TextureUpdate<'_>,
+    ) -> Result<(), String> {
+        let info = self
+            .cache
+            .values()
+            .find_map(|(id, info)| (*id == texture).then_some(*info))
+            .ok_or_else(|| "unknown texture".to_string())?;
+        let end_x = update.origin[0]
+            .checked_add(update.extent.width)
+            .ok_or("texture update x overflow")?;
+        let end_y = update.origin[1]
+            .checked_add(update.extent.height)
+            .ok_or("texture update y overflow")?;
+        if update.extent.is_empty() || end_x > info.width || end_y > info.height {
+            return Err("texture update is outside the texture extent".into());
+        }
+        let TextureData::Rgba8(rgba) = update.data else {
+            return Err(
+                "compressed texture updates are not supported by the GL reference backend".into(),
+            );
+        };
+        let expected = update
+            .extent
+            .rgba8_len()
+            .ok_or("texture update size overflow")?;
+        if rgba.len() != expected {
+            return Err(format!(
+                "texture update has {} bytes, expected {expected}",
+                rgba.len()
+            ));
+        }
+        let upload_started = self.profile_mark();
+        let raw = NonZeroU32::new(texture.0 as u32).ok_or("invalid texture handle")?;
+        unsafe {
+            self.gl
+                .bind_texture(glow::TEXTURE_2D, Some(glow::NativeTexture(raw)));
+            self.gl.tex_sub_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                update.origin[0] as i32,
+                update.origin[1] as i32,
+                update.extent.width as i32,
+                update.extent.height as i32,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(rgba)),
+            );
+            self.gl.bind_texture(glow::TEXTURE_2D, None);
+        }
+        if let Some(pixels) = self.cpu_pixels.get_mut(&texture) {
+            pixels.update_rgba(update.origin, update.extent, rgba);
+        }
+        let full_update = update.origin == [0, 0]
+            && update.extent.width == info.width
+            && update.extent.height == info.height;
+        let remains_opaque = if full_update {
+            rgba_is_opaque(rgba)
+        } else {
+            self.opaque_textures.contains(&texture) && rgba_is_opaque(rgba)
+        };
+        self.set_texture_opaque(texture, remains_opaque);
+        self.mark_texture_changed(texture);
+        self.record_upload(upload_started, rgba.len());
+        Ok(())
     }
 
     fn profile_mark(&self) -> Option<Instant> {
@@ -319,6 +467,10 @@ impl GlTextureProvider {
     /// width/height/clip 的图片层应报告素材本身的尺寸。
     pub fn cached_info(&self, name: &str) -> Option<TextureInfo> {
         self.cache.get(name).map(|(_, info)| *info)
+    }
+
+    pub(crate) fn cached_entry(&self, name: &str) -> Option<(TextureId, TextureInfo)> {
+        self.cache.get(name).copied()
     }
 
     /// Lightweight profiler counters. GPU bytes are an RGBA8-equivalent
@@ -455,6 +607,22 @@ impl GlTextureProvider {
         Some(entry)
     }
 
+    pub fn supports_bc(&self) -> bool {
+        if cfg!(any(target_os = "android", target_os = "ios"))
+            || (cfg!(all(target_os = "macos", target_arch = "aarch64")) && self.supports_astc_4x4())
+        {
+            return false;
+        }
+        let extensions = self.gl.supported_extensions();
+        [
+            "GL_EXT_texture_compression_s3tc",
+            "GL_EXT_texture_compression_dxt5",
+            "GL_ANGLE_texture_compression_dxt5",
+        ]
+        .iter()
+        .any(|extension| extensions.contains(*extension))
+    }
+
     fn upload_dxt5_render_only(
         &mut self,
         name: &str,
@@ -465,20 +633,7 @@ impl GlTextureProvider {
         // Mobile GPUs are optimized for ASTC; accepting emulated S3TC there may
         // silently expand the texture. On Apple Silicon, prefer ASTC only when
         // the active backend exposes it, leaving the CGL path unchanged.
-        if cfg!(any(target_os = "android", target_os = "ios"))
-            || (cfg!(all(target_os = "macos", target_arch = "aarch64")) && self.supports_astc_4x4())
-        {
-            return None;
-        }
-        let extensions = self.gl.supported_extensions();
-        let supported = [
-            "GL_EXT_texture_compression_s3tc",
-            "GL_EXT_texture_compression_dxt5",
-            "GL_ANGLE_texture_compression_dxt5",
-        ]
-        .iter()
-        .any(|extension| extensions.contains(*extension));
-        if !supported {
+        if !self.supports_bc() {
             return None;
         }
         let expected = (width as usize)
@@ -692,7 +847,7 @@ impl GlTextureProvider {
     }
 
     fn remove_if_cached(&mut self, name: &str) {
-        if let Some(target) = self.video_render_targets.remove(name) {
+        if let Some(target) = self.render_targets.remove(name) {
             unsafe {
                 self.gl.delete_framebuffer(target.framebuffer);
             }
@@ -803,7 +958,7 @@ impl GlTextureProvider {
 
 impl Drop for GlTextureProvider {
     fn drop(&mut self) {
-        for target in self.video_render_targets.drain().map(|(_, target)| target) {
+        for target in self.render_targets.drain().map(|(_, target)| target) {
             unsafe {
                 self.gl.delete_framebuffer(target.framebuffer);
             }

@@ -2,7 +2,7 @@ use super::CoreRuntime;
 use super::callbacks::FfiCallbacks;
 use super::magic_path;
 use crate::Project;
-use crate::backend::gl::GlTextureProvider;
+use crate::backend::{TextureData, TextureDesc, TextureUsage};
 use crate::runtime::save_io;
 use crate::text::GlyphTextRenderer;
 use asb_interpreter::{CallbackResult, Event};
@@ -24,6 +24,13 @@ impl CoreRuntime {
     }
 
     fn load_open_project(&mut self, project: Project) -> Result<(), String> {
+        self.gpu.begin_access();
+        let result = self.load_open_project_inner(project);
+        self.gpu.end_access();
+        result
+    }
+
+    fn load_open_project_inner(&mut self, project: Project) -> Result<(), String> {
         // File existence results belong to the currently mounted project.
         crate::ffi::clear_file_size_cache();
         let new_width = project.config().stage_width;
@@ -139,8 +146,8 @@ impl CoreRuntime {
     }
 
     fn wire_texture_source(&mut self) {
-        // Re-create texture provider with magic-path-aware FFI source
-        let gl_for_tex = self.gl.clone();
+        // Replace the backend texture source with the current project's
+        // magic-path-aware FFI source.
         let project_name = self
             .interpreter
             .config()
@@ -149,8 +156,8 @@ impl CoreRuntime {
             .cloned()
             .unwrap_or_default();
         let magic_paths_tex = Arc::clone(&self.magic_paths);
-        self.texture_provider =
-            GlTextureProvider::new(gl_for_tex).with_source(move |name: &str| -> Option<Vec<u8>> {
+        self.gpu
+            .replace_asset_source(Box::new(move |name: &str| -> Option<Vec<u8>> {
                 let resolved = magic_path::resolve_path(&magic_paths_tex, name);
                 for try_path in [format!("{resolved}.png"), resolved.clone()] {
                     match crate::ffi::request_asset(&try_path) {
@@ -166,7 +173,7 @@ impl CoreRuntime {
                 }
                 crate::core_debug!("[{project_name}] TEX MISS: {name} → {resolved}");
                 None
-            });
+            }));
     }
 
     fn wire_event_callback(&mut self) {
@@ -248,12 +255,16 @@ impl CoreRuntime {
     }
 
     fn register_builtin_textures(&mut self) {
+        let mut desc = TextureDesc::sampled_rgba8(2, 2);
+        desc.usage |= TextureUsage::CPU_READABLE;
+        let black = [0, 0, 0, 255].repeat(4);
+        let white = [255, 255, 255, 255].repeat(4);
         let _ = self
-            .texture_provider
-            .upload_rgba(":bg/black", 2, 2, &[0, 0, 0, 255].repeat(4));
-        let _ =
-            self.texture_provider
-                .upload_rgba(":bg/white", 2, 2, &[255, 255, 255, 255].repeat(4));
+            .gpu
+            .create_texture(":bg/black", desc, TextureData::Rgba8(&black));
+        let _ = self
+            .gpu
+            .create_texture(":bg/white", desc, TextureData::Rgba8(&white));
     }
 
     fn seed_savepath_and_sysload(&mut self) {
@@ -392,10 +403,11 @@ mod tests {
     #[cfg(all(target_os = "macos", feature = "gl-backend"))]
     #[test]
     fn exec_skip_status_is_visible_within_one_runtime_tick() {
-        use crate::backend::gl::platform::GfxBackend;
+        use crate::backend::BackendSelection;
         use asb_interpreter::Value;
 
-        let Ok(mut runtime) = CoreRuntime::create(8, 8, GfxBackend::Cgl) else {
+        let Ok(mut runtime) = CoreRuntime::create(8, 8, BackendSelection::from_legacy_int(0))
+        else {
             // Headless CGL availability depends on the test session.
             return;
         };
@@ -438,10 +450,11 @@ mod tests {
     #[test]
     fn reset_restarts_boot_without_replacing_lua_runtime() {
         use crate::Project;
-        use crate::backend::gl::platform::GfxBackend;
+        use crate::backend::BackendSelection;
         use asb_interpreter::Value;
 
-        let Ok(mut runtime) = CoreRuntime::create(8, 8, GfxBackend::Cgl) else {
+        let Ok(mut runtime) = CoreRuntime::create(8, 8, BackendSelection::from_legacy_int(0))
+        else {
             // Headless CGL availability depends on the test session. The
             // same behavior is covered on target builds with a GL context.
             return;

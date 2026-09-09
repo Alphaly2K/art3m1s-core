@@ -11,14 +11,20 @@ use crate::compositor::reduce::Compositor;
 use crate::compositor::scene::Scene;
 pub mod draw;
 pub mod hlsl;
+pub mod post_process;
 pub mod shader;
 pub mod transition;
 
 pub use draw::{
-    BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, DrawMesh, LayerDrawSource, Renderer,
-    ShaderEffect, ShaderGroup, StencilMetadata, TextureId, TextureInfo, TextureProvider,
+    BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, DrawMesh, LayerDrawSource,
+    ShaderEffect, ShaderGroup, StencilMetadata, TextureId, TextureInfo, TextureOrigin,
+    TextureProvider,
 };
-pub use shader::{BuiltinShaderManager, ShaderManager, ShaderProfile, ShaderProgramSource};
+pub use post_process::{
+    PostProcessContext, PostProcessPass, PostProcessPipeline, RenderDimensions,
+    RenderQualityPreset, SceneTarget, UpscaleConfig, UpscaleMode,
+};
+pub use shader::{ALPHA_MASK_SHADER, GROUP_COMPOSITE_SHADER, RULE_TRANS_SHADER, SPRITE_SHADER};
 
 /// Stateless rendering pipeline view over a [`Compositor`].
 pub struct RenderPipeline<'a> {
@@ -28,12 +34,6 @@ pub struct RenderPipeline<'a> {
 impl<'a> RenderPipeline<'a> {
     pub fn new(compositor: &'a Compositor) -> Self {
         Self { compositor }
-    }
-
-    /// Builds the final draw list and submits it to the backend.
-    pub fn render(&self, renderer: &mut dyn Renderer, provider: &mut dyn TextureProvider) {
-        let frame = self.build_composited(provider);
-        renderer.render(&frame);
     }
 
     /// Builds the final draw list including transition overlays.
@@ -97,6 +97,7 @@ impl<'a> RenderPipeline<'a> {
         pixels: &[u8],
         width: u32,
         height: u32,
+        draw_size: TextureInfo,
         provider: &mut dyn TextureProvider,
     ) {
         transition::capture_texture(
@@ -105,16 +106,25 @@ impl<'a> RenderPipeline<'a> {
             pixels,
             width,
             height,
+            draw_size,
             provider,
         );
     }
 
-    pub fn capture_trans_gpu_texture(&self, texture: TextureId, info: TextureInfo) {
+    pub fn capture_trans_gpu_texture(
+        &self,
+        texture: TextureId,
+        info: TextureInfo,
+        draw_size: TextureInfo,
+        origin: TextureOrigin,
+    ) {
         transition::capture_gpu_texture(
             &self.compositor.trans_state,
             self.compositor.clock_ms,
             texture,
             info,
+            draw_size,
+            origin,
         );
     }
 

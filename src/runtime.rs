@@ -1,17 +1,17 @@
-//! Core runtime — wires together GL context, compositor, interpreter,
+//! Core runtime — wires together a GPU backend, compositor, interpreter,
 //! text rendering and input handling into a single frame-oriented API
 //! that the Flutter frontend calls from its game loop.
 
 use crate::audio::AudioBackend;
-use crate::backend::gl::platform::{self, GfxBackend};
-use crate::backend::gl::{GlRenderer, GlTextureProvider, ShaderProfile};
+use crate::backend::{BackendInfo, BackendSelection, GpuBackend, NativeSurface};
 use crate::compositor::Compositor;
+use crate::render_pipeline::post_process::{
+    PostProcessPass, PostProcessPipeline, RenderDimensions, RenderQualityPreset, UpscaleConfig,
+};
 use crate::text::TextRenderer;
 use crate::video::VideoBackend;
 use asb_interpreter::event::WaitReason;
-use glow::HasContext;
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU8};
 use std::sync::{Arc, Mutex};
 
@@ -55,12 +55,7 @@ struct InlineEventFrame {
 }
 
 pub struct CoreRuntime {
-    gl: Rc<glow::Context>,
-    fbo: glow::Framebuffer,
-    fbo_tex: glow::Texture,
-
-    renderer: GlRenderer,
-    texture_provider: GlTextureProvider,
+    gpu: Box<dyn GpuBackend>,
     compositor: Compositor,
     /// 上一帧已经提交的逻辑场景。转场源帧需保留旧图像层，同时按当前状态
     /// 剔除刚隐藏或删除的消息文字，不能直接复用已经烘入文字的 FBO。
@@ -96,8 +91,6 @@ pub struct CoreRuntime {
 
     stage_w: u32,
     stage_h: u32,
-    external_surface_size: Option<(i32, i32)>,
-    external_surface_kind: Option<i32>,
     /// 上次下发的系统音量 (bgm, se)，用于跳过重复下发。
     last_system_volume: (Option<f32>, Option<f32>),
     /// 上次下发的 `s.segain.<id>`，键为 SE/Voice ID，值为 Artemis 0..1000 增益。
@@ -151,13 +144,7 @@ pub struct CoreRuntime {
     pending_message_text: Option<crate::save::MessageTextSnapshot>,
     /// 已读记录自上次持久化后是否有新增（syssave 时落 aread.dat）。
     read_dirty: bool,
-    /// Saved host GL context while libmpv is rendering directly into a
-    /// runtime-owned video-layer FBO. Leases are explicit and non-nestable.
-    video_gl_saved_context: Option<platform::SavedGlContext>,
     profiler: crate::profiler::RuntimeProfiler,
-    /// Must drop after every GL-owned field. Runtime destruction first makes
-    /// this context current, then renderer/provider drops can release objects.
-    gl_ctx: Box<dyn platform::GLPlatformContext>,
 }
 
 /// Restored click-wait that must not run until onLoad follow-up returns.
@@ -168,31 +155,93 @@ struct PendingLoadResume {
 }
 
 impl CoreRuntime {
-    /// Create a new runtime with the given rendering backend.
+    pub fn backend_info(&self) -> BackendInfo {
+        self.gpu.backend_info()
+    }
 
+    /// Returns the scene render size and presentation output size separately.
+    pub fn render_dimensions(&self) -> Option<RenderDimensions> {
+        self.gpu.render_dimensions()
+    }
+
+    /// Configures the linear post-process chain. Native GPU objects are kept
+    /// inside the selected backend and are recreated only when dimensions or
+    /// formats require it.
+    pub fn configure_post_process(&mut self, pipeline: PostProcessPipeline) -> Result<(), String> {
+        self.gpu.begin_access();
+        let result = self.gpu.configure_post_process(pipeline);
+        self.gpu.end_access();
+        result
+    }
+
+    /// Changes SceneColor scale relative to the native output while preserving
+    /// logical coordinates. Native backends never resolve below the game's
+    /// logical scene size.
+    pub fn set_render_scale(&mut self, scale: f32) -> Result<(), String> {
+        let mut pipeline = PostProcessPipeline::default();
+        pipeline.render_scale = scale;
+        self.configure_post_process(pipeline)
+    }
+
+    /// 应用统一渲染质量策略。MetalFX 不可用时由 backend 自动回退 native。
+    pub fn set_render_quality_preset(&mut self, preset: RenderQualityPreset) -> Result<(), String> {
+        let (scale, mode) = preset.policy();
+        let mut pipeline = PostProcessPipeline::default();
+        pipeline.render_scale = scale;
+        pipeline.passes[0] = PostProcessPass::Upscale(UpscaleConfig {
+            mode,
+            sharpness: 0.0,
+        });
+        self.configure_post_process(pipeline)
+    }
+
+    /// Registers or replaces a backend-neutral Artemis HLSL effect.
+    pub fn register_hlsl_shader(
+        &mut self,
+        name: &str,
+        source: &[u8],
+    ) -> Result<crate::render_pipeline::hlsl::ShaderId, crate::backend::ShaderCompileError> {
+        self.gpu.register_hlsl_shader(name, source)
+    }
+
+    /// Recompiles an effect while preserving its logical shader identity.
+    pub fn replace_hlsl_shader(
+        &mut self,
+        name: &str,
+        source: &[u8],
+    ) -> Result<crate::render_pipeline::hlsl::ShaderId, crate::backend::ShaderCompileError> {
+        self.gpu.replace_hlsl_shader(name, source)
+    }
+
+    pub fn reload_hlsl_shader(
+        &mut self,
+        name: &str,
+        source: &[u8],
+    ) -> Result<crate::render_pipeline::hlsl::ShaderId, crate::backend::ShaderCompileError> {
+        self.gpu.reload_hlsl_shader(name, source)
+    }
+
+    pub fn unregister_hlsl_shader(&mut self, name: &str) -> bool {
+        self.gpu.unregister_shader(name)
+    }
+
+    /// Create a new runtime with the given rendering backend.
     pub fn create(
         stage_width: u32,
         stage_height: u32,
-        backend: GfxBackend,
+        backend: impl Into<BackendSelection>,
     ) -> Result<Self, String> {
-        let (gl, gl_ctx, effective_backend) =
-            platform::create_offscreen_context(backend, stage_width, stage_height)?;
-
-        let (fbo, fbo_tex) = unsafe {
-            platform::create_fbo_target(&gl, stage_width as i32, stage_height as i32)
-                .map_err(|e| format!("FBO: {e}"))?
-        };
-
-        let profile = match effective_backend {
-            GfxBackend::Cgl => ShaderProfile::GlCore330,
-            GfxBackend::Angle(_) => ShaderProfile::Gles300,
-        };
-        let renderer = GlRenderer::new(gl.clone(), stage_width, stage_height, profile)
-            .map_err(|e| format!("创建渲染器失败: {e}"))?;
-
-        // load_project 时会带 magic-path 解析重建 provider；这里先建一个
-        // 无字节源的裸 provider 占位即可，不必接 FFI 源。
-        let texture_provider = GlTextureProvider::new(gl.clone());
+        let gpu = crate::backend::create_backend(backend.into(), stage_width, stage_height)?;
+        let backend_info = gpu.backend_info();
+        crate::core_info!(
+            "[GpuBackend] selected name={} kind={:?} stability={:?} capabilities=0x{:x} stage={}x{}",
+            backend_info.name,
+            backend_info.kind,
+            backend_info.stability,
+            backend_info.capabilities.bits(),
+            stage_width,
+            stage_height
+        );
 
         let compositor = Compositor::new();
         let audio = Box::new(crate::audio::AudioStateBackend::new()) as Box<dyn AudioBackend>;
@@ -210,11 +259,7 @@ impl CoreRuntime {
         let emote = Arc::new(Mutex::new(emote::EmoteState::default()));
 
         Ok(Self {
-            gl,
-            fbo,
-            fbo_tex,
-            renderer,
-            texture_provider,
+            gpu,
             compositor,
             last_rendered_scene: None,
             last_rendered_clock_ms: 0,
@@ -239,8 +284,6 @@ impl CoreRuntime {
             emote,
             stage_w: stage_width,
             stage_h: stage_height,
-            external_surface_size: None,
-            external_surface_kind: None,
             last_system_volume: (None, None),
             last_system_se_gain: HashMap::new(),
             wait_reason: None,
@@ -272,9 +315,7 @@ impl CoreRuntime {
             pending_load_resume: None,
             pending_message_text: None,
             read_dirty: false,
-            video_gl_saved_context: None,
             profiler: crate::profiler::RuntimeProfiler::new(),
-            gl_ctx,
         })
     }
 
@@ -310,10 +351,8 @@ impl CoreRuntime {
         }
 
         let mut profile = self.begin_profile_frame();
-        // 抢占当前线程的 GL 上下文前，先保存宿主（Flutter）的上下文；
-        // 渲染完后必须 restore，否则宿主后续的 GL 调用全打到我们的离屏 FBO，
-        // 宿主窗口就黑了。
-        let saved_ctx = self.gl_ctx.bind_save();
+        // The backend preserves any host graphics state before runtime work.
+        self.gpu.begin_access();
 
         self.advance_logic(delta_ms, &mut profile);
         let written = if self.render_current_frame(&mut profile).is_some() {
@@ -329,84 +368,43 @@ impl CoreRuntime {
         self.frame_visual_dirty = false;
         self.clear_input_edges();
 
-        // 渲染完毕，把 GL 上下文还给宿主。
-        self.gl_ctx.restore(saved_ctx);
+        // Restore the host graphics state after backend work.
+        self.gpu.collect_retired_resources();
+        self.gpu.end_access();
         self.finish_profile_frame(&mut profile);
 
         written
     }
 
-    /// Configures a host-owned platform texture as the presentation target.
-    pub fn set_external_surface(
-        &mut self,
-        kind: i32,
-        handle: *mut std::ffi::c_void,
-        width: u32,
-        height: u32,
-    ) -> Result<(), String> {
-        let width = i32::try_from(width).map_err(|_| "external width overflow")?;
-        let height = i32::try_from(height).map_err(|_| "external height overflow")?;
-        let saved_ctx = self.gl_ctx.bind_save();
-        self.external_surface_size = None;
-        self.external_surface_kind = None;
-        let result = self
-            .gl_ctx
-            .set_external_surface(kind, handle, width, height);
+    /// Configures a host-owned output surface as the presentation target.
+    pub fn set_native_surface(&mut self, surface: NativeSurface) -> Result<(), String> {
+        self.gpu.begin_access();
+        let result = self.gpu.set_native_surface(surface);
         if result.is_ok() {
             // A newly attached or recreated host surface has no previous frame.
             self.last_submitted_frame = None;
-            self.external_surface_size = Some((width, height));
-            self.external_surface_kind = Some(kind);
         }
-        self.gl_ctx.restore(saved_ctx);
+        self.gpu.end_access();
         result
     }
 
-    pub fn clear_external_surface(&mut self) {
-        let saved_ctx = self.gl_ctx.bind_save();
-        self.gl_ctx.clear_external_surface();
-        self.external_surface_size = None;
-        self.external_surface_kind = None;
-        self.gl_ctx.restore(saved_ctx);
+    pub fn clear_native_surface(&mut self) {
+        self.gpu.begin_access();
+        self.gpu.clear_native_surface();
+        self.gpu.end_access();
     }
 
     /// Advances logic and presents a changed frame through the host texture.
     /// Returns `Ok(false)` when no visual update was necessary.
     pub fn advance_and_present(&mut self, delta_ms: u64) -> Result<bool, String> {
         let mut profile = self.begin_profile_frame();
-        let saved_ctx = self.gl_ctx.bind_save();
+        self.gpu.begin_access();
         self.advance_logic(delta_ms, &mut profile);
         let repaint = self.render_current_frame(&mut profile);
         let result = if let Some(repaint) = repaint {
             (|| {
-                let (width, height) = self
-                    .external_surface_size
-                    .ok_or_else(|| "external surface is not configured".to_string())?;
-                let top_left_memory = matches!(self.external_surface_kind, Some(2 | 3));
-                // Android ANativeWindow rotates through a BufferQueue. Without
-                // EGL_EXT_buffer_age, untouched pixels in the next back buffer
-                // are not guaranteed to contain the previous frame. Keep the
-                // internal FBO damage-aware, but copy its complete final image
-                // to Android window surfaces. IOSurface is single-buffered and
-                // can safely retain untouched regions.
-                let present_damage = if self.external_surface_kind == Some(1) {
-                    None
-                } else {
-                    repaint.damage()
-                };
                 let present_started = profile.mark();
-                self.gl_ctx.bind_external_surface()?;
-                if let Err(error) = self.renderer.present_texture(
-                    self.fbo_tex,
-                    width,
-                    height,
-                    present_damage,
-                    top_left_memory,
-                ) {
-                    let _ = self.gl_ctx.restore_internal_surface();
-                    return Err(error);
-                }
-                self.gl_ctx.present_external_surface()?;
+                self.gpu.present(repaint.damage())?;
                 profile.present_ns = crate::profiler::FrameProfile::elapsed(present_started);
                 Ok(true)
             })()
@@ -417,7 +415,8 @@ impl CoreRuntime {
             self.frame_visual_dirty = false;
         }
         self.clear_input_edges();
-        self.gl_ctx.restore(saved_ctx);
+        self.gpu.collect_retired_resources();
+        self.gpu.end_access();
         self.finish_profile_frame(&mut profile);
         result
     }
@@ -428,10 +427,11 @@ impl CoreRuntime {
     /// readback whose pixels cannot be displayed yet.
     pub fn advance_without_render(&mut self, delta_ms: u64) {
         let mut profile = self.begin_profile_frame();
-        let saved_ctx = self.gl_ctx.bind_save();
+        self.gpu.begin_access();
         self.advance_logic(delta_ms, &mut profile);
         self.clear_input_edges();
-        self.gl_ctx.restore(saved_ctx);
+        self.gpu.collect_retired_resources();
+        self.gpu.end_access();
         self.finish_profile_frame(&mut profile);
     }
 
@@ -522,8 +522,7 @@ impl CoreRuntime {
     }
 
     pub fn set_profiler_enabled(&self, enabled: bool) {
-        self.renderer.set_profile_enabled(enabled);
-        self.texture_provider.set_profile_enabled(enabled);
+        self.gpu.set_profile_enabled(enabled);
         self.emote.lock().unwrap().set_profile_enabled(enabled);
         self.profiler.set_enabled(enabled);
     }
@@ -548,21 +547,22 @@ impl CoreRuntime {
         profile.host_ffi_calls = io.calls;
         profile.host_ffi_ns = io.elapsed_ns;
         profile.host_ffi_bytes = io.bytes;
-        let uploads = self.texture_provider.take_profile_uploads();
-        profile.texture_upload_ns = uploads.elapsed_ns;
-        profile.uploaded_bytes = uploads.bytes;
-        profile.video_upload_ns = uploads.video_elapsed_ns;
-        profile.video_uploaded_bytes = uploads.video_bytes;
-        profile.video_uploaded_frames = uploads.video_frames;
-        let render = self.renderer.take_profile_stats();
-        profile.draw_calls = render.draw_calls;
-        profile.vertices = render.vertices;
-        profile.texture_binds = render.texture_binds;
-        profile.dynamic_mesh_uploaded_bytes = render.dynamic_mesh_uploaded_bytes;
-        let (texture_count, gpu_bytes, cpu_bytes) = self.texture_provider.profile_memory();
-        profile.texture_count = texture_count as u64;
-        profile.texture_gpu_bytes = gpu_bytes;
-        profile.texture_cpu_bytes = cpu_bytes;
+        let gpu = self.gpu.take_profile_stats();
+        profile.texture_upload_ns = gpu.texture_upload_ns;
+        profile.uploaded_bytes = gpu.uploaded_bytes;
+        profile.video_upload_ns = gpu.video_upload_ns;
+        profile.video_uploaded_bytes = gpu.video_uploaded_bytes;
+        profile.video_uploaded_frames = gpu.video_uploaded_frames;
+        profile.draw_calls = gpu.draw_calls;
+        profile.vertices = gpu.vertices;
+        profile.texture_binds = gpu.texture_binds;
+        profile.dynamic_mesh_uploaded_bytes = gpu.dynamic_mesh_uploaded_bytes;
+        profile.texture_count = gpu.texture_count;
+        profile.texture_gpu_bytes = gpu.texture_gpu_bytes;
+        profile.texture_cpu_bytes = gpu.texture_cpu_bytes;
+        profile.upscale_enabled = gpu.upscale_enabled;
+        profile.upscale_cpu_encode_ns = gpu.upscale_cpu_encode_ns;
+        profile.upscale_gpu_ns = gpu.upscale_gpu_ns;
         let emote = self.emote.lock().unwrap();
         let (emote_layers, emote_source_bytes) = emote.profile_memory();
         let emote_stats = emote.take_profile_stats();
@@ -636,14 +636,6 @@ impl CoreRuntime {
 
 impl Drop for CoreRuntime {
     fn drop(&mut self) {
-        if self.gl_ctx.make_current() {
-            unsafe {
-                self.gl.delete_framebuffer(self.fbo);
-                self.gl.delete_texture(self.fbo_tex);
-            }
-        } else {
-            crate::core_warn!("[CoreRuntime] GL context unavailable during destruction");
-        }
         text::clear_process_snapshots();
         media::clear_sound_info_snapshot();
         callbacks::clear_surface_cache();
@@ -692,11 +684,9 @@ mod tests {
     #[cfg(all(target_os = "macos", feature = "gl-backend"))]
     use super::CoreRuntime;
     #[cfg(all(target_os = "macos", feature = "gl-backend"))]
-    use crate::backend::gl::platform::GfxBackend;
+    use crate::backend::{BackendSelection, FrameTarget};
     #[cfg(all(target_os = "macos", feature = "gl-backend"))]
     use asb_interpreter::event::{Event, LayerEvent};
-    #[cfg(all(target_os = "macos", feature = "gl-backend"))]
-    use glow::HasContext;
     #[cfg(all(target_os = "macos", feature = "gl-backend"))]
     use std::collections::HashMap;
 
@@ -787,7 +777,8 @@ mod tests {
     #[cfg(all(target_os = "macos", feature = "gl-backend"))]
     #[test]
     fn static_runtime_emits_first_frame_then_skips_identical_frame() {
-        let Ok(mut runtime) = CoreRuntime::create(8, 8, GfxBackend::Cgl) else {
+        let Ok(mut runtime) = CoreRuntime::create(8, 8, BackendSelection::from_legacy_int(0))
+        else {
             // Headless CGL availability varies with the macOS login/session
             // state. Target builds still cover this code when no context can
             // be created in the test process.
@@ -817,7 +808,8 @@ mod tests {
     #[cfg(all(target_os = "macos", feature = "gl-backend"))]
     #[test]
     fn damage_render_matches_a_forced_full_redraw() {
-        let Ok(mut runtime) = CoreRuntime::create(64, 64, GfxBackend::Cgl) else {
+        let Ok(mut runtime) = CoreRuntime::create(64, 64, BackendSelection::from_legacy_int(0))
+        else {
             return;
         };
         runtime
@@ -863,7 +855,8 @@ mod tests {
     #[cfg(all(target_os = "macos", feature = "gl-backend"))]
     #[test]
     fn damage_visualization_is_transient_and_cleans_to_the_scene() {
-        let Ok(mut runtime) = CoreRuntime::create(32, 32, GfxBackend::Cgl) else {
+        let Ok(mut runtime) = CoreRuntime::create(32, 32, BackendSelection::from_legacy_int(0))
+        else {
             return;
         };
         runtime
@@ -891,33 +884,24 @@ mod tests {
             initial.len()
         );
         let frame = runtime.last_submitted_frame.clone().unwrap();
-        unsafe {
-            runtime
-                .gl
-                .bind_framebuffer(glow::FRAMEBUFFER, Some(runtime.fbo));
-        }
-        crate::render_pipeline::draw::Renderer::render(&mut runtime.renderer, &frame);
+        runtime.gpu.begin_frame(FrameTarget::Main).unwrap();
+        runtime.gpu.render(&frame);
         runtime
-            .renderer
+            .gpu
             .render_damage_visualized(&frame, [4.0, 4.0, 12.0, 12.0]);
+        runtime.gpu.end_frame();
         let mut flashed = vec![0; runtime.pixel_buffer_size()];
         runtime.read_current_frame_into(&mut flashed);
 
-        unsafe {
-            runtime
-                .gl
-                .bind_framebuffer(glow::FRAMEBUFFER, Some(runtime.fbo));
-        }
-        assert!(runtime.renderer.clear_damage_overlay(&frame).is_some());
+        runtime.gpu.begin_frame(FrameTarget::Main).unwrap();
+        assert!(runtime.gpu.clear_damage_overlay(&frame).is_some());
+        runtime.gpu.end_frame();
         let mut cleaned = vec![0; runtime.pixel_buffer_size()];
         runtime.read_current_frame_into(&mut cleaned);
 
-        unsafe {
-            runtime
-                .gl
-                .bind_framebuffer(glow::FRAMEBUFFER, Some(runtime.fbo));
-        }
-        crate::render_pipeline::draw::Renderer::render(&mut runtime.renderer, &frame);
+        runtime.gpu.begin_frame(FrameTarget::Main).unwrap();
+        runtime.gpu.render(&frame);
+        runtime.gpu.end_frame();
         let mut full = vec![0; runtime.pixel_buffer_size()];
         runtime.read_current_frame_into(&mut full);
 
@@ -929,6 +913,6 @@ mod tests {
             .count();
         assert!(changed_pixels > 0);
         assert!(changed_pixels <= 12 * 12);
-        assert!(runtime.renderer.clear_damage_overlay(&frame).is_none());
+        assert!(runtime.gpu.clear_damage_overlay(&frame).is_none());
     }
 }

@@ -4,7 +4,13 @@
 //! filesystem operation inside the core is routed through those callbacks,
 //! keeping the core entirely free of direct I/O.
 use std::collections::HashMap;
-use std::ffi::{CString, c_char, c_int, c_longlong, c_void};
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+use std::ffi::c_void;
+use std::ffi::{CString, c_char, c_int, c_longlong};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -839,16 +845,30 @@ pub unsafe extern "C" fn art3m1s_delete_file(path: *const c_char) -> c_int {
 
 // ── Runtime control FFI ─────────────────────────────────────────
 
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 use crate::runtime::CoreRuntime;
 
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
+/// Creates a runtime using the platform default GPU backend.
+///
+/// Value 0 selects the production platform default: Metal on Darwin and
+/// experimental Vulkan on Android/Windows/Linux, with GL as initialization
+/// fallback when it is built. Explicit native overrides are 2=Vulkan and
+/// 3=Metal. Values 1/4/5/6 retain GL/ANGLE debug and A/B paths.
 pub unsafe extern "C" fn art3m1s_runtime_create(w: u32, h: u32, backend: i32) -> *mut CoreRuntime {
     // catch_unwind 防止 panic 跨越 extern "C" 边界导致 abort，
     // 同时把 panic message 打印到日志方便定位。
-    let b = crate::backend::gl::platform::GfxBackend::from_int(backend);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let b = crate::backend::BackendSelection::try_from_legacy_int(backend)?;
         CoreRuntime::create(w, h, b)
     }));
     match result {
@@ -867,11 +887,185 @@ pub unsafe extern "C" fn art3m1s_runtime_create(w: u32, h: u32, backend: i32) ->
     }
 }
 
+/// Returns the active backend kind: 1=Metal, 2=Vulkan, 3=GL reference.
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_backend_kind(rt: *const CoreRuntime) -> i32 {
+    if rt.is_null() {
+        return 0;
+    }
+    unsafe { &*rt }.backend_info().kind.ffi_value()
+}
+
+/// Returns the active stability level: 1=Production, 2=Experimental, 3=Legacy.
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_backend_stability(rt: *const CoreRuntime) -> i32 {
+    if rt.is_null() {
+        return 0;
+    }
+    unsafe { &*rt }.backend_info().stability.ffi_value()
+}
+
+/// Returns the `BackendCapabilities` stable bit mask for the active backend.
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_backend_capabilities(rt: *const CoreRuntime) -> u64 {
+    if rt.is_null() {
+        return 0;
+    }
+    unsafe { &*rt }.backend_info().capabilities.bits()
+}
+
+/// Registers an Artemis fragment HLSL shader. Returns its stable logical
+/// ShaderId, or -1 when the name/source is invalid or compilation fails.
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_register_hlsl_shader(
+    rt: *mut CoreRuntime,
+    name: *const c_char,
+    source: *const u8,
+    source_len: c_int,
+) -> i64 {
+    if rt.is_null() || name.is_null() || source.is_null() || source_len < 0 {
+        return -1;
+    }
+    let Some(name) = (unsafe { std::ffi::CStr::from_ptr(name).to_str().ok() }) else {
+        return -1;
+    };
+    let source = unsafe { std::slice::from_raw_parts(source, source_len as usize) };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        unsafe { &mut *rt }.register_hlsl_shader(name, source)
+    }));
+    match result {
+        Ok(Ok(id)) => id.opaque() as i64,
+        Ok(Err(error)) => {
+            core_error!("runtime HLSL shader registration failed: {error}");
+            -1
+        }
+        Err(panic_info) => {
+            core_error!(
+                "runtime HLSL shader registration panicked: {}",
+                panic_msg(&panic_info)
+            );
+            -1
+        }
+    }
+}
+
+/// Replaces an Artemis HLSL shader and invalidates native pipelines derived
+/// from the previous generation. Returns the stable ShaderId or -1.
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_replace_hlsl_shader(
+    rt: *mut CoreRuntime,
+    name: *const c_char,
+    source: *const u8,
+    source_len: c_int,
+) -> i64 {
+    if rt.is_null() || name.is_null() || source.is_null() || source_len < 0 {
+        return -1;
+    }
+    let Some(name) = (unsafe { std::ffi::CStr::from_ptr(name).to_str().ok() }) else {
+        return -1;
+    };
+    let source = unsafe { std::slice::from_raw_parts(source, source_len as usize) };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        unsafe { &mut *rt }.replace_hlsl_shader(name, source)
+    }));
+    match result {
+        Ok(Ok(id)) => id.opaque() as i64,
+        Ok(Err(error)) => {
+            core_error!("runtime HLSL shader replacement failed: {error}");
+            -1
+        }
+        Err(panic_info) => {
+            core_error!(
+                "runtime HLSL shader replacement panicked: {}",
+                panic_msg(&panic_info)
+            );
+            -1
+        }
+    }
+}
+
+/// Alias for replacement used by hosts that model shader updates as reloads.
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_reload_hlsl_shader(
+    rt: *mut CoreRuntime,
+    name: *const c_char,
+    source: *const u8,
+    source_len: c_int,
+) -> i64 {
+    unsafe { art3m1s_runtime_replace_hlsl_shader(rt, name, source, source_len) }
+}
+
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_unregister_hlsl_shader(
+    rt: *mut CoreRuntime,
+    name: *const c_char,
+) -> c_int {
+    if rt.is_null() || name.is_null() {
+        return 0;
+    }
+    let Some(name) = (unsafe { std::ffi::CStr::from_ptr(name).to_str().ok() }) else {
+        return 0;
+    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        (&mut *rt).unregister_hlsl_shader(name)
+    }));
+    match result {
+        Ok(true) => 1,
+        Ok(false) => 0,
+        Err(panic_info) => {
+            core_error!(
+                "runtime HLSL shader removal panicked: {}",
+                panic_msg(&panic_info)
+            );
+            0
+        }
+    }
+}
+
 /// Selects the E-Mote implementation before project loading.
 ///
 /// `backend=0` keeps the built-in renderer. `backend=1` enables the optional
 /// Eluna adapter when this core was built with `experimental-eluna`.
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_set_emote_backend(
     rt: *mut CoreRuntime,
@@ -904,7 +1098,11 @@ pub unsafe extern "C" fn art3m1s_runtime_set_emote_backend(
     }
 }
 
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_load_project(
     rt: *mut CoreRuntime,
@@ -937,7 +1135,11 @@ pub unsafe extern "C" fn art3m1s_runtime_load_project(
     }
 }
 
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_load_project_bytes(
     rt: *mut CoreRuntime,
@@ -1010,7 +1212,11 @@ pub unsafe extern "C" fn art3m1s_probe_caption(
     bytes.len() as c_int
 }
 
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_feed_mouse(rt: *mut CoreRuntime, x: i32, y: i32) {
     if rt.is_null() {
@@ -1020,7 +1226,11 @@ pub unsafe extern "C" fn art3m1s_runtime_feed_mouse(rt: *mut CoreRuntime, x: i32
     rt.feed_mouse(x, y);
 }
 
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_feed_click(rt: *mut CoreRuntime) {
     if rt.is_null() {
@@ -1030,7 +1240,11 @@ pub unsafe extern "C" fn art3m1s_runtime_feed_click(rt: *mut CoreRuntime) {
     rt.feed_click();
 }
 
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_feed_mouse_button(
     rt: *mut CoreRuntime,
@@ -1046,7 +1260,11 @@ pub unsafe extern "C" fn art3m1s_runtime_feed_mouse_button(
 
 /// 宿主投喂一次触摸事件：`id` 触摸点唯一标识（手指），`phase` 0=down/1=move/2=up，
 /// `x`/`y` 为舞台坐标。getTouchCount / getTouchPoint 从这些数据读真实触摸态。
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_feed_touch(
     rt: *mut CoreRuntime,
@@ -1062,7 +1280,11 @@ pub unsafe extern "C" fn art3m1s_runtime_feed_touch(
     rt.feed_touch(id, phase, x, y);
 }
 
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_feed_key(rt: *mut CoreRuntime, vk: u32, pressed: i32) {
     if rt.is_null() {
@@ -1076,7 +1298,11 @@ pub unsafe extern "C" fn art3m1s_runtime_feed_key(rt: *mut CoreRuntime, vk: u32,
     }
 }
 
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_submit_dialog(
     rt: *mut CoreRuntime,
@@ -1096,7 +1322,11 @@ pub unsafe extern "C" fn art3m1s_runtime_submit_dialog(
 }
 
 /// 回填宿主异步翻译结果。`text == NULL` 表示翻译失败，按原文继续。
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_submit_text_translation(
     rt: *mut CoreRuntime,
@@ -1115,7 +1345,11 @@ pub unsafe extern "C" fn art3m1s_runtime_submit_text_translation(
     i32::from(rt.submit_text_translation(serial, text))
 }
 
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_destroy(rt: *mut CoreRuntime) {
     if !rt.is_null() {
@@ -1125,7 +1359,11 @@ pub unsafe extern "C" fn art3m1s_runtime_destroy(rt: *mut CoreRuntime) {
     }
 }
 
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_stage_width(rt: *const CoreRuntime) -> u32 {
     if rt.is_null() {
@@ -1134,7 +1372,11 @@ pub unsafe extern "C" fn art3m1s_runtime_stage_width(rt: *const CoreRuntime) -> 
     unsafe { &*rt }.stage_width()
 }
 
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_stage_height(rt: *const CoreRuntime) -> u32 {
     if rt.is_null() {
@@ -1143,7 +1385,190 @@ pub unsafe extern "C" fn art3m1s_runtime_stage_height(rt: *const CoreRuntime) ->
     unsafe { &*rt }.stage_height()
 }
 
-#[cfg(feature = "gl-backend")]
+/// Scene render target width. This may be lower than the native output width.
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_render_width(rt: *const CoreRuntime) -> u32 {
+    if rt.is_null() {
+        return 0;
+    }
+    unsafe { &*rt }.render_dimensions().map_or_else(
+        || unsafe { &*rt }.stage_width(),
+        |dimensions| dimensions.render_size.width,
+    )
+}
+
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_render_height(rt: *const CoreRuntime) -> u32 {
+    if rt.is_null() {
+        return 0;
+    }
+    unsafe { &*rt }.render_dimensions().map_or_else(
+        || unsafe { &*rt }.stage_height(),
+        |dimensions| dimensions.render_size.height,
+    )
+}
+
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_output_width(rt: *const CoreRuntime) -> u32 {
+    if rt.is_null() {
+        return 0;
+    }
+    unsafe { &*rt }.render_dimensions().map_or_else(
+        || unsafe { &*rt }.stage_width(),
+        |dimensions| dimensions.output_size.width,
+    )
+}
+
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_output_height(rt: *const CoreRuntime) -> u32 {
+    if rt.is_null() {
+        return 0;
+    }
+    unsafe { &*rt }.render_dimensions().map_or_else(
+        || unsafe { &*rt }.stage_height(),
+        |dimensions| dimensions.output_size.height,
+    )
+}
+
+/// Configures the current upscale pass. `mode=0` selects linear sampling;
+/// `mode=1` requests a backend-native spatial upscaler when available.
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_set_upscale_mode(
+    rt: *mut CoreRuntime,
+    mode: c_int,
+    sharpness: f32,
+) -> c_int {
+    if rt.is_null() {
+        return 0;
+    }
+    let mode = match mode {
+        0 => crate::render_pipeline::post_process::UpscaleMode::Linear,
+        1 => crate::render_pipeline::post_process::UpscaleMode::Spatial,
+        _ => return 0,
+    };
+    let mut pipeline = crate::render_pipeline::post_process::PostProcessPipeline::default();
+    pipeline.passes[0] = crate::render_pipeline::post_process::PostProcessPass::Upscale(
+        crate::render_pipeline::post_process::UpscaleConfig { mode, sharpness },
+    );
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        (&mut *rt).configure_post_process(pipeline)
+    })) {
+        Ok(Ok(())) => 1,
+        Ok(Err(error)) => {
+            core_warn!("post-process configuration rejected: {error}");
+            0
+        }
+        Err(panic_info) => {
+            core_error!(
+                "post-process configuration panicked: {}",
+                panic_msg(&panic_info)
+            );
+            0
+        }
+    }
+}
+
+/// Changes SceneColor scale relative to the native output. The value must be
+/// finite and in `[0.1, 1.0]`; native backends clamp the resolved render size
+/// to at least the logical game size.
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_set_render_scale(
+    rt: *mut CoreRuntime,
+    scale: f32,
+) -> c_int {
+    if rt.is_null() {
+        return 0;
+    }
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        (&mut *rt).set_render_scale(scale)
+    })) {
+        Ok(Ok(())) => 1,
+        Ok(Err(error)) => {
+            core_warn!("render scale configuration rejected: {error}");
+            0
+        }
+        Err(panic_info) => {
+            core_error!(
+                "render scale configuration panicked: {}",
+                panic_msg(&panic_info)
+            );
+            0
+        }
+    }
+}
+
+/// 设置统一渲染质量：0 Native，1 Quality，2 Balanced，3 Performance。
+/// MetalFX 不可用时返回成功并由 Metal backend 回退到 native。
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_set_render_quality_preset(
+    rt: *mut CoreRuntime,
+    preset: c_int,
+) -> c_int {
+    if rt.is_null() {
+        return 0;
+    }
+    let Some(preset) = crate::render_pipeline::post_process::RenderQualityPreset::from_ffi(preset)
+    else {
+        return 0;
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        (&mut *rt).set_render_quality_preset(preset)
+    })) {
+        Ok(Ok(())) => 1,
+        Ok(Err(error)) => {
+            core_warn!("render quality configuration rejected: {error}");
+            0
+        }
+        Err(panic_info) => {
+            core_error!(
+                "render quality configuration panicked: {}",
+                panic_msg(&panic_info)
+            );
+            0
+        }
+    }
+}
+
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_pixel_buffer_size(rt: *const CoreRuntime) -> u32 {
     if rt.is_null() {
@@ -1152,7 +1577,11 @@ pub unsafe extern "C" fn art3m1s_runtime_pixel_buffer_size(rt: *const CoreRuntim
     unsafe { &*rt }.pixel_buffer_size() as u32
 }
 
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_advance_and_render(
     rt: *mut CoreRuntime,
@@ -1188,7 +1617,11 @@ pub unsafe extern "C" fn art3m1s_runtime_advance_and_render(
 ///
 /// 宿主上一帧仍在异步解码时调用，避免阻塞显示链导致 `onEnterFrame`
 /// （包括 E-Mote 口型采样）漏帧。返回 1 表示成功，0 表示参数无效或 panic。
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_advance_without_render(
     rt: *mut CoreRuntime,
@@ -1215,8 +1648,12 @@ pub unsafe extern "C" fn art3m1s_runtime_advance_without_render(
 
 /// Attaches a host platform texture to the runtime.
 /// `kind`: 1 = Android ANativeWindow, 2 = Apple IOSurface,
-/// 3 = Apple MTLTexture imported through EGLImage.
-#[cfg(feature = "gl-backend")]
+/// 3 = Apple MTLTexture (legacy GL/ANGLE import), 4 = Apple CAMetalLayer.
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_set_external_surface(
     rt: *mut CoreRuntime,
@@ -1229,7 +1666,9 @@ pub unsafe extern "C" fn art3m1s_runtime_set_external_surface(
         return 0;
     }
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        unsafe { &mut *rt }.set_external_surface(kind, handle, width, height)
+        let surface =
+            crate::backend::NativeSurface::from_legacy_parts(kind, handle, width, height)?;
+        unsafe { &mut *rt }.set_native_surface(surface)
     }));
     match result {
         Ok(Ok(())) => 1,
@@ -1247,20 +1686,28 @@ pub unsafe extern "C" fn art3m1s_runtime_set_external_surface(
     }
 }
 
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_clear_external_surface(rt: *mut CoreRuntime) {
     if rt.is_null() {
         return;
     }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        unsafe { &mut *rt }.clear_external_surface();
+        unsafe { &mut *rt }.clear_native_surface();
     }));
 }
 
 /// Advances and presents through the configured host texture.
 /// Returns 1 for a newly presented frame, 0 for an unchanged frame, and -1 on error.
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_advance_and_present(
     rt: *mut CoreRuntime,
@@ -1291,7 +1738,11 @@ pub unsafe extern "C" fn art3m1s_runtime_advance_and_present(
 /// Enables the per-runtime asynchronous profiler. The render thread only
 /// records timestamps and performs a non-blocking queue send; aggregation is
 /// performed by a dedicated worker.
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_set_profiler_enabled(
     rt: *const CoreRuntime,
@@ -1305,7 +1756,11 @@ pub unsafe extern "C" fn art3m1s_runtime_set_profiler_enabled(
 /// Copies the latest profiler snapshot as UTF-8 JSON. With a null/zero buffer,
 /// returns the required byte count. A too-small buffer returns the negated
 /// required count, so hosts can retry without imposing a fixed ABI struct.
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_profiler_snapshot(
     rt: *const CoreRuntime,
@@ -1329,7 +1784,11 @@ pub unsafe extern "C" fn art3m1s_runtime_profiler_snapshot(
     required
 }
 
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_set_volume(
     rt: *mut CoreRuntime,
@@ -1346,7 +1805,11 @@ pub unsafe extern "C" fn art3m1s_runtime_set_volume(
     rt.set_volume(ty, value);
 }
 
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_notify_video_finished(
     rt: *mut CoreRuntime,
@@ -1366,7 +1829,11 @@ pub unsafe extern "C" fn art3m1s_runtime_notify_video_finished(
 
 /// libmpv OpenGL resolver callback. `ctx` must be the runtime pointer supplied
 /// as `mpv_opengl_init_params.get_proc_address_ctx` by the host.
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_video_gl_get_proc_address(
     ctx: *mut std::ffi::c_void,
@@ -1379,17 +1846,21 @@ pub unsafe extern "C" fn art3m1s_runtime_video_gl_get_proc_address(
         return std::ptr::null_mut();
     };
     let rt = unsafe { &*(ctx.cast::<CoreRuntime>()) };
-    rt.video_gl_proc_address(name).cast_mut()
+    rt.external_renderer_proc_address(name).cast_mut()
 }
 
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_video_gl_begin(rt: *mut CoreRuntime) -> c_int {
     if rt.is_null() {
         return 0;
     }
     let rt = unsafe { &mut *rt };
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rt.begin_video_gl_render())) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rt.begin_external_render())) {
         Ok(Ok(())) => 1,
         Ok(Err(error)) => {
             core_warn!("video GL begin failed: {error}");
@@ -1402,7 +1873,11 @@ pub unsafe extern "C" fn art3m1s_runtime_video_gl_begin(rt: *mut CoreRuntime) ->
     }
 }
 
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_video_gl_framebuffer(
     rt: *mut CoreRuntime,
@@ -1418,13 +1893,19 @@ pub unsafe extern "C" fn art3m1s_runtime_video_gl_framebuffer(
     };
     let rt = unsafe { &mut *rt };
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        rt.video_layer_gl_framebuffer(id, width, height)
+        rt.video_layer_external_render_target(id, width, height)
+            .ok()
+            .and_then(|handle| u32::try_from(handle).ok())
             .unwrap_or(0)
     }))
     .unwrap_or(0)
 }
 
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_video_gl_commit(
     rt: *mut CoreRuntime,
@@ -1438,12 +1919,16 @@ pub unsafe extern "C" fn art3m1s_runtime_video_gl_commit(
     };
     let rt = unsafe { &mut *rt };
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        rt.commit_video_layer_gl_frame(id)
+        rt.commit_video_layer_external_frame(id)
     }))
     .map_or(0, i32::from)
 }
 
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_video_gl_end(rt: *mut CoreRuntime) {
     if rt.is_null() {
@@ -1451,18 +1936,23 @@ pub unsafe extern "C" fn art3m1s_runtime_video_gl_end(rt: *mut CoreRuntime) {
     }
     let rt = unsafe { &mut *rt };
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        rt.end_video_gl_render();
+        rt.end_external_render();
     }));
 }
 
 /// Upload one RGBA8 frame for a currently playing video layer.
 ///
 /// This call is synchronous. `rgba` is borrowed only for the duration of the
-/// call and is passed directly to GL without an intermediate CPU-side copy.
+/// call and is passed directly to the active GPU backend without an intermediate
+/// CPU-side copy.
 /// The host must serialize this with other calls using the same runtime.
 ///
 /// Returns 1 on success and 0 for invalid arguments, a stale layer, or failure.
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_upload_video_layer_frame(
     rt: *mut CoreRuntime,
@@ -1508,7 +1998,11 @@ pub unsafe extern "C" fn art3m1s_runtime_upload_video_layer_frame(
     }
 }
 
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_notify_sound_finished(
     rt: *mut CoreRuntime,
@@ -1526,7 +2020,11 @@ pub unsafe extern "C" fn art3m1s_runtime_notify_sound_finished(
     rt.notify_sound_finished(id);
 }
 
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_is_exit_requested(rt: *const CoreRuntime) -> i32 {
     if rt.is_null() {
@@ -1538,7 +2036,11 @@ pub unsafe extern "C" fn art3m1s_runtime_is_exit_requested(rt: *const CoreRuntim
 
 /// 宿主生命周期通知：state 0=引擎退出前、1=切到后台、2=回到前台。
 /// [autosave allow=1] 时核心在退出/切后台时自动保存。
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_notify_lifecycle(rt: *mut CoreRuntime, state: c_int) {
     if rt.is_null() {
@@ -1558,7 +2060,11 @@ pub unsafe extern "C" fn art3m1s_runtime_notify_lifecycle(rt: *mut CoreRuntime, 
 
 /// 宿主窗口按钮按下（setonwindowbutton，仅 Windows）：
 /// button 0=关闭(×) / 1=最大化 / 2=最小化。
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_notify_window_button(rt: *mut CoreRuntime, button: c_int) {
     if rt.is_null() {
@@ -1570,7 +2076,11 @@ pub unsafe extern "C" fn art3m1s_runtime_notify_window_button(rt: *mut CoreRunti
 
 /// 宿主屏幕方向变化（setondirchg，仅 iOS）：
 /// direction 0=纵向 / 1=横向Home右 / 2=倒置纵向 / 3=横向Home左。
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_notify_direction_changed(
     rt: *mut CoreRuntime,
@@ -1585,7 +2095,11 @@ pub unsafe extern "C" fn art3m1s_runtime_notify_direction_changed(
 
 /// 宿主回填 httpget/httppost 的结果：status_code 为 HTTP 响应码（失败传 0），
 /// body 为响应体字节（可为 NULL）。返回 1 表示有挂起请求被完成。
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_submit_http_result(
     rt: *mut CoreRuntime,
@@ -1620,7 +2134,11 @@ pub unsafe extern "C" fn art3m1s_runtime_submit_http_result(
 
 /// 宿主把字符串结果写回解释器变量（callnative/purchase 的结果回注通道，
 /// 支持 `result.title` 等子键路径）。
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_set_string_variable(
     rt: *mut CoreRuntime,
@@ -1644,7 +2162,11 @@ pub unsafe extern "C" fn art3m1s_runtime_set_string_variable(
 /// "switch"/"ps4"。NULL 或空串清除覆盖，回到项目平台。对运行中的
 /// runtime 立即生效；移植版游戏把关键功能（如存档）开关在机种判断上时，
 /// 宿主用它在桌面环境伪装目标机种。
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_set_reported_os(rt: *mut CoreRuntime, os: *const c_char) {
     if rt.is_null() {

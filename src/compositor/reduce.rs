@@ -166,6 +166,23 @@ impl Compositor {
         self.scene.clone()
     }
 
+    /// Snapshot the scene together with active frame animations for save/load.
+    /// Store elapsed time rather than the runtime clock so snapshots survive a
+    /// process restart and are rebased by `restore_scene`.
+    pub fn scene_snapshot_with_animations(&self) -> Scene {
+        let mut scene = self.scene.clone();
+        scene.anime_states = self
+            .anime_states
+            .iter()
+            .map(|(id, state)| {
+                let mut state = state.clone();
+                state.start_ms = self.clock_ms.saturating_sub(state.start_ms);
+                (id.clone(), state)
+            })
+            .collect();
+        scene
+    }
+
     /// Refresh the CPU-only projection used by synchronous script queries.
     /// Render targets, transition captures and input callbacks are not copied.
     pub(crate) fn sync_query_scene_from(&mut self, other: &Self) {
@@ -195,7 +212,17 @@ impl Compositor {
     }
 
     pub fn restore_scene(&mut self, scene: Scene) {
+        self.anime_states = scene
+            .anime_states
+            .iter()
+            .map(|(id, state)| {
+                let mut state = state.clone();
+                state.start_ms = self.clock_ms.saturating_sub(state.start_ms);
+                (id.clone(), state)
+            })
+            .collect();
         self.scene.replace_with(scene);
+        self.scene.anime_states.clear();
         self.pending_tween_events.clear();
     }
 
@@ -661,77 +688,59 @@ impl Compositor {
                 extra_params,
             } => {
                 // disable/enable 只切换已有处理器，不能丢掉 init 时注册的
-                // key/function 等参数。HENPRI 会在 enable 时省略 key，依赖引擎
-                // 恢复原处理器。
+                // key/function 等参数。组 ID 的状态操作作用于整棵子树；NekoMiko
+                // 用 btnstat(parent) 在选择退场动画期间禁止子按钮清掉选中项。
+                if matches!(mode, "reset" | "disable" | "enable") {
+                    let subtree = self.scene.subtree_ids(id);
+                    let mut found = false;
+                    for layer_id in subtree {
+                        let Some(layer) = self.scene.get_mut(&layer_id) else {
+                            continue;
+                        };
+                        match mode {
+                            "reset" => found |= layer.event_handlers.remove(event_type).is_some(),
+                            "disable" | "enable" => {
+                                if let Some(existing) = layer.event_handlers.get_mut(event_type) {
+                                    existing.enabled = mode == "enable";
+                                    found = true;
+                                }
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                    if mode != "enable" || found {
+                        return;
+                    }
+                }
+
                 self.scene.ensure(id);
                 if let Some(layer) = self.scene.get_mut(id) {
-                    match mode {
-                        "reset" => {
-                            layer.event_handlers.remove(event_type);
-                        }
-                        "disable" => {
-                            if let Some(existing) = layer.event_handlers.get_mut(event_type) {
-                                existing.enabled = false;
-                            }
-                        }
-                        "enable" => {
-                            if let Some(existing) = layer.event_handlers.get_mut(event_type) {
-                                existing.enabled = true;
-                            } else {
-                                let filter_params = complete_event_filter_params(
-                                    extra_params,
-                                    &[
-                                        ("id", Some(id)),
-                                        ("type", Some(event_type)),
-                                        ("mode", Some(mode)),
-                                        ("file", file),
-                                        ("label", label),
-                                        ("handler", handler),
-                                    ],
-                                    &[("call", call), ("penetration", penetration)],
-                                );
-                                layer.event_handlers.insert(
-                                    event_type.to_string(),
-                                    LayerEventHandler {
-                                        enabled: true,
-                                        handler: handler.map(str::to_string),
-                                        file: file.map(str::to_string),
-                                        label: label.map(str::to_string),
-                                        call,
-                                        penetration,
-                                        params: extra_params.clone(),
-                                        filter_params,
-                                    },
-                                );
-                            }
-                        }
-                        _ => {
-                            let filter_params = complete_event_filter_params(
-                                extra_params,
-                                &[
-                                    ("id", Some(id)),
-                                    ("type", Some(event_type)),
-                                    ("mode", Some(mode)),
-                                    ("file", file),
-                                    ("label", label),
-                                    ("handler", handler),
-                                ],
-                                &[("call", call), ("penetration", penetration)],
-                            );
-                            layer.event_handlers.insert(
-                                event_type.to_string(),
-                                LayerEventHandler {
-                                    enabled: true,
-                                    handler: handler.map(str::to_string),
-                                    file: file.map(str::to_string),
-                                    label: label.map(str::to_string),
-                                    call,
-                                    penetration,
-                                    params: extra_params.clone(),
-                                    filter_params,
-                                },
-                            );
-                        }
+                    if !matches!(mode, "reset" | "disable") {
+                        let filter_params = complete_event_filter_params(
+                            extra_params,
+                            &[
+                                ("id", Some(id)),
+                                ("type", Some(event_type)),
+                                ("mode", Some(mode)),
+                                ("file", file),
+                                ("label", label),
+                                ("handler", handler),
+                            ],
+                            &[("call", call), ("penetration", penetration)],
+                        );
+                        layer.event_handlers.insert(
+                            event_type.to_string(),
+                            LayerEventHandler {
+                                enabled: true,
+                                handler: handler.map(str::to_string),
+                                file: file.map(str::to_string),
+                                label: label.map(str::to_string),
+                                call,
+                                penetration,
+                                params: extra_params.clone(),
+                                filter_params,
+                            },
+                        );
                     }
                 }
             }
@@ -1180,16 +1189,16 @@ mod tests {
     #[test]
     fn lyevent_disable_enable_preserves_registered_handler_params() {
         let mut c = Compositor::new();
-        c.apply_event(&create("slot", "slot_button"));
+        c.apply_event(&create("slot.button", "slot_button"));
         c.apply_event(&Event::Layer(LayerEvent::SetProperties {
-            id: "slot".into(),
+            id: "slot.button".into(),
             properties: HashMap::from([
                 ("width".into(), "100".into()),
                 ("height".into(), "100".into()),
             ]),
         }));
         c.apply_event(&Event::LayerEventHandler {
-            id: "slot".into(),
+            id: "slot.button".into(),
             event_type: "rollover".into(),
             mode: "init".into(),
             file: None,
@@ -1229,7 +1238,7 @@ mod tests {
             extra_params: HashMap::new(),
         });
 
-        let handler = &c.scene().get("slot").unwrap().event_handlers["rollover"];
+        let handler = &c.scene().get("slot.button").unwrap().event_handlers["rollover"];
         assert!(handler.enabled);
         assert_eq!(
             handler.params.get("key").map(String::as_str),
@@ -1241,7 +1250,7 @@ mod tests {
         );
         assert_eq!(
             handler.filter_params.get("id").map(String::as_str),
-            Some("slot")
+            Some("slot.button")
         );
         assert_eq!(
             handler.filter_params.get("type").map(String::as_str),
@@ -1256,7 +1265,10 @@ mod tests {
             Some("btn_over")
         );
         let mut provider = MockProvider::new();
-        assert_eq!(c.hit_test(10.0, 10.0, &mut provider), Some("slot".into()));
+        assert_eq!(
+            c.hit_test(10.0, 10.0, &mut provider),
+            Some("slot.button".into())
+        );
     }
 
     #[test]
@@ -1497,6 +1509,37 @@ mod tests {
         c.advance(100);
         assert_eq!(c.scene().get("90").unwrap().file.as_deref(), Some("g1"));
         assert!(c.anime_states.is_empty());
+    }
+
+    #[test]
+    fn anime_state_survives_scene_snapshot_restore() {
+        let mut source = Compositor::new();
+        let anime = |mode: &str, file: Option<&str>, time: Option<u64>| Event::Anime {
+            id: "90".into(),
+            mode: mode.into(),
+            file: file.map(str::to_string),
+            mask: None,
+            time,
+            loop_count: Some(-1),
+            props: HashMap::new(),
+        };
+        source.apply_event(&anime("init", Some("g0"), None));
+        source.apply_event(&anime("add", Some("g1"), Some(100)));
+        source.apply_event(&anime("end", None, Some(200)));
+        source.advance(75);
+
+        let snapshot = source.scene_snapshot_with_animations();
+        let mut restored = Compositor::new();
+        restored.restore_scene(
+            serde_json::from_value(serde_json::to_value(snapshot).unwrap()).unwrap(),
+        );
+        restored.advance(100);
+
+        assert_eq!(
+            restored.scene().get("90").unwrap().file.as_deref(),
+            Some("g1")
+        );
+        assert!(restored.anime_states.contains_key("90"));
     }
 
     fn set_tween(id: &str, param: &str, from: &str, to: &str, time: u64) -> Event {

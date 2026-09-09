@@ -18,7 +18,20 @@ pub struct TextureInfo {
     pub height: u32,
 }
 
-/// Resolves logical resource names to backend textures.
+/// Texel origin used when a backend-owned capture is sampled as a DrawList
+/// texture. This avoids baking GL row orientation into the render pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextureOrigin {
+    TopLeft,
+    BottomLeft,
+}
+
+/// Draw-list construction view of the active GPU backend.
+///
+/// Production code implements this on the same object as `GpuBackend`; it is
+/// not a second resource owner. Keeping the narrow view lets compositor, text,
+/// and hit-test code run against lightweight CPU mocks without learning frame
+/// submission or native-surface concepts.
 pub trait TextureProvider {
     fn resolve(&mut self, name: &str) -> Option<(TextureId, TextureInfo)>;
 
@@ -84,7 +97,9 @@ pub trait TextureProvider {
         false
     }
 
-    /// Retains only the named resources. Implementations may no-op.
+    /// Retains only the named resources. Removing a logical cache entry must
+    /// not force immediate physical destruction while an in-flight frame may
+    /// still reference its texture; explicit GPU backends may defer retirement.
     fn retain(&mut self, _names: &std::collections::HashSet<String>) {}
 
     /// 取一张 1x1 纯色纹理（`lyc` 缺省 file 的单色图层模式用）。
@@ -129,7 +144,7 @@ pub fn masked_texture_name(file: &str, mask: &str) -> String {
     format!("{file}\u{1f}mask\u{1f}{mask}")
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum BlendMode {
     #[default]
     Alpha,
@@ -412,9 +427,4 @@ fn command_center(command: &DrawCommand) -> glam::Vec2 {
 
 fn center_distance_squared(command: &DrawCommand, point: glam::Vec2) -> f32 {
     command_center(command).distance_squared(point)
-}
-
-/// Backend renderer: consumes one frame of draw commands.
-pub trait Renderer {
-    fn render(&mut self, frame: &DrawList);
 }

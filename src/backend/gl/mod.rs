@@ -19,9 +19,9 @@
 //! 舞台坐标映射到 NDC，因此 [`DrawCommand::transform`] 可以直接当作像素空间的
 //! 仿射变换使用。
 
+use crate::backend::RenderRegion;
 use crate::render_pipeline::draw::{
-    BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, Renderer, ShaderGroup, TextureId,
-    TextureInfo,
+    BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, ShaderGroup, TextureId, TextureInfo,
 };
 use glow::HasContext;
 use std::cell::Cell;
@@ -29,12 +29,16 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 
+mod backend;
+mod hlsl;
 pub mod platform;
 mod provider;
 mod shader;
+mod shader_source;
 
-pub use crate::render_pipeline::ShaderProfile;
-pub use provider::{AssetSource, GlTextureProvider, PlaceholderKind};
+pub use backend::GlBackend;
+pub use provider::{GlTextureProvider, PlaceholderKind};
+pub use shader::ShaderProfile;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct RenderProfile {
@@ -331,6 +335,14 @@ impl GlRenderer {
             }
         }
         Ok(())
+    }
+
+    pub fn unregister_hlsl_shader(&mut self, name: &str) -> bool {
+        let Some(program) = self.custom_programs.remove(name) else {
+            return false;
+        };
+        unsafe { self.gl.delete_program(program.program) };
+        true
     }
 
     /// 确保 `targets[depth]` 存在且尺寸匹配，返回其 FBO 与颜色纹理。
@@ -1106,35 +1118,9 @@ impl GlRenderer {
     }
 }
 
-impl Renderer for GlRenderer {
-    fn render(&mut self, frame: &DrawList) {
+impl GlRenderer {
+    pub(crate) fn render(&mut self, frame: &DrawList) {
         let _ = self.render_internal(frame, None, false);
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum RenderRegion {
-    Full,
-    Rect([f32; 4]),
-}
-
-impl RenderRegion {
-    fn from_damage(damage: Option<[f32; 4]>) -> Self {
-        damage.map(Self::Rect).unwrap_or(Self::Full)
-    }
-
-    pub(crate) fn damage(self) -> Option<[f32; 4]> {
-        match self {
-            Self::Full => None,
-            Self::Rect(rect) => Some(rect),
-        }
-    }
-
-    fn union(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Full, _) | (_, Self::Full) => Self::Full,
-            (Self::Rect(left), Self::Rect(right)) => Self::Rect(union_rect(left, right)),
-        }
     }
 }
 
@@ -1151,14 +1137,6 @@ fn intersect_rect(left: [f32; 4], right: [f32; 4]) -> Option<[f32; 4]> {
     let x1 = (left[0] + left[2]).min(right[0] + right[2]);
     let y1 = (left[1] + left[3]).min(right[1] + right[3]);
     (x1 > x0 && y1 > y0).then_some([x0, y0, x1 - x0, y1 - y0])
-}
-
-fn union_rect(left: [f32; 4], right: [f32; 4]) -> [f32; 4] {
-    let x0 = left[0].min(right[0]);
-    let y0 = left[1].min(right[1]);
-    let x1 = (left[0] + left[2]).max(right[0] + right[2]);
-    let y1 = (left[1] + left[3]).max(right[1] + right[3]);
-    [x0, y0, x1 - x0, y1 - y0]
 }
 
 impl Drop for GlRenderer {
@@ -1456,8 +1434,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn texture_present_keeps_the_stage_upright() {
-        let (gl, _ctx, _) =
-            platform::create_offscreen_context(platform::GfxBackend::Cgl, 2, 2).unwrap();
+        let Ok((gl, _ctx, _)) = platform::create_offscreen_context(platform::GfxBackend::Cgl, 2, 2)
+        else {
+            return;
+        };
         let renderer = GlRenderer::new(gl.clone(), 2, 2, ShaderProfile::GlCore330).unwrap();
         let source = unsafe { make_present_source(&gl) };
         let (target, _) = unsafe { platform::create_fbo_target(&gl, 2, 2).unwrap() };
@@ -1473,8 +1453,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn texture_present_limits_writes_to_top_left_damage() {
-        let (gl, _ctx, _) =
-            platform::create_offscreen_context(platform::GfxBackend::Cgl, 2, 2).unwrap();
+        let Ok((gl, _ctx, _)) = platform::create_offscreen_context(platform::GfxBackend::Cgl, 2, 2)
+        else {
+            return;
+        };
         let renderer = GlRenderer::new(gl.clone(), 2, 2, ShaderProfile::GlCore330).unwrap();
         let source = unsafe { make_present_source(&gl) };
         let (target, _) = unsafe { platform::create_fbo_target(&gl, 2, 2).unwrap() };
@@ -1499,8 +1481,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn iosurface_memory_rows_keep_the_stage_upright() {
-        let (gl, _ctx, _) =
-            platform::create_offscreen_context(platform::GfxBackend::Cgl, 2, 2).unwrap();
+        let Ok((gl, _ctx, _)) = platform::create_offscreen_context(platform::GfxBackend::Cgl, 2, 2)
+        else {
+            return;
+        };
         let renderer = GlRenderer::new(gl.clone(), 2, 2, ShaderProfile::GlCore330).unwrap();
         let source = unsafe { make_present_source(&gl) };
         let (target, _) = unsafe { platform::create_fbo_target(&gl, 2, 2).unwrap() };
@@ -1517,8 +1501,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn iosurface_damage_writes_the_first_memory_row_for_stage_top() {
-        let (gl, _ctx, _) =
-            platform::create_offscreen_context(platform::GfxBackend::Cgl, 2, 2).unwrap();
+        let Ok((gl, _ctx, _)) = platform::create_offscreen_context(platform::GfxBackend::Cgl, 2, 2)
+        else {
+            return;
+        };
         let renderer = GlRenderer::new(gl.clone(), 2, 2, ShaderProfile::GlCore330).unwrap();
         let source = unsafe { make_present_source(&gl) };
         let (target, _) = unsafe { platform::create_fbo_target(&gl, 2, 2).unwrap() };

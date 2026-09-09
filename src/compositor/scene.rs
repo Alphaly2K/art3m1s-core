@@ -147,6 +147,10 @@ pub struct Scene {
     /// 变换/不透明度/可见性作用于整棵场景树。
     #[serde(default)]
     root_props: LayerProps,
+    /// Active [anime] playback state. Save snapshots store elapsed time in
+    /// `start_ms`; the compositor rebases it to its current clock on restore.
+    #[serde(default)]
+    pub(crate) anime_states: HashMap<String, crate::compositor::anim::AnimeState>,
 }
 
 impl Scene {
@@ -339,6 +343,16 @@ impl Scene {
                     if let Some(reference) = layer.props.custom.get(slot) {
                         collect_texture_reference(self, reference, &mut files);
                     }
+                }
+            }
+        }
+        for state in self.anime_states.values() {
+            for frame in &state.frames {
+                if !frame.file.is_empty() {
+                    files.insert(frame.file.clone());
+                }
+                if let Some(mask) = &frame.mask {
+                    files.insert(mask.clone());
                 }
             }
         }

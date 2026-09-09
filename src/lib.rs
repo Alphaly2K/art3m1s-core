@@ -1,8 +1,8 @@
 //! Core project bootstrap for the Artemis visual novel engine rewrite.
 //!
 //! This crate intentionally keeps the first layer thin: it wires an unpacked
-//! Artemis project directory to `asb-interpreter`, while later renderer code can
-//! consume interpreter events and map them to ANGLE-backed drawing commands.
+//! Artemis project directory to `asb-interpreter`, while renderer code consumes
+//! interpreter events through a graphics-API-neutral GPU backend boundary.
 
 use asb_interpreter::{Interpreter, InterpreterConfig};
 use std::collections::HashMap;
@@ -21,10 +21,18 @@ pub mod host_media;
     all(target_os = "macos", target_arch = "aarch64")
 ))]
 mod mobile_astc;
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 pub mod profiler;
 pub mod render_pipeline;
-#[cfg(feature = "gl-backend")]
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
 pub mod runtime;
 pub mod save;
 pub mod text;
@@ -349,6 +357,42 @@ impl Project {
 /// 文件加载复用 [`Project::create_interpreter`] 装好的 FFI 文件加载器，故宿主须在调用前
 /// 把文件供给（目录/pfs）指向该游戏。任何失败（system.ini 非法、boot 读不到、boot 在
 /// 发 caption 前就阻塞/跑完/出错）都返回 `None`，调用方回退到手动/目录名。
+fn caption_probe_blocks_progress(event: &asb_interpreter::Event) -> bool {
+    use asb_interpreter::{Event, WaitReason};
+    match event {
+        Event::ShowDialog { .. }
+        | Event::YesNo { .. }
+        | Event::Exit
+        | Event::GoTitle
+        | Event::Reset
+        | Event::ScenarioText { .. }
+        | Event::Text { .. } => true,
+        // [wt]/[wait time=…] 是加载序列里的让帧，探测需要越过它们才能到达
+        // [caption]。[stop]/[@]/按键等待则是真正的阻塞点，继续 Continue 会把
+        // `[stop]` 后的 `[jump label="top"]` 空转成导入卡死。
+        Event::Wait { reason } => matches!(
+            reason,
+            WaitReason::Stop { .. } | WaitReason::KeyWait { .. } | WaitReason::Generic
+        ),
+        _ => false,
+    }
+}
+
+fn caption_probe_on_event(
+    event: asb_interpreter::Event,
+    caption: &std::sync::Mutex<Option<String>>,
+) -> asb_interpreter::CallbackResult {
+    use asb_interpreter::{CallbackResult, Event};
+    match event {
+        Event::Caption { data } => {
+            *caption.lock().unwrap() = Some(data);
+            CallbackResult::Pause
+        }
+        event if caption_probe_blocks_progress(&event) => CallbackResult::Pause,
+        _ => CallbackResult::Continue,
+    }
+}
+
 pub fn probe_caption_from_bytes(ini_content: &[u8], platform: &str) -> Option<String> {
     use std::sync::{Arc, Mutex};
 
@@ -357,18 +401,11 @@ pub fn probe_caption_from_bytes(ini_content: &[u8], platform: &str) -> Option<St
 
     let caption: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let caption_cb = Arc::clone(&caption);
-    interpreter.set_callback(move |event| {
-        if let asb_interpreter::Event::Caption { data } = event {
-            *caption_cb.lock().unwrap() = Some(data.clone());
-            // 拿到即停，避免继续跑无谓的 boot。
-            return asb_interpreter::CallbackResult::Pause;
-        }
-        // 忽略其它一切事件，继续跑直到 caption 或首个阻塞/结束。
-        asb_interpreter::CallbackResult::Continue
-    });
+    interpreter.set_callback(move |event| caption_probe_on_event(event, &caption_cb));
 
     project.start_boot(&mut interpreter).ok()?;
-    // run() 执行到 Wait / Completed / Pause。caption 若在首个阻塞前发出即被捕获。
+    // run()/step 会把 Continue 的 Wait 直接跳过。探测只越过加载让帧，在
+    // [stop]/对话框/文本等真正阻塞点停下。
     let _ = interpreter.run();
     caption.lock().unwrap().take()
 }
@@ -607,9 +644,15 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    fn caption_probe_callback(
+        caption: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    ) -> impl FnMut(asb_interpreter::Event) -> asb_interpreter::CallbackResult + use<> {
+        let caption = std::sync::Arc::clone(caption);
+        move |event| caption_probe_on_event(event, &caption)
+    }
+
     #[test]
     fn caption_capture_mechanism_grabs_caption_before_stop() {
-        use asb_interpreter::{CallbackResult, Event};
         use std::sync::{Arc, Mutex};
 
         // 复现 probe_caption_from_bytes 的核心机制：一段带 [caption] 的脚本，用捕获
@@ -619,17 +662,58 @@ mod tests {
             .load_script("boot", "*top\n[caption data=\"探测标题\"]\n[stop]\n")
             .unwrap();
         let caption: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let cb = Arc::clone(&caption);
-        interp.set_callback(move |event| {
-            if let Event::Caption { data } = event {
-                *cb.lock().unwrap() = Some(data.clone());
-                return CallbackResult::Pause;
-            }
-            CallbackResult::Continue
-        });
+        interp.set_callback(caption_probe_callback(&caption));
         interp.start("boot", "top").unwrap();
         let _ = interp.run();
         assert_eq!(caption.lock().unwrap().as_deref(), Some("探测标题"));
+    }
+
+    #[test]
+    fn caption_probe_continues_past_yield_wait_to_caption() {
+        use std::sync::{Arc, Mutex};
+
+        let mut interp = Interpreter::new(InterpreterConfig::default());
+        interp
+            .load_script(
+                "boot",
+                "*top\n[wt]\n[caption data=\"加载后标题\"]\n[stop]\n",
+            )
+            .unwrap();
+        let caption: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        interp.set_callback(caption_probe_callback(&caption));
+        interp.start("boot", "top").unwrap();
+        let _ = interp.run();
+        assert_eq!(caption.lock().unwrap().as_deref(), Some("加载后标题"));
+    }
+
+    #[test]
+    fn caption_probe_stops_at_stop_before_later_caption() {
+        use std::sync::{Arc, Mutex};
+
+        let mut interp = Interpreter::new(InterpreterConfig::default());
+        interp
+            .load_script("boot", "*top\n[stop]\n[caption data=\"不该执行\"]\n")
+            .unwrap();
+        let caption: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        interp.set_callback(caption_probe_callback(&caption));
+        interp.start("boot", "top").unwrap();
+        let _ = interp.run();
+        assert_eq!(caption.lock().unwrap().as_deref(), None);
+    }
+
+    #[test]
+    fn caption_probe_stops_at_stop_instead_of_jumping_forever() {
+        use std::sync::{Arc, Mutex};
+
+        let mut interp = Interpreter::new(InterpreterConfig::default());
+        interp
+            .load_script("boot", "*top\n[stop]\n[jump label=\"top\"]\n")
+            .unwrap();
+        let caption: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        interp.set_callback(caption_probe_callback(&caption));
+        interp.start("boot", "top").unwrap();
+        let _ = interp.run();
+        assert_eq!(caption.lock().unwrap().as_deref(), None);
     }
 
     #[test]

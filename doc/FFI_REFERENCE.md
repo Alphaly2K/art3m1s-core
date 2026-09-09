@@ -193,6 +193,27 @@ CGL 仅 macOS 可用。ANGLE 创建失败会尝试 CGL，因此 create 成功不
 当前无实际后端查询 ABI，以日志与外部表面调用结果判断。Windows/方向通知是否被脚本使用
 取决于游戏注册的处理器，Host 只报告真实事件。
 
+`art3m1s_runtime_render_width/height` 返回 SceneColor 的 render size，
+`art3m1s_runtime_output_width/height` 返回 native presentation output size。
+两者可以不同；post-process 设计见 [`doc/POST_PROCESS.md`](POST_PROCESS.md)。
+`art3m1s_runtime_set_upscale_mode(rt, mode, sharpness)` 中 `mode=0` 为线性采样，
+`mode=1` 请求 backend-native spatial upscaler；`sharpness` 必须在 `[0,1]`。
+`art3m1s_runtime_set_render_scale(rt, scale)` 设置 SceneColor 相对 native output 的物理比例，
+范围为 `[0.1,1.0]`，且 native backend 的实际 render size 不会低于游戏逻辑舞台尺寸。
+只有 Host 提供的 output surface 大于逻辑舞台时，MetalFX 才可能执行真正的超分。
+
+## Runtime HLSL shader
+
+`art3m1s_runtime_register_hlsl_shader(rt,name,source,len)`、
+`art3m1s_runtime_replace_hlsl_shader(rt,name,source,len)`（别名
+`art3m1s_runtime_reload_hlsl_shader`）接收 UTF-8 shader
+名称及 Artemis fragment HLSL 字节串，成功返回正数逻辑 `ShaderId`，失败返回 `-1`。
+替换保留该 ID 并作废 Metal/Vulkan native pipeline cache。删除使用
+`art3m1s_runtime_unregister_hlsl_shader(rt,name)`，成功返回 1，未找到或参数无效返回 0。
+编译失败不会跨越 C ABI 抛出 panic；错误会包含 shader 名称、阶段、编译器消息及可用的
+行/列位置并写入 Core 日志。ABI 详情和支持的 HLSL 子集见
+[`doc/SHADER_ABI.md`](SHADER_ABI.md)。
+
 ## UI 命令协议
 
 回调是 `kind` 字符串 + JSON 对象；字段名区分大小写。`null` 和缺失不要随意变成空字符串

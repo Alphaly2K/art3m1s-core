@@ -226,7 +226,7 @@ impl CoreRuntime {
             };
             // 不再在这里调 advance_reveal(0)——那会把 reveal_index 重置为 1。
             // advance_reveal 只在 advance_text 里每帧调一次。
-            let commands = renderer.build_text_commands(&mut self.texture_provider);
+            let commands = renderer.build_text_commands(&mut *self.gpu);
             let layered = commands
                 .keys()
                 .map(|id| {
@@ -617,7 +617,9 @@ impl CoreRuntime {
                 }
                 for tag in &layer.tags {
                     match tag {
-                        crate::text::BacklogTag::Text(content) => renderer.push_text(content, false),
+                        crate::text::BacklogTag::Text(content) => {
+                            renderer.push_text(content, false)
+                        }
                         crate::text::BacklogTag::LineBreak => renderer.push_line_break(),
                         crate::text::BacklogTag::Font(settings) => {
                             renderer.apply_font_settings(settings)

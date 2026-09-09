@@ -211,6 +211,14 @@ fn memsave_entries(variables: &VariableStore) -> Vec<(String, asb_interpreter::V
         .collect()
 }
 
+fn serialized_story_entries(variables: &VariableStore) -> Vec<(String, asb_interpreter::Value)> {
+    variables
+        .iter_local()
+        .filter(|(name, _)| matches!(name.as_str(), "scr" | "log" | "btn"))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
 impl From<&CallFrame> for CallFrameSnapshot {
     fn from(f: &CallFrame) -> Self {
         Self {
@@ -264,11 +272,17 @@ impl SaveData {
     /// onSave 可能已经把 `memsave.*` 写进当前局部变量；这些键要保留。
     pub fn with_gameplay_checkpoint(mut self, checkpoint: &GameplayCheckpoint) -> Self {
         let memsave = memsave_entries(&self.variables);
+        // The interpreter PC is commonly parked in system/script.asb while
+        // the actual scenario position lives in Lua's serialized `scr` table.
+        // Menu saves run onSave immediately before this method, so retain the
+        // freshly serialized story state instead of reverting it to the older
+        // checkpoint snapshot.
+        let story = serialized_story_entries(&self.variables);
         self.current_script.clone_from(&checkpoint.script);
         self.current_line = checkpoint.line;
         self.call_stack.clone_from(&checkpoint.call_stack);
         self.variables = checkpoint.variables.clone();
-        for (name, value) in memsave {
+        for (name, value) in memsave.into_iter().chain(story) {
             self.variables.set(&name, value);
         }
         self.waiting_for_input = Some(checkpoint.waiting_for_input);
@@ -435,6 +449,55 @@ mod tests {
         assert_eq!(data.variables.get("status").unwrap().as_string(), "adv");
         assert_eq!(data.variables.get("memsave.size").unwrap().as_string(), "1");
         assert_eq!(data.waiting_for_input, Some(true));
+    }
+
+    #[test]
+    fn nested_menu_save_keeps_fresh_serialized_story_state() {
+        let checkpoint = wait_checkpoint();
+        let mut live = VariableStore::new();
+        live.set("scr", "latest-story-state".into());
+        live.set("log", "latest-backlog".into());
+        live.set("btn", "latest-button-state".into());
+        live.set("status", "save".into());
+        let data = SaveData {
+            version: SAVE_FORMAT_VERSION,
+            variables: live,
+            current_script: "dialog.iet".into(),
+            current_line: 459,
+            call_stack: vec![
+                CallFrameSnapshot {
+                    script: "main.iet".into(),
+                    return_line: 13,
+                },
+                CallFrameSnapshot {
+                    script: "story.txt".into(),
+                    return_line: 31,
+                },
+                CallFrameSnapshot {
+                    script: "macro.iet".into(),
+                    return_line: 1627,
+                },
+            ],
+            scene: None,
+            audio: None,
+            waiting_for_input: None,
+            message_text: None,
+        };
+
+        let data = data.with_gameplay_checkpoint(&checkpoint);
+        assert_eq!(
+            data.variables.get("scr"),
+            Some(&Value::from("latest-story-state"))
+        );
+        assert_eq!(
+            data.variables.get("log"),
+            Some(&Value::from("latest-backlog"))
+        );
+        assert_eq!(
+            data.variables.get("btn"),
+            Some(&Value::from("latest-button-state"))
+        );
+        assert_eq!(data.variables.get("status"), Some(&Value::from("adv")));
     }
 
     #[test]
