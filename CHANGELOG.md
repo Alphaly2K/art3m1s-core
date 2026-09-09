@@ -2,18 +2,24 @@
 
 本文档记录 `art3m1s-core` 的重要变更。
 
-## [0.4.0] - 2026-09-07
+## [0.4.0] - 2026-09-09
 
 ### 变更
 
 - 项目许可证由 AGPL-3.0 更换为 MPL-2.0（文件级 copyleft，兼容 App Store 分发；`crates/pf8` 保留上游 MIT）。
-- PFS 归档实现整体替换为基于 pf8 的新实现：条目哈希索引、分卷串联读取、 显式条目名编码与范围读取；移除 GPL 重写实现及其 git submodule。
+- PFS 归档实现整体替换为基于 pf8 的新实现：条目哈希索引、分卷串联读取、显式条目名编码与范围读取；移除 GPL 重写实现及其 git submodule。
+- 渲染路径收口为 backend-neutral GPU API：GL/ANGLE 作为参考后端，Apple 平台默认原生 Metal，Vulkan 仅作为实验后端。
 - 更新目前 E-Mote 后端实现，扩展了其对 PSB model variant 和私有 motion 语义的支持，修复了部分动画、口型、眨眼和 visibility/alpha 交互问题。
 
 ### 新增
 
-- 宿主运行时覆盖字体接口（`art3m1s_set_font_override` /`art3m1s_clear_font_override`）：脚本自带字体缺译文字形时，由宿主提供 TTF/OTF 覆盖全部脚本字体的光栅化来源。
+- 原生 Metal 后端，经系统共享纹理直接提交给宿主；支持 MetalFX Spatial 超分，并在不支持的设备上回退到 native render。
+- 实验性原生 Vulkan 后端（含 Android）；当前不作为 Android 默认路径。
+- 后端无关的 post-process 管线：独立 SceneColor / output size，线性放大与空间超分配置。
+- 运行时 Artemis HLSL 子集注册与编译，供游戏自定义 shader 使用。
+- 宿主运行时覆盖字体接口（`art3m1s_set_font_override` / `art3m1s_clear_font_override`）：脚本自带字体缺译文字形时，由宿主提供 TTF/OTF 覆盖全部脚本字体的光栅化来源。
 - 新增实验性 E-Mote 后端 `crates/eluna`，可在宿主提供的 Lua 5.1/5.4/5.5/luau 环境中运行，支持部分未验证的 PSB model variant 和私有 motion 语义。
+- 脚本可见的 reported-OS 覆盖，供宿主为控制台门控逻辑指定上报机种。
 
 ### 修复
 
@@ -27,6 +33,17 @@
 - 修复 Lua 标签过滤器返回放行时吞掉同名宏的问题，使背景、事件 CG 和立绘宏可以继续执行；保留非零返回值拦截及过滤器替换命令的行为。
 - 启动时按项目字符编码读取可选的 `tag.ini`，支持分节编号参数表和带前缀的日文行标签，避免立绘命令被当成对白；参数表按解释器隔离，不串用其他游戏定义。
 - 图层信息查询包含同批尚未派发的图层事件；首次加载图片时按需读取文件头尺寸，避免立绘定位读到宽高 0 后被移出舞台。查询复用合成器规则，不触发额外绘制。
+- 导入用 headless caption 探测不再跳过 `[stop]` / 按键等待，避免 boot 脚本在 `[jump label="top"]` 上空转卡死；加载用的 `[wt]` 仍会越过以到达 `[caption]`。
+- 读档后保留恢复点的点击等待与消息页，不再被旧 UI 批次或错误行号覆盖；存档保留按钮状态、当前剧情序列化和 onLoad 前的持久 Lua 表。
+- 对齐 `[reset]`、`chgmsg` 栈、无 `$` 的 estimate、calllua 队列和 skip/ctrlskip 语义，减少设置回调与快进把人名/对白层搅在一起的问题。
+- 修复原生 Metal 在共享 Flutter 纹理上闪烁，以及部分 Vulkan 场景上下颠倒、Android 文本页 ticker 卡住的问题。
+
+### 已知边界
+
+- 原生 Vulkan 仍为实验后端：Android 默认继续使用 ANGLE / OpenGL ES。
+- MetalFX Spatial 需要 macOS 13+ / iOS 16+ 且 GPU 支持；不支持 Temporal、FSR 或帧生成。
+- HLSL 仍只兼容已验证游戏使用的 Artemis shader 子集。
+- E-Mote 对少量未验证的 PSB model variant 和私有 motion 语义仍可能不完整；Eluna 路径为实验性。
 
 ## [0.3.0] - 2026-09-01
 
