@@ -421,20 +421,23 @@ fn reflect(name: &str, spirv: &[u32]) -> Result<ShaderReflection, ShaderCompileE
         })?;
 
     let binding = |id| -> Result<(u32, u32), ShaderCompileError> {
-        let literal = |decoration| {
-            compiler
-                .decoration(id, decoration)
-                .ok()
-                .flatten()
+        let literal = |decoration| -> Result<u32, ShaderCompileError> {
+            let value = compiler.decoration(id, decoration).map_err(|error| {
+                ShaderCompileError::new(
+                    name,
+                    format!("resource decoration reflection failed: {error}"),
+                )
+            })?;
+            Ok(value
                 .and_then(|value| match value {
                     DecorationValue::Literal(value) => Some(value),
                     _ => None,
                 })
-                .unwrap_or(0)
+                .unwrap_or(0))
         };
         Ok((
-            literal(spirv::Decoration::DescriptorSet),
-            literal(spirv::Decoration::Binding),
+            literal(spirv::Decoration::DescriptorSet)?,
+            literal(spirv::Decoration::Binding)?,
         ))
     };
 
@@ -708,34 +711,67 @@ fn matching_brace(source: &str, open: usize) -> Option<usize> {
 }
 
 fn strip_comments(source: &str) -> String {
-    let mut out = String::with_capacity(source.len());
-    let mut chars = source.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '/' && chars.peek() == Some(&'/') {
-            chars.next();
-            for next in chars.by_ref() {
-                if next == '\n' {
-                    out.push('\n');
-                    break;
-                }
-                out.push(' ');
+    #[derive(Clone, Copy)]
+    enum State {
+        Code,
+        LineComment,
+        BlockComment,
+        Quoted(u8),
+    }
+
+    let bytes = source.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut state = State::Code;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let next = bytes.get(index + 1).copied();
+        match state {
+            State::Code if byte == b'/' && next == Some(b'/') => {
+                out[index] = b' ';
+                out[index + 1] = b' ';
+                state = State::LineComment;
+                index += 2;
             }
-        } else if ch == '/' && chars.peek() == Some(&'*') {
-            chars.next();
-            out.push_str("  ");
-            let mut previous = '\0';
-            for next in chars.by_ref() {
-                if previous == '*' && next == '/' {
-                    break;
-                }
-                out.push(if next == '\n' { '\n' } else { ' ' });
-                previous = next;
+            State::Code if byte == b'/' && next == Some(b'*') => {
+                out[index] = b' ';
+                out[index + 1] = b' ';
+                state = State::BlockComment;
+                index += 2;
             }
-        } else {
-            out.push(ch);
+            State::Code if byte == b'\'' || byte == b'"' => {
+                state = State::Quoted(byte);
+                index += 1;
+            }
+            State::LineComment => {
+                if byte == b'\n' {
+                    state = State::Code;
+                } else {
+                    out[index] = b' ';
+                }
+                index += 1;
+            }
+            State::BlockComment if byte == b'*' && next == Some(b'/') => {
+                out[index] = b' ';
+                out[index + 1] = b' ';
+                state = State::Code;
+                index += 2;
+            }
+            State::BlockComment => {
+                if byte != b'\n' {
+                    out[index] = b' ';
+                }
+                index += 1;
+            }
+            State::Quoted(_quote) if byte == b'\\' && next.is_some() => index += 2,
+            State::Quoted(quote) if byte == quote => {
+                state = State::Code;
+                index += 1;
+            }
+            State::Quoted(_) | State::Code => index += 1,
         }
     }
-    out
+    String::from_utf8(out).expect("comment masking preserves UTF-8 outside comments")
 }
 
 #[cfg(test)]
@@ -770,6 +806,16 @@ technique technique0 { }
         assert!(normalized.contains("#define samplerFore art3m1s_texture_fore"));
         assert!(normalized.contains("#define alpha art3m1s_opacity"));
         assert!(normalized.contains("float4 fore = tex2D(samplerFore, texCoord1);"));
+    }
+
+    #[test]
+    fn comment_masking_preserves_byte_offsets_and_quoted_slashes() {
+        let source =
+            "/* 中文注释 */\nconst char* url = \"https://example.invalid\";\nvoid ps() { }";
+        let stripped = strip_comments(source);
+        assert_eq!(stripped.len(), source.len());
+        assert_eq!(stripped.find("void ps"), source.find("void ps"));
+        assert!(stripped.contains("https://example.invalid"));
     }
 
     #[cfg(feature = "runtime-shader")]

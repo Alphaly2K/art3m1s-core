@@ -7,13 +7,14 @@ resources, and produces the backend artifact:
 
 ```text
 Artemis HLSL -> compatibility normalization -> canonical HLSL
-             -> DXC-compatible shader compiler -> SPIR-V + reflection
+             -> shaderc/glslang HLSL frontend -> SPIR-V + reflection
              -> Vulkan SPIR-V
              -> Metal SPIRV-Cross MSL
 ```
 
 The compatibility frontend still parses the legacy `ps()` shape. It is only a
-source compatibility layer; shaderc is the compiler used for native backends.
+source compatibility layer; shaderc/glslang, rather than DXC, is the compiler
+currently used for native backends.
 
 ## Canonical bindings
 
