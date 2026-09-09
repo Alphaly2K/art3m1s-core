@@ -65,8 +65,8 @@ version = "0.1.0-alpha.1"
 
 [[package]]
 name = "asb-decrypt"
-version = "0.1.0"
-source = "git+https://github.com/Alphaly2K/asb-decrypt#c553e95d3bfcd5463c5dbe217cb76e65616c3c1e"
+version = "1.1.0"
+source = "git+https://github.com/Alphaly2K/asb-decrypt#824663bd41388ee701ee10348a069005f4b72a1d"
 dependencies = [
  "encoding_rs",
 ]

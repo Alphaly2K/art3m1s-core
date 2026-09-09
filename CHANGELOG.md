@@ -7,6 +7,7 @@
 ### 变更
 
 - 项目许可证由 AGPL-3.0 更换为 MPL-2.0（文件级 copyleft，兼容 App Store 分发；`crates/pf8` 保留上游 MIT）。
+- 将 git 依赖 `asb-decrypt` 更新到 BSD-3-Clause 版本。
 - PFS 归档实现整体替换为基于 pf8 的新实现：条目哈希索引、分卷串联读取、显式条目名编码与范围读取；移除 GPL 重写实现及其 git submodule。
 - 渲染路径收口为 backend-neutral GPU API：GL/ANGLE 作为参考后端，Apple 平台默认原生 Metal，Vulkan 仅作为实验后端。
 - 更新目前 E-Mote 后端实现，扩展了其对 PSB model variant 和私有 motion 语义的支持，修复了部分动画、口型、眨眼和 visibility/alpha 交互问题。
