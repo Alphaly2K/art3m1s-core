@@ -1870,6 +1870,8 @@ pub unsafe extern "C" fn art3m1s_runtime_notify_video_finished(
     feature = "vulkan-backend"
 ))]
 #[unsafe(no_mangle)]
+/// Deprecated GL-only compatibility shim. Prefer `art3m1s_runtime_import_video_frame`
+/// or `art3m1s_runtime_upload_video_layer_frame`. Metal returns NULL.
 pub unsafe extern "C" fn art3m1s_runtime_video_gl_get_proc_address(
     ctx: *mut std::ffi::c_void,
     name: *const c_char,
@@ -1890,6 +1892,7 @@ pub unsafe extern "C" fn art3m1s_runtime_video_gl_get_proc_address(
     feature = "vulkan-backend"
 ))]
 #[unsafe(no_mangle)]
+/// Deprecated GL-only lease. Metal/Vulkan return 0 so hosts fall back to import/RGBA.
 pub unsafe extern "C" fn art3m1s_runtime_video_gl_begin(rt: *mut CoreRuntime) -> c_int {
     if rt.is_null() {
         return 0;
@@ -1914,6 +1917,7 @@ pub unsafe extern "C" fn art3m1s_runtime_video_gl_begin(rt: *mut CoreRuntime) ->
     feature = "vulkan-backend"
 ))]
 #[unsafe(no_mangle)]
+/// Deprecated: returns a GLuint FBO name on the GL backend, otherwise 0.
 pub unsafe extern "C" fn art3m1s_runtime_video_gl_framebuffer(
     rt: *mut CoreRuntime,
     id: *const c_char,
@@ -2031,6 +2035,246 @@ pub unsafe extern "C" fn art3m1s_runtime_upload_video_layer_frame(
             0
         }
     }
+}
+
+/// Preferred video import kind for the active backend.
+/// 0=CPU RGBA, 1=CVPixelBuffer, 2=MTLTexture, 3=IOSurface,
+/// 4=AHardwareBuffer, 5=OpenGL framebuffer (legacy).
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_video_import_kind(rt: *const CoreRuntime) -> i32 {
+    if rt.is_null() {
+        return 0;
+    }
+    unsafe { &*rt }.video_import_kind()
+}
+
+/// Import one decoded video frame as a compositor-sampled external texture.
+///
+/// `image_kind`: 0=CPU RGBA, 1=CVPixelBuffer, 2=MTLTexture, 3=IOSurface, 4=AHardwareBuffer.
+/// `ownership`: 0=Borrowed, 1=Imported, 2=Owned.
+/// `wait_kind`: 0=none, 1=MTLSharedEvent, 2=Vulkan semaphore. Reserved; 0 is the
+/// host-synchronized path.
+/// Returns 1 and writes an opaque `ExternalTextureHandle` when `out_texture` is
+/// non-null. Failure leaves the previous frame bound.
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_import_video_frame(
+    rt: *mut CoreRuntime,
+    id: *const c_char,
+    image_kind: i32,
+    native_handle: *mut c_void,
+    width: u32,
+    height: u32,
+    ownership: i32,
+    wait_kind: i32,
+    wait_handle: *mut c_void,
+    wait_value: u64,
+    rgba: *const u8,
+    rgba_len: usize,
+    out_texture: *mut u64,
+) -> c_int {
+    if rt.is_null() || id.is_null() || width == 0 || height == 0 {
+        return 0;
+    }
+    let Some(id) = (unsafe { std::ffi::CStr::from_ptr(id).to_str().ok() }) else {
+        return 0;
+    };
+    if id.is_empty() {
+        return 0;
+    }
+    let rgba = if rgba.is_null() {
+        None
+    } else {
+        Some(unsafe { std::slice::from_raw_parts(rgba, rgba_len) })
+    };
+    let image = match crate::backend::ExternalImage::from_ffi_parts(
+        image_kind,
+        native_handle,
+        width,
+        height,
+        ownership,
+        wait_kind,
+        wait_handle,
+        wait_value,
+        rgba,
+    ) {
+        Ok(image) => image,
+        Err(error) => {
+            core_warn!("import video frame rejected: {error}");
+            return 0;
+        }
+    };
+    let rt = unsafe { &mut *rt };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rt.import_video_layer_frame(id, image)
+    })) {
+        Ok(Ok(handle)) => {
+            if !out_texture.is_null() {
+                unsafe { *out_texture = handle.opaque() };
+            }
+            1
+        }
+        Ok(Err(error)) => {
+            core_warn!("import video frame failed: {error}");
+            0
+        }
+        Err(panic_info) => {
+            core_error!(
+                "art3m1s_runtime_import_video_frame panicked: {}",
+                panic_msg(&panic_info)
+            );
+            0
+        }
+    }
+}
+
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_release_video_frame(
+    rt: *mut CoreRuntime,
+    texture_handle: u64,
+) -> c_int {
+    if rt.is_null() || texture_handle == 0 {
+        return 0;
+    }
+    let rt = unsafe { &mut *rt };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rt.release_video_layer_frame(crate::backend::ExternalTextureHandle::from_opaque(
+            texture_handle,
+        ))
+    }))
+    .map_or(0, |released| i32::from(released))
+}
+
+/// Returns 1 when the producer may recycle the native object for this handle.
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_video_frame_consumed(
+    rt: *mut CoreRuntime,
+    surface_handle: u64,
+) -> c_int {
+    if rt.is_null() || surface_handle == 0 {
+        return 1;
+    }
+    let rt = unsafe { &mut *rt };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rt.video_layer_frame_consumed(crate::backend::VideoSurfaceHandle::from_opaque(
+            surface_handle,
+        ))
+    }))
+    .map_or(0, |consumed| i32::from(consumed))
+}
+
+/// Acquire a core-owned writable video surface. The returned handle is opaque
+/// and is not a GLuint. GL hosts that still need an FBO should keep using
+/// `video_gl_framebuffer`.
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_acquire_video_surface(
+    rt: *mut CoreRuntime,
+    id: *const c_char,
+    width: u32,
+    height: u32,
+    out_surface: *mut u64,
+) -> c_int {
+    if rt.is_null() || id.is_null() || out_surface.is_null() || width == 0 || height == 0 {
+        return 0;
+    }
+    let Some(id) = (unsafe { std::ffi::CStr::from_ptr(id).to_str().ok() }) else {
+        return 0;
+    };
+    let rt = unsafe { &mut *rt };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rt.acquire_video_layer_surface(id, width, height)
+    })) {
+        Ok(Ok(handle)) => {
+            unsafe { *out_surface = handle.opaque() };
+            1
+        }
+        Ok(Err(error)) => {
+            core_warn!("acquire video surface failed: {error}");
+            0
+        }
+        Err(panic_info) => {
+            core_error!(
+                "art3m1s_runtime_acquire_video_surface panicked: {}",
+                panic_msg(&panic_info)
+            );
+            0
+        }
+    }
+}
+
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_commit_video_surface(
+    rt: *mut CoreRuntime,
+    surface_handle: u64,
+) -> c_int {
+    if rt.is_null() || surface_handle == 0 {
+        return 0;
+    }
+    let rt = unsafe { &mut *rt };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rt.commit_video_layer_surface(crate::backend::VideoSurfaceHandle::from_opaque(
+            surface_handle,
+        ))
+    }))
+    .map_or(0, |ok| i32::from(ok))
+}
+
+/// Capture the current scene into an RGBA8 buffer without advancing the engine.
+/// This is the screenshot path and does not use video framebuffer ABI.
+/// Returns bytes written, or 0 on failure.
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_runtime_capture_screenshot(
+    rt: *mut CoreRuntime,
+    out_pixels: *mut u8,
+    out_capacity: u32,
+) -> u32 {
+    if rt.is_null() || out_pixels.is_null() {
+        return 0;
+    }
+    let rt = unsafe { &mut *rt };
+    let out_capacity = out_capacity as usize;
+    if out_capacity < rt.pixel_buffer_size() {
+        return 0;
+    }
+    let out_pixels = unsafe { std::slice::from_raw_parts_mut(out_pixels, out_capacity) };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rt.capture_screenshot_from_host(out_pixels)
+    }))
+    .unwrap_or(0) as u32
 }
 
 #[cfg(any(

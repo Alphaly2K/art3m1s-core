@@ -11,6 +11,7 @@ use crate::render_pipeline::post_process::{
 };
 use std::collections::HashSet;
 
+pub mod external;
 #[cfg(feature = "gl-backend")]
 pub mod gl;
 #[cfg(all(feature = "metal-backend", any(target_os = "macos", target_os = "ios")))]
@@ -23,6 +24,10 @@ pub mod types;
 pub mod vulkan;
 
 pub use crate::render_pipeline::hlsl::{ShaderCompileError, ShaderId, ShaderSource};
+pub use external::{
+    ExternalImage, ExternalImageKind, ExternalTextureHandle, FrameTargetHandle, GpuSyncKind,
+    GpuSyncToken, ResourceOwnership, VideoImportCapability, VideoSurfaceHandle,
+};
 pub use types::{
     BackendCapabilities, BackendInfo, BackendKind, BackendStability, Extent2D, FrameTarget,
     NativeSurface, NativeSurfaceKind, PipelineId, RenderTarget, RenderTargetDesc, RenderTargetId,
@@ -197,6 +202,53 @@ pub trait GpuBackend: TextureProvider {
     fn changed_texture_ids_since(&self, revision: u64) -> HashSet<TextureId>;
     fn evict_texture_prefix(&mut self, prefix: &str) -> usize;
     fn upload_video_rgba(&mut self, name: &str, width: u32, height: u32, rgba: &[u8]) -> bool;
+
+    /// Preferred and supported video import kinds. CPU RGBA is the portable fallback.
+    fn video_import_capability(&self) -> VideoImportCapability {
+        VideoImportCapability::cpu_only()
+    }
+    /// Imports a host image as a named sampled texture. On success the previous
+    /// texture for `name` stays bound until the new GPU objects exist, then it
+    /// is retired after in-flight work. Failure leaves the previous frame.
+    fn import_external_texture(
+        &mut self,
+        name: &str,
+        image: ExternalImage<'_>,
+    ) -> Result<ExternalTextureHandle, String> {
+        let _ = (name, image);
+        Err("external texture import is unsupported by this backend".into())
+    }
+    fn release_external_texture(&mut self, handle: ExternalTextureHandle) -> bool {
+        let _ = handle;
+        false
+    }
+    /// Creates or reuses a core-owned writable video surface for `name`.
+    fn acquire_video_surface(
+        &mut self,
+        name: &str,
+        extent: Extent2D,
+    ) -> Result<VideoSurfaceHandle, String> {
+        let _ = (name, extent);
+        Err("video surfaces are unsupported by this backend".into())
+    }
+    fn commit_video_surface(&mut self, handle: VideoSurfaceHandle) -> bool {
+        let _ = handle;
+        false
+    }
+    /// True when the producer may recycle the native object for this handle.
+    fn video_surface_consumed(&mut self, handle: VideoSurfaceHandle) -> bool {
+        let _ = handle;
+        true
+    }
+    /// Legacy GL FBO name for a video surface. Metal/Vulkan return None.
+    fn video_surface_gl_framebuffer(&self, handle: VideoSurfaceHandle) -> Option<u32> {
+        let _ = handle;
+        None
+    }
+    /// Screenshot readback of the main scene target. Never a video framebuffer.
+    fn capture_screenshot(&mut self, extent: Extent2D, out: &mut [u8]) -> Result<usize, String> {
+        self.readback(FrameTarget::Main, extent, out)
+    }
 
     fn set_native_surface(&mut self, surface: NativeSurface) -> Result<(), String>;
     fn clear_native_surface(&mut self);

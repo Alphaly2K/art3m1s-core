@@ -186,7 +186,8 @@ Core 不持有 Host 输出指针。异步图像解码/上传若还在读旧缓�
 |---|---|---|
 | `1` | Android `ANativeWindow*` | 不是 Java Surface 对象或 Flutter texture ID |
 | `2` | Apple `IOSurfaceRef` | 单平面 BGRA8；不是 `CVPixelBufferRef`，需取其 IOSurface |
-| `3` | Apple `MTLTexture` 对象指针 | ANGLE EGLImage 导入，需要匹配设备/格式及对应扩展 |
+| `3` | Apple `MTLTexture` 对象指针 | Metal 直接提交；GL/ANGLE 走 EGLImage 导入 |
+| `4` | Apple `CAMetalLayer` | MetalBackend 每帧取 drawable |
 
 需要支持对应扩展的 ANGLE；CGL 不支持此路径。设置返回 `1` 才启用，失败后解绑并降级。
 替换失败时旧绑定也可能已被清除。建议先用舞台同尺寸表面，再验证缩放、旋转和颜色。
@@ -241,9 +242,42 @@ ABI 不导出跨设备 fence 或释放回调；Host 必须按平台生产/消费
 - ID 是字符串，`"1.80"` 与 `"1.8"` 不等价。`resolved_file` 是解析后的逻辑资源路径，
   不一定是可交给系统播放器的本地文件；Host 仍需提供归档读取或资源流。
 
-### 图层视频优先直绘 FBO
+### 图层视频：Darwin zero-copy 优先
 
-外部 renderer（如 libmpv render API）在 Core 的 GL lease 中绘制：
+查询 `runtime_video_import_kind(rt)`。Darwin/Metal 生产路径为 `1`（CVPixelBuffer）：
+
+```text
+VideoToolbox / decoder
+  -> CVPixelBuffer (建议 32BGRA 或 biplanar 420)
+  -> art3m1s_runtime_import_video_frame(kind=1, ownership=Imported)
+  -> MetalBackend CVMetalTextureCache -> MTLTexture
+  -> compositor 作为普通图层纹理采样
+```
+
+禁止把已经在 GPU 上的帧做 GPU→CPU→GPU。CPU RGBA 上传只是 fallback。
+
+所有权：`Borrowed` 宿主保持对象直到 `video_frame_consumed`；`Imported` core retain，
+宿主可在 import 成功后丢掉自己的引用；`Owned` 宿主交出 retain。
+
+同步：
+
+1. decoder 写完（或带 `wait_kind=MTLSharedEvent`）后才 import。
+2. import 成功返回后，下一帧 `advance_and_present` 可以采样。
+3. 该 handle 的 `video_frame_consumed==1` 后，producer 才能把 native buffer 放回池里。
+   使用 2–3 个 CVPixelBuffer 的环形池。
+
+也可以 import `MTLTexture`（kind=2）或 `IOSurface`（kind=3）。失败返回 0 且保留上一帧。
+
+截图走 `capture_screenshot` / 脚本 `takess`，与 video handle 无关。
+
+### 图层视频：CPU RGBA fallback
+
+不支持零拷贝时用 `upload_video_layer_frame`：借用连续、左上原点 RGBA8，至少
+`width * height * 4` 字节，无 stride 参数。同步上传、不保留指针。
+
+### 图层视频：legacy GL FBO shim
+
+`video_gl_*` 已 deprecated，仅供仍使用 libmpv OpenGL render API 的 GL 后端：
 
 ```text
 if runtime_video_gl_begin(rt) == 1:
@@ -255,18 +289,8 @@ if runtime_video_gl_begin(rt) == 1:
         runtime_video_gl_end(rt)
 ```
 
-成功 begin 必须配对 end，不可嵌套。renderer 初始化/销毁若需要 current context，也在
-有效 lease 内完成。获取函数地址用 `runtime_video_gl_get_proc_address`，`ctx` 为
-runtime 指针；不能对 ANGLE FBO 使用系统 GL 函数，也不能跨 lease 缓存 FBO 为永久对象。
-lease 内不推进引擎或重入其他 GL 操作。
-
-仅新视频帧到来才绘制/commit；解码线程只通知 owner。Host 保留最新帧、丢弃过期帧，
-不追赶历史帧。用带上下标记的视频验证朝向。
-
-不支持直绘则用 `upload_video_layer_frame`：借用连续、左上原点 RGBA8，至少
-`width * height * 4` 字节，无 stride 参数。同步上传、不保留指针；省去中间 CPU 复制
-不等于没有 GPU 上传开销。帧尽量留在 native 内存，不经 Dart/其他 GC 堆反复复制。
-当前 C ABI 没有 NV12 双平面上传接口。
+Metal 上 begin/framebuffer 返回 0，宿主必须改走 import 或 RGBA。成功 begin 必须配对
+end，不可嵌套。不能跨 lease 把 GLuint FBO 缓存为永久对象。
 
 ## 8. 对话框、HTTP 与翻译
 

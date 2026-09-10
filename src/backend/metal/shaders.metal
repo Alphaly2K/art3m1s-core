@@ -161,3 +161,44 @@ fragment float4 rule_transition_fragment(
     color.a *= uniforms.alpha_progress_vague_opaque.x * keep;
     return color;
 }
+
+
+vertex RasterData fullscreen_vertex(uint vertex_id [[vertex_id]]) {
+    float2 ndc[4] = {
+        float2(-1.0, 1.0),
+        float2(1.0, 1.0),
+        float2(-1.0, -1.0),
+        float2(1.0, -1.0)
+    };
+    float2 uv[4] = {
+        float2(0.0, 0.0),
+        float2(1.0, 0.0),
+        float2(0.0, 1.0),
+        float2(1.0, 1.0)
+    };
+    RasterData out;
+    out.position = float4(ndc[vertex_id], 0.0, 1.0);
+    out.uv = uv[vertex_id];
+    out.model_position = uv[vertex_id];
+    return out;
+}
+
+fragment float4 yuv_convert_fragment(
+    RasterData in [[stage_in]],
+    texture2d<float> luma [[texture(0)]],
+    texture2d<float> chroma [[texture(1)]],
+    sampler linear_sampler [[sampler(0)]],
+    constant float4 &params [[buffer(0)]]) {
+    float y = luma.sample(linear_sampler, in.uv).r;
+    float2 cbcr = chroma.sample(linear_sampler, in.uv).rg;
+    if (params.x > 0.5) {
+        y = (y - 16.0 / 255.0) * (255.0 / 219.0);
+        cbcr = (cbcr - 16.0 / 255.0) * (255.0 / 224.0);
+    }
+    float cb = cbcr.x - 0.5;
+    float cr = cbcr.y - 0.5;
+    float r = y + 1.5748 * cr;
+    float g = y - 0.1873 * cb - 0.4681 * cr;
+    float b = y + 1.8556 * cb;
+    return float4(clamp(float3(r, g, b), 0.0, 1.0), 1.0);
+}

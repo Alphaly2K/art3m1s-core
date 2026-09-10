@@ -350,6 +350,97 @@ impl CoreRuntime {
         uploaded
     }
 
+    pub fn video_import_kind(&self) -> i32 {
+        self.gpu.video_import_capability().ffi_preferred()
+    }
+
+    pub fn import_video_layer_frame(
+        &mut self,
+        id: &str,
+        image: crate::backend::ExternalImage<'_>,
+    ) -> Result<crate::backend::ExternalTextureHandle, String> {
+        let is_playing = self
+            .video
+            .video_state()
+            .video_layers
+            .get(id)
+            .is_some_and(|channel| channel.playing);
+        if !is_playing {
+            return Err(format!("video layer is not playing: {id}"));
+        }
+        let texture_name = video_layer_texture_name(id);
+        self.gpu.begin_access();
+        let result = self.gpu.import_external_texture(&texture_name, image);
+        self.gpu.end_access();
+        result
+    }
+
+    pub fn release_video_layer_frame(
+        &mut self,
+        handle: crate::backend::ExternalTextureHandle,
+    ) -> bool {
+        self.gpu.begin_access();
+        let released = self.gpu.release_external_texture(handle);
+        self.gpu.end_access();
+        released
+    }
+
+    pub fn video_layer_frame_consumed(
+        &mut self,
+        handle: crate::backend::VideoSurfaceHandle,
+    ) -> bool {
+        self.gpu.begin_access();
+        let consumed = self.gpu.video_surface_consumed(handle);
+        self.gpu.end_access();
+        consumed
+    }
+
+    pub fn acquire_video_layer_surface(
+        &mut self,
+        id: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<crate::backend::VideoSurfaceHandle, String> {
+        let is_playing = self
+            .video
+            .video_state()
+            .video_layers
+            .get(id)
+            .is_some_and(|channel| channel.playing);
+        if !is_playing {
+            return Err(format!("video layer is not playing: {id}"));
+        }
+        let texture_name = video_layer_texture_name(id);
+        self.gpu.begin_access();
+        let result = self
+            .gpu
+            .acquire_video_surface(&texture_name, crate::backend::Extent2D::new(width, height));
+        self.gpu.end_access();
+        result
+    }
+
+    pub fn commit_video_layer_surface(
+        &mut self,
+        handle: crate::backend::VideoSurfaceHandle,
+    ) -> bool {
+        self.gpu.begin_access();
+        let committed = self.gpu.commit_video_surface(handle);
+        self.gpu.end_access();
+        committed
+    }
+
+    pub fn capture_screenshot_into(&mut self, out_pixels: &mut [u8]) -> usize {
+        self.read_current_frame_into(out_pixels)
+    }
+
+    /// Host screenshot capture. Independent of the video surface ABI.
+    pub fn capture_screenshot_from_host(&mut self, out_pixels: &mut [u8]) -> usize {
+        self.gpu.begin_access();
+        let written = self.read_current_frame_into(out_pixels);
+        self.gpu.end_access();
+        written
+    }
+
     /// Resolves entry points for the backend's optional external renderer API.
     pub fn external_renderer_proc_address(&self, name: &str) -> *const std::ffi::c_void {
         self.gpu.external_renderer_proc_address(name)
@@ -399,6 +490,9 @@ impl CoreRuntime {
         let texture_name = video_layer_texture_name(id);
         self.compositor
             .clear_layer_file_if_matches(id, &texture_name);
+        self.gpu.begin_access();
+        let _ = self.gpu.evict_texture_prefix(&texture_name);
+        self.gpu.end_access();
         self.sync_layer_info_all();
     }
 

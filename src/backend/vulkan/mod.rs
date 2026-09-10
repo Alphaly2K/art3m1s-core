@@ -1494,6 +1494,9 @@ impl TextureProvider for VulkanBackend {
         if let Some(&id) = self.names.get(name) {
             return self.textures.get(&id).map(|t| (id, t.info));
         }
+        if crate::video::is_video_layer_texture_name(name) {
+            return None;
+        }
         if let Some(src) = &self.source
             && let Some(x) = src(name)
             && let Some((w, h, p)) = decode_rgba(&x)
@@ -2110,8 +2113,58 @@ impl GpuBackend for VulkanBackend {
         }
         ids.len()
     }
-    fn upload_video_rgba(&mut self, _: &str, _: u32, _: u32, _: &[u8]) -> bool {
-        false
+    fn upload_video_rgba(&mut self, name: &str, width: u32, height: u32, rgba: &[u8]) -> bool {
+        let Some(expected) = Extent2D::new(width, height).rgba8_len() else {
+            return false;
+        };
+        if width == 0 || height == 0 || rgba.len() < expected {
+            return false;
+        }
+        self.insert_texture(
+            name,
+            TextureDesc::sampled_rgba8(width, height),
+            TextureData::Rgba8(&rgba[..expected]),
+            false,
+        )
+        .is_ok()
+    }
+
+    fn video_import_capability(&self) -> VideoImportCapability {
+        VideoImportCapability {
+            preferred: ExternalImageKind::CpuRgba,
+            cpu_rgba: true,
+            cv_pixel_buffer: false,
+            metal_texture: false,
+            io_surface: false,
+            ahardware_buffer: false,
+            opengl_framebuffer: false,
+        }
+    }
+
+    fn import_external_texture(
+        &mut self,
+        name: &str,
+        image: ExternalImage<'_>,
+    ) -> Result<ExternalTextureHandle, String> {
+        match image.kind {
+            ExternalImageKind::CpuRgba => {
+                let rgba = image
+                    .rgba
+                    .ok_or_else(|| "CPU RGBA import requires pixel bytes".to_string())?;
+                if !self.upload_video_rgba(name, image.extent.width, image.extent.height, rgba) {
+                    return Err("CPU RGBA video upload failed".into());
+                }
+                Ok(ExternalTextureHandle::from_opaque(1))
+            }
+            ExternalImageKind::AHardwareBuffer => Err(
+                "AHardwareBuffer -> Vulkan external memory/image is reserved for a future Android production path"
+                    .into(),
+            ),
+            other => Err(format!(
+                "VulkanBackend cannot import {:?}; use CPU RGBA until AHardwareBuffer import lands",
+                other
+            )),
+        }
     }
     fn set_native_surface(&mut self, s: NativeSurface) -> Result<(), String> {
         let result = self.attach_surface(s);

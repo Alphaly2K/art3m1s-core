@@ -6,9 +6,11 @@
 
 use crate::backend::{
     AssetSource, BackendCapabilities, BackendInfo, BackendKind, BackendStability, Extent2D,
-    FrameCapture, FrameTarget, GpuBackend, GpuProfileStats, NativeSurface, NativeSurfaceKind,
-    RenderRegion, RenderTarget, RenderTargetDesc, RenderTargetId, ShaderCompileError, ShaderId,
-    TextureData, TextureDesc, TextureFormat, TextureOrigin, TextureUpdate, TextureUsage,
+    ExternalImage, ExternalImageKind, ExternalTextureHandle, FrameCapture, FrameTarget, GpuBackend,
+    GpuProfileStats, GpuSyncKind, GpuSyncToken, NativeSurface, NativeSurfaceKind, RenderRegion,
+    RenderTarget, RenderTargetDesc, RenderTargetId, ResourceOwnership, ShaderCompileError,
+    ShaderId, TextureData, TextureDesc, TextureFormat, TextureOrigin, TextureUpdate, TextureUsage,
+    VideoImportCapability, VideoSurfaceHandle,
 };
 use crate::render_pipeline::draw::{
     BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, ShaderEffect, ShaderGroup, TextureId,
@@ -38,6 +40,7 @@ use objc2_metal::{
     MTLTextureUsage, MTLViewport,
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
+mod core_video;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ptr::NonNull;
@@ -92,12 +95,29 @@ struct EffectUniforms {
     negative_padding: [f32; 4],
 }
 
+struct ImportedNative {
+    handle: ExternalTextureHandle,
+    #[allow(dead_code)]
+    ownership: ResourceOwnership,
+    #[allow(dead_code)]
+    kind: ExternalImageKind,
+    /// Native retains; dropped after GPU retirement.
+    retains: Vec<core_video::CfPtr>,
+}
+
+impl Drop for ImportedNative {
+    fn drop(&mut self) {
+        self.retains.clear();
+    }
+}
+
 struct MetalTexture {
     raw: Texture,
     desc: TextureDesc,
     info: TextureInfo,
     cpu_pixels: PixelStorage,
     opaque: bool,
+    external: Option<ImportedNative>,
 }
 
 struct MetalRenderTarget {
@@ -346,6 +366,13 @@ pub struct MetalBackend {
     profile_upscale_cpu_encode_ns: Cell<u64>,
     shader_clock: Instant,
     shader_frame_index: u64,
+    cv_texture_cache: Option<core_video::CvMetalTextureCache>,
+    yuv_pipeline: Option<PipelineState>,
+    video_leases: HashMap<u64, TextureId>,
+    next_external_id: u64,
+    profile_video_upload_ns: Cell<u64>,
+    profile_video_uploaded_bytes: Cell<u64>,
+    profile_video_uploaded_frames: Cell<u64>,
 }
 
 impl MetalBackend {
@@ -457,6 +484,13 @@ impl MetalBackend {
             profile_upscale_cpu_encode_ns: Cell::new(0),
             shader_clock: Instant::now(),
             shader_frame_index: 0,
+            cv_texture_cache: None,
+            yuv_pipeline: None,
+            video_leases: HashMap::new(),
+            next_external_id: 1,
+            profile_video_upload_ns: Cell::new(0),
+            profile_video_uploaded_bytes: Cell::new(0),
+            profile_video_uploaded_frames: Cell::new(0),
         })
     }
 
@@ -499,6 +533,7 @@ impl MetalBackend {
             },
             cpu_pixels: PixelStorage::None,
             opaque: false,
+            external: None,
         });
     }
 
@@ -586,6 +621,7 @@ impl MetalBackend {
         for name in names {
             self.names.remove(&name);
         }
+        self.video_leases.retain(|_, id| *id != texture);
         self.texture_revisions.remove(&texture);
         if let Some(texture) = self.textures.remove(&texture) {
             self.retire_texture(texture);
@@ -636,6 +672,7 @@ impl MetalBackend {
                 },
                 cpu_pixels,
                 opaque,
+                external: None,
             },
         );
         self.mark_texture_changed(id);
@@ -673,6 +710,379 @@ impl MetalBackend {
                 })
             }
         }
+    }
+
+    fn allocate_external_handle(&mut self) -> u64 {
+        let id = self.next_external_id;
+        self.next_external_id = self.next_external_id.wrapping_add(1).max(1);
+        id
+    }
+
+    fn record_video_frame(&self, bytes: usize) {
+        self.profile_video_uploaded_frames
+            .set(self.profile_video_uploaded_frames.get().saturating_add(1));
+        self.profile_video_uploaded_bytes.set(
+            self.profile_video_uploaded_bytes
+                .get()
+                .saturating_add(bytes as u64),
+        );
+    }
+
+    fn bind_imported_texture(
+        &mut self,
+        name: &str,
+        raw: Texture,
+        desc: TextureDesc,
+        external: ImportedNative,
+    ) -> Result<ExternalTextureHandle, String> {
+        let handle = external.handle;
+        let prepared = MetalTexture {
+            raw,
+            desc,
+            info: TextureInfo {
+                width: desc.extent.width,
+                height: desc.extent.height,
+            },
+            cpu_pixels: PixelStorage::None,
+            opaque: true,
+            external: Some(external),
+        };
+        if let Some(old) = self.names.get(name).copied() {
+            self.remove_texture_id(old);
+        }
+        let id = self.allocate_texture_id();
+        self.names.insert(name.to_owned(), id);
+        self.video_leases.insert(handle.opaque(), id);
+        self.textures.insert(id, prepared);
+        self.mark_texture_changed(id);
+        Ok(handle)
+    }
+
+    fn ensure_cv_texture_cache(&mut self) -> Result<(), String> {
+        if self.cv_texture_cache.is_none() {
+            self.cv_texture_cache = Some(core_video::CvMetalTextureCache::new(&self.device)?);
+        }
+        Ok(())
+    }
+
+    fn encode_import_wait(&self, wait: GpuSyncToken) -> Result<(), String> {
+        match wait.kind {
+            GpuSyncKind::None => Ok(()),
+            GpuSyncKind::MetalSharedEvent => {
+                if wait.handle.is_null() {
+                    return Err("MTLSharedEvent pointer is null".into());
+                }
+                let command_buffer = self.queue.commandBuffer().ok_or_else(|| {
+                    "failed to create Metal command buffer for import wait".to_string()
+                })?;
+                unsafe {
+                    let _: () = msg_send![
+                        &*command_buffer,
+                        encodeWaitForEvent: wait.handle,
+                        value: wait.value
+                    ];
+                }
+                command_buffer.commit();
+                Ok(())
+            }
+            GpuSyncKind::VulkanSemaphore => {
+                Err("MetalBackend cannot wait on a Vulkan semaphore".into())
+            }
+        }
+    }
+
+    fn ensure_yuv_pipeline(&mut self) -> Result<PipelineState, String> {
+        if let Some(pipeline) = &self.yuv_pipeline {
+            return Ok(pipeline.clone());
+        }
+        let vertex = self
+            .library
+            .newFunctionWithName(&NSString::from_str("fullscreen_vertex"))
+            .ok_or_else(|| "Metal fullscreen_vertex is missing".to_string())?;
+        let fragment = self
+            .library
+            .newFunctionWithName(&NSString::from_str("yuv_convert_fragment"))
+            .ok_or_else(|| "Metal yuv_convert_fragment is missing".to_string())?;
+        let descriptor = MTLRenderPipelineDescriptor::new();
+        descriptor.setVertexFunction(Some(&vertex));
+        descriptor.setFragmentFunction(Some(&fragment));
+        let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
+        attachment.setPixelFormat(MTLPixelFormat::RGBA8Unorm);
+        attachment.setBlendingEnabled(false);
+        let raw = self
+            .device
+            .newRenderPipelineStateWithDescriptor_error(&descriptor)
+            .map_err(|error| format!("failed to create YUV convert pipeline: {error}"))?;
+        self.yuv_pipeline = Some(raw.clone());
+        Ok(raw)
+    }
+
+    fn convert_nv12(
+        &mut self,
+        luma: &Texture,
+        chroma: &Texture,
+        extent: Extent2D,
+        video_range: bool,
+    ) -> Result<Texture, String> {
+        let destination = create_texture(
+            &self.device,
+            TextureDesc {
+                extent,
+                format: TextureFormat::Rgba8Unorm,
+                usage: TextureUsage::SAMPLED
+                    | TextureUsage::RENDER_TARGET
+                    | TextureUsage::TRANSFER_SRC,
+            },
+        )?;
+        let pipeline = self.ensure_yuv_pipeline()?;
+        let command_buffer = self
+            .queue
+            .commandBuffer()
+            .ok_or_else(|| "failed to create Metal YUV convert command buffer".to_string())?;
+        let target = PrivateRenderTarget {
+            texture: destination.clone(),
+            extent,
+            format: MTLPixelFormat::RGBA8Unorm,
+        };
+        let pass = render_pass(&target, MTLLoadAction::DontCare, [0.0, 0.0, 0.0, 1.0]);
+        let encoder = command_buffer
+            .renderCommandEncoderWithDescriptor(&pass)
+            .ok_or_else(|| "failed to create Metal YUV convert encoder".to_string())?;
+        encoder.setRenderPipelineState(&pipeline);
+        let params = [if video_range { 1.0f32 } else { 0.0 }, 0.0, 0.0, 0.0];
+        unsafe {
+            encoder.setFragmentTexture_atIndex(Some(luma), 0);
+            encoder.setFragmentTexture_atIndex(Some(chroma), 1);
+            encoder.setFragmentSamplerState_atIndex(Some(&self.sampler), 0);
+            encoder.setFragmentBytes_length_atIndex(
+                value_bytes(&params),
+                std::mem::size_of_val(&params),
+                0,
+            );
+            encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::TriangleStrip, 0, 4);
+        }
+        encoder.endEncoding();
+        command_buffer.commit();
+        command_buffer.waitUntilCompleted();
+        if command_buffer.status() == MTLCommandBufferStatus::Error {
+            return Err(format_command_error(&command_buffer));
+        }
+        Ok(destination)
+    }
+
+    fn import_cv_pixel_buffer(
+        &mut self,
+        name: &str,
+        image: &ExternalImage<'_>,
+    ) -> Result<ExternalTextureHandle, String> {
+        self.ensure_cv_texture_cache()?;
+        let info = core_video::inspect_pixel_buffer(image.handle)?;
+        if info.extent != image.extent {
+            crate::core_warn!(
+                "[MetalBackend] CVPixelBuffer size {}x{} differs from host {}x{}; using buffer size",
+                info.extent.width,
+                info.extent.height,
+                image.extent.width,
+                image.extent.height
+            );
+        }
+        if info.color.is_yuv() && info.plane_count < 2 {
+            return Err("biplanar CVPixelBuffer is missing the chroma plane".into());
+        }
+        let mut retains = Vec::new();
+        match image.ownership {
+            ResourceOwnership::Borrowed => {}
+            ResourceOwnership::Imported => {
+                retains.push(unsafe { core_video::CfPtr::retain(image.handle) }?)
+            }
+            ResourceOwnership::Owned => {
+                retains.push(unsafe { core_video::CfPtr::from_created(image.handle) }?)
+            }
+        }
+        let (raw, desc) = if info.color.is_yuv() {
+            let (luma, chroma) = {
+                let cache = self
+                    .cv_texture_cache
+                    .as_ref()
+                    .ok_or_else(|| "CVMetalTextureCache is missing".to_string())?;
+                let luma = core_video::create_plane_texture(
+                    cache,
+                    image.handle,
+                    MTLPixelFormat::R8Unorm,
+                    info.extent.width as usize,
+                    info.extent.height as usize,
+                    0,
+                )?;
+                let chroma = core_video::create_plane_texture(
+                    cache,
+                    image.handle,
+                    MTLPixelFormat::RG8Unorm,
+                    (info.extent.width as usize).div_ceil(2),
+                    (info.extent.height as usize).div_ceil(2),
+                    1,
+                )?;
+                cache.flush();
+                (luma, chroma)
+            };
+            let converted = self.convert_nv12(
+                &luma.metal,
+                &chroma.metal,
+                info.extent,
+                matches!(info.color, core_video::CvColor::Nv12Video),
+            );
+            retains.push(luma.cv_texture);
+            retains.push(chroma.cv_texture);
+            (
+                converted?,
+                TextureDesc {
+                    extent: info.extent,
+                    format: TextureFormat::Rgba8Unorm,
+                    usage: TextureUsage::SAMPLED | TextureUsage::TRANSFER_SRC,
+                },
+            )
+        } else {
+            let plane = {
+                let cache = self
+                    .cv_texture_cache
+                    .as_ref()
+                    .ok_or_else(|| "CVMetalTextureCache is missing".to_string())?;
+                let plane = core_video::create_plane_texture(
+                    cache,
+                    image.handle,
+                    match info.color {
+                        core_video::CvColor::Bgra => MTLPixelFormat::BGRA8Unorm,
+                        _ => MTLPixelFormat::RGBA8Unorm,
+                    },
+                    info.extent.width as usize,
+                    info.extent.height as usize,
+                    0,
+                )?;
+                cache.flush();
+                plane
+            };
+            let metal = plane.metal;
+            retains.push(plane.cv_texture);
+            (
+                metal,
+                TextureDesc {
+                    extent: info.extent,
+                    format: info.color.metal_format(),
+                    usage: TextureUsage::SAMPLED,
+                },
+            )
+        };
+        let handle = ExternalTextureHandle::from_opaque(self.allocate_external_handle());
+        self.bind_imported_texture(
+            name,
+            raw,
+            desc,
+            ImportedNative {
+                handle,
+                ownership: image.ownership,
+                kind: image.kind,
+                retains,
+            },
+        )
+    }
+
+    fn import_metal_texture(
+        &mut self,
+        name: &str,
+        image: &ExternalImage<'_>,
+    ) -> Result<ExternalTextureHandle, String> {
+        let raw = match image.ownership {
+            ResourceOwnership::Owned => unsafe {
+                objc2::rc::Retained::from_raw(image.handle.cast::<ProtocolObject<dyn MTLTexture>>())
+            },
+            _ => unsafe {
+                objc2::rc::Retained::retain(image.handle.cast::<ProtocolObject<dyn MTLTexture>>())
+            },
+        }
+        .ok_or_else(|| "invalid MTLTexture pointer".to_string())?;
+        if raw.width() != image.extent.width as usize
+            || raw.height() != image.extent.height as usize
+        {
+            return Err(format!(
+                "MTLTexture size {}x{} does not match {}x{}",
+                raw.width(),
+                raw.height(),
+                image.extent.width,
+                image.extent.height
+            ));
+        }
+        let format = match raw.pixelFormat() {
+            MTLPixelFormat::BGRA8Unorm => TextureFormat::Bgra8Unorm,
+            MTLPixelFormat::RGBA8Unorm => TextureFormat::Rgba8Unorm,
+            other => {
+                return Err(format!(
+                    "unsupported imported MTLPixelFormat {other:?}; use RGBA8 or BGRA8"
+                ));
+            }
+        };
+        let handle = ExternalTextureHandle::from_opaque(self.allocate_external_handle());
+        self.bind_imported_texture(
+            name,
+            raw,
+            TextureDesc {
+                extent: image.extent,
+                format,
+                usage: TextureUsage::SAMPLED,
+            },
+            ImportedNative {
+                handle,
+                ownership: image.ownership,
+                kind: image.kind,
+                retains: Vec::new(),
+            },
+        )
+    }
+
+    fn import_io_surface(
+        &mut self,
+        name: &str,
+        image: &ExternalImage<'_>,
+    ) -> Result<ExternalTextureHandle, String> {
+        let descriptor = unsafe {
+            MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                MTLPixelFormat::BGRA8Unorm,
+                image.extent.width as usize,
+                image.extent.height as usize,
+                false,
+            )
+        };
+        descriptor.setTextureType(MTLTextureType::Type2D);
+        descriptor.setUsage(MTLTextureUsage::ShaderRead);
+        let io_surface = unsafe { &*image.handle.cast::<IOSurfaceRef>() };
+        let raw = self
+            .device
+            .newTextureWithDescriptor_iosurface_plane(&descriptor, io_surface, 0)
+            .ok_or_else(|| "failed to create Metal texture from IOSurface".to_string())?;
+        let mut retains = Vec::new();
+        match image.ownership {
+            ResourceOwnership::Borrowed => {}
+            ResourceOwnership::Imported => {
+                retains.push(unsafe { core_video::CfPtr::retain(image.handle) }?)
+            }
+            ResourceOwnership::Owned => {
+                retains.push(unsafe { core_video::CfPtr::from_created(image.handle) }?)
+            }
+        }
+        let handle = ExternalTextureHandle::from_opaque(self.allocate_external_handle());
+        self.bind_imported_texture(
+            name,
+            raw,
+            TextureDesc {
+                extent: image.extent,
+                format: TextureFormat::Bgra8Unorm,
+                usage: TextureUsage::SAMPLED,
+            },
+            ImportedNative {
+                handle,
+                ownership: image.ownership,
+                kind: image.kind,
+                retains,
+            },
+        )
     }
 }
 
@@ -858,6 +1268,9 @@ impl TextureProvider for MetalBackend {
     fn resolve(&mut self, name: &str) -> Option<(TextureId, TextureInfo)> {
         if let Some(&id) = self.names.get(name) {
             return self.textures.get(&id).map(|texture| (id, texture.info));
+        }
+        if crate::video::is_video_layer_texture_name(name) {
+            return None;
         }
 
         if let Some(source) = &self.source
@@ -1056,6 +1469,8 @@ impl GpuBackend for MetalBackend {
                 custom_shader: true,
                 dynamic_mesh: true,
                 spatial_upscaling: self.metalfx_supported,
+                external_texture: true,
+                zero_copy_video: true,
                 ..BackendCapabilities::default()
             },
         }
@@ -1439,8 +1854,203 @@ impl GpuBackend for MetalBackend {
         ids.len()
     }
 
-    fn upload_video_rgba(&mut self, _name: &str, _width: u32, _height: u32, _rgba: &[u8]) -> bool {
-        false
+    fn upload_video_rgba(&mut self, name: &str, width: u32, height: u32, rgba: &[u8]) -> bool {
+        let Some(expected) = Extent2D::new(width, height).rgba8_len() else {
+            return false;
+        };
+        if width == 0 || height == 0 || rgba.len() < expected {
+            return false;
+        }
+        let rgba = &rgba[..expected];
+        let started = self.profiling_enabled.get().then(std::time::Instant::now);
+        if let Some(&id) = self.names.get(name)
+            && let Some(stored) = self.textures.get(&id)
+            && stored.external.is_none()
+            && stored.info.width == width
+            && stored.info.height == height
+        {
+            let raw = stored.raw.clone();
+            let desc = stored.desc;
+            if upload_texture(&raw, desc, [0, 0], desc.extent, rgba).is_err() {
+                return false;
+            }
+            if let Some(stored) = self.textures.get_mut(&id) {
+                stored.opaque = true;
+                stored.cpu_pixels = PixelStorage::None;
+            }
+            self.mark_texture_changed(id);
+            self.record_video_frame(rgba.len());
+            if let Some(started) = started {
+                self.profile_video_upload_ns.set(
+                    self.profile_video_upload_ns
+                        .get()
+                        .saturating_add(elapsed_ns(started)),
+                );
+            }
+            return true;
+        }
+        let desc = TextureDesc::sampled_rgba8(width, height);
+        let Ok(id) = self.insert_texture(name, desc, TextureData::Rgba8(rgba), false) else {
+            return false;
+        };
+        if let Some(stored) = self.textures.get_mut(&id) {
+            stored.opaque = true;
+            stored.cpu_pixels = PixelStorage::None;
+        }
+        self.record_video_frame(rgba.len());
+        if let Some(started) = started {
+            self.profile_video_upload_ns.set(
+                self.profile_video_upload_ns
+                    .get()
+                    .saturating_add(elapsed_ns(started)),
+            );
+        }
+        true
+    }
+
+    fn video_import_capability(&self) -> VideoImportCapability {
+        VideoImportCapability {
+            preferred: ExternalImageKind::CvPixelBuffer,
+            cpu_rgba: true,
+            cv_pixel_buffer: true,
+            metal_texture: true,
+            io_surface: true,
+            ahardware_buffer: false,
+            opengl_framebuffer: false,
+        }
+    }
+
+    fn import_external_texture(
+        &mut self,
+        name: &str,
+        image: ExternalImage<'_>,
+    ) -> Result<ExternalTextureHandle, String> {
+        self.encode_import_wait(image.wait)?;
+        let started = self.profiling_enabled.get().then(std::time::Instant::now);
+        let handle = match image.kind {
+            ExternalImageKind::CpuRgba => {
+                let rgba = image
+                    .rgba
+                    .ok_or_else(|| "CPU RGBA import requires pixel bytes".to_string())?;
+                if !self.upload_video_rgba(name, image.extent.width, image.extent.height, rgba) {
+                    return Err("CPU RGBA video upload failed".into());
+                }
+                let id = *self
+                    .names
+                    .get(name)
+                    .ok_or_else(|| "CPU RGBA video texture was not registered".to_string())?;
+                let handle = ExternalTextureHandle::from_opaque(self.allocate_external_handle());
+                self.video_leases.insert(handle.opaque(), id);
+                if let Some(stored) = self.textures.get_mut(&id) {
+                    stored.external = Some(ImportedNative {
+                        handle,
+                        ownership: image.ownership,
+                        kind: image.kind,
+                        retains: Vec::new(),
+                    });
+                }
+                handle
+            }
+            ExternalImageKind::CvPixelBuffer => self.import_cv_pixel_buffer(name, &image)?,
+            ExternalImageKind::MetalTexture => self.import_metal_texture(name, &image)?,
+            ExternalImageKind::IoSurface => self.import_io_surface(name, &image)?,
+            ExternalImageKind::AHardwareBuffer => {
+                return Err("AHardwareBuffer import is a Vulkan extension point".into());
+            }
+            ExternalImageKind::OpenGlFramebuffer => {
+                return Err("OpenGL framebuffer import is not available on MetalBackend".into());
+            }
+        };
+        self.record_video_frame(image.extent.rgba8_len().unwrap_or(0));
+        if let Some(started) = started {
+            self.profile_video_upload_ns.set(
+                self.profile_video_upload_ns
+                    .get()
+                    .saturating_add(elapsed_ns(started)),
+            );
+        }
+        Ok(handle)
+    }
+
+    fn release_external_texture(&mut self, handle: ExternalTextureHandle) -> bool {
+        let Some(id) = self.video_leases.remove(&handle.opaque()) else {
+            return false;
+        };
+        self.remove_texture_id(id)
+    }
+
+    fn acquire_video_surface(
+        &mut self,
+        name: &str,
+        extent: Extent2D,
+    ) -> Result<VideoSurfaceHandle, String> {
+        if extent.is_empty() {
+            return Err("video surface extent must be non-zero".into());
+        }
+        if let Some(&id) = self.names.get(name)
+            && let Some(stored) = self.textures.get(&id)
+            && stored.info.width == extent.width
+            && stored.info.height == extent.height
+        {
+            if let Some(external) = stored.external.as_ref() {
+                return Ok(VideoSurfaceHandle::from_opaque(external.handle.opaque()));
+            }
+        }
+        let desc = TextureDesc {
+            extent,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsage::SAMPLED
+                | TextureUsage::RENDER_TARGET
+                | TextureUsage::TRANSFER_SRC
+                | TextureUsage::TRANSFER_DST,
+        };
+        let raw = create_texture(&self.device, desc)?;
+        let handle = ExternalTextureHandle::from_opaque(self.allocate_external_handle());
+        self.bind_imported_texture(
+            name,
+            raw,
+            desc,
+            ImportedNative {
+                handle,
+                ownership: ResourceOwnership::Owned,
+                kind: ExternalImageKind::MetalTexture,
+                retains: Vec::new(),
+            },
+        )?;
+        Ok(VideoSurfaceHandle::from_opaque(handle.opaque()))
+    }
+
+    fn commit_video_surface(&mut self, handle: VideoSurfaceHandle) -> bool {
+        let Some(&id) = self.video_leases.get(&handle.opaque()) else {
+            return false;
+        };
+        if let Some(stored) = self.textures.get_mut(&id) {
+            stored.opaque = true;
+            stored.cpu_pixels = PixelStorage::None;
+        }
+        self.mark_texture_changed(id);
+        true
+    }
+
+    fn video_surface_consumed(&mut self, handle: VideoSurfaceHandle) -> bool {
+        self.collect_retired_resources();
+        if self.video_leases.contains_key(&handle.opaque()) {
+            return false;
+        }
+        !self.retired.iter().any(|pending| match &pending.resource {
+            RetiredResource::Texture(texture) => texture
+                .external
+                .as_ref()
+                .is_some_and(|external| external.handle.opaque() == handle.opaque()),
+            _ => false,
+        })
+    }
+
+    fn capture_screenshot(&mut self, extent: Extent2D, out: &mut [u8]) -> Result<usize, String> {
+        if self.active_frame.is_some() {
+            return Err("cannot capture screenshot during an active Metal frame".into());
+        }
+        self.readback(FrameTarget::Main, extent, out)
     }
 
     fn set_native_surface(&mut self, surface: NativeSurface) -> Result<(), String> {
@@ -1653,6 +2263,9 @@ impl GpuBackend for MetalBackend {
         GpuProfileStats {
             texture_upload_ns: self.profile_texture_upload_ns.replace(0),
             uploaded_bytes: self.profile_uploaded_bytes.replace(0),
+            video_upload_ns: self.profile_video_upload_ns.replace(0),
+            video_uploaded_bytes: self.profile_video_uploaded_bytes.replace(0),
+            video_uploaded_frames: self.profile_video_uploaded_frames.replace(0),
             draw_calls: self.profile_draw_calls.replace(0),
             vertices: self.profile_vertices.replace(0),
             texture_binds: self.profile_texture_binds.replace(0),
@@ -3190,6 +3803,160 @@ mod tests {
             pixels.chunks_exact(4).all(|pixel| {
                 pixel[0] >= 250 && pixel[1] <= 5 && pixel[2] <= 5 && pixel[3] >= 250
             })
+        );
+    }
+    #[test]
+    fn metal_uploads_video_rgba_without_placeholder() {
+        let Ok(mut backend) = MetalBackend::new(2, 2) else {
+            return;
+        };
+        let name = crate::video::video_layer_texture_name("movie");
+        assert!(backend.resolve(&name).is_none());
+        assert!(backend.upload_video_rgba(&name, 1, 1, &[0, 255, 0, 255]));
+        let (id, info) = backend.resolve(&name).expect("video texture");
+        assert_eq!(
+            info,
+            TextureInfo {
+                width: 1,
+                height: 1
+            }
+        );
+        let red = backend
+            .create_texture(
+                "blit-red",
+                TextureDesc::sampled_rgba8(1, 1),
+                TextureData::Rgba8(&[255, 0, 0, 255]),
+            )
+            .unwrap();
+        let mut frame = DrawList::new();
+        frame.push(DrawCommand {
+            texture: id,
+            size: info,
+            transform: glam::Affine2::IDENTITY,
+            opacity: 1.0,
+            blend: BlendMode::Alpha,
+            color: ColorFilter::default(),
+            clip: ClipRect {
+                uv_offset: [0.0, 0.0],
+                uv_scale: [1.0, 1.0],
+                quad_size: [2.0, 2.0],
+            },
+            clip_bounds: None,
+            shader: None,
+            mesh: None,
+            stencil: None,
+            native_emote: None,
+        });
+        let _ = red;
+        backend.begin_frame(FrameTarget::Main).unwrap();
+        backend.render(&frame);
+        backend.end_frame();
+        let pixels = backend
+            .readback_owned(FrameTarget::Main, Extent2D::new(2, 2))
+            .unwrap();
+        assert_eq!(&pixels[0..4], &[0, 255, 0, 255]);
+        assert_eq!(
+            backend.video_import_capability().preferred,
+            ExternalImageKind::CvPixelBuffer
+        );
+        assert!(backend.backend_info().capabilities.zero_copy_video);
+        assert!(backend.backend_info().capabilities.external_texture);
+    }
+
+    #[test]
+    fn metal_imports_mtltexture_zero_copy_and_tracks_consumption() {
+        let Ok(mut backend) = MetalBackend::new(2, 2) else {
+            return;
+        };
+        let source = backend
+            .create_texture(
+                "import-src",
+                TextureDesc::sampled_rgba8(2, 2),
+                TextureData::Rgba8(&[
+                    255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+                ]),
+            )
+            .unwrap();
+        let raw = backend.textures.get(&source).unwrap().raw.clone();
+        let name = crate::video::video_layer_texture_name("layer");
+        let handle = backend
+            .import_external_texture(
+                &name,
+                ExternalImage {
+                    kind: ExternalImageKind::MetalTexture,
+                    handle: objc2::rc::Retained::as_ptr(&raw) as *mut _,
+                    extent: Extent2D::new(2, 2),
+                    format: TextureFormat::Rgba8Unorm,
+                    ownership: ResourceOwnership::Borrowed,
+                    wait: GpuSyncToken::NONE,
+                    rgba: None,
+                },
+            )
+            .expect("import MTLTexture");
+        let (id, info) = backend.resolve(&name).expect("imported video");
+        assert_eq!(info.width, 2);
+        assert_eq!(id, *backend.video_leases.get(&handle.opaque()).unwrap());
+        assert!(!backend.video_surface_consumed(VideoSurfaceHandle::from_opaque(handle.opaque())));
+
+        backend.begin_frame(FrameTarget::Main).unwrap();
+        let mut frame = DrawList::new();
+        frame.push(DrawCommand {
+            texture: id,
+            size: info,
+            transform: glam::Affine2::IDENTITY,
+            opacity: 1.0,
+            blend: BlendMode::Alpha,
+            color: ColorFilter::default(),
+            clip: ClipRect {
+                uv_offset: [0.0, 0.0],
+                uv_scale: [1.0, 1.0],
+                quad_size: [2.0, 2.0],
+            },
+            clip_bounds: None,
+            shader: None,
+            mesh: None,
+            stencil: None,
+            native_emote: None,
+        });
+        backend.render(&frame);
+        backend.end_frame();
+        let pixels = backend
+            .readback_owned(FrameTarget::Main, Extent2D::new(2, 2))
+            .unwrap();
+        assert!(
+            pixels
+                .chunks_exact(4)
+                .all(|pixel| pixel == [255, 0, 0, 255])
+        );
+
+        assert!(backend.release_external_texture(handle));
+        backend.collect_retired_resources();
+        assert!(backend.video_surface_consumed(VideoSurfaceHandle::from_opaque(handle.opaque())));
+        assert!(backend.resolve(&name).is_none());
+    }
+
+    #[test]
+    fn metal_screenshot_does_not_use_video_surface() {
+        let Ok(mut backend) = MetalBackend::new(2, 2) else {
+            return;
+        };
+        backend.begin_frame(FrameTarget::Main).unwrap();
+        backend.clear([0.0, 0.0, 1.0, 1.0]);
+        backend.end_frame();
+        let mut pixels = [0u8; 16];
+        let written = backend
+            .capture_screenshot(Extent2D::new(2, 2), &mut pixels)
+            .unwrap();
+        assert_eq!(written, 16);
+        assert!(
+            pixels
+                .chunks_exact(4)
+                .all(|pixel| pixel == [0, 0, 255, 255])
+        );
+        assert!(
+            backend
+                .video_surface_gl_framebuffer(VideoSurfaceHandle::from_opaque(1))
+                .is_none()
         );
     }
 }

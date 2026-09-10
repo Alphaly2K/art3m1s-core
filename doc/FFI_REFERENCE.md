@@ -102,6 +102,22 @@ void art3m1s_runtime_video_gl_end(CoreRuntime *rt);
 int art3m1s_runtime_upload_video_layer_frame(CoreRuntime *rt, const char *id,
                                             uint32_t width, uint32_t height,
                                             const uint8_t *rgba, size_t rgba_len);
+int32_t art3m1s_runtime_video_import_kind(const CoreRuntime *rt);
+int art3m1s_runtime_import_video_frame(CoreRuntime *rt, const char *id,
+                                      int32_t image_kind, void *native_handle,
+                                      uint32_t width, uint32_t height,
+                                      int32_t ownership, int32_t wait_kind,
+                                      void *wait_handle, uint64_t wait_value,
+                                      const uint8_t *rgba, size_t rgba_len,
+                                      uint64_t *out_texture);
+int art3m1s_runtime_release_video_frame(CoreRuntime *rt, uint64_t texture_handle);
+int art3m1s_runtime_video_frame_consumed(CoreRuntime *rt, uint64_t surface_handle);
+int art3m1s_runtime_acquire_video_surface(CoreRuntime *rt, const char *id,
+                                         uint32_t width, uint32_t height,
+                                         uint64_t *out_surface);
+int art3m1s_runtime_commit_video_surface(CoreRuntime *rt, uint64_t surface_handle);
+uint32_t art3m1s_runtime_capture_screenshot(CoreRuntime *rt, uint8_t *out_pixels,
+                                          uint32_t capacity);
 int32_t art3m1s_runtime_is_exit_requested(const CoreRuntime *rt);
 void art3m1s_runtime_notify_lifecycle(CoreRuntime *rt, int state);
 void art3m1s_runtime_notify_window_button(CoreRuntime *rt, int button);
@@ -166,12 +182,19 @@ int32_t art3m1s_runtime_profiler_snapshot(const CoreRuntime *rt, uint8_t *out,
 | `set_string_variable` | 无返回；支持 `result.title` 等路径 | name/value 必须有效 UTF-8；无 RPC 完成语义 |
 | `set_volume` | 无返回；value 限制到 [0,1] | channel 为 master/bgm/se/voice；不要传 NaN 或未知名称 |
 | `notify_video_finished` / `notify_sound_finished` | 无返回；更新状态并触发对应完成处理 | 只用于当前播放；video id=NULL 全屏，sound id=NULL BGM |
-| `video_gl_get_proc_address` | GL 函数指针，ctx 必须为 runtime | NULL 未解析；使用同一 GL 实现 |
-| `video_gl_begin` | 1 获取 GL lease | 0 失败/已持有 lease；不可嵌套 |
-| `video_gl_framebuffer` | 非零 GL FBO 名称 | 0 无 lease/图层不播放/失败；width/height 是视频帧尺寸 |
-| `video_gl_commit` | 1 标记新帧可用 | 0 无 lease/目标不存在；不是结束播放通知 |
-| `video_gl_end` | 无返回，恢复上下文 | 与每次成功 begin 配对 |
-| `upload_video_layer_frame` | 1 同步上传成功 | 0 参数无效/图层过期/失败；id 非空，尺寸非零，rgba_len 至少 w*h*4 |
+| `video_gl_get_proc_address` | **Deprecated** GL 函数指针 | NULL 未解析/非 GL；Metal 返回 NULL |
+| `video_gl_begin` | **Deprecated** 1 获取 GL lease | 0 失败/已持有/非 GL；不可嵌套 |
+| `video_gl_framebuffer` | **Deprecated** 非零 GLuint FBO | 0 无 lease/非 GL/图层不播放；不要在新代码中使用 |
+| `video_gl_commit` | **Deprecated** 1 标记新帧可用 | 0 无 lease/目标不存在 |
+| `video_gl_end` | **Deprecated** 无返回 | 与每次成功 begin 配对 |
+| `upload_video_layer_frame` | 1 同步 CPU RGBA 上传 | 0 参数无效/图层过期/失败；fallback，不是 Darwin 生产路径 |
+| `video_import_kind` | 首选导入 kind | 0=RGBA、1=CVPixelBuffer、2=MTLTexture、3=IOSurface、4=AHardwareBuffer、5=GL FBO |
+| `import_video_frame` | 1 并可选写出不透明 texture handle | 0 失败时保留上一帧；handle 不是 GLuint |
+| `release_video_frame` | 1 已解绑 | 0 未知 handle；GPU 完成后才释放 native retain |
+| `video_frame_consumed` | 1 生产者可回收 native 对象 | 0 仍被 compositor/inflight 使用；未知 handle 视为 1 |
+| `acquire_video_surface` | 1 并写出不透明 surface handle | 0 失败；handle 不是 GLuint |
+| `commit_video_surface` | 1 标记新帧可采样 | 0 未知 handle |
+| `capture_screenshot` | 写入的 RGBA 字节数 | 0 失败/缓冲不足；不推进引擎，不走 video ABI |
 | `is_exit_requested` | 1 已请求退出，0 未请求 | 不会自动 destroy；NULL=0 |
 | `notify_lifecycle` / `notify_window_button` / `notify_direction_changed` | 无返回 | 枚举见下表，回调必须仍有效 |
 | `set_profiler_enabled` | 无返回 | per-runtime；读取仍与其他调用串行 |
@@ -182,7 +205,10 @@ int32_t art3m1s_runtime_profiler_snapshot(const CoreRuntime *rt, uint8_t *out,
 | 参数 | 值 |
 |---|---|
 | create.backend | 0=CGL、1=ANGLE OpenGL、2=ANGLE Vulkan、3=ANGLE Metal、4=ANGLE D3D11；未知值落 CGL，不是自动选择 |
-| external_surface.kind | 1=ANativeWindow、2=IOSurface、3=MTLTexture/EGLImage |
+| external_surface.kind | 1=ANativeWindow、2=IOSurface、3=MTLTexture、4=CAMetalLayer。这是呈现表面，不是视频帧 |
+| import_video_frame.image_kind | 0=CPU RGBA、1=CVPixelBuffer、2=MTLTexture、3=IOSurface、4=AHardwareBuffer |
+| import_video_frame.ownership | 0=Borrowed、1=Imported、2=Owned |
+| import_video_frame.wait_kind | 0=无（宿主已同步）、1=MTLSharedEvent、2=Vulkan semaphore（预留） |
 | mouse button / key | Windows VK；左键=1、右键=2、中键=4、Ctrl=17 |
 | touch.phase | 0=down、1=move、2=up；id 为手指跟踪标识 |
 | lifecycle.state | 0=退出前、1=后台、2=前台 |
@@ -204,6 +230,39 @@ CGL 仅 macOS 可用。ANGLE 创建失败会尝试 CGL，因此 create 成功不
 `art3m1s_runtime_configure_spatial_upscale(rt, scale, sharpness)` 原子设置 spatial pass 与
 SceneColor 比例，供 Host 实现固定 1.5x、2x 或固定输出分辨率；不支持 spatial 的 backend
 应由 Host 根据 capabilities 选择 native fallback。
+
+
+
+## 视频与 external texture
+
+新 ABI 使用不透明 handle，不再把 `GLuint` framebuffer/texture 暴露给 runtime：
+
+- `ExternalTextureHandle`：compositor 采样用
+- `VideoSurfaceHandle`：producer 写入/导入用
+- `FrameTargetHandle`：截图/离屏，与 video 分离；`capture_screenshot` 走主场景 readback
+
+Darwin 生产路径是 zero-copy：
+
+`CVPixelBuffer` → `CVMetalTextureCache` → `MTLTexture` → `MetalBackend` compositor。
+
+不要把已在 GPU 上的帧做 GPU→CPU→GPU。`upload_video_layer_frame` 只给只有 CPU RGBA 的宿主做 fallback。
+
+所有权：Borrowed（宿主保持对象直到 consumed）、Imported（core retain，宿主可立即释放自己的引用）、Owned（宿主交出 retain，core 在 GPU 完成后释放）。
+
+同步：
+
+1. producer 写完后才调用 `import_video_frame` / `commit_video_surface`。`wait_kind=0` 表示宿主已同步；可预留 fence/event。
+2. 这些调用成功返回后，renderer 可在下一帧 `advance_and_present` 采样。
+3. `video_frame_consumed(handle)==1` 后 producer 才可回收该 native 对象。替换/停止图层会把旧帧投入 retirement，等 command buffer 完成后再释放。
+
+`video_gl_*` 保留为 GL/libmpv 兼容 shim，已 deprecated。Metal 上 begin/framebuffer 失败（返回 0），宿主应改走 import 或 RGBA fallback。
+
+Android 未来路径（Vulkan experimental，不阻塞 Darwin）：
+
+`MediaCodec` → `AHardwareBuffer` → Vulkan external memory/image → compositor。
+当前 `image_kind=4` 会返回明确错误。
+
+截图使用 `capture_screenshot` 或脚本 `takess` 的主场景 readback，禁止再用 video FBO ABI。
 
 ## Runtime HLSL shader
 

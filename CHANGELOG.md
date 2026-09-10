@@ -2,6 +2,23 @@
 
 本文档记录 `art3m1s-core` 的重要变更。
 
+## [Unreleased]
+
+### 变更
+
+- 视频与 external texture 改为 backend-neutral 不透明 handle（`ExternalTextureHandle` / `VideoSurfaceHandle` / `FrameTargetHandle`）。FFI 不再把 GLuint framebuffer/texture 作为生产 ABI。
+- Darwin/Metal 图层视频走 VideoToolbox/`CVPixelBuffer` → `CVMetalTextureCache` → `MTLTexture` 的 zero-copy 路径；CPU RGBA 仅为 fallback。截图与 video framebuffer ABI 分离。
+
+### 新增
+
+- `art3m1s_runtime_import_video_frame` 及所有权/同步模型（Borrowed/Imported/Owned，可选 fence/event）。
+- `art3m1s_runtime_capture_screenshot` 独立截图 readback。
+- Android Vulkan `AHardwareBuffer` 导入作为扩展点保留，不阻塞 Darwin 生产实现。
+
+### 兼容
+
+- `video_gl_*` 保留为 deprecated GL/libmpv shim；Metal 上返回失败，宿主应改走 import 或 RGBA。
+
 ## [0.4.0] - 2026-09-09
 
 ### 变更

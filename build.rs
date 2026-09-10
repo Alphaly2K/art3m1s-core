@@ -15,10 +15,14 @@ fn main() {
     if (target_os == "macos" || target_os == "ios")
         && std::env::var_os("CARGO_FEATURE_METAL_BACKEND").is_some()
     {
-        // MetalFX is optional at runtime (macOS 13/iOS 16 and supported GPU),
-        // so keep the framework weak-linked and let the Objective-C wrapper
-        // fall back when the class is absent.
-        println!("cargo:rustc-link-arg=-Wl,-weak_framework,MetalFX");
+        // MetalFX is optional at runtime (macOS 13/iOS 16 and supported GPU).
+        // The iPhoneSimulator SDK does not ship MetalFX.framework, and Apple's
+        // linker still requires a weak framework to exist at link time.
+        let target = std::env::var("TARGET").unwrap_or_default();
+        let simulator = target.contains("ios-sim") || target.contains("simulator");
+        if !simulator {
+            println!("cargo:rustc-link-arg=-Wl,-weak_framework,MetalFX");
+        }
     }
     if target_os == "android" {
         // 链接 NDK 自带的动态 C++ 标准库（libc++_shared.so）。

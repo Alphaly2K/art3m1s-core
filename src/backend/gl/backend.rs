@@ -2,9 +2,10 @@ use super::platform::{self, GLPlatformContext, SavedGlContext};
 use super::{GlRenderer, GlTextureProvider, ShaderProfile};
 use crate::backend::{
     AssetSource, BackendCapabilities, BackendInfo, BackendKind, BackendStability, Extent2D,
-    FrameCapture, FrameTarget, GpuBackend, GpuProfileStats, NativeSurface, NativeSurfaceKind,
-    RenderRegion, RenderTarget, RenderTargetDesc, RenderTargetId, ShaderId, TextureData,
-    TextureDesc, TextureFormat, TextureOrigin, TextureUpdate, TextureUsage,
+    ExternalImage, ExternalImageKind, ExternalTextureHandle, FrameCapture, FrameTarget, GpuBackend,
+    GpuProfileStats, NativeSurface, NativeSurfaceKind, RenderRegion, RenderTarget,
+    RenderTargetDesc, RenderTargetId, ShaderId, TextureData, TextureDesc, TextureFormat,
+    TextureOrigin, TextureUpdate, TextureUsage, VideoImportCapability, VideoSurfaceHandle,
 };
 use crate::render_pipeline::draw::{DrawList, TextureId, TextureInfo, TextureProvider};
 use glow::HasContext;
@@ -32,6 +33,8 @@ pub struct GlBackend {
     access_depth: usize,
     saved_host_context: Option<SavedGlContext>,
     external_render_context: Option<SavedGlContext>,
+    video_surfaces: HashMap<VideoSurfaceHandle, (String, u32)>,
+    next_video_handle: u64,
     // Must drop after all GL-owned fields.
     platform_context: Box<dyn GLPlatformContext>,
 }
@@ -70,8 +73,24 @@ impl GlBackend {
             access_depth: 0,
             saved_host_context: None,
             external_render_context: None,
+            video_surfaces: HashMap::new(),
+            next_video_handle: 1,
             platform_context,
         })
+    }
+
+    fn remember_video_name(&mut self, name: &str) -> ExternalTextureHandle {
+        if let Some((handle, _)) = self
+            .video_surfaces
+            .iter()
+            .find(|(_, (existing, _))| existing == name)
+        {
+            return ExternalTextureHandle::from_opaque(handle.opaque());
+        }
+        let handle = VideoSurfaceHandle::from_opaque(self.next_video_handle);
+        self.next_video_handle = self.next_video_handle.wrapping_add(1).max(1);
+        self.video_surfaces.insert(handle, (name.to_owned(), 0));
+        ExternalTextureHandle::from_opaque(handle.opaque())
     }
 }
 
@@ -441,6 +460,98 @@ impl GpuBackend for GlBackend {
 
     fn upload_video_rgba(&mut self, name: &str, width: u32, height: u32, rgba: &[u8]) -> bool {
         self.textures.upload_video_rgba(name, width, height, rgba)
+    }
+
+    fn video_import_capability(&self) -> VideoImportCapability {
+        VideoImportCapability {
+            preferred: ExternalImageKind::OpenGlFramebuffer,
+            cpu_rgba: true,
+            cv_pixel_buffer: false,
+            metal_texture: false,
+            io_surface: false,
+            ahardware_buffer: false,
+            opengl_framebuffer: true,
+        }
+    }
+
+    fn import_external_texture(
+        &mut self,
+        name: &str,
+        image: ExternalImage<'_>,
+    ) -> Result<ExternalTextureHandle, String> {
+        match image.kind {
+            ExternalImageKind::CpuRgba => {
+                let rgba = image
+                    .rgba
+                    .ok_or_else(|| "CPU RGBA import requires pixel bytes".to_string())?;
+                if !self.upload_video_rgba(
+                    name,
+                    image.extent.width,
+                    image.extent.height,
+                    rgba,
+                ) {
+                    return Err("CPU RGBA video upload failed".into());
+                }
+                Ok(self.remember_video_name(name))
+            }
+            ExternalImageKind::OpenGlFramebuffer => Err(
+                "OpenGL framebuffer is acquired through the deprecated video_gl_* lease, not import"
+                    .into(),
+            ),
+            other => Err(format!(
+                "GL reference backend cannot import {:?}; use CPU RGBA or the video_gl_* shim",
+                other
+            )),
+        }
+    }
+
+    fn release_external_texture(&mut self, handle: ExternalTextureHandle) -> bool {
+        let key = VideoSurfaceHandle::from_opaque(handle.opaque());
+        let Some((name, _)) = self.video_surfaces.remove(&key) else {
+            return false;
+        };
+        self.textures.evict_prefix(&name);
+        true
+    }
+
+    fn acquire_video_surface(
+        &mut self,
+        name: &str,
+        extent: Extent2D,
+    ) -> Result<VideoSurfaceHandle, String> {
+        let framebuffer = self
+            .textures
+            .ensure_render_target(name, extent.width, extent.height)?;
+        if let Some((handle, entry)) = self
+            .video_surfaces
+            .iter_mut()
+            .find(|(_, (existing, _))| existing == name)
+        {
+            entry.1 = framebuffer;
+            return Ok(*handle);
+        }
+        let handle = VideoSurfaceHandle::from_opaque(self.next_video_handle);
+        self.next_video_handle = self.next_video_handle.wrapping_add(1).max(1);
+        self.video_surfaces
+            .insert(handle, (name.to_owned(), framebuffer));
+        Ok(handle)
+    }
+
+    fn commit_video_surface(&mut self, handle: VideoSurfaceHandle) -> bool {
+        let Some((name, _)) = self.video_surfaces.get(&handle) else {
+            return false;
+        };
+        self.textures.commit_video_render_target(name)
+    }
+
+    fn video_surface_consumed(&mut self, handle: VideoSurfaceHandle) -> bool {
+        self.external_render_context.is_none() || !self.video_surfaces.contains_key(&handle)
+    }
+
+    fn video_surface_gl_framebuffer(&self, handle: VideoSurfaceHandle) -> Option<u32> {
+        self.video_surfaces
+            .get(&handle)
+            .map(|(_, framebuffer)| *framebuffer)
     }
 
     fn set_native_surface(&mut self, surface: NativeSurface) -> Result<(), String> {
