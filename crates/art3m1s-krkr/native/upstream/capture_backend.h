@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <unordered_set>
 #include <vector>
 
 #include "backend/SWRenderBackend.h"
@@ -81,7 +82,10 @@ private:
         std::vector<uint8_t> pixels;
     };
 
+    WindowTexture* FindWindowTexture(void* handle) const;
+
     krkrsdl3::SWRenderBackend software_;
+    std::unordered_set<WindowTexture*> window_textures_;
     std::vector<uint8_t> canvas_;
     std::vector<uint8_t> published_;
     uint32_t width_ = 0;

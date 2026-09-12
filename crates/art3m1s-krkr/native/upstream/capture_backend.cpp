@@ -18,6 +18,12 @@ CaptureBackend::~CaptureBackend()
 {
 }
 
+CaptureBackend::WindowTexture* CaptureBackend::FindWindowTexture(void* handle) const
+{
+    auto* texture = static_cast<WindowTexture*>(handle);
+    return window_textures_.find(texture) == window_textures_.end() ? nullptr : texture;
+}
+
 void CaptureBackend::BeginFrame(int winWidth, int winHeight)
 {
     width_ = static_cast<uint32_t>(std::max(0, winWidth));
@@ -42,13 +48,14 @@ void* CaptureBackend::CreateWindowTexture(int width, int height)
     texture->width = static_cast<uint32_t>(width);
     texture->height = static_cast<uint32_t>(height);
     texture->pixels.resize(static_cast<size_t>(width) * height * 4);
+    window_textures_.insert(texture);
     return texture;
 }
 
 void CaptureBackend::UpdateWindowTexture(
     void* handle, const uint8_t* buff, int width, int height, int pitch)
 {
-    auto* texture = static_cast<WindowTexture*>(handle);
+    auto* texture = FindWindowTexture(handle);
     if (!texture || !buff || width <= 0 || height <= 0 || pitch < width * 4)
         return;
 
@@ -65,13 +72,17 @@ void CaptureBackend::UpdateWindowTexture(
 
 void CaptureBackend::DestroyWindowTexture(void* handle)
 {
-    delete static_cast<WindowTexture*>(handle);
+    auto* texture = FindWindowTexture(handle);
+    if (!texture)
+        return;
+    window_textures_.erase(texture);
+    delete texture;
 }
 
 void CaptureBackend::DrawWindowTexture(
     void* handle, float posX, float posY, float width, float height)
 {
-    auto* texture = static_cast<WindowTexture*>(handle);
+    auto* texture = FindWindowTexture(handle);
     if (!texture || texture->pixels.empty() || canvas_.empty() || width <= 0 || height <= 0)
         return;
 

@@ -12,5 +12,11 @@ path = "src/lib.rs"
 [features]
 default = []
 native-bootstrap = []
+native-upstream-smoke = []
 
 [dependencies]
+
+[[bin]]
+name = "krkr_upstream_smoke"
+path = "src/bin/krkr_upstream_smoke.rs"
+required-features = ["native-upstream-smoke"]

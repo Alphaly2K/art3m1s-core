@@ -1,0 +1,18 @@
+{
+    "name": "art3m1s-krkr-upstream-smoke",
+    "version-string": "0.1.0",
+    "dependencies": [
+        "freetype",
+        "glm",
+        "libjpeg-turbo",
+        "libpng",
+        "libvorbis",
+        "libwebp",
+        "oniguruma",
+        "opusfile",
+        "plutovg",
+        "sdl3",
+        "sdl3-ttf"
+    ],
+    "builtin-baseline": "8e8dfb4ba483886936ded5ca201b500b8d8b0096"
+}

@@ -29,7 +29,7 @@ pub fn load_api_v1() -> Result<&'static Art3M1sKrkrApiV1, KrkrAbiError> {
     Ok(api)
 }
 
-pub fn probe_is_unsupported() -> i32 {
+pub fn probe_null_path() -> i32 {
     let api = load_api_v1().expect("native bootstrap ABI must be valid");
     let mut probe = crate::protocol::Art3m1sKrkrProbeV1::new();
     unsafe { api.probe_project.expect("probe_project is required")(std::ptr::null(), &mut probe) }
@@ -46,11 +46,21 @@ mod tests {
         assert!(api.runtime_create.is_some());
     }
 
+    #[cfg(feature = "native-bootstrap")]
     #[test]
     fn bootstrap_reports_unsupported() {
         assert_eq!(
-            probe_is_unsupported(),
+            probe_null_path(),
             crate::protocol::ART3M1S_KRKR_STATUS_UNSUPPORTED
+        );
+    }
+
+    #[cfg(feature = "native-upstream-smoke")]
+    #[test]
+    fn upstream_validates_probe_arguments() {
+        assert_eq!(
+            probe_null_path(),
+            crate::protocol::ART3M1S_KRKR_STATUS_INVALID_ARGUMENT
         );
     }
 }

@@ -6,13 +6,25 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=native");
     println!("cargo:rerun-if-env-changed=CMAKE");
+    println!("cargo:rerun-if-env-changed=KRKRSDL3_SOURCE_DIR");
+    println!("cargo:rerun-if-env-changed=KRKRSDL3_BUILD_DIR");
 
-    if env::var_os("CARGO_FEATURE_NATIVE_BOOTSTRAP").is_none() {
+    let bootstrap = env::var_os("CARGO_FEATURE_NATIVE_BOOTSTRAP").is_some();
+    let upstream = env::var_os("CARGO_FEATURE_NATIVE_UPSTREAM_SMOKE").is_some();
+    if !bootstrap && !upstream {
         return;
     }
+    assert!(
+        !(bootstrap && upstream),
+        "enable only one native KRKR backend feature"
+    );
 
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("native-bootstrap");
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join(if upstream {
+        "native-upstream-smoke"
+    } else {
+        "native-bootstrap"
+    });
     let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
     let build_type = if profile == "release" {
         "Release"
@@ -26,18 +38,59 @@ fn main() {
         "aarch64" => "arm64",
         arch => arch,
     };
+    assert!(
+        !upstream || target_os == "macos",
+        "native-upstream-smoke currently supports macOS only"
+    );
 
     let _ = fs::remove_dir_all(&out_dir);
+
+    let cmake_source = if upstream {
+        manifest_dir.join("native/upstream")
+    } else {
+        manifest_dir.join("native")
+    };
 
     let mut configure = Command::new(&cmake);
     configure
         .arg("-S")
-        .arg(manifest_dir.join("native"))
+        .arg(cmake_source)
         .arg("-B")
         .arg(&out_dir)
         .arg("-G")
         .arg("Ninja")
         .arg(format!("-DCMAKE_BUILD_TYPE={build_type}"));
+
+    if upstream {
+        let krkr_source = env::var_os("KRKRSDL3_SOURCE_DIR")
+            .expect("KRKRSDL3_SOURCE_DIR is required for native-upstream-smoke");
+        let krkr_build = env::var_os("KRKRSDL3_BUILD_DIR")
+            .expect("KRKRSDL3_BUILD_DIR is required for native-upstream-smoke");
+        let krkr_build = PathBuf::from(krkr_build);
+        configure
+            .arg(format!(
+                "-DKRKRSDL3_SOURCE_DIR={}",
+                PathBuf::from(krkr_source).display()
+            ))
+            .arg(format!("-DKRKRSDL3_BUILD_DIR={}", krkr_build.display()))
+            .arg(format!(
+                "-DVCPKG_OVERLAY_TRIPLETS={}",
+                krkr_build.join("vcpkg/triplets").display()
+            ));
+
+        if let Some(vcpkg_root) = env::var_os("VCPKG_ROOT") {
+            let vcpkg_root = PathBuf::from(vcpkg_root);
+            configure.arg(format!(
+                "-DCMAKE_TOOLCHAIN_FILE={}",
+                vcpkg_root
+                    .join("scripts/buildsystems/vcpkg.cmake")
+                    .display()
+            ));
+        }
+        if target_arch == "arm64" {
+            configure.arg("-DVCPKG_TARGET_TRIPLET=arm64-osx");
+        }
+    }
 
     match target_os.as_str() {
         "macos" => {
@@ -50,6 +103,9 @@ fn main() {
                 .arg(format!("-DCMAKE_OSX_DEPLOYMENT_TARGET={deployment_target}"))
                 .arg(format!("-DCMAKE_C_COMPILER_TARGET={compiler_target}"))
                 .arg(format!("-DCMAKE_CXX_COMPILER_TARGET={compiler_target}"));
+            if upstream {
+                configure.arg("-DMACOS=TRUE");
+            }
             if let Some(sdkroot) = apple_sdk_path("macosx") {
                 configure.arg(format!("-DCMAKE_OSX_SYSROOT={sdkroot}"));
             }
