@@ -9,6 +9,8 @@ struct HostEventSink;
 impl Sink for HostEventSink {
     fn log(&self, record: &Record) {
         crate::ffi::log(record.level().ffi_code(), record.message());
+        #[cfg(feature = "rfvp-engine")]
+        crate::ffi::rfvp_api::dispatch_log(record.level().ffi_code(), record.message());
     }
 }
 

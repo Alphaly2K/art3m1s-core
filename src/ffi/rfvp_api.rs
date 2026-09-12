@@ -7,6 +7,7 @@
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
+use std::sync::Mutex;
 
 use art3m1s_rfvp::{
     RfvpAudioSampleFormat, RfvpEncodedAudioKind, RfvpHostAudioCommand, RfvpHostAudioCommandKind,
@@ -69,6 +70,9 @@ pub const ART3M1S_RFVP_AUDIO_ENCODED_WAV: u32 = 1;
 pub const ART3M1S_RFVP_AUDIO_ENCODED_OGG: u32 = 2;
 pub const ART3M1S_RFVP_AUDIO_ENCODED_MP3: u32 = 3;
 pub const ART3M1S_RFVP_AUDIO_ENCODED_FLAC: u32 = 4;
+
+pub type Art3m1sRfvpLogCallbackFn =
+    unsafe extern "C" fn(level: u32, message: *const u8, message_len: usize, user_data: *mut c_void);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -139,6 +143,10 @@ type RuntimeClearExternalSurfaceFn = unsafe extern "C" fn(runtime: u64);
 type RuntimeAdvanceAndPresentFn = unsafe extern "C" fn(runtime: u64, delta_ms: u32) -> i32;
 type RuntimeAdvanceAndRenderFn =
     unsafe extern "C" fn(runtime: u64, delta_ms: u32, out_pixels: *mut u8, capacity: u32) -> u32;
+type RuntimeSetLogCallbackFn = unsafe extern "C" fn(
+    callback: Option<Art3m1sRfvpLogCallbackFn>,
+    user_data: *mut c_void,
+);
 
 #[repr(C)]
 pub struct Art3m1sRfvpApiV1 {
@@ -160,7 +168,10 @@ pub struct Art3m1sRfvpApiV1 {
     pub runtime_clear_external_surface: Option<RuntimeClearExternalSurfaceFn>,
     pub runtime_advance_and_present: Option<RuntimeAdvanceAndPresentFn>,
     pub runtime_advance_and_render: Option<RuntimeAdvanceAndRenderFn>,
+    pub runtime_set_log_callback: Option<RuntimeSetLogCallbackFn>,
 }
+
+static RFVP_LOG_CALLBACK: Mutex<Option<(Art3m1sRfvpLogCallbackFn, usize)>> = Mutex::new(None);
 
 struct ApiRuntime {
     runtime: RfvpHostRuntime,
@@ -185,6 +196,7 @@ static API_V1: Art3m1sRfvpApiV1 = Art3m1sRfvpApiV1 {
     runtime_clear_external_surface: Some(runtime_clear_external_surface),
     runtime_advance_and_present: Some(runtime_advance_and_present),
     runtime_advance_and_render: Some(runtime_advance_and_render),
+    runtime_set_log_callback: Some(runtime_set_log_callback),
 };
 
 #[unsafe(no_mangle)]
@@ -474,6 +486,32 @@ unsafe extern "C" fn runtime_advance_and_render(
     .unwrap_or(0)
 }
 
+unsafe extern "C" fn runtime_set_log_callback(
+    callback: Option<Art3m1sRfvpLogCallbackFn>,
+    user_data: *mut c_void,
+) {
+    let callback = callback.map(|callback| (callback, user_data as usize));
+    if let Ok(mut slot) = RFVP_LOG_CALLBACK.lock() {
+        *slot = callback;
+    }
+}
+
+pub(crate) fn dispatch_log(level: &str, message: &str) {
+    let callback = RFVP_LOG_CALLBACK.lock().ok().and_then(|slot| *slot);
+    let Some((callback, user_data)) = callback else {
+        return;
+    };
+    let level = level.as_bytes().first().copied().unwrap_or(b'I') as u32;
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+        callback(
+            level,
+            message.as_ptr(),
+            message.len(),
+            user_data as *mut c_void,
+        );
+    }));
+}
+
 unsafe fn runtime_mut(runtime: u64) -> Result<&'static mut ApiRuntime, i32> {
     if runtime == 0 {
         return Err(ART3M1S_RFVP_STATUS_INVALID_HANDLE);
@@ -612,6 +650,7 @@ mod tests {
         assert!(api.runtime_create.is_some());
         assert!(api.runtime_advance_and_render.is_some());
         assert!(api.runtime_poll_audio_command.is_some());
+        assert!(api.runtime_set_log_callback.is_some());
     }
 
     #[test]
