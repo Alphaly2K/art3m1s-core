@@ -1113,7 +1113,8 @@ impl GlRenderer {
 }
 
 impl GlRenderer {
-    pub(crate) fn render(&mut self, frame: &DrawList) {
+    /// Renders a complete draw list into the currently bound framebuffer.
+    pub fn render(&mut self, frame: &DrawList) {
         let _ = self.render_internal(frame, None, false);
     }
 }

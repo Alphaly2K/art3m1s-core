@@ -6,6 +6,7 @@ use crate::backend::{
     GpuProfileStats, NativeSurface, NativeSurfaceKind, RenderRegion, RenderTarget,
     RenderTargetDesc, RenderTargetId, ShaderId, TextureData, TextureDesc, TextureFormat,
     TextureOrigin, TextureUpdate, TextureUsage, VideoImportCapability, VideoSurfaceHandle,
+    Yuv420pPlanes,
 };
 use crate::draw::{DrawList, TextureId, TextureInfo, TextureProvider};
 use glow::HasContext;
@@ -25,6 +26,7 @@ pub struct GlBackend {
     main_target: RenderTarget,
     renderer: GlRenderer,
     textures: GlTextureProvider,
+    shader_profile: ShaderProfile,
     texture_descs: HashMap<TextureId, TextureDesc>,
     render_targets: HashMap<RenderTargetId, RenderTarget>,
     native_surface: Option<NativeSurface>,
@@ -53,7 +55,7 @@ impl GlBackend {
         };
         let renderer = GlRenderer::new(gl.clone(), width, height, profile)
             .map_err(|error| format!("创建渲染器失败: {error}"))?;
-        let textures = GlTextureProvider::new(gl.clone());
+        let textures = GlTextureProvider::new(gl.clone(), profile);
         let main_target = RenderTarget {
             id: RenderTargetId::from_opaque(framebuffer.0.get() as u64),
             color: TextureId(framebuffer_texture.0.get() as u64),
@@ -65,6 +67,7 @@ impl GlBackend {
             main_target,
             renderer,
             textures,
+            shader_profile: profile,
             texture_descs: HashMap::new(),
             render_targets: HashMap::new(),
             native_surface: None,
@@ -437,7 +440,8 @@ impl GpuBackend for GlBackend {
     }
 
     fn replace_asset_source(&mut self, source: Box<AssetSource>) {
-        self.textures = GlTextureProvider::new(self.gl.clone()).with_source(source);
+        self.textures =
+            GlTextureProvider::new(self.gl.clone(), self.shader_profile).with_source(source);
         self.texture_descs.clear();
         self.render_targets.clear();
     }
@@ -460,6 +464,21 @@ impl GpuBackend for GlBackend {
 
     fn upload_video_rgba(&mut self, name: &str, width: u32, height: u32, rgba: &[u8]) -> bool {
         self.textures.upload_video_rgba(name, width, height, rgba)
+    }
+
+    fn upload_video_yuv420p(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+        planes: Yuv420pPlanes<'_>,
+    ) -> bool {
+        self.textures
+            .upload_video_yuv420p(name, width, height, planes)
+    }
+
+    fn supports_video_yuv420p(&self) -> bool {
+        true
     }
 
     fn video_import_capability(&self) -> VideoImportCapability {

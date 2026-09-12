@@ -212,12 +212,14 @@ pub struct RenderTargetId(u64);
 
 impl RenderTargetId {
     #[allow(dead_code)]
-    pub(crate) const fn from_opaque(value: u64) -> Self {
+    #[doc(hidden)]
+    pub const fn from_opaque(value: u64) -> Self {
         Self(value)
     }
 
     #[allow(dead_code)]
-    pub(crate) const fn opaque(self) -> u64 {
+    #[doc(hidden)]
+    pub const fn opaque(self) -> u64 {
         self.0
     }
 }
@@ -325,7 +327,8 @@ pub struct PipelineId(u64);
 
 impl PipelineId {
     #[allow(dead_code)]
-    pub(crate) const fn from_opaque(value: u64) -> Self {
+    #[doc(hidden)]
+    pub const fn from_opaque(value: u64) -> Self {
         Self(value)
     }
 }

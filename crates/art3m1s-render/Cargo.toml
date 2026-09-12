@@ -8,7 +8,7 @@ description = "Backend-neutral rendering API for Art3m1s runtimes"
 [dependencies]
 glam = "0.30"
 glow = { version = "0.16", optional = true }
-image = { version = "0.24.9", optional = true, default-features = false, features = ["png"] }
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
 libloading = { version = "0.8.9", optional = true }
 log = { version = "0.4.20", optional = true, default-features = false, features = ["std"] }
 shaderc = { version = "0.10.1", optional = true, features = ["build-from-source"] }

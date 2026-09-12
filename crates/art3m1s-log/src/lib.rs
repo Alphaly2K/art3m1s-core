@@ -10,6 +10,46 @@ use std::fmt;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
+/// Emit a trace record through the standard `log` facade.
+#[macro_export]
+macro_rules! trace {
+    ($($arg:tt)*) => {
+        ::log::trace!($($arg)*)
+    };
+}
+
+/// Emit a debug record through the standard `log` facade.
+#[macro_export]
+macro_rules! debug {
+    ($($arg:tt)*) => {
+        ::log::debug!($($arg)*)
+    };
+}
+
+/// Emit an info record through the standard `log` facade.
+#[macro_export]
+macro_rules! info {
+    ($($arg:tt)*) => {
+        ::log::info!($($arg)*)
+    };
+}
+
+/// Emit a warning record through the standard `log` facade.
+#[macro_export]
+macro_rules! warn {
+    ($($arg:tt)*) => {
+        ::log::warn!($($arg)*)
+    };
+}
+
+/// Emit an error record through the standard `log` facade.
+#[macro_export]
+macro_rules! error {
+    ($($arg:tt)*) => {
+        ::log::error!($($arg)*)
+    };
+}
+
 /// Stable Art3m1s log level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]

@@ -19,10 +19,12 @@ use crate::draw::DrawCommand;
 pub struct ShaderId(u64);
 
 impl ShaderId {
-    pub(crate) const fn from_opaque(value: u64) -> Self {
+    #[doc(hidden)]
+    pub const fn from_opaque(value: u64) -> Self {
         Self(value)
     }
 
+    #[doc(hidden)]
     pub const fn opaque(self) -> u64 {
         self.0
     }

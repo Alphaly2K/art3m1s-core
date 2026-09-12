@@ -9,10 +9,7 @@
 use crate::compositor::build::build_frame_with_content;
 use crate::compositor::reduce::Compositor;
 use crate::compositor::scene::Scene;
-pub mod draw;
-pub mod hlsl;
-pub mod post_process;
-pub mod shader;
+pub use art3m1s_render::{draw, hlsl, post_process, shader};
 pub mod transition;
 
 pub use draw::{

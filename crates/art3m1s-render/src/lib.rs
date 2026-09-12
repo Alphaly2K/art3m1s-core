@@ -12,7 +12,9 @@ pub mod post_process;
 pub mod shader;
 pub mod types;
 
-pub use backend::{AssetSource, FrameCapture, GpuBackend, GpuProfileStats, RenderRegion};
+pub use backend::{
+    AssetSource, FrameCapture, GpuBackend, GpuProfileStats, RenderRegion, Yuv420pPlanes,
+};
 pub use draw::{
     BlendMode, ClipRect, ColorFilter, DrawCommand, DrawCommandKey, DrawList, DrawMesh,
     LayerCommandKind, LayerDrawSource, LayerShaderGroupKind, NativeEmoteMaterial, ShaderEffect,

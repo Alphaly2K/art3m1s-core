@@ -41,6 +41,17 @@ pub enum RenderRegion {
     Rect([f32; 4]),
 }
 
+/// Tightly described YUV420P planes uploaded by the runtime media decoder.
+#[derive(Debug, Clone, Copy)]
+pub struct Yuv420pPlanes<'a> {
+    pub y: &'a [u8],
+    pub y_stride: usize,
+    pub u: &'a [u8],
+    pub u_stride: usize,
+    pub v: &'a [u8],
+    pub v_stride: usize,
+}
+
 impl RenderRegion {
     pub fn from_damage(damage: Option<[f32; 4]>) -> Self {
         damage.map(Self::Rect).unwrap_or(Self::Full)
@@ -178,6 +189,24 @@ pub trait GpuBackend: TextureProvider {
     fn changed_texture_ids_since(&self, revision: u64) -> HashSet<TextureId>;
     fn evict_texture_prefix(&mut self, prefix: &str) -> usize;
     fn upload_video_rgba(&mut self, name: &str, width: u32, height: u32, rgba: &[u8]) -> bool;
+    fn supports_video_yuv420p(&self) -> bool {
+        false
+    }
+    /// Uploads software-decoded YUV420P planes and converts them on the GPU.
+    ///
+    /// The portable fallback is to convert a frame to RGBA and call
+    /// [`Self::upload_video_rgba`]. Backends that can sample or convert YUV
+    /// natively should override this method to avoid a CPU full-frame copy.
+    fn upload_video_yuv420p(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+        planes: Yuv420pPlanes<'_>,
+    ) -> bool {
+        let _ = (name, width, height, planes);
+        false
+    }
 
     fn video_import_capability(&self) -> VideoImportCapability {
         VideoImportCapability::cpu_only()

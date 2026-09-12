@@ -24,6 +24,8 @@ required-features = ["game-probes", "experimental-eluna"]
 
 [dependencies]
 art3m1s-emote = { path = "crates/art3m1s-emote" }
+art3m1s-log = { path = "crates/art3m1s-log" }
+art3m1s-render = { path = "crates/art3m1s-render" }
 eluna = { package = "eluna_rs", path = "crates/eluna", optional = true }
 pfs-upk-rust = { path = "crates/pfs-upk-rust" }
 art3m1s-media = { path = "crates/art3m1s-media" }
@@ -31,57 +33,13 @@ encoding_rs = "0.8"
 glam = "0.30"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-# GL reference backend. Native Apple builds select Metal by default, but keep
-# this feature available for explicit A/B comparison.
-glow = { version = "0.16", optional = true }
-libloading = { version = "0.8.9", optional = true }
 # GPU texture asset decoding (PNG only).
-image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
-shaderc = { version = "0.10.1", optional = true, features = ["build-from-source"] }
-spirv-cross2 = { version = "0.7.1", optional = true, default-features = false, features = ["msl"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 # 字体光栅化（字形渲染子系统）
 ab_glyph = "0.2"
 
 [target.'cfg(target_os = "ios")'.dependencies]
 asb-interpreter = { path = "crates/asb-interpreter", default-features = false, features = ["backend-luau"] }
-
-[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
-objc2 = { version = "0.6.4", optional = true }
-objc2-core-foundation = { version = "0.3.2", optional = true, default-features = false, features = ["CFCGTypes"] }
-objc2-foundation = { version = "0.3.2", optional = true, default-features = false, features = ["NSString"] }
-objc2-io-surface = { version = "0.3.2", optional = true, default-features = false, features = ["IOSurfaceRef", "objc2"] }
-objc2-metal = { version = "0.3.2", optional = true, default-features = false, features = [
-    "std",
-    "MTLAllocation",
-    "MTLArgument",
-    "MTLBlitCommandEncoder",
-    "MTLBuffer",
-    "MTLCommandBuffer",
-    "MTLCommandEncoder",
-    "MTLCommandQueue",
-    "MTLDepthStencil",
-    "MTLDevice",
-    "MTLDrawable",
-    "MTLLibrary",
-    "MTLPixelFormat",
-    "MTLRenderCommandEncoder",
-    "MTLRenderPass",
-    "MTLRenderPipeline",
-    "MTLResource",
-    "MTLSampler",
-    "MTLTexture",
-    "MTLTypes",
-    "objc2-io-surface",
-] }
-objc2-quartz-core = { version = "0.3.2", optional = true, default-features = false, features = [
-    "CALayer",
-    "CAMetalLayer",
-    "objc2-core-foundation",
-    "objc2-metal",
-] }
-
-[target.'cfg(any(target_os = "android", target_os = "windows", target_os = "linux"))'.dependencies]
-ash = { version = "0.38", optional = true, default-features = true }
 
 [target.'cfg(any(target_os = "android", target_os = "ios", all(target_os = "macos", target_arch = "aarch64")))'.dependencies]
 ctt-astcenc = "0.5"
@@ -91,27 +49,14 @@ asb-interpreter = { path = "crates/asb-interpreter", default-features = false, f
 
 [features]
 default = ["gl-backend", "metal-backend", "vulkan-backend", "experimental-eluna"]
-gl-backend = ["dep:glow", "dep:image", "dep:libloading"]
-metal-backend = [
-    "dep:image",
-    "runtime-shader",
-    "dep:objc2",
-    "dep:objc2-core-foundation",
-    "dep:objc2-foundation",
-    "dep:objc2-io-surface",
-    "dep:objc2-metal",
-    "dep:objc2-quartz-core",
-]
-vulkan-backend = ["dep:ash", "dep:image", "dep:naga", "runtime-shader"]
-runtime-shader = ["dep:shaderc", "dep:spirv-cross2"]
+gl-backend = ["art3m1s-render/gl"]
+metal-backend = ["runtime-shader", "art3m1s-render/metal"]
+vulkan-backend = ["runtime-shader", "art3m1s-render/vulkan"]
+runtime-shader = ["art3m1s-render/runtime-shader"]
 experimental-eluna = ["dep:eluna"]
 ffmpeg = ["art3m1s-media/ffmpeg"]
 game-probes = ["gl-backend"]
 
-[build-dependencies]
-naga = { version = "29", optional = true, features = ["wgsl-in", "spv-out"] }
-
 [dev-dependencies]
 # 离屏像素回读测试需要在 macOS 上创建一个 CGL headless 上下文。
-# 测试里用来在内存中编码一张 PNG 喂给解码路径。
-image = { version = "0.25", default-features = false, features = ["png"] }
+glow = "0.16"
