@@ -51,6 +51,18 @@ cargo run --manifest-path crates/art3m1s-krkr/Cargo.toml \
   /path/to/game/data.xp3 120 /tmp/krkr.ppm
 ```
 
+To verify a deterministic pointer path, inject one left-button click on a
+specific frame. The smoke host sends a move plus pointer-down on `frame`, then
+a pointer-up on the following frame:
+
+```sh
+cargo run --manifest-path crates/art3m1s-krkr/Cargo.toml \
+  --features native-upstream-smoke \
+  --bin krkr_upstream_smoke -- \
+  /path/to/game/data.xp3 120 /tmp/krkr-after-click.ppm \
+  --click 60:640:480
+```
+
 The build copies `Res/` from `KRKRSDL3_BUILD_DIR` next to the native host
 library and points the runtime's virtual executable path there. This supplies
 the built-in Droid Sans Fallback font when the game does not ship

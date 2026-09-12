@@ -1,5 +1,5 @@
 use std::env;
-use std::ffi::CString;
+use std::ffi::{CString, OsString};
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use art3m1s_krkr::native::load_api_v1;
 use art3m1s_krkr::protocol::{
-    ART3M1S_KRKR_STATUS_NO_FRAME, ART3M1S_KRKR_STATUS_OK, Art3m1sKrkrFrameV1,
+    ART3M1S_KRKR_INPUT_PHASE_DOWN, ART3M1S_KRKR_INPUT_PHASE_UP, ART3M1S_KRKR_INPUT_POINTER_BUTTON,
+    ART3M1S_KRKR_INPUT_POINTER_MOVE, ART3M1S_KRKR_POINTER_LEFT, ART3M1S_KRKR_STATUS_NO_FRAME,
+    ART3M1S_KRKR_STATUS_OK, Art3m1sKrkrFrameV1, Art3m1sKrkrInputEventV1,
     Art3m1sKrkrRuntimeConfigV1,
 };
 
@@ -20,21 +22,9 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = env::args_os().skip(1);
-    let game_root = args.next().map(PathBuf::from).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "usage: krkr_upstream_smoke <game-root> [frames] [output.ppm]",
-        )
-    })?;
-    let frame_count = args
-        .next()
-        .map(|value| value.to_string_lossy().parse::<u32>())
-        .transpose()?
-        .unwrap_or(120);
-    let output = args.next().map(PathBuf::from);
+    let options = parse_args()?;
 
-    let probe = art3m1s_krkr::probe_project(&game_root)?;
+    let probe = art3m1s_krkr::probe_project(&options.game_root)?;
     if !probe.is_krkr() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -44,7 +34,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let api = load_api_v1()?;
-    let game_root = CString::new(game_root.to_string_lossy().as_bytes())?;
+    let game_root = CString::new(options.game_root.to_string_lossy().as_bytes())?;
     eprintln!("runtime_create: begin");
     let mut runtime = 0u64;
     let status = unsafe {
@@ -62,10 +52,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let result = (|| {
         let mut last_frame = None;
-        for frame_index in 0..frame_count {
+        for frame_index in 0..options.frame_count {
             if frame_index == 0 {
                 eprintln!("runtime_tick: first");
             }
+
+            if let Some(click) = options.click {
+                if frame_index == click.frame {
+                    push_click(api, runtime, click, ART3M1S_KRKR_INPUT_PHASE_DOWN)?;
+                } else if frame_index == click.frame + 1 {
+                    push_click(api, runtime, click, ART3M1S_KRKR_INPUT_PHASE_UP)?;
+                }
+            }
+
             let status = unsafe { api.runtime_tick.expect("runtime_tick is required")(runtime) };
             if status != ART3M1S_KRKR_STATUS_OK {
                 return Err(
@@ -105,8 +104,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
         let frame = last_frame
             .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "no frame was produced"))?;
-        if let Some(output) = output {
-            write_ppm(&output, &frame)?;
+        if let Some(output) = options.output.as_ref() {
+            write_ppm(output, &frame)?;
             println!(
                 "wrote {} ({}x{}, generation {})",
                 output.display(),
@@ -129,6 +128,115 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     result
 }
 
+struct SmokeOptions {
+    game_root: PathBuf,
+    frame_count: u32,
+    output: Option<PathBuf>,
+    click: Option<Click>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Click {
+    frame: u32,
+    x: i32,
+    y: i32,
+}
+
+fn parse_args() -> Result<SmokeOptions, Box<dyn std::error::Error>> {
+    let mut positional = Vec::<OsString>::new();
+    let mut click = None;
+    let mut args = env::args_os().skip(1);
+
+    while let Some(arg) = args.next() {
+        if arg == "--click" {
+            let value = args.next().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "--click requires frame:x:y")
+            })?;
+            click = Some(parse_click(&value)?);
+        } else {
+            positional.push(arg);
+        }
+    }
+
+    let game_root = positional
+        .first()
+        .cloned()
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "usage: krkr_upstream_smoke <game-root> [frames] [output.ppm] [--click frame:x:y]",
+            )
+        })?;
+    let frame_count = positional
+        .get(1)
+        .map(|value| value.to_string_lossy().parse::<u32>())
+        .transpose()?
+        .unwrap_or(120);
+    let output = positional.get(2).cloned().map(PathBuf::from);
+
+    if let Some(click) = click
+        && click.frame + 1 >= frame_count
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "click frame must leave at least one frame for pointer-up",
+        )
+        .into());
+    }
+
+    Ok(SmokeOptions {
+        game_root,
+        frame_count,
+        output,
+        click,
+    })
+}
+
+fn parse_click(value: &OsString) -> Result<Click, Box<dyn std::error::Error>> {
+    let value = value.to_string_lossy();
+    let mut parts = value.split(':');
+    let frame = parts.next().and_then(|part| part.parse::<u32>().ok());
+    let x = parts.next().and_then(|part| part.parse::<i32>().ok());
+    let y = parts.next().and_then(|part| part.parse::<i32>().ok());
+    if parts.next().is_some() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid --click value").into());
+    }
+    match (frame, x, y) {
+        (Some(frame), Some(x), Some(y)) => Ok(Click { frame, x, y }),
+        _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid --click value").into()),
+    }
+}
+
+fn push_click(
+    api: &art3m1s_krkr::abi::Art3M1sKrkrApiV1,
+    runtime: u64,
+    click: Click,
+    phase: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut move_event = Art3m1sKrkrInputEventV1::new(ART3M1S_KRKR_INPUT_POINTER_MOVE);
+    move_event.x = click.x;
+    move_event.y = click.y;
+
+    let mut button_event = Art3m1sKrkrInputEventV1::new(ART3M1S_KRKR_INPUT_POINTER_BUTTON);
+    button_event.code = ART3M1S_KRKR_POINTER_LEFT;
+    button_event.phase = phase;
+    button_event.x = click.x;
+    button_event.y = click.y;
+
+    let events = [move_event, button_event];
+    let status = unsafe {
+        api.runtime_push_input
+            .expect("runtime_push_input is required")(runtime, events.as_ptr(), events.len())
+    };
+    if status != ART3M1S_KRKR_STATUS_OK {
+        return Err(
+            io::Error::other(format!("runtime_push_input failed with status {status}")).into(),
+        );
+    }
+    Ok(())
+}
+
 struct OwnedFrame {
     width: u32,
     height: u32,
@@ -143,7 +251,7 @@ fn copy_frame(frame: &Art3m1sKrkrFrameV1) -> Result<OwnedFrame, Box<dyn std::err
     let stride = usize::try_from(frame.stride)?;
     let row_bytes = usize::try_from(frame.width)? * 4;
     let height = usize::try_from(frame.height)?;
-    if stride < row_bytes || frame.pixels_len < stride.checked_mul(height).unwrap_or(usize::MAX) {
+    if stride < row_bytes || frame.pixels_len < stride.saturating_mul(height) {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid frame stride").into());
     }
 
@@ -169,4 +277,28 @@ fn write_ppm(path: &PathBuf, frame: &OwnedFrame) -> io::Result<()> {
         ppm.extend_from_slice(&pixel[..3]);
     }
     fs::write(path, ppm)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_click_option() {
+        assert_eq!(
+            parse_click(&OsString::from("700:580:930")).unwrap(),
+            Click {
+                frame: 700,
+                x: 580,
+                y: 930,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_click_options() {
+        for value in ["", "700", "700:580", "700:580:930:1", "x:580:930"] {
+            assert!(parse_click(&OsString::from(value)).is_err(), "{value}");
+        }
+    }
 }
