@@ -188,7 +188,13 @@ typedef struct Art3m1sKrkrApiV1 {
     ArtKrkrRuntimeSetExternalSurfaceFn runtime_set_external_surface;
 } Art3m1sKrkrApiV1;
 
-ART3M1S_KRKR_EXPORT const Art3m1sKrkrApiV1* art3m1s_krkr_get_api_v1(size_t* out_size);
+/* Public entry point exported by the Art3m1s core library. */
+ART3M1S_KRKR_EXPORT const Art3m1sKrkrApiV1* art3m1s_krkr_get_api_v1(
+    size_t* out_size);
+
+/* Private entry point exported by the native KRKR host shim. */
+ART3M1S_KRKR_EXPORT const Art3m1sKrkrApiV1* art3m1s_krkr_native_get_api_v1(
+    size_t* out_size);
 
 #ifdef __cplusplus
 }

@@ -7,12 +7,12 @@
 use crate::abi::{ART3M1S_KRKR_API_ABI_VERSION, Art3M1sKrkrApiV1, KrkrAbiError, validate_api_v1};
 
 unsafe extern "C" {
-    fn art3m1s_krkr_get_api_v1(out_size: *mut usize) -> *const Art3M1sKrkrApiV1;
+    fn art3m1s_krkr_native_get_api_v1(out_size: *mut usize) -> *const Art3M1sKrkrApiV1;
 }
 
 pub fn load_api_v1() -> Result<&'static Art3M1sKrkrApiV1, KrkrAbiError> {
     let mut size = 0usize;
-    let api = unsafe { art3m1s_krkr_get_api_v1(&mut size) };
+    let api = unsafe { art3m1s_krkr_native_get_api_v1(&mut size) };
     if api.is_null() {
         return Err(KrkrAbiError::Null);
     }

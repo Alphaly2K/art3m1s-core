@@ -650,7 +650,7 @@ const Art3m1sKrkrApiV1 kApi = {
 };
 } // namespace
 
-extern "C" ART3M1S_KRKR_EXPORT const Art3m1sKrkrApiV1* art3m1s_krkr_get_api_v1(
+extern "C" ART3M1S_KRKR_EXPORT const Art3m1sKrkrApiV1* art3m1s_krkr_native_get_api_v1(
     size_t* out_size)
 {
     if (out_size)
