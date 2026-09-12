@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RFVP_REPOSITORY: https://github.com/Alphaly2K/rfvp.git
 
 jobs:
   build:
@@ -18,6 +19,8 @@ jobs:
     - uses: actions/checkout@v4
       with:
         submodules: recursive
+    - name: Checkout RFVP dependency
+      run: git clone --depth 1 "$RFVP_REPOSITORY" "${GITHUB_WORKSPACE}/../rfvp"
     - name: Build
       run: cargo build --verbose
     - name: Run tests
