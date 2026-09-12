@@ -1,3 +1,5 @@
+//! Runtime profiling state and snapshot publishing.
+
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

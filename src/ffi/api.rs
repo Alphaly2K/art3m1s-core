@@ -1,15 +1,9 @@
-//! Versioned C ABI table.
+//! Versioned C ABI table exposed through the core facade.
 //!
 //! This is the single entry point hosts should query. Individual exported
 //! symbols remain temporarily for migration, but new host code must use this
 //! table so the eventual flat-symbol allowlist can be reduced without another
 //! ABI change.
-
-#![cfg(any(
-    feature = "gl-backend",
-    feature = "metal-backend",
-    feature = "vulkan-backend"
-))]
 
 use crate::ffi::{
     art3m1s_clear_font_override, art3m1s_probe_caption, art3m1s_runtime_advance_and_present,

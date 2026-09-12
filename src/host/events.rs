@@ -1,4 +1,4 @@
-//! Callback-free host event transport.
+//! Callback-free host event transport and state.
 //!
 //! Event queues and host state live behind an opaque [`HostEvents`] handle.
 //! Logs and media/UI commands originate from process-wide core code, so they

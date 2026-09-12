@@ -14,28 +14,22 @@ pub mod audio;
 pub mod backend;
 pub mod compositor;
 pub mod ffi;
-pub mod ffi_api;
-pub mod host_events;
-pub mod host_files;
-pub mod host_media;
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+pub use ffi::api as ffi_api;
+pub mod host;
+pub use host::{events as host_events, files as host_files, media as host_media};
 #[cfg(any(
     target_os = "android",
     target_os = "ios",
     all(target_os = "macos", target_arch = "aarch64")
 ))]
-mod mobile_astc;
-#[cfg(any(
-    feature = "gl-backend",
-    feature = "metal-backend",
-    feature = "vulkan-backend"
-))]
+mod platform;
 pub mod profiler;
 pub mod render_pipeline;
-#[cfg(any(
-    feature = "gl-backend",
-    feature = "metal-backend",
-    feature = "vulkan-backend"
-))]
 pub mod runtime;
 pub mod save;
 pub mod text;

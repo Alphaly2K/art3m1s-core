@@ -115,7 +115,7 @@ struct EmoteInstance {
         target_os = "ios",
         all(target_os = "macos", target_arch = "aarch64")
     ))]
-    astc_encoder: Option<crate::mobile_astc::AstcEncoder>,
+    astc_encoder: Option<crate::platform::mobile_astc::AstcEncoder>,
 }
 
 struct EmoteEyeBlink {
@@ -542,7 +542,7 @@ impl EmoteInstance {
                 if texture.gpu.is_none() && provider.supports_astc_4x4() {
                     let cache_path = astc_cache_path(compressed, texture.width, texture.height);
                     if let Ok(cached) = self.resources.read_file(&cache_path)
-                        && crate::mobile_astc::astc_4x4_len(texture.width, texture.height)
+                        && crate::platform::mobile_astc::astc_4x4_len(texture.width, texture.height)
                             == Some(cached.len())
                     {
                         texture.gpu = provider.upload_astc_4x4_render_only(
@@ -561,7 +561,7 @@ impl EmoteInstance {
                                 format!("failed to decode E-Mote texture {texture_id}: {error}")
                             })?;
                         if self.astc_encoder.is_none() {
-                            match crate::mobile_astc::AstcEncoder::new() {
+                            match crate::platform::mobile_astc::AstcEncoder::new() {
                                 Ok(encoder) => self.astc_encoder = Some(encoder),
                                 Err(error) => {
                                     crate::core_warn!("[E-Mote] ASTC encoder unavailable: {error}");

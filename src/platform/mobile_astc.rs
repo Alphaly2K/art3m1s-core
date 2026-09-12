@@ -1,3 +1,5 @@
+//! Platform ASTC encoding support.
+
 use ctt_astcenc::bindings::{astcenc_image, astcenc_type_ASTCENC_TYPE_U8};
 use ctt_astcenc::{Context, Flags, Preset, Profile, Swizzle, config_init};
 use std::ffi::c_void;

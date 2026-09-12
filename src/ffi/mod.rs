@@ -1,8 +1,16 @@
 //! Core-side implementations used by the versioned C ABI table.
 //!
-//! These functions are address-taken by [`crate::ffi_api::Art3m1sApiV1`].
+//! These functions are address-taken by [`crate::ffi::api::Art3m1sApiV1`].
 //! They are intentionally not exported as individual dynamic-library symbols;
-//! hosts must obtain them through [`crate::ffi_api::art3m1s_get_api_v1`].
+//! hosts must obtain them through [`crate::ffi::api::art3m1s_get_api_v1`].
+
+#[cfg(any(
+    feature = "gl-backend",
+    feature = "metal-backend",
+    feature = "vulkan-backend"
+))]
+pub mod api;
+
 #[cfg(any(
     feature = "gl-backend",
     feature = "metal-backend",
@@ -11,7 +19,7 @@
 use std::ffi::c_void;
 use std::ffi::{c_char, c_int};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 // ── Global debug flag ──────────────────────────────────────────
 
@@ -336,22 +344,9 @@ pub unsafe extern "C" fn art3m1s_clear_font_override() {
 
 // ── ANGLE library search path ──────────────────────────────────
 
-static ANGLE_PATH: OnceLock<String> = OnceLock::new();
-
 pub unsafe extern "C" fn art3m1s_set_angle_path(path: *const c_char) {
     if let Ok(s) = unsafe { std::ffi::CStr::from_ptr(path).to_str() } {
-        let _ = ANGLE_PATH.set(s.to_string());
-    }
-}
-
-pub fn angle_lib_path(name: &str) -> String {
-    if let Some(prefix) = ANGLE_PATH.get() {
-        std::path::Path::new(prefix)
-            .join(name)
-            .to_string_lossy()
-            .into_owned()
-    } else {
-        name.to_string()
+        let _ = crate::backend::set_angle_path_prefix(s);
     }
 }
 
@@ -469,18 +464,8 @@ pub fn query_asset_size(path: &str) -> Option<u64> {
 
 // ── Runtime control FFI ─────────────────────────────────────────
 
-#[cfg(any(
-    feature = "gl-backend",
-    feature = "metal-backend",
-    feature = "vulkan-backend"
-))]
 use crate::runtime::CoreRuntime;
 
-#[cfg(any(
-    feature = "gl-backend",
-    feature = "metal-backend",
-    feature = "vulkan-backend"
-))]
 /// Creates a runtime using the platform default GPU backend.
 ///
 /// Value 0 selects the production platform default: Metal on Darwin and

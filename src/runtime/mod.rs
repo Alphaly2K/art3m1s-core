@@ -1,4 +1,4 @@
-//! Core runtime — wires together a GPU backend, compositor, interpreter,
+//! Core runtime: wires together a GPU backend, compositor, interpreter,
 //! text rendering and input handling into a single frame-oriented API
 //! that the Flutter frontend calls from its game loop.
 
@@ -585,7 +585,7 @@ impl CoreRuntime {
         profile
     }
 
-    fn finish_profile_frame(&self, profile: &mut crate::profiler::FrameProfile) {
+    fn finish_profile_frame(&mut self, profile: &mut crate::profiler::FrameProfile) {
         if !profile.enabled {
             return;
         }

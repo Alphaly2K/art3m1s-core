@@ -1,4 +1,4 @@
-//! Host media command protocol.
+//! Host media command protocol and payload types.
 //!
 //! Core only produces media commands and consumes completion notifications.
 //! Audio sample transport is intentionally not part of this Dart-facing FFI
