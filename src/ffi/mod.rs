@@ -14,6 +14,9 @@ pub mod api;
 #[cfg(feature = "rfvp-engine")]
 pub mod rfvp_api;
 
+#[cfg(feature = "krkr-engine")]
+pub mod krkr_api;
+
 #[cfg(any(
     feature = "gl-backend",
     feature = "metal-backend",

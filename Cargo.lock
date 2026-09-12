@@ -76,6 +76,7 @@ version = "0.4.0"
 dependencies = [
  "ab_glyph",
  "art3m1s-emote",
+ "art3m1s-krkr",
  "art3m1s-log",
  "art3m1s-media",
  "art3m1s-render",
@@ -95,6 +96,10 @@ dependencies = [
 [[package]]
 name = "art3m1s-emote"
 version = "0.1.0-alpha.1"
+
+[[package]]
+name = "art3m1s-krkr"
+version = "0.1.0"
 
 [[package]]
 name = "art3m1s-log"
