@@ -6,18 +6,20 @@
 
 ### 变更
 
-- 视频与 external texture 改为 backend-neutral 不透明 handle（`ExternalTextureHandle` / `VideoSurfaceHandle` / `FrameTargetHandle`）。FFI 不再把 GLuint framebuffer/texture 作为生产 ABI。
-- Darwin/Metal 图层视频走 VideoToolbox/`CVPixelBuffer` → `CVMetalTextureCache` → `MTLTexture` 的 zero-copy 路径；CPU RGBA 仅为 fallback。截图与 video framebuffer ABI 分离。
+- core 动态库只导出 `art3m1s_get_api_v1`；原有 `art3m1s_*` 平铺符号全部退出动态库导出面。对象操作通过不透明句柄，像素/blob/字符串数据继续使用裸指针加长度。
+- 文件挂载、存档根和资源覆盖改为独立 `HostResources` 句柄；`CoreRuntime` 在加载项目前绑定资源句柄，运行时的媒体、字体、存档和 asset 查询不再依赖进程全局文件表。
+- 不兼容旧平铺 ABI。Host 必须通过 `Art3m1sApiV1` 调用 runtime、文件、输入、profiler 和 host events 入口。
 
 ### 新增
 
-- `art3m1s_runtime_import_video_frame` 及所有权/同步模型（Borrowed/Imported/Owned，可选 fence/event）。
-- `art3m1s_runtime_capture_screenshot` 独立截图 readback。
-- Android Vulkan `AHardwareBuffer` 导入作为扩展点保留，不阻塞 Darwin 生产实现。
+- 新增 `art3m1s_get_api_v1` 版本化 C ABI 函数表：宿主只查询一次，按 `struct_size`、`abi_version` 和 `magic` 校验后调用；Dart 已开始用该表承接 host events、文件挂载和 runtime 主循环。
+- 新增 runtime FFmpeg 视频会话与 `art3m1s_runtime_set_runtime_media_enabled`：运行时解码 YUV420P、按 PTS 投递，并由 GL/Metal 在 GPU 上转换为可采样视频纹理。
+- 新增 callback-free host events v1：日志、media、UI、字体、窗口状态和文本替换改为拉取/推送接口，宿主不再需要向 core 保存 Dart callback trampoline。
+- 新增 FFI 导出 allowlist 检查脚本，release 构建出现额外 `art3m1s_*` 导出时直接失败。
 
 ### 兼容
 
-- `video_gl_*` 保留为 deprecated GL/libmpv shim；Metal 上返回失败，宿主应改走 import 或 RGBA。
+- native video import/surface、`video_gl_*`、截图、render/output size、upscale mode/render scale、HLSL shader 和窗口方向通知暂不进入 v1 函数表；需要恢复时先设计新的版本化入口。
 
 ## [0.4.0] - 2026-09-09
 
