@@ -1,5 +1,6 @@
 #include "art3m1s_krkr.h"
 #include "capture_backend.h"
+#include "host_audio.h"
 
 #define SDL_MAIN_USE_CALLBACKS
 #define SDL_MAIN_NOIMPL
@@ -204,6 +205,7 @@ int32_t RuntimeCreateImpl(const char* game_root_utf8,
         return ART3M1S_KRKR_STATUS_UNSUPPORTED;
     if (Application)
         return ART3M1S_KRKR_STATUS_ENGINE;
+    art3m1s::krkr::ResetAudioHost();
 
 #ifdef ART3M1S_KRKR_RESOURCE_EXE
     std::string program = ART3M1S_KRKR_RESOURCE_EXE;
@@ -273,6 +275,7 @@ void RuntimeDestroyImpl(uint64_t handle)
         return;
     runtime->capture = nullptr;
     SDL_AppQuit(nullptr, SDL_APP_SUCCESS);
+    art3m1s::krkr::ResetAudioHost();
     delete runtime;
 }
 
@@ -415,7 +418,9 @@ int32_t RuntimePollAudioCommandImpl(uint64_t handle, Art3m1sKrkrAudioCommandV1* 
     if (!runtime || !out_command ||
         out_command->struct_size != sizeof(Art3m1sKrkrAudioCommandV1))
         return ART3M1S_KRKR_STATUS_INVALID_ARGUMENT;
-    return ART3M1S_KRKR_STATUS_NO_COMMAND;
+    return art3m1s::krkr::PollAudioCommand(out_command)
+               ? ART3M1S_KRKR_STATUS_OK
+               : ART3M1S_KRKR_STATUS_NO_COMMAND;
 }
 
 int32_t RuntimeSubmitAudioConsumedImpl(
@@ -425,7 +430,7 @@ int32_t RuntimeSubmitAudioConsumedImpl(
     if (!runtime || !consumed ||
         consumed->struct_size != sizeof(Art3m1sKrkrAudioConsumedV1))
         return ART3M1S_KRKR_STATUS_INVALID_ARGUMENT;
-    return ART3M1S_KRKR_STATUS_UNSUPPORTED;
+    return art3m1s::krkr::SubmitAudioConsumed(consumed);
 }
 
 int32_t RuntimeIsExitRequestedImpl(uint64_t handle)

@@ -1,17 +1,23 @@
+use std::collections::HashMap;
 use std::env;
 use std::ffi::{CString, OsString};
 use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use art3m1s_krkr::native::load_api_v1;
 use art3m1s_krkr::protocol::{
-    ART3M1S_KRKR_INPUT_PHASE_DOWN, ART3M1S_KRKR_INPUT_PHASE_UP, ART3M1S_KRKR_INPUT_POINTER_BUTTON,
-    ART3M1S_KRKR_INPUT_POINTER_MOVE, ART3M1S_KRKR_POINTER_LEFT, ART3M1S_KRKR_STATUS_NO_FRAME,
-    ART3M1S_KRKR_STATUS_OK, Art3m1sKrkrFrameV1, Art3m1sKrkrInputEventV1,
-    Art3m1sKrkrRuntimeConfigV1,
+    ART3M1S_KRKR_AUDIO_CREATE_STREAM, ART3M1S_KRKR_AUDIO_DESTROY_STREAM,
+    ART3M1S_KRKR_AUDIO_FORMAT_F32, ART3M1S_KRKR_AUDIO_FORMAT_I8, ART3M1S_KRKR_AUDIO_FORMAT_I16,
+    ART3M1S_KRKR_AUDIO_FORMAT_I24, ART3M1S_KRKR_AUDIO_FORMAT_I32, ART3M1S_KRKR_AUDIO_PAUSE,
+    ART3M1S_KRKR_AUDIO_PLAY, ART3M1S_KRKR_AUDIO_SET_PARAMS, ART3M1S_KRKR_AUDIO_STOP,
+    ART3M1S_KRKR_AUDIO_SUBMIT_PCM, ART3M1S_KRKR_INPUT_PHASE_DOWN, ART3M1S_KRKR_INPUT_PHASE_UP,
+    ART3M1S_KRKR_INPUT_POINTER_BUTTON, ART3M1S_KRKR_INPUT_POINTER_MOVE, ART3M1S_KRKR_POINTER_LEFT,
+    ART3M1S_KRKR_STATUS_NO_COMMAND, ART3M1S_KRKR_STATUS_NO_FRAME, ART3M1S_KRKR_STATUS_OK,
+    Art3m1sKrkrAudioCommandV1, Art3m1sKrkrAudioConsumedV1, Art3m1sKrkrFrameV1,
+    Art3m1sKrkrInputEventV1, Art3m1sKrkrRuntimeConfigV1,
 };
 
 fn main() {
@@ -51,6 +57,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("runtime_create: ok");
 
     let result = (|| {
+        let mut audio = AudioPump::default();
         let mut last_frame = None;
         for frame_index in 0..options.frame_count {
             if frame_index == 0 {
@@ -71,6 +78,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     io::Error::other(format!("runtime_tick failed with status {status}")).into(),
                 );
             }
+            audio.pump(api, runtime)?;
 
             let mut frame = Art3m1sKrkrFrameV1::default();
             let status = unsafe {
@@ -119,6 +127,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 frame.width, frame.height, frame.generation
             );
         }
+        println!(
+            "audio: {} stream(s), {} PCM chunk(s), {} byte(s), non-zero PCM={}",
+            audio.created_streams, audio.pcm_chunks, audio.pcm_bytes, audio.nonzero_pcm
+        );
         Ok(())
     })();
 
@@ -244,6 +256,200 @@ struct OwnedFrame {
     rgba: Vec<u8>,
 }
 
+#[derive(Default)]
+struct AudioPump {
+    streams: HashMap<u32, AudioStream>,
+    last_advance: Option<Instant>,
+    created_streams: u64,
+    pcm_chunks: u64,
+    pcm_bytes: u64,
+    nonzero_pcm: bool,
+}
+
+struct AudioStream {
+    sample_format: u32,
+    sample_rate: u32,
+    channels: u32,
+    playing: bool,
+    consumed_samples: u64,
+    fractional_samples: f64,
+}
+
+impl AudioStream {
+    fn new(command: &Art3m1sKrkrAudioCommandV1) -> Self {
+        Self {
+            sample_format: command.sample_format,
+            sample_rate: command.sample_rate,
+            channels: command.channels,
+            playing: false,
+            consumed_samples: 0,
+            fractional_samples: 0.0,
+        }
+    }
+
+    fn sample_bytes(&self) -> Option<usize> {
+        match self.sample_format {
+            ART3M1S_KRKR_AUDIO_FORMAT_I8 => Some(1),
+            ART3M1S_KRKR_AUDIO_FORMAT_I16 => Some(2),
+            ART3M1S_KRKR_AUDIO_FORMAT_I24 => Some(3),
+            ART3M1S_KRKR_AUDIO_FORMAT_I32 | ART3M1S_KRKR_AUDIO_FORMAT_F32 => Some(4),
+            _ => None,
+        }
+    }
+}
+
+impl AudioPump {
+    fn pump(
+        &mut self,
+        api: &art3m1s_krkr::abi::Art3M1sKrkrApiV1,
+        runtime: u64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        loop {
+            let mut command = Art3m1sKrkrAudioCommandV1::default();
+            let status = unsafe {
+                api.runtime_poll_audio_command
+                    .expect("runtime_poll_audio_command is required")(
+                    runtime, &mut command
+                )
+            };
+            match status {
+                ART3M1S_KRKR_STATUS_OK => self.handle_command(command)?,
+                ART3M1S_KRKR_STATUS_NO_COMMAND => break,
+                _ => {
+                    return Err(io::Error::other(format!(
+                        "runtime_poll_audio_command failed with status {status}"
+                    ))
+                    .into());
+                }
+            }
+        }
+
+        let now = Instant::now();
+        let elapsed = self
+            .last_advance
+            .map(|last| now.saturating_duration_since(last))
+            .unwrap_or_default();
+        self.last_advance = Some(now);
+
+        for (&stream_id, stream) in &mut self.streams {
+            if !stream.playing || stream.sample_rate == 0 {
+                continue;
+            }
+            stream.fractional_samples += elapsed.as_secs_f64() * f64::from(stream.sample_rate);
+            let samples = stream.fractional_samples.floor() as u64;
+            if samples == 0 {
+                continue;
+            }
+            stream.fractional_samples -= samples as f64;
+            stream.consumed_samples += samples;
+
+            let consumed = Art3m1sKrkrAudioConsumedV1::new(stream_id, stream.consumed_samples, 0);
+            let status = unsafe {
+                api.runtime_submit_audio_consumed
+                    .expect("runtime_submit_audio_consumed is required")(
+                    runtime, &consumed
+                )
+            };
+            if status != ART3M1S_KRKR_STATUS_OK {
+                return Err(io::Error::other(format!(
+                    "runtime_submit_audio_consumed failed with status {status}"
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_command(
+        &mut self,
+        command: Art3m1sKrkrAudioCommandV1,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match command.kind {
+            ART3M1S_KRKR_AUDIO_CREATE_STREAM => {
+                if command.sample_rate == 0 || command.channels == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "audio stream has an invalid format",
+                    )
+                    .into());
+                }
+                self.streams
+                    .insert(command.stream_id, AudioStream::new(&command));
+                self.created_streams += 1;
+            }
+            ART3M1S_KRKR_AUDIO_SUBMIT_PCM => {
+                let stream = self.streams.get(&command.stream_id).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "PCM for an unknown audio stream",
+                    )
+                })?;
+                let frame_bytes = stream
+                    .sample_bytes()
+                    .and_then(|bytes| bytes.checked_mul(usize::try_from(stream.channels).ok()?))
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "unsupported PCM format")
+                    })?;
+                let expected = usize::try_from(command.sample_count)
+                    .ok()
+                    .and_then(|samples| samples.checked_mul(frame_bytes))
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "PCM payload is too large")
+                    })?;
+                if command.payload_size != expected || (expected != 0 && command.payload.is_null())
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "PCM payload does not match its format: format={}, channels={}, \
+                             samples={}, expected={}, actual={}",
+                            command.sample_format,
+                            command.channels,
+                            command.sample_count,
+                            expected,
+                            command.payload_size
+                        ),
+                    )
+                    .into());
+                }
+                if expected != 0 {
+                    let payload = unsafe {
+                        std::slice::from_raw_parts(command.payload, command.payload_size)
+                    };
+                    self.nonzero_pcm |= payload.iter().any(|byte| *byte != 0);
+                }
+                self.pcm_chunks += 1;
+                self.pcm_bytes += command.payload_size as u64;
+            }
+            ART3M1S_KRKR_AUDIO_PLAY => {
+                if let Some(stream) = self.streams.get_mut(&command.stream_id) {
+                    stream.playing = true;
+                }
+            }
+            ART3M1S_KRKR_AUDIO_PAUSE => {
+                if let Some(stream) = self.streams.get_mut(&command.stream_id) {
+                    stream.playing = false;
+                }
+            }
+            ART3M1S_KRKR_AUDIO_STOP => {
+                if let Some(stream) = self.streams.get_mut(&command.stream_id) {
+                    stream.playing = false;
+                    stream.consumed_samples = 0;
+                    stream.fractional_samples = 0.0;
+                }
+            }
+            ART3M1S_KRKR_AUDIO_DESTROY_STREAM => {
+                self.streams.remove(&command.stream_id);
+            }
+            ART3M1S_KRKR_AUDIO_SET_PARAMS => {}
+            kind => {
+                return Err(io::Error::other(format!("unknown audio command kind {kind}")).into());
+            }
+        }
+        Ok(())
+    }
+}
+
 fn copy_frame(frame: &Art3m1sKrkrFrameV1) -> Result<OwnedFrame, Box<dyn std::error::Error>> {
     if frame.pixels.is_null() || frame.width == 0 || frame.height == 0 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "empty native frame").into());
@@ -300,5 +506,51 @@ mod tests {
         for value in ["", "700", "700:580", "700:580:930:1", "x:580:930"] {
             assert!(parse_click(&OsString::from(value)).is_err(), "{value}");
         }
+    }
+
+    #[test]
+    fn audio_pump_validates_i16_stereo_pcm() {
+        let mut audio = AudioPump::default();
+        let create = Art3m1sKrkrAudioCommandV1 {
+            kind: ART3M1S_KRKR_AUDIO_CREATE_STREAM,
+            stream_id: 7,
+            sample_format: ART3M1S_KRKR_AUDIO_FORMAT_I16,
+            sample_rate: 48_000,
+            channels: 2,
+            ..Default::default()
+        };
+        audio.handle_command(create).unwrap();
+
+        let payload = [1u8, 0, 0, 0, 2, 0, 0, 0];
+        let mut pcm = Art3m1sKrkrAudioCommandV1 {
+            kind: ART3M1S_KRKR_AUDIO_SUBMIT_PCM,
+            stream_id: 7,
+            sample_count: 2,
+            payload: payload.as_ptr(),
+            payload_size: payload.len(),
+            ..Default::default()
+        };
+        audio.handle_command(pcm).unwrap();
+        assert_eq!(audio.pcm_chunks, 1);
+        assert_eq!(audio.pcm_bytes, payload.len() as u64);
+        assert!(audio.nonzero_pcm);
+
+        pcm.payload_size -= 1;
+        assert!(audio.handle_command(pcm).is_err());
+    }
+
+    #[test]
+    fn audio_pump_rejects_pcm_for_unknown_stream() {
+        let mut audio = AudioPump::default();
+        let payload = [0u8; 4];
+        let pcm = Art3m1sKrkrAudioCommandV1 {
+            kind: ART3M1S_KRKR_AUDIO_SUBMIT_PCM,
+            stream_id: 99,
+            sample_count: 1,
+            payload: payload.as_ptr(),
+            payload_size: payload.len(),
+            ..Default::default()
+        };
+        assert!(audio.handle_command(pcm).is_err());
     }
 }

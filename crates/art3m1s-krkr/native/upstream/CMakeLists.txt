@@ -58,9 +58,16 @@ list(
     EXCLUDE
     REGEX "/sdl3_entry\\.cpp$"
 )
+list(
+    FILTER
+    KRKRSDL_ENVIRON_SRC
+    EXCLUDE
+    REGEX "/sdl3_audio\\.cpp$"
+)
 
 set(_art3m1s_sources
     "${CMAKE_CURRENT_SOURCE_DIR}/capture_backend.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/host_audio.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/host_runtime.cpp"
 )
 

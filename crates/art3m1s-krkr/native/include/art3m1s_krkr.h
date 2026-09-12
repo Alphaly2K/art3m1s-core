@@ -61,6 +61,9 @@ enum Art3m1sKrkrStatus {
 
 #define ART3M1S_KRKR_AUDIO_FORMAT_I16 1u
 #define ART3M1S_KRKR_AUDIO_FORMAT_F32 2u
+#define ART3M1S_KRKR_AUDIO_FORMAT_I8 3u
+#define ART3M1S_KRKR_AUDIO_FORMAT_I24 4u
+#define ART3M1S_KRKR_AUDIO_FORMAT_I32 5u
 
 typedef struct Art3m1sKrkrProbeV1 {
     uint32_t struct_size;
@@ -117,6 +120,7 @@ typedef struct Art3m1sKrkrAudioCommandV1 {
     uint32_t sample_format;
     uint32_t sample_rate;
     uint32_t channels;
+    /* Per-channel sample frames for SUBMIT_PCM. */
     uint64_t sample_count;
     float volume;
     float pan;
@@ -128,6 +132,7 @@ typedef struct Art3m1sKrkrAudioCommandV1 {
 typedef struct Art3m1sKrkrAudioConsumedV1 {
     uint32_t struct_size;
     uint32_t stream_id;
+    /* Absolute sample frames consumed since stream creation or stop/reset. */
     uint64_t consumed_samples;
     uint64_t generation;
     uint64_t reserved[2];

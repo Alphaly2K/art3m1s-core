@@ -69,7 +69,12 @@ the built-in Droid Sans Fallback font when the game does not ship
 `default.ttf`.
 
 The smoke host currently covers macOS project loading, TJS/KAG startup,
-XP3/root patch mounting, input event translation, frame capture, and lifecycle
-shutdown. Host-owned audio output, arbitrary Windows `.dll`/`.tpm` plugins,
-iOS packaging, and dynamic FFmpeg packaging remain separate integration work.
-The current source and build pins are recorded in [`UPSTREAM.md`](UPSTREAM.md).
+XP3/root patch mounting, input event translation, frame capture, host-owned
+audio command extraction, and lifecycle shutdown. The smoke host advances each
+playing stream from the wall clock and submits absolute consumed sample counts
+back to the runtime; this lets the engine fill audio buffers without making the
+smoke host a real speaker backend.
+
+Arbitrary Windows `.dll`/`.tpm` plugins, real speaker playback, iOS packaging,
+and dynamic FFmpeg packaging remain separate integration work. The current
+source and build pins are recorded in [`UPSTREAM.md`](UPSTREAM.md).

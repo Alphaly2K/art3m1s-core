@@ -51,6 +51,9 @@ pub const ART3M1S_KRKR_AUDIO_MASTER_VOLUME: u32 = 8;
 
 pub const ART3M1S_KRKR_AUDIO_FORMAT_I16: u32 = 1;
 pub const ART3M1S_KRKR_AUDIO_FORMAT_F32: u32 = 2;
+pub const ART3M1S_KRKR_AUDIO_FORMAT_I8: u32 = 3;
+pub const ART3M1S_KRKR_AUDIO_FORMAT_I24: u32 = 4;
+pub const ART3M1S_KRKR_AUDIO_FORMAT_I32: u32 = 5;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -178,6 +181,8 @@ pub struct Art3m1sKrkrAudioCommandV1 {
     pub sample_format: u32,
     pub sample_rate: u32,
     pub channels: u32,
+    /// Per-channel sample frames. For `SUBMIT_PCM`, payload size must equal
+    /// `sample_count * channels * bytes_per_sample`.
     pub sample_count: u64,
     pub volume: f32,
     pub pan: f32,
@@ -210,6 +215,8 @@ impl Default for Art3m1sKrkrAudioCommandV1 {
 pub struct Art3m1sKrkrAudioConsumedV1 {
     pub struct_size: u32,
     pub stream_id: u32,
+    /// Absolute number of decoded sample frames consumed since stream creation
+    /// or the most recent stop/reset.
     pub consumed_samples: u64,
     pub generation: u64,
     pub reserved: [u64; 2],
