@@ -24,6 +24,12 @@ CaptureBackend::WindowTexture* CaptureBackend::FindWindowTexture(void* handle) c
     return window_textures_.find(texture) == window_textures_.end() ? nullptr : texture;
 }
 
+CaptureBackend::ShadowTexture* CaptureBackend::FindShadowTexture(void* handle) const
+{
+    const auto it = shadow_textures_.find(handle);
+    return it == shadow_textures_.end() ? nullptr : it->second.get();
+}
+
 void CaptureBackend::BeginFrame(int winWidth, int winHeight)
 {
     width_ = static_cast<uint32_t>(std::max(0, winWidth));
@@ -173,23 +179,53 @@ void CaptureBackend::UpdateTargetTexture(
 
 void* CaptureBackend::CreateTexture(int width, int height)
 {
-    return software_.CreateTexture(width, height);
+    void* texture = software_.CreateTexture(width, height);
+    shadow_textures_.erase(texture);
+    return texture;
 }
 
 void CaptureBackend::UpdateTexture(
     void* texture, const uint8_t* pixels, int width, int height, int pitch)
 {
     software_.UpdateTexture(texture, pixels, width, height, pitch);
+    if (!pixels || width <= 0 || height <= 0 || pitch < width * 4)
+        return;
+
+    int software_pitch = 0;
+    if (software_.LockTexture(texture, software_pitch))
+        return;
+
+    auto& shadow = shadow_textures_[texture];
+    if (!shadow)
+        shadow = std::make_unique<ShadowTexture>();
+    shadow->width = static_cast<uint32_t>(width);
+    shadow->height = static_cast<uint32_t>(height);
+    shadow->pixels.resize(static_cast<size_t>(width) * height * 4);
+    for (int y = 0; y < height; ++y)
+    {
+        std::memcpy(shadow->pixels.data() + static_cast<size_t>(y) * width * 4,
+                    pixels + static_cast<size_t>(y) * pitch,
+                    static_cast<size_t>(width) * 4);
+    }
 }
 
 void CaptureBackend::DestroyTexture(void* texture)
 {
     software_.DestroyTexture(texture);
+    shadow_textures_.erase(texture);
 }
 
 uint8_t* CaptureBackend::LockTexture(void* texture, int& pitch)
 {
-    return software_.LockTexture(texture, pitch);
+    uint8_t* pixels = software_.LockTexture(texture, pitch);
+    if (pixels)
+        return pixels;
+
+    ShadowTexture* shadow = FindShadowTexture(texture);
+    if (!shadow)
+        return nullptr;
+    pitch = static_cast<int>(shadow->width) * 4;
+    return shadow->pixels.data();
 }
 
 void CaptureBackend::SetMask(void* maskTarget)

@@ -85,6 +85,7 @@ target_compile_definitions(
     PRIVATE
         _KRKRSDL3_MACOS=1
         _KRKRSDL3_USE_SDL3=1
+        ART3M1S_KRKR_RESOURCE_EXE="${CMAKE_CURRENT_BINARY_DIR}/art3m1s-krkr"
 )
 
 target_include_directories(
@@ -163,4 +164,13 @@ set_target_properties(
         INSTALL_RPATH "@loader_path"
         INSTALL_NAME_DIR "@rpath"
         MACOSX_RPATH YES
+)
+
+add_custom_command(
+    TARGET art3m1s_krkr_host
+    POST_BUILD
+    COMMAND
+        ${CMAKE_COMMAND} -E copy_directory
+        "${KRKRSDL3_BUILD_DIR}/Res"
+        "${CMAKE_CURRENT_BINARY_DIR}/Res"
 )

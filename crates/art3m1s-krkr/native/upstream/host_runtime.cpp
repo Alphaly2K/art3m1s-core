@@ -79,7 +79,11 @@ void RecreateWindowTextures()
     {
         TVPWindow* window = TVPGetWindowListAt(index);
         if (window && window->pSprite && !window->pSprite->texture)
+        {
             krkrsdl3::TVPCreateTexture(*window->pSprite);
+            if (window->pSprite->texture)
+                window->UpdateContent();
+        }
     }
 }
 
@@ -201,7 +205,11 @@ int32_t RuntimeCreateImpl(const char* game_root_utf8,
     if (Application)
         return ART3M1S_KRKR_STATUS_ENGINE;
 
+#ifdef ART3M1S_KRKR_RESOURCE_EXE
+    std::string program = ART3M1S_KRKR_RESOURCE_EXE;
+#else
     std::string program = "art3m1s-krkr";
+#endif
     std::string game_root = NormalizeRuntimePath(game_root_utf8);
     std::string window_arg =
         "-window=" + std::to_string(config->width) + "x" + std::to_string(config->height);

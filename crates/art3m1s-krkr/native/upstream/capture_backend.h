@@ -2,6 +2,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -75,6 +77,13 @@ public:
     FrameView AcquireFrame() const;
 
 private:
+    struct ShadowTexture
+    {
+        uint32_t width = 0;
+        uint32_t height = 0;
+        std::vector<uint8_t> pixels;
+    };
+
     struct WindowTexture
     {
         uint32_t width = 0;
@@ -83,9 +92,11 @@ private:
     };
 
     WindowTexture* FindWindowTexture(void* handle) const;
+    ShadowTexture* FindShadowTexture(void* handle) const;
 
     krkrsdl3::SWRenderBackend software_;
     std::unordered_set<WindowTexture*> window_textures_;
+    std::unordered_map<void*, std::unique_ptr<ShadowTexture>> shadow_textures_;
     std::vector<uint8_t> canvas_;
     std::vector<uint8_t> published_;
     uint32_t width_ = 0;
