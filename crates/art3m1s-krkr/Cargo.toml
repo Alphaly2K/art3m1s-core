@@ -1,0 +1,16 @@
+[package]
+name = "art3m1s-krkr"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+description = "KrKr/Kirikiri runtime adaptation boundary for Art3m1s"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+native-bootstrap = []
+
+[dependencies]
