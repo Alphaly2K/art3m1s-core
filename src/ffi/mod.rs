@@ -11,6 +11,9 @@
 ))]
 pub mod api;
 
+#[cfg(feature = "rfvp-engine")]
+pub mod rfvp_api;
+
 #[cfg(any(
     feature = "gl-backend",
     feature = "metal-backend",

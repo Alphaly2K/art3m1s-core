@@ -9,12 +9,19 @@ description = "RFVP draw-command adaptation for the Art3m1s render backend"
 art3m1s-render = { path = "../art3m1s-render" }
 anyhow = { version = "1", optional = true }
 glam = "0.30"
-image = { version = "0.24.9", optional = true, default-features = false, features = ["png"] }
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
 rfvp = { path = "../../../rfvp/crates/rfvp", default-features = false, features = ["external-renderer"], optional = true }
 
 [features]
 default = []
 rfvp-fork = ["dep:rfvp"]
+host-runtime = ["rfvp-fork", "rfvp/host-runtime", "rfvp/image-formats"]
+host-runtime-smoke = [
+    "host-runtime",
+    "art3m1s-render/metal",
+    "dep:anyhow",
+    "dep:image",
+]
 winit-smoke = [
     "rfvp-fork",
     "rfvp/gpu-render",
@@ -27,3 +34,8 @@ winit-smoke = [
 name = "rfvp_win95_smoke"
 path = "src/bin/rfvp_win95_smoke.rs"
 required-features = ["winit-smoke"]
+
+[[bin]]
+name = "rfvp_host_runtime_smoke"
+path = "src/bin/rfvp_host_runtime_smoke.rs"
+required-features = ["host-runtime-smoke"]

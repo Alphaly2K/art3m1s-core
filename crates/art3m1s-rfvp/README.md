@@ -1,11 +1,13 @@
 # art3m1s-rfvp
 
-Backend-neutral RFVP frame to `art3m1s-render::DrawList` adapter.
+RFVP integration boundary and backend-neutral frame adapter for Art3m1s.
 
-The crate intentionally has no dependency on `rfvp`, `art3m1s-core`, wgpu,
-FFI, or a concrete GPU backend. It is the conversion boundary that can be
-tested while RFVP's production renderer is being split from its wgpu surface
-path.
+The base crate has no dependency on `rfvp`, `art3m1s-core`, wgpu, FFI, or a
+concrete GPU backend. Its protocol and `DrawList` conversion types can be
+tested independently. The optional `rfvp-fork` feature adds direct access to
+the maintained RFVP fork, and `host-runtime` adds the host-facing runtime used
+by `art3m1s-core` for mounting resources, driving frames, forwarding input and
+audio commands, and presenting through `art3m1s-render`.
 
 Current mapping:
 
@@ -25,8 +27,10 @@ Explicit first-version limits:
 - per-vertex colors must be uniform;
 - `effect_id != 0` is rejected;
 - negative clip or draw extents are rejected;
-- texture upload/update/destroy and nearest filtering stay outside this pure
-  conversion layer until the backend adapter owns `GpuBackend`.
+- nearest filtering remains outside the conversion layer.
+
+The `host-runtime` path consumes ordered texture create/update/destroy records,
+validates their bounds and formats, and uploads them through `GpuBackend`.
 
 Run validation with:
 

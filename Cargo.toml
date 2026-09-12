@@ -29,6 +29,7 @@ art3m1s-render = { path = "crates/art3m1s-render" }
 eluna = { package = "eluna_rs", path = "crates/eluna", optional = true }
 pfs-upk-rust = { path = "crates/pfs-upk-rust" }
 art3m1s-media = { path = "crates/art3m1s-media" }
+art3m1s-rfvp = { path = "crates/art3m1s-rfvp", optional = true, features = ["host-runtime"] }
 encoding_rs = "0.8"
 glam = "0.30"
 serde = { version = "1.0", features = ["derive"] }
@@ -48,12 +49,13 @@ ctt-astcenc = "0.5"
 asb-interpreter = { path = "crates/asb-interpreter", default-features = false, features = ["backend-lua51"] }
 
 [features]
-default = ["gl-backend", "metal-backend", "vulkan-backend", "experimental-eluna"]
+default = ["gl-backend", "metal-backend", "vulkan-backend", "experimental-eluna", "rfvp-engine"]
 gl-backend = ["art3m1s-render/gl"]
 metal-backend = ["runtime-shader", "art3m1s-render/metal"]
 vulkan-backend = ["runtime-shader", "art3m1s-render/vulkan"]
 runtime-shader = ["art3m1s-render/runtime-shader"]
 experimental-eluna = ["dep:eluna"]
+rfvp-engine = ["dep:art3m1s-rfvp"]
 ffmpeg = ["art3m1s-media/ffmpeg"]
 game-probes = ["gl-backend"]
 
