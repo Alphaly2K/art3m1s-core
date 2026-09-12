@@ -26,6 +26,7 @@ required-features = ["game-probes", "experimental-eluna"]
 art3m1s-emote = { path = "crates/art3m1s-emote" }
 eluna = { package = "eluna_rs", path = "crates/eluna", optional = true }
 pfs-upk-rust = { path = "crates/pfs-upk-rust" }
+art3m1s-media = { path = "crates/art3m1s-media" }
 encoding_rs = "0.8"
 glam = "0.30"
 serde = { version = "1.0", features = ["derive"] }
@@ -104,6 +105,7 @@ metal-backend = [
 vulkan-backend = ["dep:ash", "dep:image", "dep:naga", "runtime-shader"]
 runtime-shader = ["dep:shaderc", "dep:spirv-cross2"]
 experimental-eluna = ["dep:eluna"]
+ffmpeg = ["art3m1s-media/ffmpeg"]
 game-probes = ["gl-backend"]
 
 [build-dependencies]

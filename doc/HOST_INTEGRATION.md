@@ -1,6 +1,7 @@
 # Host 接入指南
 
-本文面向 Flutter、原生应用及其他嵌入式 Host，以当前 `src/ffi.rs` 导出的 C ABI 为准。
+本文面向 Flutter、原生应用及其他嵌入式 Host，以 [`src/ffi_api.rs`](src/ffi_api.rs)
+ 的版本化 C ABI 为准。
 它不是 Artemis 脚本 API 文档，也不要求 Host 使用 Dart 或 libmpv。
 完整签名、返回值和命令字段见 [FFI_REFERENCE.md](FFI_REFERENCE.md)。
 
@@ -14,20 +15,30 @@
 | 发送媒体命令、等待播放完成 | 解码、播放、混音、全屏视频、完成通知 |
 | 发出对话框、网络、翻译等请求 | 原生 UI、网络权限、翻译服务与异步任务 |
 
-生产入口是 `CoreRuntime` 的 C FFI，不是旧窗口示例。Core 不包含 FFmpeg/mpv；可以选择
-其他播放器，但必须实现相同的命令与完成语义。游戏自己的 save/load/config/backlog
-通常由脚本绘制，不需要 Host 重写。
+生产入口是 `CoreRuntime` 的版本化 C ABI，不是旧窗口示例。新宿主应只调用
+`art3m1s_get_api_v1`，不再逐个解析平铺符号。媒体解码可由 runtime 的 FFmpeg session
+承担；真实音频输出和最终 present 仍由 Host 所有。游戏自己的
+save/load/config/backlog 通常由脚本绘制，不需要 Host 重写。
+
+跨边界规则：
+
+- 对象与生命周期走不透明句柄，例如 `CoreRuntime*`。句柄内容、Rust trait、C++ vtable
+  或平台对象布局都不能直接暴露。
+- 数据走裸指针和显式长度，例如像素、INI、字体、替换表、HTTP body 和 uniform block。
+  零拷贝数据仍由调用方保证调用期间有效，不由 core 猜测容器布局。
+- 只有 `Art3m1sApiV1` 这种定长、版本化、全函数指针的 POD 结构可以按地址跨边界；
+  不要新增按值传递的复杂对象结构。
 
 ### 构建与加载
 
-- 默认 `gl-backend` feature 提供全部 `art3m1s_runtime_*` 符号。关闭后只剩文件回调、
-  配置、caption 探测等非运行时接口，不能通过 C ABI 创建 headless runtime。
+- 默认图形 feature 提供 runtime 调用；FFmpeg 视频 session 额外要求 `ffmpeg` feature。
+  新宿主只检查 API 表中的函数指针是否为 NULL，不把 feature 差异编码成不同的 ABI 布局。
 - `experimental-eluna` 默认编入，仍可通过关闭默认 features 排除；运行时默认使用内置
   E-Mote 后端，Host 显式选择后才启用 Eluna。
 - 动态库、ANGLE 和可选媒体库由 Host 打包/加载。媒体库应只加载一份实例，避免重复
   全局状态或 Objective-C 类。构建方式见 [README](README.md#构建)。
-- 当前没有 ABI 版本或功能位查询函数。记录 core 版本/commit；可选功能按完整符号组
-  探测，再检查调用结果。符号存在不代表当前设备支持对应的 EGL 扩展或后端。
+- `art3m1s_get_api_v1` 必须返回匹配的 `struct_size`、`abi_version` 和 `magic`；否则
+  拒绝读取函数表。可选能力通过函数指针是否为空判断，不再用散装符号探测。
 - JSON 的未知字段应忽略；未知命令记录一次诊断。必须回应的已知请求不能静默丢弃。
 
 ## 2. 线程、指针与进程级状态
@@ -37,50 +48,47 @@
 `*const CoreRuntime` 不等于允许并发读取；FFI 没有通用并发调用保证。
 `advance_without_render` 也可能处理纹理加载等 GL 工作，不是任意线程可调用的纯逻辑 API。
 
-所有注册回调都是同步调用，运行在发起请求的调用栈内，日志也可能来自工作线程。
-查询/读写回调必须当场填好结果；媒体/UI 回调应复制参数、排队后立即返回。
-不要在回调里重入同一 runtime，不要等待被当前调用阻塞的 GUI 线程，也不要把语言异常
-或 panic 抛过 C 边界。Host 错误应转为约定的返回值或异步失败响应。
+文件资源由 Host 通过 `resources_mount_*` 一次性提交到一个 `HostResources` 句柄，
+再通过 `runtime_set_resources` 绑定给 runtime；不再注册逐次读取回调，也不依赖进程全局文件表。
+host-events 队列、窗口状态、字体表和文本替换表归独立 `HostEvents` 句柄所有；任意 core
+线程可写入当前启用句柄，Host 在 owner 线程批量 poll。媒体/UI 事件复制到 Host 队列后
+应立即返回。不要等待被当前调用阻塞的 GUI 线程，也不要把语言异常或 panic 抛过 C 边界。
 
 | 数据 | 所有权与有效期 |
 |---|---|
 | `CoreRuntime*` | Core 分配；不透明；不能制造第二个所有者；仅用 `runtime_destroy` 释放一次 |
+| `HostResources*` / `HostEvents*` | Core 分配；不透明；生命周期归创建它的 Host；分别用 `resources_destroy` / `host_events_destroy` 释放一次 |
 | 传入字符串/INI/结果/视频帧 | Host 所有；调用期间有效且不可同时修改；调用返回后可释放 |
-| 回调中的字符串和字节指针 | Core 借出，仅回调期间有效；异步使用前复制，不能缓存原指针 |
-| 回调输出、帧像素、caption、profiler 缓冲 | 调用方提供；只能写容量内，不替换指针、不释放 |
+| 资源挂载路径与覆盖字节 | 调用期间借用；成功挂载后 core 保存索引/副本，Host 可释放原参数 |
+| 帧像素、caption、profiler 缓冲 | 调用方提供；只能写容量内，不替换指针、不释放 |
+| host-events 记录 | `poll_events_v1(events, ...)` 返回后由 Host 拥有；同一事件不会再次返回 |
 | 视频 FBO 名称 | Core 所有，仅在有效 GL lease 中使用；不能删除或跨 context 使用 |
 | 外部平台表面 | Host 所有；绑定期间保持强引用，解绑且消费者完成后才释放/复用 |
 
 除显式声明可空的参数外不要传 `NULL`。判空不代表非法指针、短缓冲或重复销毁安全。
 部分入口捕获 Rust panic，但这不是内存安全检查或崩溃恢复保证。
 
-### 当前不是多实例隔离 ABI
+### 当前不是完全多实例隔离 ABI
 
-- 所有注册回调都是进程级槽位，没有 `user_data` 或 runtime ID；新注册会覆盖旧回调。
-- 注册函数要求非空函数指针，**没有注销接口**。销毁 runtime 不会注销回调；必须保留
-  trampoline 和其引用的数据，直到不会再有 core 调用。热重启先停旧会话，再更换回调。
-- `art3m1s_set_angle_path` 和 `art3m1s_set_save_dir` 使用 `OnceLock`，进程内仅第一次
-  设置生效。后者目前只是保留配置，生产存档路径实际由 Host 文件回调映射。
+- 文件挂载已经绑定到独立的 `HostResources` 句柄；runtime 不直接碰进程全局资源状态。
+- host-events 队列和宿主状态已经绑定到独立 `HostEvents` 句柄；但 core 内部日志、media、
+  UI 产生点仍通过“当前启用句柄”路由，因此当前一个进程只应运行一个活动游戏会话。
+- `art3m1s_set_angle_path` 使用进程级一次性设置。存档根通过
+  `resources_set_save_dir` 在资源句柄内切换；媒体/UI 输出仍由 Host owner 队列消费。
 - 调试开关和部分内部快照也有进程级状态。当前建议一个进程只运行一个游戏会话；
-  不要一边运行游戏，一边把全局资源回调切到另一游戏做 caption 探测。
+  不要一边运行游戏，一边替换全局资源挂载做 caption 探测。
 
 ## 3. 资源、编码与存档
 
 先安装资源命名空间，再加载项目。Core 传逻辑路径，Host 根据当前游戏映射到解包目录、
 具体 PFS 条目、补丁覆盖或可写应用数据目录。
 
-`file_reader(path, buf, capacity, offset)` 有两种调用：
+Host 先通过 `resources_mount_directory` 或 `resources_mount_pfs` 向资源句柄提交资源根。
+Core 建立索引后，解释器只使用逻辑路径；Host 不再提供逐次读取回调。
 
-1. `offset == -1, buf == NULL, capacity == 0`：返回文件字节长度；不存在/失败返回负数。
-2. `offset >= 0`：写入该范围，返回实际字节数；EOF 为 `0`，失败为负数，不得超容量。
-
-大小查询返回 `int`，不能表示大于 `INT_MAX` 的单个逻辑文件；64 位 offset 不等于长度
-协议也为 64 位。归档整体可以很大，这里通常查询条目而非整个归档。Core 当前整文件
-读取在不超过 16 MiB 时请求一次，更大文件按 64 KiB 块读；Host 不能依赖固定请求大小。
-
-写回调没有 offset，应完整覆盖/截断写，返回恰好 `len`；短写按失败处理。推荐临时文件
-加原子替换，成功返回前保证后续读取已能看到新内容。删除成功返回 `0`。
-读、写、删、stat 共用同一映射，写入成功后同步失效缓存。
+PFS 多卷和补丁覆盖在 core 内按统一索引解析；目录挂载只暴露选中目录。存档写入通过
+`resources_set_save_dir` 指定的独立根目录完成，不会回写资源归档。覆盖内容通过
+`resources_set_override` 提交，core 复制后参与后续读取。
 
 ### 编码与路径
 
@@ -102,7 +110,6 @@ Core 已添加逻辑前缀，Host 不要重复添加。将这些路径映射到�
 
 编号存档与 `saveg.dat`、`system.dat`、已读记录是不同文件。load 旧编号存档不能回滚
 整个可写目录。封面和翻译缓存等 Host 元数据也应由稳定游戏 ID 隔离。
-stat 返回本地时间 `[年, 月, 日, 时, 分, 秒]`，不是 Unix 时间戳。
 
 读档会清理旧场景图层及其处理器，但保留游戏启动时注册的全局 `seton*` 事件；
 它们由脚本显式 `delon*` 或重新注册管理，不随消息窗重建而注销。
@@ -110,26 +117,29 @@ stat 返回本地时间 `[年, 月, 日, 时, 分, 秒]`，不是 Unix 时间戳
 Host 最终负责拒绝目录穿越、越权绝对路径和不允许的写入位置。脚本发起的 `exec`、
 `shell_execute`、`callnative`、网络及购买请求不是可信授权，按 Host 权限策略处理。
 
-`art3m1s_probe_caption` 不创建 GL，但会通过当前文件回调运行解释器。它不是无副作用
+`probe_caption` 不创建 GL，但会使用传入资源句柄中已挂载的资源运行解释器。它不是无副作用
 的文件名扫描器，必须有对应资源上下文且与正在运行的游戏隔离。返回 `0` 包括未探测到、
 出错和缓冲不足。
 
 ## 4. 启动与帧循环
 
-下面是顺序伪代码，省略 `art3m1s_` 前缀；`host_*` 由 Host 实现，不是导出符号：
+下面是顺序伪代码。除 `art3m1s_get_api_v1` 外，所有 `*_v1`、`runtime_*` 和 `set_*`
+名称都表示 `Art3m1sApiV1` 中的函数表字段；`host_*` 由 Host 实现，不是导出符号：
 
 ```text
-host_install_asset_and_save_mapping(game_id)
-register_log_callback(...)
-register_file_reader(...), register_file_writer(...), register_file_delete(...)
-register_file_stat(...), register_font_query(...), register_window_state_query(...)
-register_media_command_callback(...), register_ui_command_callback(...)
-register_text_inject_callback(...)               // 可选
+resources = resources_create()
+resources_mount_directory(game_root)            // 或 resources_mount_pfs
+resources_set_save_dir(save_root)
+events = host_events_create()
+host_events_enable_v1(events, 1)
+set_font_list_v1(events, ...), set_window_state_v1(events, ...)
+set_text_replacements_v1(events, ...)            // 可选
 set_font_override(font_bytes, font_len)          // 可选：译文缺字时覆盖运行时字体
 set_angle_path(directory)                       // 第一次加载 ANGLE 之前
 
 rt = runtime_create(initial_width, initial_height, gfx_backend)
 if rt == NULL: report_error_and_stop()
+runtime_set_resources(rt, resources)             // 必须在 load_project 之前
 runtime_set_emote_backend(rt, chosen_backend)    // 可选，检查返回值
 if runtime_load_project_bytes(rt, ini, ini_len, platform) != 0:
     runtime_destroy(rt)
@@ -152,6 +162,7 @@ on_each_engine_tick:
     else:
         n = runtime_advance_and_render(rt, delta_ms, pixels, capacity)
         if n > 0: host_present_or_copy_before_reusing_buffer(pixels, n)
+    host_drain_events(rt)                        // host-events v1，批量处理
     host_dispatch_queued_media_and_ui_commands()
     if runtime_is_exit_requested(rt): host_begin_shutdown()
 ```
@@ -242,55 +253,17 @@ ABI 不导出跨设备 fence 或释放回调；Host 必须按平台生产/消费
 - ID 是字符串，`"1.80"` 与 `"1.8"` 不等价。`resolved_file` 是解析后的逻辑资源路径，
   不一定是可交给系统播放器的本地文件；Host 仍需提供归档读取或资源流。
 
-### 图层视频：Darwin zero-copy 优先
+### Runtime 视频
 
-查询 `runtime_video_import_kind(rt)`。Darwin/Metal 生产路径为 `1`（CVPixelBuffer）：
-
-```text
-VideoToolbox / decoder
-  -> CVPixelBuffer (建议 32BGRA 或 biplanar 420)
-  -> art3m1s_runtime_import_video_frame(kind=1, ownership=Imported)
-  -> MetalBackend CVMetalTextureCache -> MTLTexture
-  -> compositor 作为普通图层纹理采样
-```
-
-禁止把已经在 GPU 上的帧做 GPU→CPU→GPU。CPU RGBA 上传只是 fallback。
-
-所有权：`Borrowed` 宿主保持对象直到 `video_frame_consumed`；`Imported` core retain，
-宿主可在 import 成功后丢掉自己的引用；`Owned` 宿主交出 retain。
-
-同步：
-
-1. decoder 写完（或带 `wait_kind=MTLSharedEvent`）后才 import。
-2. import 成功返回后，下一帧 `advance_and_present` 可以采样。
-3. 该 handle 的 `video_frame_consumed==1` 后，producer 才能把 native buffer 放回池里。
-   使用 2–3 个 CVPixelBuffer 的环形池。
-
-也可以 import `MTLTexture`（kind=2）或 `IOSurface`（kind=3）。失败返回 0 且保留上一帧。
-
-截图走 `capture_screenshot` / 脚本 `takess`，与 video handle 无关。
+启用 `runtime_set_runtime_media_enabled(rt, 1)` 后，`video` 命令由 core 的 FFmpeg
+session 在 runtime 侧解码，并作为普通图层纹理参与合成。Host 不再通过 native video
+import/surface ABI 交付解码帧；最终显示仍由 Host 的外部表面承担。
 
 ### 图层视频：CPU RGBA fallback
 
-不支持零拷贝时用 `upload_video_layer_frame`：借用连续、左上原点 RGBA8，至少
-`width * height * 4` 字节，无 stride 参数。同步上传、不保留指针。
-
-### 图层视频：legacy GL FBO shim
-
-`video_gl_*` 已 deprecated，仅供仍使用 libmpv OpenGL render API 的 GL 后端：
-
-```text
-if runtime_video_gl_begin(rt) == 1:
-    try:
-        fbo = runtime_video_gl_framebuffer(rt, layer_id, video_width, video_height)
-        if fbo != 0 and host_render_new_video_frame_into(fbo):
-            runtime_video_gl_commit(rt, layer_id)
-    finally:
-        runtime_video_gl_end(rt)
-```
-
-Metal 上 begin/framebuffer 返回 0，宿主必须改走 import 或 RGBA。成功 begin 必须配对
-end，不可嵌套。不能跨 lease 把 GLuint FBO 缓存为永久对象。
+`runtime_upload_video_layer_frame` 是只有 CPU RGBA 结果时的同步 fallback：借用连续、
+左上原点 RGBA8，至少 `width * height * 4` 字节，无 stride 参数；调用返回后不保留指针。
+正常的 runtime FFmpeg 路径不需要 Host 每帧上传。
 
 ## 8. 对话框、HTTP 与翻译
 
@@ -329,8 +302,9 @@ serial，不能让旧响应完成新请求。
 
 ## 9. 日志、Profiler 与退出
 
-日志通过回调推送，没有 C ABI 拉取接口。Host 按游戏会话持久化，再给 UI 有界显示缓冲；
-不要把 overlay 缓冲当完整日志。上传日志前处理路径/脚本文本等隐私，不记录网络密钥。
+宿主通过当前启用的 `HostEvents` 句柄批量拉取日志。Host 按游戏会话持久化，再给 UI
+有界显示缓冲；不要把 overlay 缓冲当完整日志。上传日志前处理路径/脚本文本等隐私，
+不记录网络密钥。
 
 Profiler 在线程内异步聚合，约每 500 ms 发布快照，按低频读取 JSON。读取仍遵守 runtime
 串行约束；先查询容量，不足时按负返回值扩容重试。字段/计时关系见参考文档。
@@ -343,8 +317,9 @@ Profiler 在线程内异步聚合，约每 500 ms 发布快照，按低频读取
    令会话 generation 失效，丢弃迟到事件。
 4. 停止共享提交/消费并解绑，按平台同步等消费者结束后释放表面。
 5. owner 线程 `runtime_destroy` 一次，清空指针，不再调用任何 `runtime_*`。
-6. 最后释放资源索引、像素缓冲和 UI；保留有效 callback trampoline 或安全替换它，
-   不能用 NULL 注销。
+6. 调用 `resources_clear`，然后 `resources_destroy`；runtime 已销毁后不应再使用该句柄。
+7. 最后释放像素缓冲和 UI；调用 `host_events_enable_v1(events, 0)` 后停止拉取，
+   再调用 `host_events_destroy(events)` 释放句柄。
 
 ## 10. 新 Host 验收清单
 

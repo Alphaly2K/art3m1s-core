@@ -8,11 +8,13 @@
 //! - [`engine`]：`AudioBackend` trait、`AudioState`、播放配置类型、淡出逻辑
 //! - [`state`]：`AudioStateBackend` — 逻辑状态实现
 //!
-//! ## 典型接入方式
-//! 1. Core 在帧循环中把解释器事件归约到 [`AudioState`]。
-//! 2. 前端/宿主通过 runtime 的媒体命令回调执行真实播放。
-//! 3. Core 每帧推进淡入淡出状态，并产出声音完成 handler。
-//!    并交回解释器执行 handler。
+//! ## 目标接入方式
+//! 1. Core 在帧循环中把解释器事件归约到 runtime media session。
+//! 2. Runtime 负责解码并生成 PCM，宿主负责真实音频设备输出。
+//! 3. Host 通过拉取接口消费 PCM，并把播放时间反馈给 runtime。
+//!
+//! 当前 [`AudioStateBackend`] 仍维护逻辑状态，真实播放由宿主媒体命令执行；
+//! 迁移期结束后，音频设备输出仍固定于宿主侧。
 
 pub mod engine;
 pub mod state;

@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use super::magic_path;
 use crate::ffi;
+use crate::host_files::HostResources;
 
 pub(super) type LayerInfoTable =
     std::sync::Arc<std::sync::Mutex<super::layer_info::LayerQueryState>>;
@@ -19,6 +20,7 @@ pub(super) struct FfiCallbacks {
     pub input: std::sync::Arc<std::sync::Mutex<InputSnapshot>>,
     pub magic_paths: std::sync::Arc<magic_path::MagicPathTable>,
     pub layer_info: LayerInfoTable,
+    pub resources: HostResources,
     pub volumes: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, f32>>>,
     pub debug_skip_active: Arc<AtomicBool>,
     pub script_status: Arc<AtomicU8>,
@@ -364,12 +366,17 @@ impl EngineCallbacks for FfiCallbacks {
 
     fn is_file_exists(&self, path: &str) -> bool {
         let resolved = magic_path::resolve_path(&self.magic_paths, path);
-        ffi::query_asset_size(&resolved).is_some()
+        self.resources
+            .query_size(&resolved)
+            .ok()
+            .flatten()
+            .is_some()
     }
 
     fn file_write(&self, path: &str, data: &[u8]) -> asb_interpreter::Result<()> {
         let resolved = magic_path::resolve_path(&self.magic_paths, path);
-        ffi::request_write(&resolved, data)
+        self.resources
+            .write(&resolved, data)
             .map_err(|m| asb_interpreter::Error::IoError(std::io::Error::other(m)))
     }
 
@@ -442,26 +449,25 @@ impl EngineCallbacks for FfiCallbacks {
 
     fn get_layer_info(&self, id: &str) -> Option<HashMap<String, String>> {
         self.layer_info.lock().unwrap().get(id, |file| {
-            super::layer_info::asset_dimensions(&self.magic_paths, file)
+            super::layer_info::asset_dimensions(&self.magic_paths, &self.resources, file)
         })
     }
 
     fn get_layer_info_all(&self) -> Vec<(String, HashMap<String, String>)> {
         // get_layer_info.md：省略 id 的全图层枚举按 id 升序返回。
-        self.layer_info
-            .lock()
-            .unwrap()
-            .all(|file| super::layer_info::asset_dimensions(&self.magic_paths, file))
+        self.layer_info.lock().unwrap().all(|file| {
+            super::layer_info::asset_dimensions(&self.magic_paths, &self.resources, file)
+        })
     }
 
     fn get_font_list(&self, monospace: bool, vertical: bool) -> Vec<String> {
-        // 宿主（Flutter）经 art3m1s_register_font_query 回答可用字体族；
-        // 未注册时返回空列表（脚本读到"无可选字体"，退化安全）。
+        // Host 经 art3m1s_set_font_list_v1 推送可用字体族；
+        // 未推送时返回空列表（脚本读到"无可选字体"，退化安全）。
         ffi::query_font_list(monospace, vertical)
     }
 
     fn get_window_state(&self) -> (bool, bool) {
-        // (全屏, 最小化)。宿主经 art3m1s_register_window_state_query 回答。
+        // (全屏, 最小化)。Host 经 art3m1s_set_window_state_v1 推送。
         ffi::query_window_state()
     }
 
@@ -491,7 +497,9 @@ impl EngineCallbacks for FfiCallbacks {
     fn bind_surface(&self, key: &str) {
         let resolved = magic_path::resolve_path(&self.magic_paths, key);
         let mut cache = surface_cache().lock().unwrap();
-        surface_cache_bind(&mut cache, &resolved, || ffi::request_asset(&resolved));
+        surface_cache_bind(&mut cache, &resolved, || {
+            self.resources.read_file(&resolved).ok()
+        });
     }
 
     fn bind_surface_async(&self, key: &str) {
@@ -563,7 +571,7 @@ impl EngineCallbacks for FfiCallbacks {
 
     fn load_png_comments(&self, path: &str) -> Option<HashMap<String, String>> {
         let resolved = magic_path::resolve_path(&self.magic_paths, path);
-        let bytes = ffi::request_asset(&resolved)?;
+        let bytes = self.resources.read_file(&resolved).ok()?;
         let comments = parse_png_text_chunks(&bytes);
         if comments.is_empty() {
             None
@@ -582,7 +590,7 @@ impl EngineCallbacks for FfiCallbacks {
         let mut loaded = Vec::with_capacity(files.len());
         for file in files {
             let resolved = magic_path::resolve_path(&self.magic_paths, file);
-            let bytes = ffi::request_file(&resolved).map_err(|message| {
+            let bytes = self.resources.read_file(&resolved).map_err(|message| {
                 asb_interpreter::Error::IoError(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     message,
@@ -593,7 +601,7 @@ impl EngineCallbacks for FfiCallbacks {
         self.emote
             .lock()
             .unwrap()
-            .create_layer(id, loaded, width, height)
+            .create_layer(id, loaded, width, height, self.resources.clone())
             .map_err(|message| asb_interpreter::Error::RuntimeError { line: 0, message })
     }
 
@@ -961,6 +969,7 @@ mod tests {
             input: Arc::new(std::sync::Mutex::new(InputSnapshot::default())),
             magic_paths: Arc::clone(&magic_paths),
             layer_info: Arc::new(std::sync::Mutex::new(Default::default())),
+            resources: crate::host_files::default_resources().clone(),
             volumes: Arc::new(std::sync::Mutex::new(HashMap::new())),
             debug_skip_active: Arc::new(AtomicBool::new(false)),
             script_status: Arc::new(AtomicU8::new(0)),
@@ -997,6 +1006,7 @@ mod tests {
             magic_paths: Arc::new(std::sync::Mutex::new(HashMap::new()))
                 as Arc<magic_path::MagicPathTable>,
             layer_info: Arc::new(std::sync::Mutex::new(Default::default())),
+            resources: crate::host_files::default_resources().clone(),
             volumes: Arc::new(std::sync::Mutex::new(HashMap::new())),
             debug_skip_active: Arc::new(AtomicBool::new(false)),
             script_status: Arc::new(AtomicU8::new(0)),

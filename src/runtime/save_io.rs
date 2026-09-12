@@ -77,10 +77,10 @@ impl CoreRuntime {
     ) -> Result<(), String> {
         let src_path = self.save_path_for(src)?;
         let dst_path = self.save_path_for(dst)?;
-        let data = crate::ffi::request_file(&src_path)?;
-        crate::ffi::request_write(&dst_path, &data)?;
+        let data = self.resources.read_file(&src_path)?;
+        self.resources.write(&dst_path, &data)?;
         if delete_src {
-            crate::ffi::request_delete(&src_path)?;
+            self.resources.delete(&src_path)?;
         }
         Ok(())
     }
@@ -129,7 +129,7 @@ impl CoreRuntime {
         data = data.with_audio(AudioSnapshot::from_audio(self.audio.as_ref()));
         let json = serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?;
         let path = self.save_path_for(file)?;
-        crate::ffi::request_write(&path, json.as_bytes())?;
+        self.resources.write(&path, json.as_bytes())?;
         crate::core_info!("[runtime] 已保存存档: {}", path);
 
         // `store()`/`saveconv(true)` 已把最新 `sys.saveslot` 写入 `g.system`。
@@ -165,7 +165,7 @@ impl CoreRuntime {
         for (file, map) in [(SAVEG_FILE, &global), (SYSTEM_FILE, &system)] {
             let json = serde_json::to_string_pretty(map).map_err(|e| e.to_string())?;
             let path = self.save_path_for(file)?;
-            crate::ffi::request_write(&path, json.as_bytes())?;
+            self.resources.write(&path, json.as_bytes())?;
             crate::core_info!("[runtime] syssave 已保存 {} ({} 项)", path, map.len());
         }
         // 已读记录随 syssave 落盘（仅在有新增时写，减少 IO）。
@@ -181,7 +181,7 @@ impl CoreRuntime {
         let data = self.control.read_lines_export();
         let json = serde_json::to_string(&data).map_err(|e| e.to_string())?;
         let path = self.save_path_for(AREAD_FILE)?;
-        crate::ffi::request_write(&path, json.as_bytes())?;
+        self.resources.write(&path, json.as_bytes())?;
         self.read_dirty = false;
         crate::core_info!("[runtime] 已读记录已保存 {} ({} 脚本)", path, data.len());
         Ok(())
@@ -192,7 +192,7 @@ impl CoreRuntime {
         let Ok(path) = self.save_path_for(AREAD_FILE) else {
             return;
         };
-        let Ok(bytes) = crate::ffi::request_file(&path) else {
+        let Ok(bytes) = self.resources.read_file(&path) else {
             return;
         };
         match serde_json::from_slice::<std::collections::HashMap<String, Vec<usize>>>(&bytes) {
@@ -213,7 +213,7 @@ impl CoreRuntime {
             let Ok(path) = self.save_path_for(file) else {
                 continue;
             };
-            let bytes = match crate::ffi::request_file(&path) {
+            let bytes = match self.resources.read_file(&path) {
                 Ok(b) => b,
                 Err(e) => {
                     // 首次启动尚无文件属正常；记 debug 便于排查"读路径不对"的情况。
@@ -291,7 +291,7 @@ impl CoreRuntime {
     ) -> Result<(), String> {
         let path = self.save_path_for(file)?;
         crate::core_info!("[runtime] 读取存档文件 FFI 开始: {}", path);
-        let bytes = crate::ffi::request_file(&path).map_err(|error| {
+        let bytes = self.resources.read_file(&path).map_err(|error| {
             crate::core_error!("[runtime] 读取存档文件 FFI 失败: {}: {}", path, error);
             error
         })?;
@@ -529,7 +529,7 @@ impl CoreRuntime {
         let png = encode_png_rgba(&rgba, target_width, target_height)?;
         let (resource_name, path) = self.screenshot_paths_for(file)?;
 
-        crate::ffi::request_write(&path, &png)?;
+        self.resources.write(&path, &png)?;
         let desc = TextureDesc::sampled_rgba8(target_width, target_height);
         let _ = self
             .gpu

@@ -10,7 +10,10 @@
 //! 因此默认无字节源、一律回退占位，让整条绘制管线无需素材即可端到端验证。
 
 use super::platform;
-use crate::backend::{AssetSource, Extent2D, RenderTargetId, TextureData, TextureUpdate};
+use super::{ShaderProfile, shader};
+use crate::backend::{
+    AssetSource, Extent2D, RenderTargetId, TextureData, TextureUpdate, Yuv420pPlanes,
+};
 use crate::render_pipeline::draw::{TextureId, TextureInfo, TextureProvider};
 use glow::HasContext;
 use std::cell::Cell;
@@ -42,6 +45,16 @@ struct GlRenderTarget {
     framebuffer: glow::Framebuffer,
     texture: TextureId,
     info: TextureInfo,
+}
+
+struct GlYuvTarget {
+    framebuffer: glow::Framebuffer,
+    output: TextureId,
+    y: glow::Texture,
+    u: glow::Texture,
+    v: glow::Texture,
+    width: u32,
+    height: u32,
 }
 
 enum PixelStorage {
@@ -176,6 +189,10 @@ pub struct GlTextureProvider {
     /// Texture handles whose uploaded pixels are known to have alpha 255.
     opaque_textures: HashSet<TextureId>,
     render_targets: HashMap<String, GlRenderTarget>,
+    yuv_targets: HashMap<String, GlYuvTarget>,
+    yuv_program: Option<glow::Program>,
+    yuv_vao: Option<glow::VertexArray>,
+    profile: ShaderProfile,
     profiling_enabled: Cell<bool>,
     profile_upload_elapsed_ns: Cell<u64>,
     profile_upload_bytes: Cell<u64>,
@@ -185,7 +202,7 @@ pub struct GlTextureProvider {
 }
 
 impl GlTextureProvider {
-    pub fn new(gl: Rc<glow::Context>) -> Self {
+    pub fn new(gl: Rc<glow::Context>, profile: ShaderProfile) -> Self {
         Self {
             gl,
             cache: HashMap::new(),
@@ -197,6 +214,10 @@ impl GlTextureProvider {
             texture_revisions: HashMap::new(),
             opaque_textures: HashSet::new(),
             render_targets: HashMap::new(),
+            yuv_targets: HashMap::new(),
+            yuv_program: None,
+            yuv_vao: None,
+            profile,
             profiling_enabled: Cell::new(false),
             profile_upload_elapsed_ns: Cell::new(0),
             profile_upload_bytes: Cell::new(0),
@@ -846,7 +867,251 @@ impl GlTextureProvider {
         true
     }
 
+    /// Uploads YUV420P planes and converts them to the named RGBA texture with
+    /// a GPU pass. No CPU RGB conversion is performed.
+    pub fn upload_video_yuv420p(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+        planes: Yuv420pPlanes<'_>,
+    ) -> bool {
+        if width == 0 || height == 0 {
+            return false;
+        }
+        let chroma_width = width.div_ceil(2);
+        let chroma_height = height.div_ceil(2);
+        if !plane_is_valid(planes.y, width, height, planes.y_stride)
+            || !plane_is_valid(planes.u, chroma_width, chroma_height, planes.u_stride)
+            || !plane_is_valid(planes.v, chroma_width, chroma_height, planes.v_stride)
+        {
+            return false;
+        }
+
+        let video_started = self.profile_mark();
+        if self.ensure_yuv_target(name, width, height).is_err() {
+            return false;
+        }
+        let Some(target) = self.yuv_targets.get(name).map(|target| {
+            (
+                target.framebuffer,
+                target.output,
+                target.y,
+                target.u,
+                target.v,
+            )
+        }) else {
+            return false;
+        };
+
+        unsafe {
+            self.gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            if planes.y_stride != width as usize {
+                self.gl
+                    .pixel_store_i32(glow::UNPACK_ROW_LENGTH, planes.y_stride as i32);
+            }
+            upload_plane(&self.gl, target.2, glow::RED, width, height, planes.y);
+            if planes.u_stride != chroma_width as usize {
+                self.gl
+                    .pixel_store_i32(glow::UNPACK_ROW_LENGTH, planes.u_stride as i32);
+            }
+            upload_plane(
+                &self.gl,
+                target.3,
+                glow::RED,
+                chroma_width,
+                chroma_height,
+                planes.u,
+            );
+            if planes.v_stride != chroma_width as usize {
+                self.gl
+                    .pixel_store_i32(glow::UNPACK_ROW_LENGTH, planes.v_stride as i32);
+            }
+            upload_plane(
+                &self.gl,
+                target.4,
+                glow::RED,
+                chroma_width,
+                chroma_height,
+                planes.v,
+            );
+            self.gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 0);
+
+            let Some(program) = self.yuv_program else {
+                return false;
+            };
+            let Some(vao) = self.yuv_vao else {
+                return false;
+            };
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.0));
+            self.gl.viewport(0, 0, width as i32, height as i32);
+            self.gl.use_program(Some(program));
+            self.gl.bind_vertex_array(Some(vao));
+            bind_texture(&self.gl, 0, target.2);
+            bind_texture(&self.gl, 1, target.3);
+            bind_texture(&self.gl, 2, target.4);
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.gl.bind_texture(glow::TEXTURE_2D, None);
+            self.gl.active_texture(glow::TEXTURE0);
+            self.gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+        }
+
+        self.cpu_pixels.remove(&target.1);
+        self.opaque_textures.insert(target.1);
+        self.mark_texture_changed(target.1);
+        let uploaded = planes
+            .y
+            .len()
+            .saturating_add(planes.u.len())
+            .saturating_add(planes.v.len());
+        self.record_video_upload(video_started, uploaded);
+        true
+    }
+
+    fn ensure_yuv_target(&mut self, name: &str, width: u32, height: u32) -> Result<(), String> {
+        if self
+            .yuv_targets
+            .get(name)
+            .is_some_and(|target| target.width == width && target.height == height)
+        {
+            return Ok(());
+        }
+        self.destroy_yuv_target(name);
+
+        if self.yuv_program.is_none() {
+            let program = unsafe { shader::build_yuv420p_program(&self.gl, self.profile)? };
+            unsafe {
+                self.gl.use_program(Some(program));
+                for (uniform, unit) in [("u_y", 0), ("u_u", 1), ("u_v", 2)] {
+                    if let Some(location) = self.gl.get_uniform_location(program, uniform) {
+                        self.gl.uniform_1_i32(Some(&location), unit);
+                    }
+                }
+                self.gl.use_program(None);
+            }
+            self.yuv_program = Some(program);
+        }
+        if self.yuv_vao.is_none() {
+            self.yuv_vao = Some(unsafe { self.gl.create_vertex_array()? });
+        }
+
+        let (framebuffer, output) = unsafe {
+            platform::create_fbo_target(&self.gl, width as i32, height as i32)
+                .map_err(|error| format!("create YUV output failed: {error}"))?
+        };
+        let create_plane =
+            |internal_format: u32, is_chroma: bool| -> Result<glow::Texture, String> {
+                unsafe {
+                    let texture = self.gl.create_texture()?;
+                    self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                    self.gl.tex_parameter_i32(
+                        glow::TEXTURE_2D,
+                        glow::TEXTURE_MIN_FILTER,
+                        glow::LINEAR as i32,
+                    );
+                    self.gl.tex_parameter_i32(
+                        glow::TEXTURE_2D,
+                        glow::TEXTURE_MAG_FILTER,
+                        glow::LINEAR as i32,
+                    );
+                    self.gl.tex_parameter_i32(
+                        glow::TEXTURE_2D,
+                        glow::TEXTURE_WRAP_S,
+                        glow::CLAMP_TO_EDGE as i32,
+                    );
+                    self.gl.tex_parameter_i32(
+                        glow::TEXTURE_2D,
+                        glow::TEXTURE_WRAP_T,
+                        glow::CLAMP_TO_EDGE as i32,
+                    );
+                    let (plane_width, plane_height) = if is_chroma {
+                        (width.div_ceil(2), height.div_ceil(2))
+                    } else {
+                        (width, height)
+                    };
+                    self.gl.tex_image_2d(
+                        glow::TEXTURE_2D,
+                        0,
+                        internal_format as i32,
+                        plane_width as i32,
+                        plane_height as i32,
+                        0,
+                        glow::RED,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(None),
+                    );
+                    self.gl.bind_texture(glow::TEXTURE_2D, None);
+                    Ok(texture)
+                }
+            };
+        let y = match create_plane(glow::R8, false) {
+            Ok(y) => y,
+            Err(error) => {
+                unsafe {
+                    self.gl.delete_framebuffer(framebuffer);
+                    self.gl.delete_texture(output);
+                }
+                return Err(error);
+            }
+        };
+        let u = match create_plane(glow::R8, true) {
+            Ok(u) => u,
+            Err(error) => {
+                unsafe {
+                    self.gl.delete_texture(y);
+                    self.gl.delete_framebuffer(framebuffer);
+                    self.gl.delete_texture(output);
+                }
+                return Err(error);
+            }
+        };
+        let v = match create_plane(glow::R8, true) {
+            Ok(v) => v,
+            Err(error) => {
+                unsafe {
+                    self.gl.delete_texture(y);
+                    self.gl.delete_texture(u);
+                    self.gl.delete_framebuffer(framebuffer);
+                    self.gl.delete_texture(output);
+                }
+                return Err(error);
+            }
+        };
+        let output_id = TextureId(output.0.get() as u64);
+        self.cache
+            .insert(name.to_owned(), (output_id, TextureInfo { width, height }));
+        self.yuv_targets.insert(
+            name.to_owned(),
+            GlYuvTarget {
+                framebuffer,
+                output: output_id,
+                y,
+                u,
+                v,
+                width,
+                height,
+            },
+        );
+        Ok(())
+    }
+
+    fn destroy_yuv_target(&mut self, name: &str) {
+        let Some(target) = self.yuv_targets.remove(name) else {
+            return;
+        };
+        unsafe {
+            self.gl.delete_texture(target.y);
+            self.gl.delete_texture(target.u);
+            self.gl.delete_texture(target.v);
+            self.gl.delete_framebuffer(target.framebuffer);
+        }
+    }
+
     fn remove_if_cached(&mut self, name: &str) {
+        self.destroy_yuv_target(name);
         if let Some(target) = self.render_targets.remove(name) {
             unsafe {
                 self.gl.delete_framebuffer(target.framebuffer);
@@ -956,8 +1221,64 @@ impl GlTextureProvider {
     }
 }
 
+fn plane_is_valid(data: &[u8], width: u32, height: u32, stride: usize) -> bool {
+    if width == 0 || height == 0 {
+        return false;
+    }
+    let row_len = width as usize;
+    let last_row = (height as usize - 1)
+        .saturating_mul(stride)
+        .saturating_add(row_len);
+    stride >= row_len && data.len() >= last_row
+}
+
+fn bind_texture(gl: &glow::Context, unit: u32, texture: glow::Texture) {
+    unsafe {
+        gl.active_texture(glow::TEXTURE0 + unit);
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+    }
+}
+
+unsafe fn upload_plane(
+    gl: &glow::Context,
+    texture: glow::Texture,
+    format: u32,
+    width: u32,
+    height: u32,
+    data: &[u8],
+) {
+    unsafe {
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        gl.tex_sub_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            0,
+            0,
+            width as i32,
+            height as i32,
+            format,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(data)),
+        );
+    }
+}
+
 impl Drop for GlTextureProvider {
     fn drop(&mut self) {
+        for target in self.yuv_targets.drain().map(|(_, target)| target) {
+            unsafe {
+                self.gl.delete_texture(target.y);
+                self.gl.delete_texture(target.u);
+                self.gl.delete_texture(target.v);
+                self.gl.delete_framebuffer(target.framebuffer);
+            }
+        }
+        if let Some(program) = self.yuv_program.take() {
+            unsafe { self.gl.delete_program(program) };
+        }
+        if let Some(vao) = self.yuv_vao.take() {
+            unsafe { self.gl.delete_vertex_array(vao) };
+        }
         for target in self.render_targets.drain().map(|(_, target)| target) {
             unsafe {
                 self.gl.delete_framebuffer(target.framebuffer);

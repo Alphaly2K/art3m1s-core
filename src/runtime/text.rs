@@ -735,7 +735,9 @@ impl CoreRuntime {
         }
         let mut errors = Vec::new();
         for candidate in std::iter::once(face.to_string()).chain(font_fallback_candidates(face)) {
-            match crate::load_font_ffi(&candidate)
+            match self
+                .resources
+                .read_file(&candidate)
                 .and_then(|bytes| renderer.set_named_font_bytes(face, bytes))
             {
                 Ok(()) => {

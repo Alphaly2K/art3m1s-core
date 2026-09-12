@@ -98,7 +98,7 @@ impl CoreRuntime {
                     crate::core_info!("[runtime] Event::FileOperation delete target={:?}", target);
                     if let Some(t) = target {
                         match self.save_path_for(t) {
-                            Ok(path) => match crate::ffi::request_delete(&path) {
+                            Ok(path) => match self.resources.delete(&path) {
                                 Ok(()) => {
                                     crate::core_info!("[runtime] 已删除 {}", path);
                                 }
@@ -141,7 +141,7 @@ impl CoreRuntime {
                     // [file command=clear_cache]：打包文件（pfs）由宿主资源回调
                     // 持有与缓存，核心转发命令让宿主清缓存。
                     crate::core_info!("[runtime] FileOperation clear_cache → 转发宿主");
-                    crate::ffi::clear_file_size_cache();
+                    self.resources.clear_overrides();
                     crate::ffi::emit_ui_command("file_clear_cache", serde_json::json!({}));
                 }
                 Event::FileOperation {
@@ -540,7 +540,7 @@ impl CoreRuntime {
             );
             return;
         }
-        let source = match crate::ffi::request_file(file) {
+        let source = match self.resources.read_file(file) {
             Ok(source) => source,
             Err(error) => {
                 crate::core_warn!("[shader] 读取失败 id={} file={}: {}", id, file, error);
@@ -760,7 +760,7 @@ impl CoreRuntime {
             // 指定 filename 时结果存文件（存档目录），忽略 varname_data。
             match self.save_path_for(filename) {
                 Ok(path) => {
-                    if let Err(e) = crate::ffi::request_write(&path, body) {
+                    if let Err(e) = self.resources.write(&path, body) {
                         crate::core_warn!("[http] 结果写入 {path} 失败: {e}");
                     }
                 }
@@ -815,7 +815,7 @@ impl CoreRuntime {
         let line = self.interpreter.current_line();
         let stack = self.interpreter.call_stack();
         let resolved = super::magic_path::resolve_path(&self.magic_paths, &script);
-        let data = match crate::ffi::request_file(&resolved) {
+        let data = match self.resources.read_file(&resolved) {
             Ok(data) => data,
             Err(e) => {
                 crate::core_warn!("[debugreload] 重读 {script} 失败: {e}");
@@ -971,6 +971,9 @@ impl CoreRuntime {
         let savepath_for_exists = self.savepath.clone();
         let magic_for_crc = std::sync::Arc::clone(&self.magic_paths);
         let savepath_for_time = self.savepath.clone();
+        let resources_for_exists = self.resources.clone();
+        let resources_for_crc = self.resources.clone();
+        let resources_for_time = self.resources.clone();
 
         asb_interpreter::tags::var_handler::set_host_query_hooks(
             asb_interpreter::tags::var_handler::HostQueryHooks {
@@ -978,22 +981,33 @@ impl CoreRuntime {
                     if save {
                         // save=1：目标为存档数据，按存档目录相对路径查询。
                         qualify_hook_save_path(file, &savepath_for_exists)
-                            .map(|path| crate::ffi::query_asset_size(&path).is_some())
+                            .map(|path| {
+                                resources_for_exists
+                                    .query_size(&path)
+                                    .ok()
+                                    .flatten()
+                                    .is_some()
+                            })
                             .unwrap_or(false)
                     } else {
                         let resolved = super::magic_path::resolve_path(&magic_for_exists, file);
-                        crate::ffi::query_asset_size(&resolved).is_some()
+                        resources_for_exists
+                            .query_size(&resolved)
+                            .ok()
+                            .flatten()
+                            .is_some()
                     }
                 }),
                 file_crc32: Box::new(move |file| {
                     let resolved = super::magic_path::resolve_path(&magic_for_crc, file);
-                    crate::ffi::request_file(&resolved)
+                    resources_for_crc
+                        .read_file(&resolved)
                         .ok()
                         .map(|bytes| crc32_ieee(&bytes))
                 }),
                 file_update_time: Box::new(move |file| {
                     qualify_hook_save_path(file, &savepath_for_time)
-                        .and_then(|path| crate::ffi::request_file_mtime(&path))
+                        .and_then(|path| resources_for_time.file_mtime(&path))
                 }),
                 sound_info: Box::new(super::media::sound_info_snapshot),
                 // backlog / message-tags 从每帧刷新的进程级快照读取

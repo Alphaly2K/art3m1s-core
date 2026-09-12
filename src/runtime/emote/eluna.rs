@@ -914,17 +914,12 @@ mod tests {
         }
         let (gl, _context, effective_backend) =
             platform::create_offscreen_context(requested_backend, 1024, 1024).unwrap();
-        let mut renderer = GlRenderer::new(
-            gl.clone(),
-            1024,
-            1024,
-            match effective_backend {
-                platform::GfxBackend::Angle(_) => ShaderProfile::Gles300,
-                platform::GfxBackend::Cgl => ShaderProfile::GlCore330,
-            },
-        )
-        .unwrap();
-        let mut textures = GlTextureProvider::new(gl.clone());
+        let profile = match effective_backend {
+            platform::GfxBackend::Angle(_) => ShaderProfile::Gles300,
+            platform::GfxBackend::Cgl => ShaderProfile::GlCore330,
+        };
+        let mut renderer = GlRenderer::new(gl.clone(), 1024, 1024, profile).unwrap();
+        let mut textures = GlTextureProvider::new(gl.clone(), profile);
         let (fbo, color) = unsafe { platform::create_fbo_target(&gl, 1024, 1024).unwrap() };
         let mut previous_pixels = None;
         let mut previous_icons = Vec::new();

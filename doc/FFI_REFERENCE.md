@@ -1,8 +1,9 @@
 # C FFI 参考
 
-本文件对应当前 [`src/ffi.rs`](src/ffi.rs) 的全部 `art3m1s_*` 导出，不包含依赖库的
-`pfs_*` API。先阅读 [Host 接入指南](HOST_INTEGRATION.md) 的线程、生命周期和所有权约定。
-以下是 C 声明参考，不是额外的一套实现；修改 ABI 时应同步更新这里。
+本文件对应当前 [`src/ffi_api.rs`](src/ffi_api.rs) 的版本化 ABI。core 动态库只导出
+`art3m1s_get_api_v1`；其余入口都通过返回的 `Art3m1sApiV1` 函数表访问。依赖库
+`pfs_upk` 的 `pfs_*` API 独立存在。先阅读 [Host 接入指南](HOST_INTEGRATION.md)
+的线程、生命周期和所有权约定。
 
 ## 类型约定
 
@@ -12,12 +13,9 @@
 - 使用 C calling convention。整型布尔为 `0` 假、非 `0` 真，不是 C++/Dart `bool` ABI。
 - `const char*` 是 UTF-8、NUL 结尾，不能包含内嵌 NUL。`uint8_t* + length` 是字节，
   不要求 NUL；返回长度不包含终止符，输出缓冲也不会自动补 NUL。
-- 所有 callback 指针必须非空；别把“可不注册”理解为“可传空指针注销”。
 - `size_t` 随目标位数变化。容量单位均为字节，只有 stat 的 `out_len` 是 `int64_t` 元素数。
 
 ## 完整声明
-
-回调 typedef 名称为本文定义的助记名；符号名、参数顺序和 ABI 类型与源码对应。
 
 ```c
 #include <stddef.h>
@@ -28,143 +26,229 @@ extern "C" {
 #endif
 
 typedef struct CoreRuntime CoreRuntime;
-typedef void (*ArtLogCallback)(const char *level, const char *message);
-typedef void (*ArtJsonCallback)(const char *kind, const char *payload_json);
-typedef int (*ArtFileReader)(const char *path, uint8_t *buf, int capacity, long long offset);
-typedef int (*ArtFileWriter)(const char *path, const uint8_t *buf, int len);
-typedef int (*ArtFileDelete)(const char *path);
-typedef int (*ArtFileStat)(const char *path, int64_t *out_components, int out_len);
-typedef int (*ArtFontQuery)(int monospace, int vertical, uint8_t *buf, int capacity);
-typedef int (*ArtWindowQuery)(void);
-typedef int (*ArtTextInject)(const char *text, uint8_t *buf, int capacity);
+typedef struct HostResources HostResources;
+typedef struct HostEvents HostEvents;
 
-void art3m1s_register_log_callback(ArtLogCallback cb);
-void art3m1s_register_media_command_callback(ArtJsonCallback cb);
-void art3m1s_register_ui_command_callback(ArtJsonCallback cb);
-void art3m1s_register_file_reader(ArtFileReader cb);
-void art3m1s_register_file_writer(ArtFileWriter cb);
-void art3m1s_register_file_delete(ArtFileDelete cb);
-void art3m1s_register_file_stat(ArtFileStat cb);
-void art3m1s_register_font_query(ArtFontQuery cb);
-void art3m1s_register_window_state_query(ArtWindowQuery cb);
-void art3m1s_register_text_inject_callback(ArtTextInject cb);
-int art3m1s_set_font_override(const uint8_t *data, int len);
-void art3m1s_clear_font_override(void);
-void art3m1s_set_debug(int enabled);
-void art3m1s_set_damage_visualization(int enabled);
-void art3m1s_set_angle_path(const char *directory);
-void art3m1s_set_save_dir(const char *directory);
-int art3m1s_file_exists(const char *path);
-int art3m1s_copy_file(const char *src, const char *dst);
-int art3m1s_delete_file(const char *path);
-int art3m1s_probe_caption(const uint8_t *ini, size_t ini_len, const char *platform,
-                        uint8_t *out, int capacity);
+typedef HostEvents *(*ArtHostEventsCreateFn)(void);
+typedef void (*ArtHostEventsDestroyFn)(HostEvents *events);
+typedef void (*ArtHostEventsEnableFn)(HostEvents *events, int enabled);
+typedef size_t (*ArtHostEventsNextFn)(HostEvents *events);
+typedef size_t (*ArtPollEventsFn)(HostEvents *events, uint8_t *out,
+                                  size_t capacity, uint32_t *out_count);
+typedef int (*ArtSetFontListFn)(HostEvents *events, int monospace, int vertical,
+                                const uint8_t *names, size_t names_len);
+typedef void (*ArtSetWindowStateFn)(HostEvents *events, int flags);
+typedef int (*ArtSetTextReplacementsFn)(HostEvents *events, const uint8_t *json,
+                                        size_t json_len);
+typedef void (*ArtSetTextTranslationEnabledFn)(HostEvents *events, int enabled);
+typedef void (*ArtClearHostStateFn)(HostEvents *events);
+typedef HostResources *(*ArtResourcesCreateFn)(void);
+typedef void (*ArtResourcesDestroyFn)(HostResources *resources);
+typedef void (*ArtResourcesClearFn)(HostResources *resources);
+typedef int (*ArtResourcesMountDirectoryFn)(HostResources *resources, const char *path);
+typedef int (*ArtResourcesMountPfsFn)(HostResources *resources, const char *path,
+                                      const char *encoding);
+typedef int (*ArtResourcesSetSaveDirFn)(HostResources *resources, const char *path);
+typedef int (*ArtResourcesSetOverrideFn)(HostResources *resources, const char *path,
+                                         const uint8_t *data, size_t len);
 
-/* The following symbols require the gl-backend feature. */
-CoreRuntime *art3m1s_runtime_create(uint32_t width, uint32_t height, int32_t backend);
-void art3m1s_runtime_destroy(CoreRuntime *rt);
-int art3m1s_runtime_set_emote_backend(CoreRuntime *rt, int32_t backend);
-int32_t art3m1s_runtime_load_project(CoreRuntime *rt, const char *ini, const char *platform);
-int32_t art3m1s_runtime_load_project_bytes(CoreRuntime *rt, const uint8_t *ini,
-                                         size_t ini_len, const char *platform);
-uint32_t art3m1s_runtime_stage_width(const CoreRuntime *rt);
-uint32_t art3m1s_runtime_stage_height(const CoreRuntime *rt);
-uint32_t art3m1s_runtime_pixel_buffer_size(const CoreRuntime *rt);
-uint32_t art3m1s_runtime_advance_and_render(CoreRuntime *rt, uint32_t delta_ms,
-                                          uint8_t *out_pixels, uint32_t capacity);
-int32_t art3m1s_runtime_advance_without_render(CoreRuntime *rt, uint32_t delta_ms);
-int32_t art3m1s_runtime_set_external_surface(CoreRuntime *rt, int32_t kind, void *handle,
-                                            uint32_t width, uint32_t height);
-void art3m1s_runtime_clear_external_surface(CoreRuntime *rt);
-int32_t art3m1s_runtime_advance_and_present(CoreRuntime *rt, uint32_t delta_ms);
-void art3m1s_runtime_feed_mouse(CoreRuntime *rt, int32_t x, int32_t y);
-void art3m1s_runtime_feed_click(CoreRuntime *rt);
-void art3m1s_runtime_feed_mouse_button(CoreRuntime *rt, uint32_t button, int32_t pressed);
-void art3m1s_runtime_feed_touch(CoreRuntime *rt, uint32_t id, uint8_t phase,
-                               int32_t x, int32_t y);
-void art3m1s_runtime_feed_key(CoreRuntime *rt, uint32_t vk, int32_t pressed);
-int32_t art3m1s_runtime_submit_dialog(CoreRuntime *rt, int32_t accepted, const char *text);
-int32_t art3m1s_runtime_submit_text_translation(CoreRuntime *rt, uint64_t serial,
-                                               const char *text);
-void art3m1s_runtime_set_reported_os(CoreRuntime *rt, const char *os);
-int art3m1s_runtime_submit_http_result(CoreRuntime *rt, int status_code,
-                                     const uint8_t *body, int body_len);
-void art3m1s_runtime_set_string_variable(CoreRuntime *rt, const char *name, const char *value);
-void art3m1s_runtime_set_volume(CoreRuntime *rt, const char *channel, float value);
-void art3m1s_runtime_notify_video_finished(CoreRuntime *rt, const char *id);
-void art3m1s_runtime_notify_sound_finished(CoreRuntime *rt, const char *id);
-void *art3m1s_runtime_video_gl_get_proc_address(void *ctx, const char *name);
-int art3m1s_runtime_video_gl_begin(CoreRuntime *rt);
-uint32_t art3m1s_runtime_video_gl_framebuffer(CoreRuntime *rt, const char *id,
-                                            uint32_t width, uint32_t height);
-int art3m1s_runtime_video_gl_commit(CoreRuntime *rt, const char *id);
-void art3m1s_runtime_video_gl_end(CoreRuntime *rt);
-int art3m1s_runtime_upload_video_layer_frame(CoreRuntime *rt, const char *id,
-                                            uint32_t width, uint32_t height,
-                                            const uint8_t *rgba, size_t rgba_len);
-int32_t art3m1s_runtime_video_import_kind(const CoreRuntime *rt);
-int art3m1s_runtime_import_video_frame(CoreRuntime *rt, const char *id,
-                                      int32_t image_kind, void *native_handle,
-                                      uint32_t width, uint32_t height,
-                                      int32_t ownership, int32_t wait_kind,
-                                      void *wait_handle, uint64_t wait_value,
-                                      const uint8_t *rgba, size_t rgba_len,
-                                      uint64_t *out_texture);
-int art3m1s_runtime_release_video_frame(CoreRuntime *rt, uint64_t texture_handle);
-int art3m1s_runtime_video_frame_consumed(CoreRuntime *rt, uint64_t surface_handle);
-int art3m1s_runtime_acquire_video_surface(CoreRuntime *rt, const char *id,
-                                         uint32_t width, uint32_t height,
-                                         uint64_t *out_surface);
-int art3m1s_runtime_commit_video_surface(CoreRuntime *rt, uint64_t surface_handle);
-uint32_t art3m1s_runtime_capture_screenshot(CoreRuntime *rt, uint8_t *out_pixels,
-                                          uint32_t capacity);
-int32_t art3m1s_runtime_is_exit_requested(const CoreRuntime *rt);
-void art3m1s_runtime_notify_lifecycle(CoreRuntime *rt, int state);
-void art3m1s_runtime_notify_window_button(CoreRuntime *rt, int button);
-void art3m1s_runtime_notify_direction_changed(CoreRuntime *rt, int direction);
-void art3m1s_runtime_set_profiler_enabled(const CoreRuntime *rt, int enabled);
-int32_t art3m1s_runtime_profiler_snapshot(const CoreRuntime *rt, uint8_t *out,
-                                         uint32_t capacity);
+typedef CoreRuntime *(*ArtRuntimeCreateFn)(uint32_t width, uint32_t height, int32_t backend);
+typedef void (*ArtRuntimeDestroyFn)(CoreRuntime *rt);
+typedef int32_t (*ArtRuntimeSetResourcesFn)(CoreRuntime *rt, HostResources *resources);
+typedef void (*ArtRuntimeSetRuntimeMediaEnabledFn)(CoreRuntime *rt, int enabled);
+typedef int32_t (*ArtRuntimeAdvancePresentFn)(CoreRuntime *rt, uint32_t delta_ms);
+typedef int32_t (*ArtRuntimeAdvanceWithoutRenderFn)(CoreRuntime *rt, uint32_t delta_ms);
+typedef uint32_t (*ArtRuntimeStageFn)(const CoreRuntime *rt);
+typedef int32_t (*ArtRuntimeLoadProjectFn)(CoreRuntime *rt, const char *ini,
+                                           const char *platform);
+typedef int32_t (*ArtRuntimeLoadProjectBytesFn)(CoreRuntime *rt, const uint8_t *ini,
+                                                size_t ini_len, const char *platform);
+typedef uint32_t (*ArtRuntimePixelBufferSizeFn)(const CoreRuntime *rt);
+typedef uint32_t (*ArtRuntimeAdvanceRenderFn)(CoreRuntime *rt, uint32_t delta_ms,
+                                              uint8_t *out_pixels, uint32_t capacity);
+typedef int32_t (*ArtRuntimeSetExternalSurfaceFn)(CoreRuntime *rt, int32_t kind,
+                                                  void *handle, uint32_t width,
+                                                  uint32_t height);
+typedef void (*ArtRuntimeClearExternalSurfaceFn)(CoreRuntime *rt);
+typedef void (*ArtRuntimeFeedMouseFn)(CoreRuntime *rt, int32_t x, int32_t y);
+typedef void (*ArtRuntimeFeedClickFn)(CoreRuntime *rt);
+typedef void (*ArtRuntimeFeedMouseButtonFn)(CoreRuntime *rt, uint32_t button,
+                                            int32_t pressed);
+typedef void (*ArtRuntimeFeedTouchFn)(CoreRuntime *rt, uint32_t id, uint8_t phase,
+                                      int32_t x, int32_t y);
+typedef void (*ArtRuntimeFeedKeyFn)(CoreRuntime *rt, uint32_t vk, int32_t pressed);
+typedef int32_t (*ArtRuntimeSubmitDialogFn)(CoreRuntime *rt, int32_t accepted,
+                                            const char *text);
+typedef int32_t (*ArtRuntimeSubmitTextTranslationFn)(CoreRuntime *rt, uint64_t serial,
+                                                     const char *text);
+typedef void (*ArtRuntimeSetReportedOsFn)(CoreRuntime *rt, const char *os);
+typedef int32_t (*ArtRuntimeSetEmoteBackendFn)(CoreRuntime *rt, int32_t backend);
+typedef int32_t (*ArtRuntimeConfigureSpatialUpscaleFn)(CoreRuntime *rt, float render_scale,
+                                                       float sharpness);
+typedef int32_t (*ArtRuntimeSetRenderQualityPresetFn)(CoreRuntime *rt, int32_t preset);
+typedef void (*ArtRuntimeSetProfilerEnabledFn)(const CoreRuntime *rt, int enabled);
+typedef int32_t (*ArtRuntimeProfilerSnapshotFn)(const CoreRuntime *rt, uint8_t *out,
+                                                uint32_t capacity);
+typedef void (*ArtRuntimeSetVolumeFn)(CoreRuntime *rt, const char *channel, float value);
+typedef void (*ArtRuntimeNotifyFinishedFn)(CoreRuntime *rt, const char *id);
+typedef void (*ArtRuntimeNotifyLifecycleFn)(CoreRuntime *rt, int state);
+typedef int32_t (*ArtRuntimeIsExitRequestedFn)(const CoreRuntime *rt);
+typedef uint64_t (*ArtRuntimeBackendCapabilitiesFn)(const CoreRuntime *rt);
+typedef int32_t (*ArtRuntimeSubmitHttpResultFn)(CoreRuntime *rt, int status_code,
+                                                const uint8_t *body, int body_len);
+typedef void (*ArtRuntimeSetStringVariableFn)(CoreRuntime *rt, const char *name,
+                                              const char *value);
+typedef int32_t (*ArtProbeCaptionFn)(HostResources *resources, const uint8_t *ini,
+                                     size_t ini_len, const char *platform,
+                                     uint8_t *out, int capacity);
+typedef void (*ArtSetAnglePathFn)(const char *directory);
+typedef void (*ArtSetDebugFn)(int enabled);
+typedef int32_t (*ArtSetFontOverrideFn)(const uint8_t *data, int len);
+typedef void (*ArtClearFontOverrideFn)(void);
+typedef int32_t (*ArtRuntimeUploadVideoLayerFrameFn)(CoreRuntime *rt, const char *id,
+                                                     uint32_t width, uint32_t height,
+                                                     const uint8_t *rgba,
+                                                     size_t rgba_len);
+
+typedef struct ArtHostEventHeaderV1 {
+    uint32_t abi_version;
+    uint32_t kind;
+    uint64_t sequence;
+    uint32_t payload_size;
+    uint32_t aux;
+} ArtHostEventHeaderV1;
+
+typedef struct Art3m1sApiV1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint64_t magic;
+
+    ArtHostEventsCreateFn host_events_create;
+    ArtHostEventsDestroyFn host_events_destroy;
+    ArtHostEventsEnableFn host_events_enable;
+    ArtHostEventsNextFn host_events_next;
+    ArtPollEventsFn poll_events;
+    ArtSetFontListFn set_font_list;
+    ArtSetWindowStateFn set_window_state;
+    ArtSetTextReplacementsFn set_text_replacements;
+    ArtSetTextTranslationEnabledFn set_text_translation_enabled;
+    ArtClearHostStateFn clear_host_state;
+
+    ArtResourcesCreateFn resources_create;
+    ArtResourcesDestroyFn resources_destroy;
+    ArtResourcesClearFn resources_clear;
+    ArtResourcesMountDirectoryFn resources_mount_directory;
+    ArtResourcesMountPfsFn resources_mount_pfs;
+    ArtResourcesSetSaveDirFn resources_set_save_dir;
+    ArtResourcesSetOverrideFn resources_set_override;
+    ArtResourcesClearFn resources_clear_overrides;
+
+    ArtRuntimeCreateFn runtime_create;
+    ArtRuntimeDestroyFn runtime_destroy;
+    ArtRuntimeSetResourcesFn runtime_set_resources;
+    ArtRuntimeSetRuntimeMediaEnabledFn runtime_set_runtime_media_enabled;
+    ArtRuntimeAdvancePresentFn runtime_advance_and_present;
+    ArtRuntimeAdvanceWithoutRenderFn runtime_advance_without_render;
+    ArtRuntimeStageFn runtime_stage_width;
+    ArtRuntimeStageFn runtime_stage_height;
+    ArtRuntimeLoadProjectFn runtime_load_project;
+    ArtRuntimeLoadProjectBytesFn runtime_load_project_bytes;
+    ArtRuntimePixelBufferSizeFn runtime_pixel_buffer_size;
+    ArtRuntimeAdvanceRenderFn runtime_advance_and_render;
+    ArtRuntimeSetExternalSurfaceFn runtime_set_external_surface;
+    ArtRuntimeClearExternalSurfaceFn runtime_clear_external_surface;
+    ArtRuntimeFeedMouseFn runtime_feed_mouse;
+    ArtRuntimeFeedClickFn runtime_feed_click;
+    ArtRuntimeFeedMouseButtonFn runtime_feed_mouse_button;
+    ArtRuntimeFeedTouchFn runtime_feed_touch;
+    ArtRuntimeFeedKeyFn runtime_feed_key;
+    ArtRuntimeSubmitDialogFn runtime_submit_dialog;
+    ArtRuntimeSubmitTextTranslationFn runtime_submit_text_translation;
+    ArtRuntimeSetReportedOsFn runtime_set_reported_os;
+    ArtRuntimeSetEmoteBackendFn runtime_set_emote_backend;
+    ArtRuntimeConfigureSpatialUpscaleFn runtime_configure_spatial_upscale;
+    ArtRuntimeSetRenderQualityPresetFn runtime_set_render_quality_preset;
+    ArtRuntimeSetProfilerEnabledFn runtime_set_profiler_enabled;
+    ArtRuntimeProfilerSnapshotFn runtime_profiler_snapshot;
+    ArtRuntimeSetVolumeFn runtime_set_volume;
+    ArtRuntimeNotifyFinishedFn runtime_notify_video_finished;
+    ArtRuntimeNotifyFinishedFn runtime_notify_sound_finished;
+    ArtRuntimeNotifyLifecycleFn runtime_notify_lifecycle;
+    ArtRuntimeIsExitRequestedFn runtime_is_exit_requested;
+    ArtRuntimeBackendCapabilitiesFn runtime_backend_capabilities;
+    ArtRuntimeSubmitHttpResultFn runtime_submit_http_result;
+    ArtRuntimeSetStringVariableFn runtime_set_string_variable;
+
+    ArtProbeCaptionFn probe_caption;
+    ArtSetAnglePathFn set_angle_path;
+    ArtSetDebugFn set_debug;
+    ArtSetDebugFn set_damage_visualization;
+    ArtSetFontOverrideFn set_font_override;
+    ArtClearFontOverrideFn clear_font_override;
+    ArtRuntimeUploadVideoLayerFrameFn runtime_upload_video_layer_frame;
+} Art3m1sApiV1;
+
+/* The only exported symbol of the core dynamic library. */
+const Art3m1sApiV1 *art3m1s_get_api_v1(size_t *out_size);
 
 #ifdef __cplusplus
 }
 #endif
 ```
 
-## 注册与全局配置
+## Host 状态、文件与全局配置
 
 | 回调/函数（省略 `art3m1s_`） | 约定 |
 |---|---|
-| `register_log_callback` | `level`/`message` 为借用字符串，常用级别 `D/I/W/E`，按字符串处理 |
-| `register_media_command_callback` / `register_ui_command_callback` | 借用的 `kind` 和 JSON 对象；复制入队，不在回调里阻塞或回调 runtime |
-| `register_file_reader` | offset=-1 查询大小，否则范围读取；负数失败，读取 EOF=0 |
-| `register_file_writer` | 返回写入字节数，必须等于 len；负数/短写失败 |
-| `register_file_delete` | 成功 0，失败负数 |
-| `register_file_stat` | 写 6 个本地时间分量，返回 6；负数失败；Core 目前忽略少于 6 的结果 |
-| `register_font_query` | 非零参数分别筛选等宽/竖排；输出 UTF-8 换行分隔字体族，无 NUL，返回字节数；负数无结果；目前容量 16384 |
-| `register_window_state_query` | 返回位标志 bit0=全屏、bit1=最小化；未注册视为两者 false |
-| `register_text_inject_callback` | 返回替换 UTF-8 字节数，0 可替换为空；-1 保留原文，-2 后台翻译；目前容量 8192 |
 | `set_font_override` / `clear_font_override` | 安装/清除运行时覆盖字体（TTF/OTF 字节，进程级全局，core 复制）；返回 1 成功，0 参数无效或非法字体；变更下一帧生效，不回溯已排版文本 |
 | `set_debug` | 全局调试开关；关闭同时清除脏区着色开关，不自动关闭 per-runtime profiler |
 | `set_damage_visualization` | 仅 debug 开启时允许启用；Host 调试 UI 关闭时还应关闭 profiler |
 | `set_angle_path` | ANGLE 库目录；首次设置生效，需早于创建 runtime |
-| `set_save_dir` | 历史保留配置，首次设置生效；不代替 Host 的每游戏文件路径映射 |
-| `file_exists` | 1 存在，0 不存在/无效；经 reader 查询 |
-| `copy_file` / `delete_file` | 0 成功，-1 失败；通过注册的文件回调，不是直接系统调用 |
-| `probe_caption` | 返回 UTF-8 字节数，无 NUL；0 表示未找到/失败/缓冲不足；使用当前全局资源回调 |
+| `host_events_create` / `host_events_destroy` | 创建/释放独立 host-events 句柄；队列、窗口状态、字体表和文本替换表都归该句柄所有 |
+| `host_events_enable` | 启用/停用该句柄；启用时清空队列并成为日志、media、UI 的当前活动路由 |
+| `resources_create` / `resources_destroy` | 创建/释放独立资源句柄；runtime 可持有同一句柄 |
+| `resources_mount_directory` / `resources_mount_pfs` | 返回 1 成功；重建该句柄的资源索引并替换当前挂载 |
+| `resources_set_save_dir` / `resources_set_override` / `resources_clear_overrides` | 设置存档根或资源覆盖；失败返回 0 |
+| `resources_clear` | 清空该句柄的挂载、覆盖和存档根 |
+| `probe_caption` | 第一个参数是资源句柄；返回 UTF-8 字节数，无 NUL；0 表示未找到/失败/缓冲不足 |
 
-可选回调未注册时并非所有功能都会自动跳过：字体为空、窗口状态为 false、文本保留原文；
-文件读写会失败；原生 dialog 会保持等待。HTTP 未注册 UI 时按失败结果完成；注册了 UI 却
-不处理 `http_request` 则可能一直等待。媒体回调是正常播放和完成时序的必要接线。
+Host 必须调用 `art3m1s_get_api_v1` 并校验 `struct_size`、`abi_version` 和 `magic`；
+不匹配时必须拒绝读取函数表。core 不再导出表中的平铺符号。
+
+旧日志、media、UI、字体、窗口和文本注入回调入口已删除。Host 未启用 host events 时，
+日志和 UI/media 事件不会交付，字体为空、窗口状态为 false、文本保留原文。文件读写失败；
+原生 dialog 会保持等待。媒体事件是正常播放和完成时序的必要接线。
+
+### 无反向回调 host events v1
+
+Host 先调用 `host_events_create()`，再调用
+`host_events_enable_v1(events, 1)`。启用后 core 把输出写入该句柄持有的有界队列：
+
+- `host_events_next_v1(events)` 返回队首完整事件的字节数，队列为空时为 0。
+- `poll_events_v1(events, ...)` 只写完整事件，返回实际字节数并通过 `out_count` 返回
+  事件数；调用后已写事件从队列移除。缓冲区不足时保留下一个完整事件，不会写半条记录。
+- 事件按 `sequence` 单调递增。当前版本定义 `1=log`、`2=media`、`3=UI`。
+- log 的 `aux` 是 ASCII 级别首字符（`D/I/W/E`），payload 是 UTF-8 消息。
+- media/UI 的 payload 是 `{"kind":"...","payload":{...}}` JSON，语义与原回调相同。
+
+`set_font_list_v1(events, ...)` 推送换行分隔的 UTF-8 字体族列表；
+`set_window_state_v1(events, ...)` 推送 bit0=全屏、bit1=最小化。文本替换表是 JSON
+字符串映射；精确命中时同步替换。在线翻译开启而未命中时，core 保留原文并继续通过 UI
+事件下发 `text_translate`，由 `runtime_submit_text_translation` 回填。
+
+句柄本身可以独立创建和释放，但日志、media、UI 的产生点位于进程级 core 代码，因此当前
+进程只应向最近启用的一组句柄路由输出。关闭会话时必须先 `host_events_enable(events, 0)`，
+再 `host_events_destroy(events)`；销毁后不得继续 poll 或提交状态。
 
 ## Runtime 返回值与枚举
 
-下表函数名省略 `art3m1s_runtime_`。
+下表是 `Art3m1sApiV1` 中以 `runtime_` 开头的函数表字段，表中省略该前缀。
 
 | 函数 | 成功/返回数据 | 失败与注意事项 |
 |---|---|---|
 | `create` | 非空 runtime 指针 | NULL；尺寸须合理，细节读日志 |
 | `destroy` | 无返回 | NULL 无操作；有效指针只能销毁一次 |
+| `set_resources` | 1 绑定资源句柄 | 0 runtime 为空；必须在 `load_project` 前绑定 |
 | `set_emote_backend` | 1；0=内置、1=Eluna | 返回 0 表示失败/未编入；加载项目前设置；不要传未知值 |
 | `load_project` / `load_project_bytes` | **0** 成功 | -1 失败；参数是 INI 内容，不是文件路径 |
 | `stage_width` / `stage_height` | 舞台尺寸 | NULL 返回 0 |
@@ -181,22 +265,11 @@ int32_t art3m1s_runtime_profiler_snapshot(const CoreRuntime *rt, uint8_t *out,
 | `submit_http_result` | 1 完成当前请求 | 0 无挂起请求/无效；status=0 表失败；NULL body/非正长度视为空 |
 | `set_string_variable` | 无返回；支持 `result.title` 等路径 | name/value 必须有效 UTF-8；无 RPC 完成语义 |
 | `set_volume` | 无返回；value 限制到 [0,1] | channel 为 master/bgm/se/voice；不要传 NaN 或未知名称 |
+| `set_runtime_media_enabled` | 切换 runtime 视频解码；1=启用、0=停用并清空 | core 未编入 `ffmpeg` 时该函数指针为 NULL；启用后 `video` 事件不再下发宿主播放命令 |
 | `notify_video_finished` / `notify_sound_finished` | 无返回；更新状态并触发对应完成处理 | 只用于当前播放；video id=NULL 全屏，sound id=NULL BGM |
-| `video_gl_get_proc_address` | **Deprecated** GL 函数指针 | NULL 未解析/非 GL；Metal 返回 NULL |
-| `video_gl_begin` | **Deprecated** 1 获取 GL lease | 0 失败/已持有/非 GL；不可嵌套 |
-| `video_gl_framebuffer` | **Deprecated** 非零 GLuint FBO | 0 无 lease/非 GL/图层不播放；不要在新代码中使用 |
-| `video_gl_commit` | **Deprecated** 1 标记新帧可用 | 0 无 lease/目标不存在 |
-| `video_gl_end` | **Deprecated** 无返回 | 与每次成功 begin 配对 |
 | `upload_video_layer_frame` | 1 同步 CPU RGBA 上传 | 0 参数无效/图层过期/失败；fallback，不是 Darwin 生产路径 |
-| `video_import_kind` | 首选导入 kind | 0=RGBA、1=CVPixelBuffer、2=MTLTexture、3=IOSurface、4=AHardwareBuffer、5=GL FBO |
-| `import_video_frame` | 1 并可选写出不透明 texture handle | 0 失败时保留上一帧；handle 不是 GLuint |
-| `release_video_frame` | 1 已解绑 | 0 未知 handle；GPU 完成后才释放 native retain |
-| `video_frame_consumed` | 1 生产者可回收 native 对象 | 0 仍被 compositor/inflight 使用；未知 handle 视为 1 |
-| `acquire_video_surface` | 1 并写出不透明 surface handle | 0 失败；handle 不是 GLuint |
-| `commit_video_surface` | 1 标记新帧可采样 | 0 未知 handle |
-| `capture_screenshot` | 写入的 RGBA 字节数 | 0 失败/缓冲不足；不推进引擎，不走 video ABI |
 | `is_exit_requested` | 1 已请求退出，0 未请求 | 不会自动 destroy；NULL=0 |
-| `notify_lifecycle` / `notify_window_button` / `notify_direction_changed` | 无返回 | 枚举见下表，回调必须仍有效 |
+| `notify_lifecycle` | 无返回 | state 枚举见下表 |
 | `set_profiler_enabled` | 无返回 | per-runtime；读取仍与其他调用串行 |
 | `profiler_snapshot` | 写入字节数；out=NULL 或 capacity=0 时返回所需容量 | 缓冲小返回负的所需容量；NULL rt=-1；无 NUL；可能要扩容重试 |
 
@@ -206,79 +279,31 @@ int32_t art3m1s_runtime_profiler_snapshot(const CoreRuntime *rt, uint8_t *out,
 |---|---|
 | create.backend | 0=CGL、1=ANGLE OpenGL、2=ANGLE Vulkan、3=ANGLE Metal、4=ANGLE D3D11；未知值落 CGL，不是自动选择 |
 | external_surface.kind | 1=ANativeWindow、2=IOSurface、3=MTLTexture、4=CAMetalLayer。这是呈现表面，不是视频帧 |
-| import_video_frame.image_kind | 0=CPU RGBA、1=CVPixelBuffer、2=MTLTexture、3=IOSurface、4=AHardwareBuffer |
-| import_video_frame.ownership | 0=Borrowed、1=Imported、2=Owned |
-| import_video_frame.wait_kind | 0=无（宿主已同步）、1=MTLSharedEvent、2=Vulkan semaphore（预留） |
 | mouse button / key | Windows VK；左键=1、右键=2、中键=4、Ctrl=17 |
 | touch.phase | 0=down、1=move、2=up；id 为手指跟踪标识 |
 | lifecycle.state | 0=退出前、1=后台、2=前台 |
-| window_button.button | 0=关闭、1=最大化、2=最小化 |
-| direction.direction | 0=纵向、1=横向 Home 右、2=倒置纵向、3=横向 Home 左 |
 
 CGL 仅 macOS 可用。ANGLE 创建失败会尝试 CGL，因此 create 成功不证明实际用了 ANGLE；
 当前无实际后端查询 ABI，以日志与外部表面调用结果判断。Windows/方向通知是否被脚本使用
 取决于游戏注册的处理器，Host 只报告真实事件。
 
-`art3m1s_runtime_render_width/height` 返回 SceneColor 的 render size，
-`art3m1s_runtime_output_width/height` 返回 native presentation output size。
-两者可以不同；post-process 设计见 [`doc/POST_PROCESS.md`](POST_PROCESS.md)。
-`art3m1s_runtime_set_upscale_mode(rt, mode, sharpness)` 中 `mode=0` 为线性采样，
-`mode=1` 请求 backend-native spatial upscaler；`sharpness` 必须在 `[0,1]`。
-`art3m1s_runtime_set_render_scale(rt, scale)` 设置 SceneColor 相对 native output 的物理比例，
-范围为 `[0.1,1.0]`，且 native backend 的实际 render size 不会低于游戏逻辑舞台尺寸。
-只有 Host 提供的 output surface 大于逻辑舞台时，MetalFX 才可能执行真正的超分。
-`art3m1s_runtime_configure_spatial_upscale(rt, scale, sharpness)` 原子设置 spatial pass 与
+`runtime_configure_spatial_upscale(rt, scale, sharpness)` 原子设置 spatial pass 与
 SceneColor 比例，供 Host 实现固定 1.5x、2x 或固定输出分辨率；不支持 spatial 的 backend
-应由 Host 根据 capabilities 选择 native fallback。
+应由 Host 根据 `runtime_backend_capabilities` 选择 native fallback。
 
 
 
-## 视频与 external texture
+## 已移出稳定 ABI
 
-新 ABI 使用不透明 handle，不再把 `GLuint` framebuffer/texture 暴露给 runtime：
-
-- `ExternalTextureHandle`：compositor 采样用
-- `VideoSurfaceHandle`：producer 写入/导入用
-- `FrameTargetHandle`：截图/离屏，与 video 分离；`capture_screenshot` 走主场景 readback
-
-Darwin 生产路径是 zero-copy：
-
-`CVPixelBuffer` → `CVMetalTextureCache` → `MTLTexture` → `MetalBackend` compositor。
-
-不要把已在 GPU 上的帧做 GPU→CPU→GPU。`upload_video_layer_frame` 只给只有 CPU RGBA 的宿主做 fallback。
-
-所有权：Borrowed（宿主保持对象直到 consumed）、Imported（core retain，宿主可立即释放自己的引用）、Owned（宿主交出 retain，core 在 GPU 完成后释放）。
-
-同步：
-
-1. producer 写完后才调用 `import_video_frame` / `commit_video_surface`。`wait_kind=0` 表示宿主已同步；可预留 fence/event。
-2. 这些调用成功返回后，renderer 可在下一帧 `advance_and_present` 采样。
-3. `video_frame_consumed(handle)==1` 后 producer 才可回收该 native 对象。替换/停止图层会把旧帧投入 retirement，等 command buffer 完成后再释放。
-
-`video_gl_*` 保留为 GL/libmpv 兼容 shim，已 deprecated。Metal 上 begin/framebuffer 失败（返回 0），宿主应改走 import 或 RGBA fallback。
-
-Android 未来路径（Vulkan experimental，不阻塞 Darwin）：
-
-`MediaCodec` → `AHardwareBuffer` → Vulkan external memory/image → compositor。
-当前 `image_kind=4` 会返回明确错误。
-
-截图使用 `capture_screenshot` 或脚本 `takess` 的主场景 readback，禁止再用 video FBO ABI。
-
-## Runtime HLSL shader
-
-`art3m1s_runtime_register_hlsl_shader(rt,name,source,len)`、
-`art3m1s_runtime_replace_hlsl_shader(rt,name,source,len)`（别名
-`art3m1s_runtime_reload_hlsl_shader`）接收 UTF-8 shader
-名称及 Artemis fragment HLSL 字节串，成功返回正数逻辑 `ShaderId`，失败返回 `-1`。
-替换保留该 ID 并作废 Metal/Vulkan native pipeline cache。删除使用
-`art3m1s_runtime_unregister_hlsl_shader(rt,name)`，成功返回 1，未找到或参数无效返回 0。
-编译失败不会跨越 C ABI 抛出 panic；错误会包含 shader 名称、阶段、编译器消息及可用的
-行/列位置并写入 Core 日志。ABI 详情和支持的 HLSL 子集见
-[`doc/SHADER_ABI.md`](SHADER_ABI.md)。
+旧平铺入口中的 native video import/surface、`video_gl_*`、截图、render/output size、
+upscale mode/render scale、HLSL shader 和窗口方向通知目前不再是导出符号，也不在
+`Art3m1sApiV1` 中。Host 不得再按旧文档解析这些符号；需要恢复时必须先设计新的版本化
+函数和明确的所有权语义，再提升 ABI 版本或在兼容的后续结构中追加字段。
 
 ## UI 命令协议
 
-回调是 `kind` 字符串 + JSON 对象；字段名区分大小写。`null` 和缺失不要随意变成空字符串
+UI 事件是 `kind` 字符串 + JSON 对象；字段名区分大小写。兼容宿主仍可用原回调。
+`null` 和缺失不要随意变成空字符串
 或 0。未实现的能力按 Host 安全策略拒绝；对需完成通知的能力必须明确结束等待。
 
 | kind | payload 字段 | Host 行为/回应 |
@@ -301,7 +326,7 @@ Android 未来路径（Vulkan experimental，不阻塞 Darwin）：
 | `shell_execute` | `file,params` | params 是字符串映射；打开文件/应用等，按权限策略处理 |
 | `text_translate` | `serial,text,ruby,blocking:false` | 非阻塞队列；ruby 为可空注音上下文；submit_text_translation 回填 |
 
-UI/媒体回调没有 runtime 标识。HTTP/对话框/媒体完成没有统一 request ID 回填保护，详见
+UI/媒体事件没有 runtime 标识。HTTP/对话框/媒体完成没有统一 request ID 回填保护，详见
 接入指南。不能直接从回调同步调用任何 `submit_*`，应返回后在 owner 队列处理。
 
 ## 媒体命令协议

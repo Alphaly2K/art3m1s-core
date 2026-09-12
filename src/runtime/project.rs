@@ -32,7 +32,7 @@ impl CoreRuntime {
 
     fn load_open_project_inner(&mut self, project: Project) -> Result<(), String> {
         // File existence results belong to the currently mounted project.
-        crate::ffi::clear_file_size_cache();
+        self.resources().clear_overrides();
         let new_width = project.config().stage_width;
         let new_height = project.config().stage_height;
 
@@ -115,6 +115,7 @@ impl CoreRuntime {
                 input: Arc::clone(&self.input),
                 magic_paths: Arc::clone(&self.magic_paths),
                 layer_info: Arc::clone(&self.layer_info),
+                resources: self.resources().clone(),
                 volumes: Arc::clone(&self.volumes),
                 debug_skip_active: Arc::clone(&self.debug_skip_active),
                 script_status: Arc::clone(&self.script_status),
@@ -126,17 +127,18 @@ impl CoreRuntime {
         // Project::create_interpreter already installs a local loader when no
         // host file callback exists. Keep it for headless/standalone runtime
         // tests; production FFI projects use the magic-path-aware loader.
-        if !crate::ffi::file_reader_registered() {
+        if !self.resources().is_mounted() {
             return;
         }
         // Override the file loader with magic-path-aware FFI version.
         // Scripts can reference files via `:name/rest` notation; the
         // default loader (from create_interpreter) doesn't resolve these.
         let magic_paths_loader = Arc::clone(&self.magic_paths);
+        let resources = self.resources().clone();
         self.interpreter
             .set_file_loader(Box::new(move |name: &str| {
                 let resolved = magic_path::resolve_path(&magic_paths_loader, name);
-                crate::ffi::request_file(&resolved).map_err(|m| {
+                resources.read_file(&resolved).map_err(|m| {
                     asb_interpreter::Error::IoError(std::io::Error::new(
                         std::io::ErrorKind::NotFound,
                         m,
@@ -156,11 +158,12 @@ impl CoreRuntime {
             .cloned()
             .unwrap_or_default();
         let magic_paths_tex = Arc::clone(&self.magic_paths);
+        let resources = self.resources().clone();
         self.gpu
             .replace_asset_source(Box::new(move |name: &str| -> Option<Vec<u8>> {
                 let resolved = magic_path::resolve_path(&magic_paths_tex, name);
                 for try_path in [format!("{resolved}.png"), resolved.clone()] {
-                    match crate::ffi::request_asset(&try_path) {
+                    match resources.read_file(&try_path).ok() {
                         Some(bytes) => {
                             return Some(bytes);
                         }
@@ -219,7 +222,11 @@ impl CoreRuntime {
         for candidate in std::iter::once(Self::DEFAULT_FONT_PATH.to_string()).chain(
             super::text::font_fallback_candidates(Self::DEFAULT_FONT_PATH),
         ) {
-            match crate::load_font_ffi(&candidate).and_then(|font| text.set_font_owned(font)) {
+            match self
+                .resources
+                .read_file(&candidate)
+                .and_then(|font| text.set_font_owned(font))
+            {
                 Ok(()) => {
                     if candidate != Self::DEFAULT_FONT_PATH {
                         crate::core_info!(

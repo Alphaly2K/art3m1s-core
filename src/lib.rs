@@ -14,6 +14,9 @@ pub mod audio;
 pub mod backend;
 pub mod compositor;
 pub mod ffi;
+pub mod ffi_api;
+pub mod host_events;
+pub mod host_files;
 pub mod host_media;
 #[cfg(any(
     target_os = "android",
@@ -39,6 +42,7 @@ pub mod text;
 pub mod video;
 
 pub use art3m1s_emote as emote;
+pub use art3m1s_media as media;
 pub use asb_interpreter as script;
 pub use pfs_upk as archive;
 
@@ -295,10 +299,26 @@ impl Project {
     /// An optional `tag.ini` is read through the same source and decoded with
     /// the project's CHARSET before any script is parsed.
     pub fn create_interpreter(&self) -> Interpreter {
+        self.create_interpreter_with_resources(None)
+    }
+
+    pub fn create_interpreter_with_resources(
+        &self,
+        resources: Option<&crate::host_files::HostResources>,
+    ) -> Interpreter {
         let root = self.root.clone();
         let mut interpreter = Interpreter::new(self.config.to_interpreter_config(Some(&self.root)));
 
-        if crate::ffi::file_reader_registered() {
+        if let Some(resources) = resources.cloned() {
+            interpreter.set_file_loader(Box::new(move |name| {
+                resources.read_file(name).map_err(|m| {
+                    asb_interpreter::Error::IoError(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        m,
+                    ))
+                })
+            }));
+        } else if crate::ffi::file_reader_registered() {
             interpreter.set_file_loader(Box::new(move |name| {
                 let bytes = crate::ffi::request_file(name).map_err(|m| {
                     asb_interpreter::Error::IoError(std::io::Error::new(
@@ -315,7 +335,9 @@ impl Project {
             }));
         }
 
-        let tag_ini = if crate::ffi::file_reader_registered() {
+        let tag_ini = if let Some(resources) = resources {
+            resources.read_file("tag.ini").ok()
+        } else if crate::ffi::file_reader_registered() {
             crate::ffi::request_file("tag.ini").ok()
         } else {
             self.read_file("tag.ini").ok()
@@ -394,10 +416,18 @@ fn caption_probe_on_event(
 }
 
 pub fn probe_caption_from_bytes(ini_content: &[u8], platform: &str) -> Option<String> {
+    probe_caption_from_bytes_with_resources(ini_content, platform, None)
+}
+
+pub fn probe_caption_from_bytes_with_resources(
+    ini_content: &[u8],
+    platform: &str,
+    resources: Option<&crate::host_files::HostResources>,
+) -> Option<String> {
     use std::sync::{Arc, Mutex};
 
     let project = Project::open_from_bytes("", ini_content, platform).ok()?;
-    let mut interpreter = project.create_interpreter();
+    let mut interpreter = project.create_interpreter_with_resources(resources);
 
     let caption: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let caption_cb = Arc::clone(&caption);

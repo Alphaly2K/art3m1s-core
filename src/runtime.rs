@@ -5,6 +5,7 @@
 use crate::audio::AudioBackend;
 use crate::backend::{BackendInfo, BackendSelection, GpuBackend, NativeSurface};
 use crate::compositor::Compositor;
+use crate::host_files::HostResources;
 use crate::render_pipeline::post_process::{
     PostProcessPass, PostProcessPipeline, RenderDimensions, RenderQualityPreset, UpscaleConfig,
 };
@@ -24,6 +25,8 @@ mod input;
 mod layer_info;
 mod magic_path;
 mod media;
+#[cfg(feature = "ffmpeg")]
+mod media_session;
 mod project;
 mod render;
 mod save_io;
@@ -72,6 +75,9 @@ pub struct CoreRuntime {
     text_translation_serial: u64,
     audio: Box<dyn AudioBackend>,
     video: Box<dyn VideoBackend>,
+    resources: HostResources,
+    #[cfg(feature = "ffmpeg")]
+    media_session: media_session::RuntimeMediaSession,
     interpreter: asb_interpreter::Interpreter,
     input: Arc<Mutex<callbacks::InputSnapshot>>,
     events: Arc<Mutex<Vec<events::RuntimeEvent>>>,
@@ -155,6 +161,16 @@ struct PendingLoadResume {
 }
 
 impl CoreRuntime {
+    #[cfg(feature = "ffmpeg")]
+    pub fn set_runtime_media_enabled(&mut self, enabled: bool) {
+        self.media_session.set_enabled(enabled);
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    pub fn runtime_media_enabled(&self) -> bool {
+        self.media_session.is_enabled()
+    }
+
     pub fn backend_info(&self) -> BackendInfo {
         self.gpu.backend_info()
     }
@@ -263,6 +279,8 @@ impl CoreRuntime {
         let compositor = Compositor::new();
         let audio = Box::new(crate::audio::AudioStateBackend::new()) as Box<dyn AudioBackend>;
         let video = Box::new(crate::video::VideoStateBackend::new()) as Box<dyn VideoBackend>;
+        #[cfg(feature = "ffmpeg")]
+        let media_session = media_session::RuntimeMediaSession::default();
         let interpreter =
             asb_interpreter::Interpreter::new(asb_interpreter::InterpreterConfig::default());
 
@@ -288,6 +306,9 @@ impl CoreRuntime {
             text_translation_serial: 0,
             audio,
             video,
+            resources: crate::host_files::default_resources().clone(),
+            #[cfg(feature = "ffmpeg")]
+            media_session,
             interpreter,
             input,
             events,
@@ -338,6 +359,14 @@ impl CoreRuntime {
 
     pub fn stage_width(&self) -> u32 {
         self.stage_w
+    }
+
+    pub fn set_resources(&mut self, resources: HostResources) {
+        self.resources = resources;
+    }
+
+    pub(crate) fn resources(&self) -> &HostResources {
+        &self.resources
     }
 
     pub fn stage_height(&self) -> u32 {

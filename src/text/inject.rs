@@ -99,11 +99,10 @@ impl std::fmt::Debug for InjectionChain {
 // FFI 注入器
 // ---------------------------------------------------------------------------
 
-/// 经 FFI 回调实现的注入器。
+/// 经 callback-free host state 实现的注入器。
 ///
-/// 宿主（Flutter 或汉化补丁动态库）通过
-/// `art3m1s_register_text_inject_callback` 注册回调后即生效；
-/// 未注册时 [`TextInject::inject`] 恒返回 `None`（保持原文）。
+/// 宿主通过 `art3m1s_set_text_replacements_v1` 提前提交替换表；
+/// 未命中时 [`TextInject::inject`] 返回 `None`（保持原文，或由异步翻译事件接管）。
 /// runtime 默认把它挂在注入链首位。
 pub struct FfiTextInject;
 

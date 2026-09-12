@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use super::CoreRuntime;
+use crate::host_files::HostResources;
 use crate::render_pipeline::draw::{
     BlendMode, ClipRect, ColorFilter, DrawCommand, DrawMesh, StencilMetadata, TextureId,
     TextureInfo, TextureProvider,
@@ -108,6 +109,7 @@ struct EmoteInstance {
     eye_blinks: Vec<EmoteEyeBlink>,
     textures: BTreeMap<String, EmoteTextureState>,
     texture_source_bytes: usize,
+    resources: HostResources,
     #[cfg(any(
         target_os = "android",
         target_os = "ios",
@@ -189,6 +191,7 @@ impl EmoteState {
         files: Vec<(String, Vec<u8>)>,
         width: u32,
         height: u32,
+        resources: HostResources,
     ) -> Result<bool, String> {
         if files.len() != 1 {
             return Err(format!(
@@ -204,7 +207,7 @@ impl EmoteState {
         let generation = self.next_generation;
         let instance = match self.backend {
             EmoteBackend::Builtin => EmoteInstanceSlot::Builtin(EmoteInstance::new(
-                generation, &path, bytes, width, height,
+                generation, &path, bytes, width, height, resources,
             )?),
             EmoteBackend::ElunaExperimental => {
                 #[cfg(feature = "experimental-eluna")]
@@ -407,6 +410,7 @@ impl EmoteInstance {
         bytes: Vec<u8>,
         width: u32,
         height: u32,
+        resources: HostResources,
     ) -> Result<Self, String> {
         let document = PsbDocument::from_bytes(bytes)
             .map_err(|error| format!("failed to parse E-Mote model {path}: {error}"))?;
@@ -448,6 +452,7 @@ impl EmoteInstance {
             eye_blinks,
             textures,
             texture_source_bytes,
+            resources,
             #[cfg(any(
                 target_os = "android",
                 target_os = "ios",
@@ -536,7 +541,7 @@ impl EmoteInstance {
                 ))]
                 if texture.gpu.is_none() && provider.supports_astc_4x4() {
                     let cache_path = astc_cache_path(compressed, texture.width, texture.height);
-                    if let Ok(cached) = crate::ffi::request_file(&cache_path)
+                    if let Ok(cached) = self.resources.read_file(&cache_path)
                         && crate::mobile_astc::astc_4x4_len(texture.width, texture.height)
                             == Some(cached.len())
                     {
@@ -566,9 +571,7 @@ impl EmoteInstance {
                         if let Some(encoder) = self.astc_encoder.as_mut() {
                             match encoder.encode_rgba8(texture.width, texture.height, &rgba) {
                                 Ok(astc) => {
-                                    if let Err(error) =
-                                        crate::ffi::request_write(&cache_path, &astc)
-                                    {
+                                    if let Err(error) = self.resources.write(&cache_path, &astc) {
                                         crate::core_debug!(
                                             "[E-Mote] ASTC cache write failed {cache_path}: {error}"
                                         );
@@ -1180,7 +1183,13 @@ mod tests {
         let mut state = EmoteState::default();
         assert!(
             !state
-                .create_layer("1.0", vec![(path.display().to_string(), bytes)], 1600, 1350,)
+                .create_layer(
+                    "1.0",
+                    vec![(path.display().to_string(), bytes)],
+                    1600,
+                    1350,
+                    crate::host_files::default_resources().clone(),
+                )
                 .unwrap()
         );
         let instance = state.layers["1.0"].active.as_ref().unwrap().as_builtin();
@@ -1283,7 +1292,13 @@ mod tests {
         state.set_backend(super::EmoteBackend::ElunaExperimental);
         assert!(
             !state
-                .create_layer("1.0", vec![(path.display().to_string(), bytes)], 1600, 1350,)
+                .create_layer(
+                    "1.0",
+                    vec![(path.display().to_string(), bytes)],
+                    1600,
+                    1350,
+                    crate::host_files::default_resources().clone(),
+                )
                 .unwrap()
         );
         state

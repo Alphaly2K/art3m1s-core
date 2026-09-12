@@ -83,11 +83,18 @@ impl CoreRuntime {
             .collect();
         self.audio.stop_all_sounds();
         self.video.stop_all_videos();
+        #[cfg(feature = "ffmpeg")]
+        self.media_session.stop_all();
         for id in video_layer_ids {
             self.clear_video_layer_texture(&id);
         }
         hm::emit(Kind::AudioStopAll, hm::EmptyPayload {});
+        #[cfg(not(feature = "ffmpeg"))]
         hm::emit(Kind::VideoStopAll, hm::EmptyPayload {});
+        #[cfg(feature = "ffmpeg")]
+        if !self.media_session.is_enabled() {
+            hm::emit(Kind::VideoStopAll, hm::EmptyPayload {});
+        }
         self.refresh_sound_info_snapshot();
     }
 
@@ -168,9 +175,13 @@ impl CoreRuntime {
 
     pub(super) fn advance_media_and_enqueue_finish_handlers(&mut self, delta_ms: u64) {
         let host_media = crate::ffi::media_command_callback_registered();
+        #[cfg(feature = "ffmpeg")]
+        let runtime_video = self.media_session.is_enabled();
+        #[cfg(not(feature = "ffmpeg"))]
+        let runtime_video = false;
         self.audio.advance(delta_ms);
         self.refresh_sound_info_snapshot();
-        if !host_media {
+        if !host_media && !runtime_video {
             self.video.advance(delta_ms);
         }
 
@@ -191,7 +202,7 @@ impl CoreRuntime {
         }
 
         for event in self.video.poll_finish_events() {
-            if host_media {
+            if host_media || runtime_video {
                 // Completion is owned by the host decoder for both modes.
                 continue;
             }
@@ -214,6 +225,14 @@ impl CoreRuntime {
                     &HashMap::new(),
                     &[],
                 );
+            }
+        }
+
+        #[cfg(feature = "ffmpeg")]
+        if runtime_video {
+            self.media_session.advance(delta_ms, &mut *self.gpu);
+            for id in self.media_session.drain_finished() {
+                self.notify_video_finished(id.as_deref());
             }
         }
     }
@@ -293,10 +312,14 @@ impl CoreRuntime {
         };
         match id {
             Some(layer_id) => {
+                #[cfg(feature = "ffmpeg")]
+                self.media_session.stop_layer(layer_id);
                 self.video.stop_layer(layer_id);
                 self.clear_video_layer_texture(layer_id);
             }
             None => {
+                #[cfg(feature = "ffmpeg")]
+                self.media_session.stop_fullscreen();
                 self.video.stop_fullscreen();
             }
         }
@@ -806,6 +829,30 @@ impl CoreRuntime {
                         self.bind_video_layer_texture(layer_id);
                     }
                     None => self.video.play_fullscreen(&config),
+                }
+                #[cfg(feature = "ffmpeg")]
+                if self.media_session.is_enabled() {
+                    let resources = self.resources.clone();
+                    let result = match id {
+                        Some(layer_id) => self.media_session.play_layer(
+                            &resources,
+                            layer_id,
+                            &resolved_file,
+                            *loop_play,
+                        ),
+                        None => self.media_session.play_fullscreen(
+                            &resources,
+                            &resolved_file,
+                            *loop_play,
+                        ),
+                    };
+                    if let Err(error) = result {
+                        crate::core_warn!(
+                            "[media] runtime video open failed: file={resolved_file} error={error}"
+                        );
+                    } else {
+                        return true;
+                    }
                 }
                 hm::emit(
                     Kind::VideoPlay,

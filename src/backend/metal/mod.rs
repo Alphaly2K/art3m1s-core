@@ -10,7 +10,7 @@ use crate::backend::{
     GpuProfileStats, GpuSyncKind, GpuSyncToken, NativeSurface, NativeSurfaceKind, RenderRegion,
     RenderTarget, RenderTargetDesc, RenderTargetId, ResourceOwnership, ShaderCompileError,
     ShaderId, TextureData, TextureDesc, TextureFormat, TextureOrigin, TextureUpdate, TextureUsage,
-    VideoImportCapability, VideoSurfaceHandle,
+    VideoImportCapability, VideoSurfaceHandle, Yuv420pPlanes,
 };
 use crate::render_pipeline::draw::{
     BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, ShaderEffect, ShaderGroup, TextureId,
@@ -124,6 +124,14 @@ struct MetalRenderTarget {
     id: RenderTargetId,
     color: TextureId,
     desc: RenderTargetDesc,
+}
+
+struct MetalYuvUpload {
+    y: Texture,
+    u: Texture,
+    v: Texture,
+    output_id: TextureId,
+    extent: Extent2D,
 }
 
 struct PrivateRenderTarget {
@@ -368,6 +376,8 @@ pub struct MetalBackend {
     shader_frame_index: u64,
     cv_texture_cache: Option<core_video::CvMetalTextureCache>,
     yuv_pipeline: Option<PipelineState>,
+    yuv420p_pipeline: Option<PipelineState>,
+    yuv_uploads: HashMap<String, MetalYuvUpload>,
     video_leases: HashMap<u64, TextureId>,
     next_external_id: u64,
     profile_video_upload_ns: Cell<u64>,
@@ -486,6 +496,8 @@ impl MetalBackend {
             shader_frame_index: 0,
             cv_texture_cache: None,
             yuv_pipeline: None,
+            yuv420p_pipeline: None,
+            yuv_uploads: HashMap::new(),
             video_leases: HashMap::new(),
             next_external_id: 1,
             profile_video_upload_ns: Cell::new(0),
@@ -621,6 +633,8 @@ impl MetalBackend {
         for name in names {
             self.names.remove(&name);
         }
+        self.yuv_uploads
+            .retain(|_, upload| upload.output_id != texture);
         self.video_leases.retain(|_, id| *id != texture);
         self.texture_revisions.remove(&texture);
         if let Some(texture) = self.textures.remove(&texture) {
@@ -728,6 +742,67 @@ impl MetalBackend {
         );
     }
 
+    fn ensure_yuv420p_upload(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<(Texture, Texture, Texture, Texture, TextureId), String> {
+        if let Some(upload) = self.yuv_uploads.get(name)
+            && upload.extent == Extent2D::new(width, height)
+            && let Some(output) = self.textures.get(&upload.output_id)
+        {
+            return Ok((
+                upload.y.clone(),
+                upload.u.clone(),
+                upload.v.clone(),
+                output.raw.clone(),
+                upload.output_id,
+            ));
+        }
+        if let Some(old) = self.names.get(name).copied() {
+            self.remove_texture_id(old);
+        } else {
+            self.yuv_uploads.remove(name);
+        }
+
+        let y = create_yuv_plane_texture(&self.device, width, height)?;
+        let u = create_yuv_plane_texture(&self.device, width.div_ceil(2), height.div_ceil(2))?;
+        let v = create_yuv_plane_texture(&self.device, width.div_ceil(2), height.div_ceil(2))?;
+        let extent = Extent2D::new(width, height);
+        let desc = TextureDesc {
+            extent,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsage::SAMPLED | TextureUsage::RENDER_TARGET | TextureUsage::TRANSFER_SRC,
+        };
+        let output = create_texture(&self.device, desc)?;
+        let output_id = self.allocate_texture_id();
+        self.names.insert(name.to_owned(), output_id);
+        self.textures.insert(
+            output_id,
+            MetalTexture {
+                raw: output.clone(),
+                desc,
+                info: TextureInfo { width, height },
+                cpu_pixels: PixelStorage::None,
+                opaque: true,
+                external: None,
+            },
+        );
+        self.yuv_uploads.insert(
+            name.to_owned(),
+            MetalYuvUpload {
+                y: y.clone(),
+                u: u.clone(),
+                v: v.clone(),
+                output_id,
+                extent,
+            },
+        );
+        self.mark_texture_changed(output_id);
+        Ok((y, u, v, output, output_id))
+    }
+
     fn bind_imported_texture(
         &mut self,
         name: &str,
@@ -815,6 +890,71 @@ impl MetalBackend {
             .map_err(|error| format!("failed to create YUV convert pipeline: {error}"))?;
         self.yuv_pipeline = Some(raw.clone());
         Ok(raw)
+    }
+
+    fn ensure_yuv420p_pipeline(&mut self) -> Result<PipelineState, String> {
+        if let Some(pipeline) = &self.yuv420p_pipeline {
+            return Ok(pipeline.clone());
+        }
+        let vertex = self
+            .library
+            .newFunctionWithName(&NSString::from_str("fullscreen_vertex"))
+            .ok_or_else(|| "Metal fullscreen_vertex is missing".to_string())?;
+        let fragment = self
+            .library
+            .newFunctionWithName(&NSString::from_str("yuv420p_convert_fragment"))
+            .ok_or_else(|| "Metal yuv420p_convert_fragment is missing".to_string())?;
+        let descriptor = MTLRenderPipelineDescriptor::new();
+        descriptor.setVertexFunction(Some(&vertex));
+        descriptor.setFragmentFunction(Some(&fragment));
+        let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
+        attachment.setPixelFormat(MTLPixelFormat::RGBA8Unorm);
+        attachment.setBlendingEnabled(false);
+        let raw = self
+            .device
+            .newRenderPipelineStateWithDescriptor_error(&descriptor)
+            .map_err(|error| format!("failed to create YUV420P convert pipeline: {error}"))?;
+        self.yuv420p_pipeline = Some(raw.clone());
+        Ok(raw)
+    }
+
+    fn convert_yuv420p_into(
+        &mut self,
+        luma: &Texture,
+        chroma_u: &Texture,
+        chroma_v: &Texture,
+        destination: &Texture,
+        extent: Extent2D,
+    ) -> Result<(), String> {
+        let pipeline = self.ensure_yuv420p_pipeline()?;
+        let command_buffer = self
+            .queue
+            .commandBuffer()
+            .ok_or_else(|| "failed to create Metal YUV420P command buffer".to_string())?;
+        let target = PrivateRenderTarget {
+            texture: destination.clone(),
+            extent,
+            format: MTLPixelFormat::RGBA8Unorm,
+        };
+        let pass = render_pass(&target, MTLLoadAction::DontCare, [0.0, 0.0, 0.0, 1.0]);
+        let encoder = command_buffer
+            .renderCommandEncoderWithDescriptor(&pass)
+            .ok_or_else(|| "failed to create Metal YUV420P encoder".to_string())?;
+        encoder.setRenderPipelineState(&pipeline);
+        unsafe {
+            encoder.setFragmentTexture_atIndex(Some(luma), 0);
+            encoder.setFragmentTexture_atIndex(Some(chroma_u), 1);
+            encoder.setFragmentTexture_atIndex(Some(chroma_v), 2);
+            encoder.setFragmentSamplerState_atIndex(Some(&self.sampler), 0);
+            encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::TriangleStrip, 0, 4);
+        }
+        encoder.endEncoding();
+        command_buffer.commit();
+        command_buffer.waitUntilCompleted();
+        if command_buffer.status() == MTLCommandBufferStatus::Error {
+            return Err(format_command_error(&command_buffer));
+        }
+        Ok(())
     }
 
     fn convert_nv12(
@@ -1257,6 +1397,65 @@ fn upload_texture(
     unsafe {
         texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(region, 0, pointer, bytes_per_row)
     };
+    Ok(())
+}
+
+fn create_yuv_plane_texture(
+    device: &ProtocolObject<dyn MTLDevice>,
+    width: u32,
+    height: u32,
+) -> Result<Texture, String> {
+    if width == 0 || height == 0 {
+        return Err("Metal YUV plane extent must be non-zero".into());
+    }
+    let descriptor = unsafe {
+        MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+            MTLPixelFormat::R8Unorm,
+            width as usize,
+            height as usize,
+            false,
+        )
+    };
+    descriptor.setTextureType(MTLTextureType::Type2D);
+    descriptor.setStorageMode(MTLStorageMode::Shared);
+    descriptor.setUsage(MTLTextureUsage::ShaderRead);
+    device
+        .newTextureWithDescriptor(&descriptor)
+        .ok_or_else(|| "failed to allocate Metal YUV plane texture".to_string())
+}
+
+fn metal_plane_is_valid(data: &[u8], width: u32, height: u32, stride: usize) -> bool {
+    if width == 0 || height == 0 {
+        return false;
+    }
+    let row_len = width as usize;
+    let last_row = (height as usize - 1)
+        .saturating_mul(stride)
+        .saturating_add(row_len);
+    stride >= row_len && data.len() >= last_row
+}
+
+fn upload_yuv_plane(
+    texture: &ProtocolObject<dyn MTLTexture>,
+    width: u32,
+    height: u32,
+    stride: usize,
+    bytes: &[u8],
+) -> Result<(), String> {
+    if !metal_plane_is_valid(bytes, width, height, stride) {
+        return Err("invalid Metal YUV plane geometry".to_string());
+    }
+    let region = objc2_metal::MTLRegion {
+        origin: MTLOrigin { x: 0, y: 0, z: 0 },
+        size: MTLSize {
+            width: width as usize,
+            height: height as usize,
+            depth: 1,
+        },
+    };
+    let pointer = NonNull::new(bytes.as_ptr().cast_mut().cast())
+        .ok_or_else(|| "Metal YUV plane upload pointer is null".to_string())?;
+    unsafe { texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(region, 0, pointer, stride) };
     Ok(())
 }
 
@@ -1905,6 +2104,61 @@ impl GpuBackend for MetalBackend {
                     .saturating_add(elapsed_ns(started)),
             );
         }
+        true
+    }
+
+    fn upload_video_yuv420p(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+        planes: Yuv420pPlanes<'_>,
+    ) -> bool {
+        if width == 0 || height == 0 {
+            return false;
+        }
+        let chroma_width = width.div_ceil(2);
+        let chroma_height = height.div_ceil(2);
+        if !metal_plane_is_valid(planes.y, width, height, planes.y_stride)
+            || !metal_plane_is_valid(planes.u, chroma_width, chroma_height, planes.u_stride)
+            || !metal_plane_is_valid(planes.v, chroma_width, chroma_height, planes.v_stride)
+        {
+            return false;
+        }
+
+        let started = self.profiling_enabled.get().then(std::time::Instant::now);
+        let Ok((y, u, v, output, output_id)) = self.ensure_yuv420p_upload(name, width, height)
+        else {
+            return false;
+        };
+        if upload_yuv_plane(&y, width, height, planes.y_stride, planes.y).is_err()
+            || upload_yuv_plane(&u, chroma_width, chroma_height, planes.u_stride, planes.u).is_err()
+            || upload_yuv_plane(&v, chroma_width, chroma_height, planes.v_stride, planes.v).is_err()
+            || self
+                .convert_yuv420p_into(&y, &u, &v, &output, Extent2D::new(width, height))
+                .is_err()
+        {
+            return false;
+        }
+
+        self.mark_texture_changed(output_id);
+        let uploaded = planes
+            .y
+            .len()
+            .saturating_add(planes.u.len())
+            .saturating_add(planes.v.len());
+        self.record_video_frame(uploaded);
+        if let Some(started) = started {
+            self.profile_video_upload_ns.set(
+                self.profile_video_upload_ns
+                    .get()
+                    .saturating_add(elapsed_ns(started)),
+            );
+        }
+        true
+    }
+
+    fn supports_video_yuv420p(&self) -> bool {
         true
     }
 

@@ -122,6 +122,7 @@ impl LayerQueryState {
 
 pub(super) fn asset_dimensions(
     paths: &super::magic_path::MagicPathTable,
+    resources: &crate::host_files::HostResources,
     file: &str,
 ) -> Option<(u32, u32)> {
     if file.starts_with("image/text/") {
@@ -131,10 +132,12 @@ pub(super) fn asset_dimensions(
     // Match the texture provider's lookup order, but only read image headers.
     for path in [format!("{resolved}.png"), resolved] {
         for limit in [4096, 65536, 1048576] {
-            let Some(bytes) = crate::ffi::request_asset_range(&path, 0, limit) else {
+            let mut bytes = vec![0u8; limit];
+            let Ok(read) = resources.read_range(&path, 0, &mut bytes) else {
                 break;
             };
-            let short = bytes.len() < limit;
+            let short = read < limit;
+            bytes.truncate(read);
             if let Ok(reader) = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format()
                 && let Ok(size) = reader.into_dimensions()
             {
@@ -169,6 +172,7 @@ mod tests {
             input: Default::default(),
             magic_paths: Default::default(),
             layer_info: Arc::clone(&state),
+            resources: crate::host_files::default_resources().clone(),
             volumes: Default::default(),
             debug_skip_active: Default::default(),
             script_status: Default::default(),

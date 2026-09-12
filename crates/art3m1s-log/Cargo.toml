@@ -1,0 +1,9 @@
+[package]
+name = "art3m1s-log"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+description = "Reusable logging boundary for Art3m1s runtimes"
+
+[dependencies]
+log = { version = "0.4.20", default-features = false, features = ["std"] }

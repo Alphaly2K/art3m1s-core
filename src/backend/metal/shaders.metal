@@ -202,3 +202,18 @@ fragment float4 yuv_convert_fragment(
     float b = y + 1.8556 * cb;
     return float4(clamp(float3(r, g, b), 0.0, 1.0), 1.0);
 }
+
+fragment float4 yuv420p_convert_fragment(
+    RasterData in [[stage_in]],
+    texture2d<float> luma [[texture(0)]],
+    texture2d<float> chroma_u [[texture(1)]],
+    texture2d<float> chroma_v [[texture(2)]],
+    sampler linear_sampler [[sampler(0)]]) {
+    float y = (luma.sample(linear_sampler, in.uv).r - 16.0 / 255.0) * (255.0 / 219.0);
+    float u = chroma_u.sample(linear_sampler, in.uv).r - 0.5;
+    float v = chroma_v.sample(linear_sampler, in.uv).r - 0.5;
+    float r = y + 1.5748 * v;
+    float g = y - 0.1873 * u - 0.4681 * v;
+    float b = y + 1.8556 * u;
+    return float4(clamp(float3(r, g, b), 0.0, 1.0), 1.0);
+}

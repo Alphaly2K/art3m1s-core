@@ -1,0 +1,430 @@
+//! Draw-list and backend boundary types.
+//!
+//! The compositor builds logical scene state; the render pipeline owns the
+//! backend-facing draw commands and provider/renderer traits.
+
+use std::collections::BTreeMap;
+use std::fmt::Debug;
+use std::sync::Arc;
+
+/// Opaque backend texture handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TextureId(pub u64);
+
+/// Texture pixel size.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextureInfo {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Texel origin used when a backend-owned capture is sampled as a DrawList
+/// texture. This avoids baking GL row orientation into the render pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextureOrigin {
+    TopLeft,
+    BottomLeft,
+}
+
+/// Draw-list construction view of the active GPU backend.
+///
+/// Production code implements this on the same object as `GpuBackend`; it is
+/// not a second resource owner. Keeping the narrow view lets compositor, text,
+/// and hit-test code run against lightweight CPU mocks without learning frame
+/// submission or native-surface concepts.
+pub trait TextureProvider {
+    fn resolve(&mut self, name: &str) -> Option<(TextureId, TextureInfo)>;
+
+    /// Uploads raw RGBA pixels and returns a backend texture handle.
+    fn upload_rgba(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) -> Option<(TextureId, TextureInfo)>;
+
+    /// Uploads pixels that will only be sampled by the renderer.
+    ///
+    /// Backends may avoid retaining a CPU-readable copy. The default keeps
+    /// compatibility with providers that only implement [`Self::upload_rgba`].
+    fn upload_rgba_render_only(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) -> Option<(TextureId, TextureInfo)> {
+        self.upload_rgba(name, width, height, data)
+    }
+
+    /// Uploads a DXT5-compressed texture without expanding it to RGBA first.
+    /// Backends without S3TC support return `None` and callers may decode it.
+    fn upload_dxt5_render_only(
+        &mut self,
+        _name: &str,
+        _width: u32,
+        _height: u32,
+        _data: &[u8],
+    ) -> Option<(TextureId, TextureInfo)> {
+        None
+    }
+
+    fn supports_astc_4x4(&self) -> bool {
+        false
+    }
+
+    /// Uploads raw ASTC 4x4 blocks. Mobile backends use this for persistent
+    /// E-Mote transcode caches; unsupported GPUs return `None`.
+    fn upload_astc_4x4_render_only(
+        &mut self,
+        _name: &str,
+        _width: u32,
+        _height: u32,
+        _data: &[u8],
+    ) -> Option<(TextureId, TextureInfo)> {
+        None
+    }
+
+    /// Samples a texture alpha value at the given pixel coordinate.
+    fn pixel_alpha(&self, _texture: TextureId, _x: u32, _y: u32) -> Option<u8> {
+        None
+    }
+
+    /// Returns true only when every texel is known to have alpha 1.0.
+    /// Unknown and compressed textures must conservatively return false.
+    fn texture_is_opaque(&self, _texture: TextureId) -> bool {
+        false
+    }
+
+    /// Retains only the named resources. Removing a logical cache entry must
+    /// not force immediate physical destruction while an in-flight frame may
+    /// still reference its texture; explicit GPU backends may defer retirement.
+    fn retain(&mut self, _names: &std::collections::HashSet<String>) {}
+
+    /// 取一张 1x1 纯色纹理（`lyc` 缺省 file 的单色图层模式用）。
+    ///
+    /// 默认实现直接按稳定名字上传；带缓存的后端（如 GL provider）应覆写为
+    /// 先查缓存，避免每帧重建纹理。
+    fn solid_texture(&mut self, rgba: [u8; 4]) -> Option<(TextureId, TextureInfo)> {
+        self.upload_rgba(&solid_texture_name(rgba), 1, 1, &rgba)
+    }
+
+    /// 解析 `file` 并用 `mask` 灰度图合成 alpha 后的组合纹理（`lyc` mask 参数）。
+    ///
+    /// 默认实现忽略蒙版、退化为普通 `resolve`；有像素访问能力的后端应覆写为
+    /// 真正的双图合成（out.rgb = file.rgb，out.a = file.a × mask 灰度）。
+    fn resolve_with_mask(&mut self, file: &str, _mask: &str) -> Option<(TextureId, TextureInfo)> {
+        self.resolve(file)
+    }
+
+    /// 读取某逻辑资源的 CPU 侧 RGBA 像素（`lyedit` 像素加工用）。
+    ///
+    /// 返回 `(宽, 高, RGBA8)`。无法提供像素（无 CPU 缓存）时返回 `None`。
+    fn pixels_of(&mut self, _name: &str) -> Option<(u32, u32, Vec<u8>)> {
+        None
+    }
+}
+
+/// `lyc` 单色图层使用的 1x1 纯色纹理的稳定缓存名。
+///
+/// provider 缓存与 `Scene::collect_files` 的保活列表都用这个名字，保证纹理
+/// 不会被逐帧驱逐重建。
+pub fn solid_texture_name(rgba: [u8; 4]) -> String {
+    format!(
+        "__solid_{:02x}{:02x}{:02x}{:02x}__",
+        rgba[0], rgba[1], rgba[2], rgba[3]
+    )
+}
+
+/// `lyc` file+mask 双图合成纹理的稳定缓存名。
+///
+/// provider 缓存与 `Scene::collect_files` 的保活列表共用，避免 retain 驱逐。
+pub fn masked_texture_name(file: &str, mask: &str) -> String {
+    format!("{file}\u{1f}mask\u{1f}{mask}")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum BlendMode {
+    #[default]
+    Alpha,
+    /// Source pixels already have RGB multiplied by alpha (for example an
+    /// offscreen group texture).
+    PremultipliedAlpha,
+    /// Premultiplied-alpha source with additive composition.
+    PremultipliedAdd,
+    Add,
+    Screen,
+    Multiply,
+    /// Native E-Mote additive mode while preserving destination alpha.
+    NativeAdd,
+    /// Native E-Mote reverse-subtract blend (destination - source * alpha).
+    NativeReverseSubtract,
+    /// Native E-Mote multiply mode while preserving destination alpha.
+    NativeMultiply,
+    /// Native E-Mote screen mode while preserving destination alpha.
+    NativeScreen,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ColorFilter {
+    pub multiply: [f32; 3],
+    pub grayscale: bool,
+    pub negative: bool,
+}
+
+impl Default for ColorFilter {
+    fn default() -> Self {
+        Self {
+            multiply: [1.0, 1.0, 1.0],
+            grayscale: false,
+            negative: false,
+        }
+    }
+}
+
+impl ColorFilter {
+    pub fn is_identity(&self) -> bool {
+        self.multiply == [1.0, 1.0, 1.0] && !self.grayscale && !self.negative
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShaderEffect {
+    pub name: String,
+    pub uniforms: BTreeMap<String, Vec<f32>>,
+    pub mask_texture: Option<TextureId>,
+    pub user_texture: Option<TextureId>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShaderGroup {
+    pub key: Option<ShaderGroupKey>,
+    pub start: usize,
+    pub end: usize,
+    pub effect: ShaderEffect,
+    pub clip_bounds: Option<[f32; 4]>,
+    pub mask_range: Option<[usize; 2]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LayerShaderGroupKind {
+    Declared,
+    Intermediate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ShaderGroupKey {
+    Layer {
+        layer_id: String,
+        kind: LayerShaderGroupKind,
+    },
+    Stencil {
+        command: DrawCommandKey,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StencilMetadata {
+    pub namespace: u64,
+    pub source_label: String,
+    pub mask_labels: Vec<String>,
+}
+
+/// Per-sprite fixed-function state used by the native E-Mote renderer.
+///
+/// Keeping this optional preserves the compact generic sprite path while
+/// allowing E-Mote's authored corner colors, model-space clipping and wipe
+/// operation to reach the backend without flattening them into one tint.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NativeEmoteMaterial {
+    pub corner_colors: [[f32; 4]; 4],
+    pub uv_rect: [f32; 4],
+    pub blend_mode: u32,
+    pub clip_rect: [f32; 4],
+    pub wipe: [f32; 3],
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DrawCommand {
+    pub texture: TextureId,
+    pub size: TextureInfo,
+    pub transform: glam::Affine2,
+    pub opacity: f32,
+    pub blend: BlendMode,
+    pub color: ColorFilter,
+    pub clip: ClipRect,
+    pub clip_bounds: Option<[f32; 4]>,
+    pub shader: Option<ShaderEffect>,
+    pub mesh: Option<DrawMesh>,
+    pub stencil: Option<StencilMetadata>,
+    pub native_emote: Option<NativeEmoteMaterial>,
+}
+
+/// Stable compositor identity for matching draw commands across frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LayerCommandKind {
+    Visual,
+    Content,
+    Text,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DrawCommandKey {
+    pub layer_id: String,
+    pub kind: LayerCommandKind,
+    pub ordinal: u32,
+}
+
+/// Host-owned draw commands attached to a compositor layer.
+/// Supplies commands for one scene layer. Frame construction visits each layer
+/// once, so callers can move command batches into the final draw list.
+pub type LayerDrawSource<'a> = dyn FnMut(&str) -> Vec<DrawCommand> + 'a;
+
+/// Expanded triangle-list geometry for deformed sprites.
+///
+/// Positions are local pixels and UVs are normalized within `DrawCommand::clip`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DrawMesh {
+    pub vertices: Arc<[[f32; 4]]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClipRect {
+    pub uv_offset: [f32; 2],
+    pub uv_scale: [f32; 2],
+    pub quad_size: [f32; 2],
+}
+
+impl ClipRect {
+    pub fn full(size: TextureInfo) -> Self {
+        Self {
+            uv_offset: [0.0, 0.0],
+            uv_scale: [1.0, 1.0],
+            quad_size: [size.width as f32, size.height as f32],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DrawList {
+    pub commands: Vec<DrawCommand>,
+    /// Parallel to `commands`. Anonymous commands are reserved for global
+    /// render-pipeline overlays such as transitions.
+    pub command_keys: Vec<Option<DrawCommandKey>>,
+    pub mask_commands: Vec<DrawCommand>,
+    pub shader_groups: Vec<ShaderGroup>,
+}
+
+impl DrawList {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push(&mut self, command: DrawCommand) {
+        self.commands.push(command);
+        self.command_keys.push(None);
+    }
+
+    pub fn push_layer(
+        &mut self,
+        layer_id: &str,
+        kind: LayerCommandKind,
+        ordinal: usize,
+        command: DrawCommand,
+    ) {
+        self.commands.push(command);
+        self.command_keys.push(Some(DrawCommandKey {
+            layer_id: layer_id.to_owned(),
+            kind,
+            ordinal: ordinal.try_into().unwrap_or(u32::MAX),
+        }));
+    }
+
+    pub fn command_key(&self, index: usize) -> Option<&DrawCommandKey> {
+        self.command_keys.get(index).and_then(Option::as_ref)
+    }
+
+    pub fn push_shader_group(&mut self, group: ShaderGroup) {
+        self.shader_groups.push(group);
+    }
+
+    pub fn materialize_stencil_groups(&mut self, effect_name: &str) {
+        let masked = self
+            .commands
+            .iter()
+            .enumerate()
+            .filter_map(|(index, command)| {
+                command
+                    .stencil
+                    .as_ref()
+                    .filter(|stencil| !stencil.mask_labels.is_empty())
+                    .map(|stencil| (index, self.command_key(index).cloned(), stencil.clone()))
+            })
+            .collect::<Vec<_>>();
+
+        for (index, command_key, stencil) in masked {
+            let content_center = command_center(&self.commands[index]);
+            let mask_start = self.mask_commands.len();
+            for label in &stencil.mask_labels {
+                let closest = self
+                    .commands
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.stencil.as_ref().is_some_and(|metadata| {
+                            metadata.namespace == stencil.namespace
+                                && metadata.source_label == *label
+                        })
+                    })
+                    .min_by(|left, right| {
+                        center_distance_squared(left, content_center)
+                            .total_cmp(&center_distance_squared(right, content_center))
+                    });
+                if let Some(mask) = closest {
+                    let mut mask = mask.clone();
+                    mask.blend = BlendMode::Alpha;
+                    mask.color = ColorFilter::default();
+                    mask.shader = None;
+                    mask.stencil = None;
+                    self.mask_commands.push(mask);
+                }
+            }
+            let mask_end = self.mask_commands.len();
+            if mask_end == mask_start {
+                continue;
+            }
+            self.shader_groups.push(ShaderGroup {
+                key: command_key.map(|command| ShaderGroupKey::Stencil { command }),
+                start: index,
+                end: index + 1,
+                effect: ShaderEffect {
+                    name: effect_name.to_owned(),
+                    uniforms: BTreeMap::new(),
+                    mask_texture: None,
+                    user_texture: None,
+                },
+                clip_bounds: self.commands[index].clip_bounds,
+                mask_range: Some([mask_start, mask_end]),
+            });
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.commands.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.commands.is_empty()
+    }
+}
+
+fn command_center(command: &DrawCommand) -> glam::Vec2 {
+    command.transform.transform_point2(glam::Vec2::new(
+        command.clip.quad_size[0] * 0.5,
+        command.clip.quad_size[1] * 0.5,
+    ))
+}
+
+fn center_distance_squared(command: &DrawCommand, point: glam::Vec2) -> f32 {
+    command_center(command).distance_squared(point)
+}

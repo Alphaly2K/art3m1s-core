@@ -11,12 +11,13 @@
 //! 1. **全屏视频**（`id=None`）：视频直接渲染到整个舞台，不创建图层
 //! 2. **视频图层**（`id=Some(...)`）：视频作为图层渲染，支持图层属性
 //!
-//! ## 典型接入方式
-//! 1. Core 在帧循环中把解释器的视频事件归约到 [`VideoState`]。
-//! 2. Core 发出 host media 命令，前端/宿主选择平台解码器或 fallback。
-//! 3. 宿主播放结束后通过 FFI 通知 core，core 再恢复脚本或执行 finish handler。
+//! ## 目标接入方式
+//! 1. Core 在帧循环中把解释器的视频事件归约到 runtime media session。
+//! 2. Runtime 持有 FFmpeg/平台解码器、PTS 和完成事件。
+//! 3. Runtime 把视频合成进宿主提供的最终呈现目标；宿主仍拥有 surface/present。
 //!
-//! Core 不持有 FFmpeg backend，也不把解码帧存回视频状态。
+//! 当前 [`VideoStateBackend`] 仍是迁移期的逻辑状态实现，解码接入将在
+//! [`crate::media`] 的契约上逐步替换。
 
 pub mod engine;
 pub mod state;

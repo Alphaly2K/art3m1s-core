@@ -1,0 +1,73 @@
+[package]
+name = "art3m1s-render"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+description = "Backend-neutral rendering API for Art3m1s runtimes"
+
+[dependencies]
+glam = "0.30"
+glow = { version = "0.16", optional = true }
+image = { version = "0.24.9", optional = true, default-features = false, features = ["png"] }
+libloading = { version = "0.8.9", optional = true }
+log = { version = "0.4.20", optional = true, default-features = false, features = ["std"] }
+shaderc = { version = "0.10.1", optional = true, features = ["build-from-source"] }
+spirv-cross2 = { version = "0.7.1", optional = true, default-features = false, features = ["msl"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+objc2 = { version = "0.6.4", optional = true }
+objc2-core-foundation = { version = "0.3.2", optional = true, default-features = false, features = ["CFCGTypes"] }
+objc2-foundation = { version = "0.3.2", optional = true, default-features = false, features = ["NSString"] }
+objc2-io-surface = { version = "0.3.2", optional = true, default-features = false, features = ["IOSurfaceRef", "objc2"] }
+objc2-metal = { version = "0.3.2", optional = true, default-features = false, features = [
+    "std",
+    "MTLAllocation",
+    "MTLArgument",
+    "MTLBlitCommandEncoder",
+    "MTLBuffer",
+    "MTLCommandBuffer",
+    "MTLCommandEncoder",
+    "MTLCommandQueue",
+    "MTLDepthStencil",
+    "MTLDevice",
+    "MTLDrawable",
+    "MTLLibrary",
+    "MTLPixelFormat",
+    "MTLRenderCommandEncoder",
+    "MTLRenderPass",
+    "MTLRenderPipeline",
+    "MTLResource",
+    "MTLSampler",
+    "MTLTexture",
+    "MTLTypes",
+    "objc2-io-surface",
+] }
+objc2-quartz-core = { version = "0.3.2", optional = true, default-features = false, features = [
+    "CALayer",
+    "CAMetalLayer",
+    "objc2-core-foundation",
+    "objc2-metal",
+] }
+
+[target.'cfg(any(target_os = "android", target_os = "windows", target_os = "linux"))'.dependencies]
+ash = { version = "0.38", optional = true, default-features = true }
+
+[build-dependencies]
+naga = { version = "29", optional = true, features = ["wgsl-in", "spv-out"] }
+
+[features]
+default = []
+gl = ["dep:glow", "dep:image", "dep:libloading", "dep:log"]
+metal = [
+    "runtime-shader",
+    "dep:image",
+    "dep:log",
+    "dep:objc2",
+    "dep:objc2-core-foundation",
+    "dep:objc2-foundation",
+    "dep:objc2-io-surface",
+    "dep:objc2-metal",
+    "dep:objc2-quartz-core",
+]
+runtime-shader = ["dep:shaderc", "dep:spirv-cross2"]
+vulkan = ["runtime-shader", "dep:ash", "dep:image", "dep:log", "dep:naga"]

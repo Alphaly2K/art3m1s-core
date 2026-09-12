@@ -46,6 +46,13 @@ pub unsafe fn build_builtin_program(
     unsafe { build_program_from_bodies(gl, profile, source.vertex_body, source.fragment_body) }
 }
 
+pub unsafe fn build_yuv420p_program(
+    gl: &glow::Context,
+    profile: ShaderProfile,
+) -> Result<glow::Program, String> {
+    unsafe { build_program_from_bodies(gl, profile, YUV420P_VERTEX_BODY, YUV420P_FRAGMENT_BODY) }
+}
+
 pub unsafe fn build_effect_program(
     gl: &glow::Context,
     profile: ShaderProfile,
@@ -111,3 +118,34 @@ unsafe fn build_program_from_bodies(
         Ok(program)
     }
 }
+
+const YUV420P_VERTEX_BODY: &str = r#"
+out vec2 v_uv;
+
+void main() {
+    vec2 uv = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+    v_uv = uv;
+    gl_Position = vec4(uv * 2.0 - 1.0, 0.0, 1.0);
+}
+"#;
+
+const YUV420P_FRAGMENT_BODY: &str = r#"
+in vec2 v_uv;
+out vec4 frag_color;
+
+uniform sampler2D u_y;
+uniform sampler2D u_u;
+uniform sampler2D u_v;
+
+void main() {
+    // Software decoders normally emit limited-range BT.601 YUV420P for the
+    // WMV/MPEG-4 content used by this engine.
+    float y = (texture(u_y, v_uv).r - 16.0 / 255.0) * (255.0 / 219.0);
+    float u = texture(u_u, v_uv).r - 0.5;
+    float v = texture(u_v, v_uv).r - 0.5;
+    float r = y + 1.5748 * v;
+    float g = y - 0.1873 * u - 0.4681 * v;
+    float b = y + 1.8556 * u;
+    frag_color = vec4(clamp(vec3(r, g, b), 0.0, 1.0), 1.0);
+}
+"#;

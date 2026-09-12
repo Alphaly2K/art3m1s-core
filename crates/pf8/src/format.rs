@@ -98,10 +98,10 @@ fn decode_filename(bytes: &[u8]) -> String {
 /// 缺省保持上游的 UTF-8 → Shift_JIS 自动回退。
 fn decode_filename_impl(bytes: &[u8], encoding: Option<&'static encoding_rs::Encoding>) -> String {
     if let Some(encoding) = encoding {
-        let (decoded, _, had_errors) = encoding.decode(bytes);
-        if had_errors {
-            eprintln!("Warning: filename contains bytes invalid for the requested encoding");
-        }
+        // Legacy archives routinely contain a few entry names that are not
+        // valid in the selected encoding. encoding_rs already substitutes
+        // replacement characters; do not flood host stderr per entry.
+        let (decoded, _, _) = encoding.decode(bytes);
         return decoded.into_owned();
     }
     if let Ok(s) = std::str::from_utf8(bytes) {
@@ -110,7 +110,9 @@ fn decode_filename_impl(bytes: &[u8], encoding: Option<&'static encoding_rs::Enc
     let (decoded, _, had_errors) = SHIFT_JIS.decode(bytes);
     if had_errors {
         // Neither UTF-8 nor valid Shift-JIS, contains replacement characters
-        eprintln!("Warning: filename contains unrecognizable bytes, some characters may be corrupted");
+        eprintln!(
+            "Warning: filename contains unrecognizable bytes, some characters may be corrupted"
+        );
     }
     decoded.into_owned()
 }

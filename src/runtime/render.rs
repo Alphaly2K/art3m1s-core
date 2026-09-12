@@ -264,6 +264,13 @@ impl CoreRuntime {
         } else {
             pipeline.build_with_content(&mut *self.gpu, content_for, text_for)
         };
+        #[cfg(feature = "ffmpeg")]
+        self.media_session.append_fullscreen_texture(
+            &mut frame,
+            &mut *self.gpu,
+            self.stage_w,
+            self.stage_h,
+        );
         frame.materialize_stencil_groups(crate::render_pipeline::shader::ALPHA_MASK_SHADER);
         let mut used_files = scene_snapshot
             .map(|(scene, _)| scene.collect_files())
@@ -274,6 +281,10 @@ impl CoreRuntime {
             used_files.extend(renderer.retained_texture_names());
         }
         used_files.extend(emote_files);
+        #[cfg(feature = "ffmpeg")]
+        if self.media_session.is_enabled() {
+            used_files.insert(super::media_session::FULLSCREEN_VIDEO_TEXTURE.to_string());
+        }
         for f in RenderPipeline::new(&self.compositor).retained_files() {
             used_files.insert(f);
         }

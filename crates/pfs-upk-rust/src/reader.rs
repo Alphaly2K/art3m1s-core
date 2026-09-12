@@ -35,6 +35,11 @@ impl PfsArchive {
         self.reader.get_entry(path)
     }
 
+    /// 枚举归档条目，供宿主建立资源索引。
+    pub fn entries(&self) -> impl Iterator<Item = &Pf8Entry> {
+        self.reader.entries()
+    }
+
     /// 从条目内偏移 `offset` 读取至多 `buf.len()` 字节，返回实际读取数。
     pub fn read_entry(
         &mut self,

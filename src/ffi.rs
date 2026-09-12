@@ -1,16 +1,15 @@
-//! C FFI bridge — all host ↔ core communication.
+//! Core-side implementations used by the versioned C ABI table.
 //!
-//! The Flutter frontend registers callbacks at startup; afterwards every
-//! filesystem operation inside the core is routed through those callbacks,
-//! keeping the core entirely free of direct I/O.
-use std::collections::HashMap;
+//! These functions are address-taken by [`crate::ffi_api::Art3m1sApiV1`].
+//! They are intentionally not exported as individual dynamic-library symbols;
+//! hosts must obtain them through [`crate::ffi_api::art3m1s_get_api_v1`].
 #[cfg(any(
     feature = "gl-backend",
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
 use std::ffi::c_void;
-use std::ffi::{CString, c_char, c_int, c_longlong};
+use std::ffi::{c_char, c_int};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -112,7 +111,6 @@ fn panic_msg(payload: &Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_set_debug(enabled: c_int) {
     let enabled = enabled != 0;
     DEBUG.store(enabled, Ordering::Relaxed);
@@ -125,27 +123,12 @@ pub fn debug_enabled() -> bool {
     DEBUG.load(Ordering::Relaxed)
 }
 
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_set_damage_visualization(enabled: c_int) {
     DAMAGE_VISUALIZATION.store(enabled != 0 && debug_enabled(), Ordering::Relaxed);
 }
 
 pub fn damage_visualization_enabled() -> bool {
     debug_enabled() && DAMAGE_VISUALIZATION.load(Ordering::Relaxed)
-}
-
-// ── Log callback ───────────────────────────────────────────────
-//
-// 回调指针一律用 Mutex<Option<..>> 而非 OnceLock：Flutter 热重启后会用新的
-// trampoline 地址重新注册，旧指针必须允许被覆盖，否则调用悬垂指针。
-
-type LogCallback = unsafe extern "C" fn(level: *const c_char, msg: *const c_char);
-
-static LOG_CB: Mutex<Option<LogCallback>> = Mutex::new(None);
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn art3m1s_register_log_callback(cb: LogCallback) {
-    *LOG_CB.lock().unwrap() = Some(cb);
 }
 
 // ── 日志过滤钩子（setLogFilter 的 core 侧）────────────────────────
@@ -196,67 +179,42 @@ pub fn log(level: &str, msg: &str) {
     if log_suppressed_by_filter(level, msg) {
         return;
     }
-    let Some(cb) = *LOG_CB.lock().unwrap() else {
-        return;
-    };
-    if let (Ok(l), Ok(m)) = (CString::new(level), CString::new(msg)) {
-        unsafe {
-            cb(l.as_ptr(), m.as_ptr());
+    if crate::host_events::enabled() {
+        crate::host_events::push_log(level, msg);
+    }
+}
+
+// ── Media / UI command events ──────────────────────────────────
+
+fn emit_json_command(event_kind: u32, kind: &str, payload: serde_json::Value) {
+    let payload = payload.to_string();
+    if crate::host_events::enabled() {
+        match event_kind {
+            crate::host_events::EVENT_KIND_MEDIA => {
+                crate::host_events::push_media(kind, &payload);
+            }
+            crate::host_events::EVENT_KIND_UI => {
+                crate::host_events::push_ui(kind, &payload);
+            }
+            _ => {}
         }
     }
 }
 
-// ── Media / UI command callbacks ───────────────────────────────
-
-/// `(kind, payload_json)` 形式的宿主命令回调，media 与 ui 通道共用同一签名。
-type JsonCommandCallback = unsafe extern "C" fn(kind: *const c_char, payload_json: *const c_char);
-
-static MEDIA_COMMAND_CB: Mutex<Option<JsonCommandCallback>> = Mutex::new(None);
-static UI_COMMAND_CB: Mutex<Option<JsonCommandCallback>> = Mutex::new(None);
-
-fn emit_json_command(
-    slot: &Mutex<Option<JsonCommandCallback>>,
-    kind: &str,
-    payload: serde_json::Value,
-) {
-    let Some(cb) = *slot.lock().unwrap() else {
-        return;
-    };
-    let Ok(kind) = CString::new(kind) else {
-        return;
-    };
-    let Ok(payload) = CString::new(payload.to_string()) else {
-        return;
-    };
-    unsafe {
-        cb(kind.as_ptr(), payload.as_ptr());
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn art3m1s_register_media_command_callback(cb: JsonCommandCallback) {
-    *MEDIA_COMMAND_CB.lock().unwrap() = Some(cb);
-}
-
 pub fn media_command_callback_registered() -> bool {
-    MEDIA_COMMAND_CB.lock().unwrap().is_some()
+    crate::host_events::enabled()
 }
 
 pub fn emit_media_command(kind: &str, payload: serde_json::Value) {
-    emit_json_command(&MEDIA_COMMAND_CB, kind, payload);
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn art3m1s_register_ui_command_callback(cb: JsonCommandCallback) {
-    *UI_COMMAND_CB.lock().unwrap() = Some(cb);
+    emit_json_command(crate::host_events::EVENT_KIND_MEDIA, kind, payload);
 }
 
 pub fn ui_command_callback_registered() -> bool {
-    UI_COMMAND_CB.lock().unwrap().is_some()
+    crate::host_events::enabled()
 }
 
 pub fn emit_ui_command(kind: &str, payload: serde_json::Value) {
-    emit_json_command(&UI_COMMAND_CB, kind, payload);
+    emit_json_command(crate::host_events::EVENT_KIND_UI, kind, payload);
 }
 
 #[macro_export]
@@ -280,22 +238,11 @@ macro_rules! core_error {
     ($($arg:tt)*) => { $crate::ffi::log("E", &format!($($arg)*)); };
 }
 
-// ── Text inject callback ───────────────────────────────────────
+// ── Text replacement state ─────────────────────────────────────
 //
-// 汉化/本地化补丁入口：宿主注册回调后，每段剧本文本在光栅化前都会先经过它。
-// 协议：`text` 为原文（UTF-8，NUL 结尾）；替换文本写入 `buf`（UTF-8，不含
-// NUL，最多 `buf_cap` 字节），返回写入的字节数；-1 表示不替换，-2 表示
-// 宿主需要后台翻译。core 会立即显示原文并继续派发事件，再经 ui_command 的
-// `text_translate` 下发请求；完成后由 `art3m1s_runtime_submit_text_translation`
-// 尝试热替换仍位于当前页面、且已完成逐字显示的文本片段。
-
-type TextInjectCallback =
-    unsafe extern "C" fn(text: *const c_char, buf: *mut u8, buf_cap: c_int) -> c_int;
-
-static TEXT_INJECT_CB: Mutex<Option<TextInjectCallback>> = Mutex::new(None);
-
-/// 替换文本的最大字节数。单段剧本文本远小于此值。
-const TEXT_INJECT_CAP: usize = 8192;
+// 汉化/本地化补丁入口：Host 预先提交精确替换表；未命中且在线翻译开启时，
+// core 保留原文并通过 UI event 发送 `text_translate` 请求，完成后由
+// `art3m1s_runtime_submit_text_translation` 尝试热替换当前页面文本。
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TextInjectResult {
@@ -304,38 +251,15 @@ pub enum TextInjectResult {
     Pending,
 }
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn art3m1s_register_text_inject_callback(cb: TextInjectCallback) {
-    *TEXT_INJECT_CB.lock().unwrap() = Some(cb);
-}
-
 /// 把一段文本交给宿主注入回调；Pending 只表示排队，不阻塞 runtime。
 pub fn request_text_injection(text: &str) -> TextInjectResult {
-    let Some(cb) = *TEXT_INJECT_CB.lock().unwrap() else {
-        return TextInjectResult::Unchanged;
-    };
-    let Ok(c_text) = CString::new(text) else {
-        return TextInjectResult::Unchanged;
-    };
-    let mut buf = vec![0u8; TEXT_INJECT_CAP];
-    let n = unsafe { cb(c_text.as_ptr(), buf.as_mut_ptr(), buf.len() as c_int) };
-    if n == -2 {
-        if ui_command_callback_registered() {
-            return TextInjectResult::Pending;
-        }
-        core_warn!("text inject 请求异步翻译，但宿主未注册 UI 回调，保持原文");
-        return TextInjectResult::Unchanged;
+    if let Some(replaced) = crate::host_events::text_replacement(text) {
+        return TextInjectResult::Replaced(replaced);
     }
-    if n < 0 || n as usize > buf.len() {
-        return TextInjectResult::Unchanged;
-    }
-    buf.truncate(n as usize);
-    match String::from_utf8(buf) {
-        Ok(s) => TextInjectResult::Replaced(s),
-        Err(_) => {
-            core_warn!("text inject 回调返回了非 UTF-8 内容，忽略替换");
-            TextInjectResult::Unchanged
-        }
+    if crate::host_events::text_translation_enabled() {
+        TextInjectResult::Pending
+    } else {
+        TextInjectResult::Unchanged
     }
 }
 
@@ -391,7 +315,6 @@ pub(crate) fn font_override() -> Option<(u64, Arc<[u8]>)> {
 
 /// 安装运行时覆盖字体。`data`/`len` 为字体文件字节（TTF/OTF），core 内部复制。
 /// 返回 1 成功；0 参数无效或字体解析失败。
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_set_font_override(data: *const u8, len: c_int) -> c_int {
     if data.is_null() || len <= 0 {
         return 0;
@@ -407,7 +330,6 @@ pub unsafe extern "C" fn art3m1s_set_font_override(data: *const u8, len: c_int) 
 }
 
 /// 清除运行时覆盖字体，恢复脚本指定字体。
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_clear_font_override() {
     clear_font_override();
 }
@@ -416,7 +338,6 @@ pub unsafe extern "C" fn art3m1s_clear_font_override() {
 
 static ANGLE_PATH: OnceLock<String> = OnceLock::new();
 
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_set_angle_path(path: *const c_char) {
     if let Ok(s) = unsafe { std::ffi::CStr::from_ptr(path).to_str() } {
         let _ = ANGLE_PATH.set(s.to_string());
@@ -434,130 +355,26 @@ pub fn angle_lib_path(name: &str) -> String {
     }
 }
 
-// ── File reader callback ────────────────────────────────────────
-
-type FileReaderCallback = unsafe extern "C" fn(
-    path: *const c_char,
-    buf: *mut u8,
-    buf_size: c_int,
-    offset: c_longlong,
-) -> c_int;
-
-static FILE_READER: Mutex<Option<FileReaderCallback>> = Mutex::new(None);
-// System scripts may probe the same optional asset many times while building
-// menus. Cache hits and misses at the synchronous FFI boundary.
-static FILE_SIZE_CACHE: Mutex<Option<HashMap<String, Option<u64>>>> = Mutex::new(None);
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn art3m1s_register_file_reader(cb: FileReaderCallback) {
-    *FILE_READER.lock().unwrap() = Some(cb);
-    *FILE_SIZE_CACHE.lock().unwrap() = Some(HashMap::new());
-}
+// ── Native file host ───────────────────────────────────────────
 
 pub fn clear_file_size_cache() {
-    if let Some(cache) = FILE_SIZE_CACHE.lock().unwrap().as_mut() {
-        cache.clear();
-    }
+    crate::host_files::clear_overrides();
 }
 
 pub fn file_reader_registered() -> bool {
-    FILE_READER.lock().unwrap().is_some()
+    crate::host_files::is_mounted()
 }
 
-// ── File writer / delete callbacks ──────────────────────────────
-//
-// 方案 B：通过宿主（Flutter）注册的回调落盘到应用沙箱目录。
-// core 只传脚本相对路径；物理路径由宿主决定，core 不直接读写文件系统。
-
-/// 写文件回调：`path` 相对路径，`buf`/`len` 为待写字节。返回写入字节数，<0 表失败。
-type FileWriterCallback =
-    unsafe extern "C" fn(path: *const c_char, buf: *const u8, len: c_int) -> c_int;
-
-/// 删除文件回调：`path` 相对路径。返回 0 成功，<0 失败。
-type FileDeleteCallback = unsafe extern "C" fn(path: *const c_char) -> c_int;
-
-static FILE_WRITER: Mutex<Option<FileWriterCallback>> = Mutex::new(None);
-static FILE_DELETE: Mutex<Option<FileDeleteCallback>> = Mutex::new(None);
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn art3m1s_register_file_writer(cb: FileWriterCallback) {
-    *FILE_WRITER.lock().unwrap() = Some(cb);
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn art3m1s_register_file_delete(cb: FileDeleteCallback) {
-    *FILE_DELETE.lock().unwrap() = Some(cb);
-}
-
-/// 通过宿主回调写入文件。`path` 为相对路径。
-///
-/// 回调没有 offset 参数、无法续写，所以部分写入视为失败。
 pub fn request_write(path: &str, data: &[u8]) -> Result<(), String> {
-    let cb = FILE_WRITER
-        .lock()
-        .unwrap()
-        .ok_or_else(|| "file writer not registered".to_string())?;
-    let c_path = CString::new(path).map_err(|e| e.to_string())?;
-    let started = begin_profile_io();
-    let n = unsafe { cb(c_path.as_ptr(), data.as_ptr(), data.len() as c_int) };
-    finish_profile_io(started, n.max(0) as usize);
-    if n < 0 {
-        return Err(format!("write failed: {path}"));
-    }
-    if n as usize != data.len() {
-        return Err(format!(
-            "partial write: {path} ({n} of {} bytes)",
-            data.len()
-        ));
-    }
-    clear_file_size_cache();
-    Ok(())
+    crate::host_files::write(path, data)
 }
 
-/// 通过宿主回调删除文件。`path` 为相对路径。
 pub fn request_delete(path: &str) -> Result<(), String> {
-    let cb = FILE_DELETE
-        .lock()
-        .unwrap()
-        .ok_or_else(|| "file delete not registered".to_string())?;
-    let c_path = CString::new(path).map_err(|e| e.to_string())?;
-    let started = begin_profile_io();
-    let r = unsafe { cb(c_path.as_ptr()) };
-    finish_profile_io(started, 0);
-    if r < 0 {
-        return Err(format!("delete failed: {path}"));
-    }
-    clear_file_size_cache();
-    Ok(())
+    crate::host_files::delete(path)
 }
 
-// ── File stat callback（存档文件更新时间查询）────────────────────
-//
-// `var system=file_update_time` 需要存档文件的修改时间。存档在应用沙箱内由
-// 宿主管理，core 不直接 stat 文件系统；宿主注册回调，把本地时间分量
-// [年,月,日,时,分,秒] 写入 out（时区换算由宿主完成）。返回写入的分量数
-// （应为 6），文件不存在或失败时返回 <0。
-
-type FileStatCallback =
-    unsafe extern "C" fn(path: *const c_char, out_components: *mut i64, out_len: c_int) -> c_int;
-
-static FILE_STAT: Mutex<Option<FileStatCallback>> = Mutex::new(None);
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn art3m1s_register_file_stat(cb: FileStatCallback) {
-    *FILE_STAT.lock().unwrap() = Some(cb);
-}
-
-/// 查询文件更新时间的本地时间分量 [年,月,日,时,分,秒]。
-/// 未注册回调或文件不存在时返回 None。
 pub fn request_file_mtime(path: &str) -> Option<[i64; 6]> {
-    let cb = (*FILE_STAT.lock().unwrap())?;
-    let c_path = CString::new(path).ok()?;
-    let mut out = [0i64; 6];
-    let started = begin_profile_io();
-    let n = unsafe { cb(c_path.as_ptr(), out.as_mut_ptr(), out.len() as c_int) };
-    finish_profile_io(started, n.max(0) as usize * std::mem::size_of::<i64>());
-    if n >= 6 { Some(out) } else { None }
+    crate::host_files::file_mtime(path)
 }
 
 // ── Clipboard ────────────────────────────────────────────────────
@@ -568,171 +385,35 @@ pub fn write_clipboard(text: &str) {
     emit_ui_command("write_clipboard", serde_json::json!({ "string": text }));
 }
 
-// ── 字体枚举 / 窗口状态查询 ────────────────────────────────────────
+// ── 字体枚举 / 窗口状态 ────────────────────────────────────────────
 //
-// `var system=get_font` 与 `fullscreen`/`minimize` 需要宿主（Flutter）回答
-// 可用字体族与窗口状态。宿主注册这两个查询回调后即返回真实数据；未注册时
-// 保持保守默认（空字体列表 / 非全屏非最小化）。
+// `var system=get_font` 与 `fullscreen`/`minimize` 读取 Host 经
+// `art3m1s_set_font_list_v1` / `art3m1s_set_window_state_v1` 推送的状态。
 
-/// 字体列表查询：`monospace`/`vertical` 为过滤标志（非 0 表示只要等宽/竖排）。
-/// 结果为换行分隔的字体族名写入 `buf`（UTF-8，最多 `buf_cap` 字节），返回写入
-/// 字节数；<0 表示无结果。
-type FontQueryCallback =
-    unsafe extern "C" fn(monospace: c_int, vertical: c_int, buf: *mut u8, buf_cap: c_int) -> c_int;
-
-/// 窗口状态查询：返回位标志 bit0=全屏、bit1=最小化。
-type WindowStateCallback = unsafe extern "C" fn() -> c_int;
-
-static FONT_QUERY_CB: Mutex<Option<FontQueryCallback>> = Mutex::new(None);
-static WINDOW_STATE_CB: Mutex<Option<WindowStateCallback>> = Mutex::new(None);
-
-const FONT_LIST_CAP: usize = 16384;
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn art3m1s_register_font_query(cb: FontQueryCallback) {
-    *FONT_QUERY_CB.lock().unwrap() = Some(cb);
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn art3m1s_register_window_state_query(cb: WindowStateCallback) {
-    *WINDOW_STATE_CB.lock().unwrap() = Some(cb);
-}
-
-/// 查询可用字体族列表。未注册宿主回调时返回空列表。
+/// 查询可用字体族列表。Host 未推送时返回空列表。
 pub fn query_font_list(monospace: bool, vertical: bool) -> Vec<String> {
-    let Some(cb) = *FONT_QUERY_CB.lock().unwrap() else {
-        return Vec::new();
-    };
-    let mut buf = vec![0u8; FONT_LIST_CAP];
-    let n = unsafe {
-        cb(
-            monospace as c_int,
-            vertical as c_int,
-            buf.as_mut_ptr(),
-            buf.len() as c_int,
-        )
-    };
-    if n < 0 || n as usize > buf.len() {
-        return Vec::new();
-    }
-    buf.truncate(n as usize);
-    String::from_utf8_lossy(&buf)
-        .lines()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect()
+    crate::host_events::query_font_list(monospace, vertical).unwrap_or_default()
 }
 
-/// 查询窗口状态：`(全屏, 最小化)`。未注册宿主回调时返回 `(false, false)`。
+/// 查询窗口状态：`(全屏, 最小化)`。Host 未推送时返回 `(false, false)`。
 pub fn query_window_state() -> (bool, bool) {
-    let Some(cb) = *WINDOW_STATE_CB.lock().unwrap() else {
-        return (false, false);
-    };
-    let flags = unsafe { cb() };
-    (flags & 0b01 != 0, flags & 0b10 != 0)
-}
-
-// ── Save directory ───────────────────────────────────────────────
-
-// The Flutter host can create several runtimes in one process (for example
-// when switching games). This value must therefore be replaceable; OnceLock
-// would silently keep the first game's directory forever.
-static SAVE_DIR: Mutex<Option<String>> = Mutex::new(None);
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn art3m1s_set_save_dir(dir: *const c_char) {
-    if dir.is_null() {
-        *SAVE_DIR.lock().unwrap() = None;
-    } else if let Ok(s) = unsafe { std::ffi::CStr::from_ptr(dir).to_str() } {
-        *SAVE_DIR.lock().unwrap() = Some(s.to_string());
-    }
-}
-
-pub fn save_dir() -> Option<String> {
-    SAVE_DIR.lock().unwrap().clone()
+    crate::host_events::query_window_state().unwrap_or((false, false))
 }
 
 // ── Query helpers ────────────────────────────────────────────────
 
 fn query_size(path: &str) -> Option<u64> {
-    let cb = FILE_READER.lock().unwrap().clone()?;
-    let key = path.replace('\\', "/");
-    if let Some(cached) = FILE_SIZE_CACHE
-        .lock()
-        .unwrap()
-        .as_ref()
-        .and_then(|cache| cache.get(&key).copied())
-    {
-        return cached;
-    }
-    // PFS archives in the host preserve the original Windows `\\` separator,
-    // while directory-backed projects conventionally use `/`.  Try the
-    // caller's spelling first, then the alternate separator only on failure;
-    // this keeps normal paths fast and makes the FFI boundary tolerant of both
-    // resource backends without teaching the interpreter game-specific paths.
-    for (index, candidate) in path_candidates(path).into_iter().enumerate() {
-        if index > 0 && candidate.as_ref() == path {
-            continue;
-        }
-        let Some(c_path) = CString::new(candidate.as_ref()).ok() else {
-            continue;
-        };
-        let started = begin_profile_io();
-        let size = unsafe { cb(c_path.as_ptr(), std::ptr::null_mut(), 0, -1) };
-        finish_profile_io(started, 0);
-        if size >= 0 {
-            let result = Some(size as u64);
-            if let Some(cache) = FILE_SIZE_CACHE.lock().unwrap().as_mut() {
-                cache.insert(key.clone(), result);
-            }
-            return result;
-        }
-    }
-    if let Some(cache) = FILE_SIZE_CACHE.lock().unwrap().as_mut() {
-        cache.insert(key, None);
-    }
-    None
+    let started = begin_profile_io();
+    let result = crate::host_files::query_size(path).ok().flatten();
+    finish_profile_io(started, 0);
+    result
 }
 
 fn read_chunk(path: &str, offset: u64, buf: &mut [u8]) -> Option<usize> {
-    let cb = FILE_READER.lock().unwrap().clone()?;
-    for (index, candidate) in path_candidates(path).into_iter().enumerate() {
-        if index > 0 && candidate.as_ref() == path {
-            continue;
-        }
-        let Some(c_path) = CString::new(candidate.as_ref()).ok() else {
-            continue;
-        };
-        let started = begin_profile_io();
-        let n = unsafe {
-            cb(
-                c_path.as_ptr(),
-                buf.as_mut_ptr(),
-                buf.len() as c_int,
-                offset as c_longlong,
-            )
-        };
-        finish_profile_io(started, n.max(0) as usize);
-        if n >= 0 {
-            return Some(n as usize);
-        }
-    }
-    None
-}
-
-/// Return the original path and, when useful, a separator-normalized variant.
-/// The host file callback is the compatibility boundary, so both PFS and
-/// directory providers can retain their native path spelling.
-fn path_candidates(path: &str) -> [std::borrow::Cow<'_, str>; 2] {
-    let alternate = if path.contains('/') {
-        std::borrow::Cow::Owned(path.replace('/', "\\"))
-    } else if path.contains('\\') {
-        std::borrow::Cow::Owned(path.replace('\\', "/"))
-    } else {
-        std::borrow::Cow::Borrowed(path)
-    };
-    [std::borrow::Cow::Borrowed(path), alternate]
+    let started = begin_profile_io();
+    let result = crate::host_files::read_range(path, offset, buf).ok();
+    finish_profile_io(started, result.unwrap_or(0));
+    result
 }
 
 const CHUNK: usize = 65536;
@@ -786,63 +467,6 @@ pub fn query_asset_size(path: &str) -> Option<u64> {
     query_size(path)
 }
 
-// ── File operations ──────────────────────────────────────────────
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn art3m1s_file_exists(path: *const c_char) -> c_int {
-    if path.is_null() {
-        return 0;
-    }
-    let Ok(s) = (unsafe { std::ffi::CStr::from_ptr(path).to_str() }) else {
-        return 0;
-    };
-    if query_size(s).is_some() { 1 } else { 0 }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn art3m1s_copy_file(src: *const c_char, dst: *const c_char) -> c_int {
-    if src.is_null() || dst.is_null() {
-        return -1;
-    }
-    let Ok(s) = (unsafe { std::ffi::CStr::from_ptr(src).to_str() }) else {
-        return -1;
-    };
-    let Ok(d) = (unsafe { std::ffi::CStr::from_ptr(dst).to_str() }) else {
-        return -1;
-    };
-    let data = match request_file(s) {
-        Ok(v) => v,
-        Err(e) => {
-            core_warn!("art3m1s_copy_file: read {s}: {e}");
-            return -1;
-        }
-    };
-    match request_write(d, &data) {
-        Ok(()) => 0,
-        Err(e) => {
-            core_warn!("art3m1s_copy_file: write {d}: {e}");
-            -1
-        }
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn art3m1s_delete_file(path: *const c_char) -> c_int {
-    if path.is_null() {
-        return -1;
-    }
-    let Ok(s) = (unsafe { std::ffi::CStr::from_ptr(path).to_str() }) else {
-        return -1;
-    };
-    match request_delete(s) {
-        Ok(()) => 0,
-        Err(e) => {
-            core_warn!("art3m1s_delete_file: {e}");
-            -1
-        }
-    }
-}
-
 // ── Runtime control FFI ─────────────────────────────────────────
 
 #[cfg(any(
@@ -857,7 +481,6 @@ use crate::runtime::CoreRuntime;
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 /// Creates a runtime using the platform default GPU backend.
 ///
 /// Value 0 selects the production platform default: Metal on Darwin and
@@ -887,13 +510,28 @@ pub unsafe extern "C" fn art3m1s_runtime_create(w: u32, h: u32, backend: i32) ->
     }
 }
 
+pub unsafe extern "C" fn art3m1s_runtime_set_resources(
+    rt: *mut CoreRuntime,
+    resources: *mut crate::host_files::HostResources,
+) -> c_int {
+    if rt.is_null() {
+        return 0;
+    }
+    let resources = if resources.is_null() {
+        crate::host_files::default_resources().clone()
+    } else {
+        unsafe { &*resources }.clone()
+    };
+    unsafe { &mut *rt }.set_resources(resources);
+    1
+}
+
 /// Returns the active backend kind: 1=Metal, 2=Vulkan, 3=GL reference.
 #[cfg(any(
     feature = "gl-backend",
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_backend_kind(rt: *const CoreRuntime) -> i32 {
     if rt.is_null() {
         return 0;
@@ -907,7 +545,6 @@ pub unsafe extern "C" fn art3m1s_runtime_backend_kind(rt: *const CoreRuntime) ->
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_backend_stability(rt: *const CoreRuntime) -> i32 {
     if rt.is_null() {
         return 0;
@@ -921,7 +558,6 @@ pub unsafe extern "C" fn art3m1s_runtime_backend_stability(rt: *const CoreRuntim
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_backend_capabilities(rt: *const CoreRuntime) -> u64 {
     if rt.is_null() {
         return 0;
@@ -936,7 +572,6 @@ pub unsafe extern "C" fn art3m1s_runtime_backend_capabilities(rt: *const CoreRun
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_register_hlsl_shader(
     rt: *mut CoreRuntime,
     name: *const c_char,
@@ -976,7 +611,6 @@ pub unsafe extern "C" fn art3m1s_runtime_register_hlsl_shader(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_replace_hlsl_shader(
     rt: *mut CoreRuntime,
     name: *const c_char,
@@ -1015,7 +649,6 @@ pub unsafe extern "C" fn art3m1s_runtime_replace_hlsl_shader(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_reload_hlsl_shader(
     rt: *mut CoreRuntime,
     name: *const c_char,
@@ -1030,7 +663,6 @@ pub unsafe extern "C" fn art3m1s_runtime_reload_hlsl_shader(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_unregister_hlsl_shader(
     rt: *mut CoreRuntime,
     name: *const c_char,
@@ -1066,7 +698,6 @@ pub unsafe extern "C" fn art3m1s_runtime_unregister_hlsl_shader(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_set_emote_backend(
     rt: *mut CoreRuntime,
     backend: i32,
@@ -1103,7 +734,6 @@ pub unsafe extern "C" fn art3m1s_runtime_set_emote_backend(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_load_project(
     rt: *mut CoreRuntime,
     ini_content: *const c_char,
@@ -1140,7 +770,6 @@ pub unsafe extern "C" fn art3m1s_runtime_load_project(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_load_project_bytes(
     rt: *mut CoreRuntime,
     ini_content: *const u8,
@@ -1176,23 +805,29 @@ pub unsafe extern "C" fn art3m1s_runtime_load_project_bytes(
 /// 只跑解释器到发出第一个 `[caption]` 即停，不建 GL/compositor，近乎瞬时。把 caption 的
 /// UTF-8 写入 `out_buf`（≤`out_cap`），返回写入字节数；无 caption / 缓冲不足 / 出错返回 0。
 /// 宿主须在调用前把文件供给（目录/pfs）指向该游戏，否则 boot 脚本读不到直接返回 0。
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_probe_caption(
+    resources: *mut crate::host_files::HostResources,
     ini_content: *const u8,
     ini_len: usize,
     platform: *const c_char,
     out_buf: *mut u8,
     out_cap: c_int,
 ) -> c_int {
-    if ini_content.is_null() || platform.is_null() || out_buf.is_null() || out_cap <= 0 {
+    if resources.is_null()
+        || ini_content.is_null()
+        || platform.is_null()
+        || out_buf.is_null()
+        || out_cap <= 0
+    {
         return 0;
     }
+    let resources = unsafe { &*resources };
     let ini = unsafe { std::slice::from_raw_parts(ini_content, ini_len) };
     let Ok(plat) = (unsafe { std::ffi::CStr::from_ptr(platform).to_str() }) else {
         return 0;
     };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        crate::probe_caption_from_bytes(ini, plat)
+        crate::probe_caption_from_bytes_with_resources(ini, plat, Some(resources))
     }));
     let caption = match result {
         Ok(Some(c)) => c,
@@ -1217,7 +852,6 @@ pub unsafe extern "C" fn art3m1s_probe_caption(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_feed_mouse(rt: *mut CoreRuntime, x: i32, y: i32) {
     if rt.is_null() {
         return;
@@ -1231,7 +865,6 @@ pub unsafe extern "C" fn art3m1s_runtime_feed_mouse(rt: *mut CoreRuntime, x: i32
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_feed_click(rt: *mut CoreRuntime) {
     if rt.is_null() {
         return;
@@ -1245,7 +878,6 @@ pub unsafe extern "C" fn art3m1s_runtime_feed_click(rt: *mut CoreRuntime) {
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_feed_mouse_button(
     rt: *mut CoreRuntime,
     button: u32,
@@ -1265,7 +897,6 @@ pub unsafe extern "C" fn art3m1s_runtime_feed_mouse_button(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_feed_touch(
     rt: *mut CoreRuntime,
     id: u32,
@@ -1285,7 +916,6 @@ pub unsafe extern "C" fn art3m1s_runtime_feed_touch(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_feed_key(rt: *mut CoreRuntime, vk: u32, pressed: i32) {
     if rt.is_null() {
         return;
@@ -1303,7 +933,6 @@ pub unsafe extern "C" fn art3m1s_runtime_feed_key(rt: *mut CoreRuntime, vk: u32,
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_submit_dialog(
     rt: *mut CoreRuntime,
     accepted: i32,
@@ -1327,7 +956,6 @@ pub unsafe extern "C" fn art3m1s_runtime_submit_dialog(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_submit_text_translation(
     rt: *mut CoreRuntime,
     serial: u64,
@@ -1350,7 +978,6 @@ pub unsafe extern "C" fn art3m1s_runtime_submit_text_translation(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_destroy(rt: *mut CoreRuntime) {
     if !rt.is_null() {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1364,7 +991,6 @@ pub unsafe extern "C" fn art3m1s_runtime_destroy(rt: *mut CoreRuntime) {
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_stage_width(rt: *const CoreRuntime) -> u32 {
     if rt.is_null() {
         return 0;
@@ -1377,7 +1003,6 @@ pub unsafe extern "C" fn art3m1s_runtime_stage_width(rt: *const CoreRuntime) -> 
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_stage_height(rt: *const CoreRuntime) -> u32 {
     if rt.is_null() {
         return 0;
@@ -1391,7 +1016,6 @@ pub unsafe extern "C" fn art3m1s_runtime_stage_height(rt: *const CoreRuntime) ->
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_render_width(rt: *const CoreRuntime) -> u32 {
     if rt.is_null() {
         return 0;
@@ -1407,7 +1031,6 @@ pub unsafe extern "C" fn art3m1s_runtime_render_width(rt: *const CoreRuntime) ->
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_render_height(rt: *const CoreRuntime) -> u32 {
     if rt.is_null() {
         return 0;
@@ -1423,7 +1046,6 @@ pub unsafe extern "C" fn art3m1s_runtime_render_height(rt: *const CoreRuntime) -
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_output_width(rt: *const CoreRuntime) -> u32 {
     if rt.is_null() {
         return 0;
@@ -1439,7 +1061,6 @@ pub unsafe extern "C" fn art3m1s_runtime_output_width(rt: *const CoreRuntime) ->
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_output_height(rt: *const CoreRuntime) -> u32 {
     if rt.is_null() {
         return 0;
@@ -1457,7 +1078,6 @@ pub unsafe extern "C" fn art3m1s_runtime_output_height(rt: *const CoreRuntime) -
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_set_upscale_mode(
     rt: *mut CoreRuntime,
     mode: c_int,
@@ -1501,7 +1121,6 @@ pub unsafe extern "C" fn art3m1s_runtime_set_upscale_mode(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_set_render_scale(
     rt: *mut CoreRuntime,
     scale: f32,
@@ -1535,7 +1154,6 @@ pub unsafe extern "C" fn art3m1s_runtime_set_render_scale(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_configure_spatial_upscale(
     rt: *mut CoreRuntime,
     render_scale: f32,
@@ -1569,7 +1187,6 @@ pub unsafe extern "C" fn art3m1s_runtime_configure_spatial_upscale(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_set_render_quality_preset(
     rt: *mut CoreRuntime,
     preset: c_int,
@@ -1604,7 +1221,6 @@ pub unsafe extern "C" fn art3m1s_runtime_set_render_quality_preset(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_pixel_buffer_size(rt: *const CoreRuntime) -> u32 {
     if rt.is_null() {
         return 0;
@@ -1617,7 +1233,6 @@ pub unsafe extern "C" fn art3m1s_runtime_pixel_buffer_size(rt: *const CoreRuntim
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_advance_and_render(
     rt: *mut CoreRuntime,
     delta_ms: u32,
@@ -1657,7 +1272,6 @@ pub unsafe extern "C" fn art3m1s_runtime_advance_and_render(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_advance_without_render(
     rt: *mut CoreRuntime,
     delta_ms: u32,
@@ -1689,7 +1303,6 @@ pub unsafe extern "C" fn art3m1s_runtime_advance_without_render(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_set_external_surface(
     rt: *mut CoreRuntime,
     kind: i32,
@@ -1726,7 +1339,6 @@ pub unsafe extern "C" fn art3m1s_runtime_set_external_surface(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_clear_external_surface(rt: *mut CoreRuntime) {
     if rt.is_null() {
         return;
@@ -1743,7 +1355,6 @@ pub unsafe extern "C" fn art3m1s_runtime_clear_external_surface(rt: *mut CoreRun
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_advance_and_present(
     rt: *mut CoreRuntime,
     delta_ms: u32,
@@ -1778,7 +1389,6 @@ pub unsafe extern "C" fn art3m1s_runtime_advance_and_present(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_set_profiler_enabled(
     rt: *const CoreRuntime,
     enabled: c_int,
@@ -1796,7 +1406,6 @@ pub unsafe extern "C" fn art3m1s_runtime_set_profiler_enabled(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_profiler_snapshot(
     rt: *const CoreRuntime,
     out: *mut u8,
@@ -1824,7 +1433,6 @@ pub unsafe extern "C" fn art3m1s_runtime_profiler_snapshot(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_set_volume(
     rt: *mut CoreRuntime,
     volume_type: *const c_char,
@@ -1840,12 +1448,35 @@ pub unsafe extern "C" fn art3m1s_runtime_set_volume(
     rt.set_volume(ty, value);
 }
 
+/// Selects the callback-free runtime video session for subsequent video tags.
+///
+/// When enabled, `video` events are decoded by the runtime and uploaded to
+/// renderer-owned textures. Audio transport and final presentation remain
+/// host-owned. The switch is explicit so hosts can migrate one media path at a
+/// time without mixing decoder ownership.
+#[cfg(all(
+    feature = "ffmpeg",
+    any(
+        feature = "gl-backend",
+        feature = "metal-backend",
+        feature = "vulkan-backend"
+    )
+))]
+pub unsafe extern "C" fn art3m1s_runtime_set_runtime_media_enabled_v1(
+    rt: *mut CoreRuntime,
+    enabled: c_int,
+) {
+    if rt.is_null() {
+        return;
+    }
+    unsafe { &mut *rt }.set_runtime_media_enabled(enabled != 0);
+}
+
 #[cfg(any(
     feature = "gl-backend",
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_notify_video_finished(
     rt: *mut CoreRuntime,
     id: *const c_char,
@@ -1869,7 +1500,6 @@ pub unsafe extern "C" fn art3m1s_runtime_notify_video_finished(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 /// Deprecated GL-only compatibility shim. Prefer `art3m1s_runtime_import_video_frame`
 /// or `art3m1s_runtime_upload_video_layer_frame`. Metal returns NULL.
 pub unsafe extern "C" fn art3m1s_runtime_video_gl_get_proc_address(
@@ -1891,7 +1521,6 @@ pub unsafe extern "C" fn art3m1s_runtime_video_gl_get_proc_address(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 /// Deprecated GL-only lease. Metal/Vulkan return 0 so hosts fall back to import/RGBA.
 pub unsafe extern "C" fn art3m1s_runtime_video_gl_begin(rt: *mut CoreRuntime) -> c_int {
     if rt.is_null() {
@@ -1916,7 +1545,6 @@ pub unsafe extern "C" fn art3m1s_runtime_video_gl_begin(rt: *mut CoreRuntime) ->
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 /// Deprecated: returns a GLuint FBO name on the GL backend, otherwise 0.
 pub unsafe extern "C" fn art3m1s_runtime_video_gl_framebuffer(
     rt: *mut CoreRuntime,
@@ -1945,7 +1573,6 @@ pub unsafe extern "C" fn art3m1s_runtime_video_gl_framebuffer(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_video_gl_commit(
     rt: *mut CoreRuntime,
     id: *const c_char,
@@ -1968,7 +1595,6 @@ pub unsafe extern "C" fn art3m1s_runtime_video_gl_commit(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_video_gl_end(rt: *mut CoreRuntime) {
     if rt.is_null() {
         return;
@@ -1992,7 +1618,6 @@ pub unsafe extern "C" fn art3m1s_runtime_video_gl_end(rt: *mut CoreRuntime) {
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_upload_video_layer_frame(
     rt: *mut CoreRuntime,
     id: *const c_char,
@@ -2045,7 +1670,6 @@ pub unsafe extern "C" fn art3m1s_runtime_upload_video_layer_frame(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_video_import_kind(rt: *const CoreRuntime) -> i32 {
     if rt.is_null() {
         return 0;
@@ -2066,7 +1690,6 @@ pub unsafe extern "C" fn art3m1s_runtime_video_import_kind(rt: *const CoreRuntim
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_import_video_frame(
     rt: *mut CoreRuntime,
     id: *const c_char,
@@ -2142,7 +1765,6 @@ pub unsafe extern "C" fn art3m1s_runtime_import_video_frame(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_release_video_frame(
     rt: *mut CoreRuntime,
     texture_handle: u64,
@@ -2165,7 +1787,6 @@ pub unsafe extern "C" fn art3m1s_runtime_release_video_frame(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_video_frame_consumed(
     rt: *mut CoreRuntime,
     surface_handle: u64,
@@ -2190,7 +1811,6 @@ pub unsafe extern "C" fn art3m1s_runtime_video_frame_consumed(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_acquire_video_surface(
     rt: *mut CoreRuntime,
     id: *const c_char,
@@ -2231,7 +1851,6 @@ pub unsafe extern "C" fn art3m1s_runtime_acquire_video_surface(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_commit_video_surface(
     rt: *mut CoreRuntime,
     surface_handle: u64,
@@ -2256,7 +1875,6 @@ pub unsafe extern "C" fn art3m1s_runtime_commit_video_surface(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_capture_screenshot(
     rt: *mut CoreRuntime,
     out_pixels: *mut u8,
@@ -2282,7 +1900,6 @@ pub unsafe extern "C" fn art3m1s_runtime_capture_screenshot(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_notify_sound_finished(
     rt: *mut CoreRuntime,
     id: *const c_char,
@@ -2304,7 +1921,6 @@ pub unsafe extern "C" fn art3m1s_runtime_notify_sound_finished(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_is_exit_requested(rt: *const CoreRuntime) -> i32 {
     if rt.is_null() {
         return 0;
@@ -2320,7 +1936,6 @@ pub unsafe extern "C" fn art3m1s_runtime_is_exit_requested(rt: *const CoreRuntim
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_notify_lifecycle(rt: *mut CoreRuntime, state: c_int) {
     if rt.is_null() {
         return;
@@ -2344,7 +1959,6 @@ pub unsafe extern "C" fn art3m1s_runtime_notify_lifecycle(rt: *mut CoreRuntime, 
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_notify_window_button(rt: *mut CoreRuntime, button: c_int) {
     if rt.is_null() {
         return;
@@ -2360,7 +1974,6 @@ pub unsafe extern "C" fn art3m1s_runtime_notify_window_button(rt: *mut CoreRunti
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_notify_direction_changed(
     rt: *mut CoreRuntime,
     direction: c_int,
@@ -2379,7 +1992,6 @@ pub unsafe extern "C" fn art3m1s_runtime_notify_direction_changed(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_submit_http_result(
     rt: *mut CoreRuntime,
     status_code: c_int,
@@ -2418,7 +2030,6 @@ pub unsafe extern "C" fn art3m1s_runtime_submit_http_result(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_set_string_variable(
     rt: *mut CoreRuntime,
     name: *const c_char,
@@ -2446,7 +2057,6 @@ pub unsafe extern "C" fn art3m1s_runtime_set_string_variable(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_runtime_set_reported_os(rt: *mut CoreRuntime, os: *const c_char) {
     if rt.is_null() {
         return;
@@ -2466,8 +2076,8 @@ pub unsafe extern "C" fn art3m1s_runtime_set_reported_os(rt: *mut CoreRuntime, o
 #[cfg(test)]
 mod tests {
     use super::{
-        font_override, log_suppressed_by_filter, path_candidates, save_dir,
-        script_debug_print_allowed, set_font_override, set_log_filter, set_script_debug_config,
+        font_override, log_suppressed_by_filter, script_debug_print_allowed, set_font_override,
+        set_log_filter, set_script_debug_config,
     };
 
     /// 日志过滤钩子是进程级状态，单测里串行验证后卸载，避免影响其它测试。
@@ -2522,17 +2132,6 @@ mod tests {
     }
 
     #[test]
-    fn path_candidates_preserve_native_and_alternate_separators() {
-        let unix = path_candidates("_data/image/menu/tag/btn_back_0.png");
-        assert_eq!(unix[0], "_data/image/menu/tag/btn_back_0.png");
-        assert_eq!(unix[1], r"_data\image\menu\tag\btn_back_0.png");
-
-        let windows = path_candidates(r"_data\image\menu\tag\btn_back_0.png");
-        assert_eq!(windows[0], r"_data\image\menu\tag\btn_back_0.png");
-        assert_eq!(windows[1], "_data/image/menu/tag/btn_back_0.png");
-    }
-
-    #[test]
     fn font_override_rejects_invalid_bytes_without_storing() {
         // 非法字体必须被拒绝且不进全局状态（校验先于存储，世代号不变）。
         let before = font_override().map(|(generation, _)| generation);
@@ -2540,17 +2139,5 @@ mod tests {
         assert!(set_font_override(Vec::new()).is_err());
         let after = font_override().map(|(generation, _)| generation);
         assert_eq!(before, after);
-    }
-
-    #[test]
-    fn save_dir_can_switch_between_game_runtimes() {
-        let first = std::ffi::CString::new("/tmp/game-one").unwrap();
-        let second = std::ffi::CString::new("/tmp/game-two").unwrap();
-        unsafe { super::art3m1s_set_save_dir(first.as_ptr()) };
-        assert_eq!(save_dir().as_deref(), Some("/tmp/game-one"));
-        unsafe { super::art3m1s_set_save_dir(second.as_ptr()) };
-        assert_eq!(save_dir().as_deref(), Some("/tmp/game-two"));
-        unsafe { super::art3m1s_set_save_dir(std::ptr::null()) };
-        assert_eq!(save_dir(), None);
     }
 }

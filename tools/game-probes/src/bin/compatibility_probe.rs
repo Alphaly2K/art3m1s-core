@@ -1,80 +1,70 @@
 use art3m1s_core::{
-    archive::reader::PfsArchive,
     backend::gl::platform::{AngleBackend, GfxBackend},
-    ffi,
+    ffi, host_events,
+    host_files::HostResources,
     runtime::CoreRuntime,
 };
 use std::{
-    ffi::{CStr, CString, c_char, c_int, c_longlong},
-    fs::File,
-    io::{Read, Seek, SeekFrom},
+    ffi::CString,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::OnceLock,
     time::{Duration, Instant},
 };
 
-enum ProbeSource {
-    Archive(PfsArchive),
-    Directory(PathBuf),
-}
-
-static SOURCE: OnceLock<Mutex<ProbeSource>> = OnceLock::new();
 static OUTPUT_DIR: OnceLock<PathBuf> = OnceLock::new();
+static HOST_EVENTS: OnceLock<host_events::HostEvents> = OnceLock::new();
 
-unsafe extern "C" fn read(
-    path: *const c_char,
-    buf: *mut u8,
-    len: c_int,
-    offset: c_longlong,
-) -> c_int {
-    let path = unsafe { CStr::from_ptr(path) }.to_string_lossy();
-    let mut source = SOURCE.get().unwrap().lock().unwrap();
-    match &mut *source {
-        ProbeSource::Archive(archive) => {
-            let Some(entry) = archive.find(&path).cloned() else {
-                return -1;
-            };
-            if buf.is_null() {
-                return c_int::try_from(entry.size()).unwrap_or(c_int::MAX);
-            }
-            let buf = unsafe { std::slice::from_raw_parts_mut(buf, len as usize) };
-            archive
-                .read_entry(&entry, offset as u64, buf)
-                .map(|n| n as c_int)
-                .unwrap_or(-1)
+fn drain_host_events() {
+    let events = HOST_EVENTS.get().expect("host events initialized");
+    loop {
+        let next = unsafe {
+            host_events::art3m1s_host_events_next_v1(
+                events as *const host_events::HostEvents as *mut host_events::HostEvents,
+            )
+        };
+        if next == 0 {
+            break;
         }
-        ProbeSource::Directory(root) => {
-            let relative = path.replace('\\', "/");
-            let Ok(mut file) = File::open(root.join(relative.trim_start_matches('/'))) else {
-                return -1;
-            };
-            if buf.is_null() {
-                return file
-                    .metadata()
-                    .ok()
-                    .and_then(|metadata| c_int::try_from(metadata.len()).ok())
-                    .unwrap_or(-1);
+        let mut bytes = vec![0u8; next];
+        let mut count = 0u32;
+        let written = unsafe {
+            host_events::art3m1s_poll_events_v1(
+                events as *const host_events::HostEvents as *mut host_events::HostEvents,
+                bytes.as_mut_ptr(),
+                bytes.len(),
+                &mut count,
+            )
+        };
+        if written == 0 || count == 0 {
+            break;
+        }
+        let mut offset = 0usize;
+        for _ in 0..count {
+            if offset + 24 > written {
+                break;
             }
-            if file.seek(SeekFrom::Start(offset.max(0) as u64)).is_err() {
-                return -1;
+            let kind = u32::from_ne_bytes(bytes[offset + 4..offset + 8].try_into().unwrap());
+            let len =
+                u32::from_ne_bytes(bytes[offset + 16..offset + 20].try_into().unwrap()) as usize;
+            let aux = u32::from_ne_bytes(bytes[offset + 20..offset + 24].try_into().unwrap());
+            offset += 24;
+            if offset + len > written {
+                break;
             }
-            let buf = unsafe { std::slice::from_raw_parts_mut(buf, len.max(0) as usize) };
-            file.read(buf).map(|n| n as c_int).unwrap_or(-1)
+            if kind == host_events::EVENT_KIND_LOG {
+                let level = char::from_u32(aux).unwrap_or('I');
+                let message = String::from_utf8_lossy(&bytes[offset..offset + len]);
+                eprintln!("[{level}] {message}");
+            }
+            offset += len;
         }
     }
-}
-
-unsafe extern "C" fn log(level: *const c_char, msg: *const c_char) {
-    eprintln!(
-        "[{}] {}",
-        unsafe { CStr::from_ptr(level) }.to_string_lossy(),
-        unsafe { CStr::from_ptr(msg) }.to_string_lossy()
-    );
 }
 
 fn tick(rt: &mut CoreRuntime, count: usize, pixels: &mut Vec<u8>) {
     for _ in 0..count {
         rt.advance_and_render_into(17, pixels);
+        drain_host_events();
     }
 }
 
@@ -125,20 +115,19 @@ fn main() {
     let save_dir = output_dir.join("saves");
     std::fs::create_dir_all(&save_dir).expect("create isolated save directory");
     let input = Path::new(&path);
-    let source = if input.is_dir() {
-        ProbeSource::Directory(input.to_path_buf())
+    let resources = HostResources::new();
+    if input.is_dir() {
+        resources.mount_directory(input).unwrap();
     } else {
-        ProbeSource::Archive(PfsArchive::open(input).unwrap())
-    };
-    SOURCE.set(Mutex::new(source)).ok().unwrap();
-    unsafe {
-        ffi::art3m1s_register_file_reader(read);
-        ffi::art3m1s_register_log_callback(log);
-        ffi::art3m1s_set_debug(1);
-        let save_dir = CString::new(save_dir.to_string_lossy().as_bytes()).unwrap();
-        ffi::art3m1s_set_save_dir(save_dir.as_ptr());
+        resources.mount_pfs(input, "utf-8").unwrap();
     }
-    let ini = ffi::request_file("system.ini").unwrap();
+    resources.set_save_dir(Some(&save_dir)).unwrap();
+    let events = HOST_EVENTS.get_or_init(host_events::HostEvents::new);
+    events.set_enabled(true);
+    unsafe {
+        ffi::art3m1s_set_debug(1);
+    }
+    let ini = resources.read_file("system.ini").unwrap();
     let backend = match std::env::var("ART3M1S_PROBE_BACKEND").as_deref() {
         Ok("angle-metal") => GfxBackend::Angle(AngleBackend::Metal),
         Ok("angle-vulkan") => GfxBackend::Angle(AngleBackend::Vulkan),
@@ -147,6 +136,7 @@ fn main() {
         _ => GfxBackend::Cgl,
     };
     let mut rt = CoreRuntime::create(1280, 720, backend).unwrap();
+    rt.set_resources(resources.clone());
     if let Ok(os) = std::env::var("ART3M1S_PROBE_OS") {
         let os = CString::new(os).unwrap();
         unsafe { ffi::art3m1s_runtime_set_reported_os(&mut rt, os.as_ptr()) };
