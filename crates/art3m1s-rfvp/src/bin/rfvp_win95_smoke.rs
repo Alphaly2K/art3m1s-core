@@ -15,12 +15,9 @@ use rfvp::subsystem::resources::thread_manager::ThreadManager;
 
 fn main() -> Result<()> {
     let mut args = std::env::args_os().skip(1);
-    let game_root = args
-        .next()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../rfvp/win95_painter_demo")
-        });
+    let game_root = args.next().map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../rfvp/win95_painter_demo")
+    });
     let game_root = game_root
         .to_str()
         .context("game root is not valid UTF-8")?
@@ -176,20 +173,8 @@ fn frame_signature(external: &rfvp::rendering::external::ExternalFrame) -> u64 {
             RenderCommand::DrawGlyph(command) => {
                 1u8.hash(&mut hasher);
                 command.texture.0.hash(&mut hasher);
-                [
-                    command.src.x,
-                    command.src.y,
-                    command.src.w,
-                    command.src.h,
-                ]
-                .hash(&mut hasher);
-                [
-                    command.dst.x,
-                    command.dst.y,
-                    command.dst.w,
-                    command.dst.h,
-                ]
-                .hash(&mut hasher);
+                [command.src.x, command.src.y, command.src.w, command.src.h].hash(&mut hasher);
+                [command.dst.x, command.dst.y, command.dst.w, command.dst.h].hash(&mut hasher);
                 [
                     command.color.r,
                     command.color.g,
