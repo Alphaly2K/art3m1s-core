@@ -1,4 +1,5 @@
 use super::CoreRuntime;
+use super::callbacks::{OVERRIDE_IS_DECIDE, OVERRIDE_IS_DOWN_EDGE};
 use super::input::enqueue_handler_tags;
 use asb_interpreter::Value;
 use std::collections::{HashMap, HashSet};
@@ -88,11 +89,11 @@ pub(super) struct RuntimeControlState {
 }
 
 /// keyconfig 的默认按键分配（docs/spec/key_assign.md，Windows 缺省）：
-/// Enter/滚轮下=前进、Space=隐藏、↑/滚轮上=日志、A=自动、
+/// 鼠标左键/Enter/滚轮下=前进、Space=隐藏、↑/滚轮上=日志、A=自动、
 /// Shift=跳过切换、Ctrl=临时跳过。
 fn default_keymap() -> HashMap<i32, Vec<u32>> {
     HashMap::from([
-        (ROLE_ADVANCE, vec![13, 137]),
+        (ROLE_ADVANCE, vec![1, 13, 137]),
         (ROLE_HIDE_IN, vec![32]),
         (ROLE_HIDE_OUT, vec![32]),
         (ROLE_BACKLOG_IN, vec![38, 136]),
@@ -848,10 +849,15 @@ impl CoreRuntime {
     }
 
     /// 键盘按下边沿的 role 派发。返回该键是否触发"前进"（role 0）。
-    pub(super) fn handle_role_key_edge(&mut self, key: u32) -> bool {
+    /// role 0 只认 DECIDE；其余离散 role 认 DOWN_EDGE 或 DECIDE。
+    /// role 14 的按住跳过不走这里，见 `update_control_skip_from_keys`。
+    pub(super) fn handle_role_key_edge(&mut self, key: u32, bits: u32) -> bool {
         let roles = self.control.roles_for_key(key);
         let mut advance = false;
         for role in roles {
+            if !role_triggered_by_bits(role, bits) {
+                continue;
+            }
             match role {
                 ROLE_ADVANCE => advance = true,
                 // 同一键同时配了开始/结束（如缺省 Space/Shift）即为切换语义，
@@ -913,6 +919,14 @@ impl CoreRuntime {
     }
 }
 
+fn role_triggered_by_bits(role: i32, bits: u32) -> bool {
+    match role {
+        ROLE_ADVANCE => bits & OVERRIDE_IS_DECIDE != 0,
+        ROLE_CONTROL_SKIP => false,
+        _ => bits & (OVERRIDE_IS_DOWN_EDGE | OVERRIDE_IS_DECIDE) != 0,
+    }
+}
+
 /// 解析 [keyconfig] 的原始参数：role=角色编号、keys=键 ID 数组（逗号/空格分隔）。
 fn parse_keyconfig(params: &HashMap<String, String>) -> Option<(i32, Vec<u32>)> {
     let role = params.get("role")?.trim().parse::<i32>().ok()?;
@@ -950,10 +964,11 @@ fn control_skip_transition_event(was_active: bool, is_active: bool) -> Option<&'
 
 #[cfg(test)]
 mod tests {
+    use super::super::callbacks::{OVERRIDE_IS_DECIDE, OVERRIDE_IS_DOWN, OVERRIDE_IS_DOWN_EDGE};
     use super::{
         ROLE_ADVANCE, ROLE_AVOID_IN, ROLE_AVOID_OUT, ROLE_BACKLOG_IN, ROLE_CONTROL_SKIP,
         ROLE_HIDE_IN, ROLE_SKIP_IN, RuntimeControlState, control_skip_transition_event,
-        exec_input_route, parse_keyconfig,
+        exec_input_route, parse_keyconfig, role_triggered_by_bits,
     };
     use std::collections::HashMap;
 
@@ -1083,9 +1098,10 @@ mod tests {
 
     #[test]
     fn default_keymap_matches_key_assign_spec() {
-        // docs/spec/key_assign.md：Enter/滚轮下前进、↑/滚轮上进日志、
+        // docs/spec/key_assign.md：鼠标左键/Enter/滚轮下前进、↑/滚轮上进日志、
         // Space 隐藏、Shift 跳过、Ctrl 临时跳过。
         let control = RuntimeControlState::default();
+        assert_eq!(control.roles_for_key(1), vec![ROLE_ADVANCE]);
         assert_eq!(control.roles_for_key(13), vec![ROLE_ADVANCE]);
         assert_eq!(control.roles_for_key(137), vec![ROLE_ADVANCE]);
         assert_eq!(control.roles_for_key(136), vec![ROLE_BACKLOG_IN]);
@@ -1137,6 +1153,22 @@ mod tests {
         let mut fresh = RuntimeControlState::default();
         fresh.read_lines_import(export);
         assert!(fresh.is_read("scene01.asb", 100) && fresh.is_read("scene01.asb", 101));
+    }
+
+    #[test]
+    fn dummy_decide_bits_trigger_advance_without_down_edge() {
+        let mut control = RuntimeControlState::default();
+        control.keymap.insert(ROLE_ADVANCE, vec![124]);
+        assert_eq!(control.roles_for_key(124), vec![ROLE_ADVANCE]);
+        assert!(role_triggered_by_bits(ROLE_ADVANCE, OVERRIDE_IS_DECIDE));
+        assert!(!role_triggered_by_bits(ROLE_ADVANCE, OVERRIDE_IS_DOWN_EDGE));
+        assert!(!role_triggered_by_bits(ROLE_ADVANCE, OVERRIDE_IS_DOWN));
+        assert!(role_triggered_by_bits(ROLE_HIDE_IN, OVERRIDE_IS_DOWN_EDGE));
+        assert!(role_triggered_by_bits(ROLE_HIDE_IN, OVERRIDE_IS_DECIDE));
+        assert!(!role_triggered_by_bits(
+            ROLE_CONTROL_SKIP,
+            OVERRIDE_IS_DOWN_EDGE | OVERRIDE_IS_DECIDE
+        ));
     }
 
     #[test]

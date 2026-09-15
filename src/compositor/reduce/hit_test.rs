@@ -13,7 +13,7 @@ impl Compositor {
     ///
     /// 「可交互」需同时满足：visible != false、注册了至少一个事件处理器、且未被
     /// `clickablethreshold` 判为透明。`clickablethreshold` 是 Artemis 的指针命中
-    /// 阈值：纹理像素 alpha 低于该阈值时对指针透明（不吃事件）。图层自身 alpha
+    /// 阈值：纹理像素 alpha 低于或等于该阈值时对指针透明（不吃事件）。图层自身 alpha
     /// 只影响渲染，不应让脚本用 alpha=0 做出的不可见热区失效。
     ///
     /// 命中用图层 left/top/width/height 做 AABB 判定。没有可推断宽高的纯分组节点跳过。
@@ -119,8 +119,8 @@ impl Compositor {
     /// 按 `clickablethreshold` 判断图层在指定坐标处是否对指针透明。
     ///
     /// Artemis 的 `clickablethreshold` 是指针命中的 alpha 阈值：**坐标处的纹理像素
-    /// alpha** 低于阈值时，指针穿透该图层。例如，圆形按钮四角的透明像素 alpha=0，
-    /// 低于阈值 128，点击穿透；中心像素 alpha=255，高于阈值，点击被该图层接收。
+    /// alpha** 低于或等于阈值时，指针穿透该图层。例如，圆形按钮四角的透明像素
+    /// alpha=0，低于阈值 128，点击穿透；中心像素 alpha=255，高于阈值，点击被该图层接收。
     /// 图层 alpha 不参与像素阈值判断，否则 alpha=0 的不可见输入热区无法接收 hover。
     ///
     /// 未设 `clickablethreshold` 的图层一律可点（默认行为）。
@@ -167,7 +167,7 @@ impl Compositor {
             None => props.alpha.unwrap_or(255) as i32, // 无法采样时退回图层 alpha
         };
 
-        hit_alpha < threshold
+        hit_alpha <= threshold
     }
 }
 

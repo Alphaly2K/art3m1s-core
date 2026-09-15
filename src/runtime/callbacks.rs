@@ -4,7 +4,7 @@
 //! FFI services for input, file access, magic paths, and volume changes.
 
 use asb_interpreter::lua_engine::{EmoteLayerCommand, EngineCallbacks};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
@@ -37,11 +37,25 @@ pub(super) const OVERRIDE_IS_DECIDE: u32 = 32;
 /// isPush 的按键重复阈值：按下 0.5s 后转为持续 true（docs/lua/engine/isPush.txt）。
 const PUSH_REPEAT_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// isDecide 的键盘确认键（docs/spec/key_id.md）：回车 13、空格 32。
-/// 用于阅读剧情的确认键在 Windows 上是鼠标左键（键 1），键盘上的 Enter/Space
-/// 同样触发确认（isDecide.txt：确认键随平台而异）。
-pub(super) const DECIDE_ENTER_KEY: u32 = 13;
-pub(super) const DECIDE_SPACE_KEY: u32 = 32;
+/// 本帧冻结后的有效输入。overrideKey 在 onEnterFrame 里改写 raw bits，
+/// 指针 / setonpush / keyconfig 只读这份视图，不再各自解释 clicked、
+/// keys_down_edge 或 scripted_down_edge。
+#[derive(Clone, Debug, Default)]
+pub(super) struct EffectiveInputFrame {
+    pub keys: BTreeMap<u32, u32>,
+    pub mouse_x: i32,
+    pub mouse_y: i32,
+}
+
+impl EffectiveInputFrame {
+    pub(super) fn bits(&self, key: u32) -> u32 {
+        self.keys.get(&key).copied().unwrap_or(0)
+    }
+
+    pub(super) fn has(&self, key: u32, bit: u32) -> bool {
+        self.bits(key) & bit != 0
+    }
+}
 
 /// 触摸阶段（art3m1s_runtime_feed_touch 的 phase 参数）。
 pub(super) const TOUCH_PHASE_DOWN: u8 = 0;
@@ -241,36 +255,39 @@ impl InputSnapshot {
             .or(self.override_all_keys)
     }
 
-    fn key_down(&self, vk: u32) -> bool {
-        match self.override_mask(vk) {
-            Some(mask) => mask & OVERRIDE_IS_DOWN != 0,
-            None => self.keys_down.contains(&vk),
+    fn candidate_keys(&self) -> BTreeSet<u32> {
+        let mut keys = BTreeSet::new();
+        keys.extend(self.keys_down.iter().copied());
+        keys.extend(self.keys_down_edge.iter().copied());
+        keys.extend(self.keys_up_edge.iter().copied());
+        keys.extend(self.mouse_buttons_down.iter().copied());
+        keys.extend(self.mouse_buttons_down_edge.iter().copied());
+        keys.extend(self.mouse_buttons_up_edge.iter().copied());
+        keys.extend(self.key_overrides.keys().copied());
+        if self.clicked {
+            keys.insert(1);
         }
+        keys
     }
 
-    fn key_down_edge(&self, vk: u32) -> bool {
-        match self.override_mask(vk) {
-            Some(mask) => mask & OVERRIDE_IS_DOWN_EDGE != 0,
-            None => self.keys_down_edge.contains(&vk),
-        }
+    fn raw_down(&self, vk: u32) -> bool {
+        self.keys_down.contains(&vk) || (vk == 1 && self.mouse_buttons_down.contains(&1))
     }
 
-    fn key_up_edge(&self, vk: u32) -> bool {
-        match self.override_mask(vk) {
-            Some(mask) => mask & OVERRIDE_IS_UP_EDGE != 0,
-            None => self.keys_up_edge.contains(&vk),
-        }
+    fn raw_down_edge(&self, vk: u32) -> bool {
+        self.keys_down_edge.contains(&vk)
+            || (vk == 1 && (self.clicked || self.mouse_buttons_down_edge.contains(&1)))
     }
 
-    /// isPush：按下瞬间 true → 0.5s 内 false → 0.5s 后持续 true。
-    fn push(&self, vk: u32, now: std::time::Instant) -> bool {
-        if let Some(mask) = self.override_mask(vk) {
-            return mask & OVERRIDE_IS_PUSH != 0;
-        }
-        if self.keys_down_edge.contains(&vk) {
+    fn raw_up_edge(&self, vk: u32) -> bool {
+        self.keys_up_edge.contains(&vk) || (vk == 1 && self.mouse_buttons_up_edge.contains(&1))
+    }
+
+    fn raw_push(&self, vk: u32, now: std::time::Instant) -> bool {
+        if self.raw_down_edge(vk) {
             return true;
         }
-        if !self.keys_down.contains(&vk) {
+        if !self.raw_down(vk) {
             return false;
         }
         self.keys_pressed_at
@@ -278,33 +295,85 @@ impl InputSnapshot {
             .is_some_and(|pressed_at| now.duration_since(*pressed_at) >= PUSH_REPEAT_DELAY)
     }
 
-    /// isDecide：键 1（鼠标左键 / 阅读剧情确认键）取宿主 click 事件，
-    /// 键盘 Enter(13)/Space(32) 的按下边沿同样算确认（isDecide.txt：确认键随
-    /// 平台而异，键盘上以回车/空格确认）；其余键取自身按下边沿。
-    /// 覆盖存在时只看 isDecide 位——`overrideKey{key=1,status=0}` 应使点击无效。
-    fn decide(&self, vk: u32) -> bool {
-        if let Some(mask) = self.override_mask(vk) {
-            return mask & OVERRIDE_IS_DECIDE != 0;
+    fn raw_bits(&self, vk: u32, now: std::time::Instant) -> u32 {
+        let mut bits = 0;
+        if self.raw_down(vk) {
+            bits |= OVERRIDE_IS_DOWN;
         }
-        if vk == 1 {
-            // 确认键：鼠标点击 或 键盘回车/空格边沿。
-            self.clicked
-                || self.keys_down_edge.contains(&DECIDE_ENTER_KEY)
-                || self.keys_down_edge.contains(&DECIDE_SPACE_KEY)
-        } else {
-            self.keys_down_edge.contains(&vk)
+        if self.raw_down_edge(vk) {
+            bits |= OVERRIDE_IS_DOWN_EDGE | OVERRIDE_IS_DECIDE;
+        }
+        if self.raw_up_edge(vk) {
+            bits |= OVERRIDE_IS_UP_EDGE;
+        }
+        if self.raw_push(vk, now) {
+            bits |= OVERRIDE_IS_PUSH;
+        }
+        bits
+    }
+
+    fn key_down(&self, vk: u32) -> bool {
+        match self.override_mask(vk) {
+            Some(mask) => mask & OVERRIDE_IS_DOWN != 0,
+            None => self.raw_down(vk),
         }
     }
 
-    /// 是否存在脚本注入的「决定/按下边沿」覆盖（[stop] 唤醒的判定来源）。
-    pub(super) fn scripted_down_edge(&self) -> bool {
-        let edge_bits = OVERRIDE_IS_DOWN_EDGE | OVERRIDE_IS_DECIDE;
-        self.key_overrides
-            .values()
-            .any(|mask| mask & edge_bits != 0)
-            || self
-                .override_all_keys
-                .is_some_and(|mask| mask & edge_bits != 0)
+    fn key_down_edge(&self, vk: u32) -> bool {
+        match self.override_mask(vk) {
+            Some(mask) => mask & OVERRIDE_IS_DOWN_EDGE != 0,
+            None => self.raw_down_edge(vk),
+        }
+    }
+
+    fn key_up_edge(&self, vk: u32) -> bool {
+        match self.override_mask(vk) {
+            Some(mask) => mask & OVERRIDE_IS_UP_EDGE != 0,
+            None => self.raw_up_edge(vk),
+        }
+    }
+
+    /// isPush：按下瞬间 true → 0.5s 内 false → 0.5s 后持续 true。
+    fn push(&self, vk: u32, now: std::time::Instant) -> bool {
+        match self.override_mask(vk) {
+            Some(mask) => mask & OVERRIDE_IS_PUSH != 0,
+            None => self.raw_push(vk, now),
+        }
+    }
+
+    /// isDecide：只看该键自身的 DECIDE 位。键 1 的 raw DECIDE 来自鼠标左键
+    /// 按下边沿 / `feed_click`；Enter/Space 不再合并进键 1。
+    /// 覆盖存在时整组 bits 被替换——`overrideKey{key=1,status=0}` 使点击无效。
+    fn decide(&self, vk: u32) -> bool {
+        match self.override_mask(vk) {
+            Some(mask) => mask & OVERRIDE_IS_DECIDE != 0,
+            None => self.raw_down_edge(vk),
+        }
+    }
+
+    /// 冻结 onEnterFrame / overrideKey 之后的本帧有效输入。
+    /// Lua 查询仍走 query-time（上面的 key_down/decide/push），以便回调内先读
+    /// raw 再 overrideKey；指针和 keyconfig 只消费这份冻结视图。
+    pub(super) fn effective_frame(&self, now: std::time::Instant) -> EffectiveInputFrame {
+        let mut keys = BTreeMap::new();
+        for vk in self.candidate_keys() {
+            let bits = match self.override_mask(vk) {
+                Some(mask) => mask,
+                None => self.raw_bits(vk, now),
+            };
+            if bits != 0 {
+                keys.insert(vk, bits);
+            }
+        }
+        EffectiveInputFrame {
+            keys,
+            mouse_x: self.mouse_x,
+            mouse_y: self.mouse_y,
+        }
+    }
+
+    pub(super) fn has_raw_decide_or_down_edge(&self, vk: u32) -> bool {
+        self.raw_down_edge(vk)
     }
 }
 
@@ -684,9 +753,9 @@ pub(super) fn surface_cache_unbind(cache: &mut SurfaceCache, path: &str) -> Opti
 #[cfg(test)]
 mod tests {
     use super::{
-        DECIDE_ENTER_KEY, DECIDE_SPACE_KEY, InputSnapshot, OVERRIDE_IS_DECIDE, OVERRIDE_IS_DOWN,
-        OVERRIDE_IS_DOWN_EDGE, OVERRIDE_IS_PUSH, OVERRIDE_IS_UP_EDGE, TOUCH_PHASE_DOWN,
-        TOUCH_PHASE_MOVE, TOUCH_PHASE_UP, surface_cache_bind, surface_cache_unbind,
+        InputSnapshot, OVERRIDE_IS_DECIDE, OVERRIDE_IS_DOWN, OVERRIDE_IS_DOWN_EDGE,
+        OVERRIDE_IS_PUSH, OVERRIDE_IS_UP_EDGE, TOUCH_PHASE_DOWN, TOUCH_PHASE_MOVE, TOUCH_PHASE_UP,
+        surface_cache_bind, surface_cache_unbind,
     };
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
@@ -772,19 +841,23 @@ mod tests {
     }
 
     #[test]
-    fn key_override_status_32_creates_a_scripted_edge() {
+    fn key_override_status_32_freezes_dummy_decide_without_down_edge() {
         let mut input = InputSnapshot::default();
         input.key_overrides.insert(124, OVERRIDE_IS_DECIDE);
-        assert!(input.scripted_down_edge());
+        let frame = input.effective_frame(Instant::now());
+        assert_eq!(frame.bits(124), OVERRIDE_IS_DECIDE);
+        assert!(!frame.has(124, OVERRIDE_IS_DOWN_EDGE));
+        assert!(!frame.has(124, OVERRIDE_IS_PUSH));
+        assert!(!input.has_raw_decide_or_down_edge(124));
+        assert!(input.decide(124));
 
-        let mut input = InputSnapshot::default();
-        input.override_all_keys = Some(OVERRIDE_IS_DECIDE);
-        assert!(input.scripted_down_edge());
-
-        // 仅 isDown 位不构成脚本决定边沿。
+        // 仅 isDown 位不是 DECIDE，也不会被当成物理边沿。
         let mut input = InputSnapshot::default();
         input.key_overrides.insert(124, OVERRIDE_IS_DOWN);
-        assert!(!input.scripted_down_edge());
+        let frame = input.effective_frame(Instant::now());
+        assert!(frame.has(124, OVERRIDE_IS_DOWN));
+        assert!(!frame.has(124, OVERRIDE_IS_DECIDE));
+        assert!(!input.has_raw_decide_or_down_edge(124));
     }
 
     #[test]
@@ -825,30 +898,92 @@ mod tests {
     }
 
     #[test]
-    fn decide_key1_also_triggers_on_keyboard_enter_or_space() {
-        // 确认键（键 1）：无鼠标点击、无键盘边沿 → false。
+    fn decide_key1_only_uses_its_own_bits() {
         let mut input = InputSnapshot::default();
         assert!(!input.decide(1));
 
-        // 键盘回车(13)按下边沿 → 确认。
-        input.keys_down_edge.insert(DECIDE_ENTER_KEY);
-        assert!(input.decide(1));
+        // Enter 只构成键 13 的 DECIDE，不再合并进键 1。
+        input.keys_down_edge.insert(13);
+        assert!(!input.decide(1));
+        assert!(input.decide(13));
 
-        // 键盘空格(32)按下边沿 → 确认。
+        // Space 只构成键 32 的 DECIDE，默认隐藏而不是前进。
         let mut input = InputSnapshot::default();
-        input.keys_down_edge.insert(DECIDE_SPACE_KEY);
-        assert!(input.decide(1));
+        input.keys_down_edge.insert(32);
+        assert!(!input.decide(1));
+        assert!(input.decide(32));
 
-        // 鼠标点击 → 确认。
+        // 鼠标点击 / feed_click 仍是键 1 的 DECIDE。
         let mut input = InputSnapshot::default();
         input.clicked = true;
         assert!(input.decide(1));
 
-        // overrideKey{key=1,status=0} 覆盖仍使确认无效（回车边沿也被压掉）。
+        // overrideKey{key=1,status=0} 只屏蔽键 1，不影响 Enter。
         let mut input = InputSnapshot::default();
-        input.keys_down_edge.insert(DECIDE_ENTER_KEY);
+        input.clicked = true;
+        input.keys_down_edge.insert(13);
         input.key_overrides.insert(1, 0);
         assert!(!input.decide(1));
+        assert!(input.decide(13));
+    }
+
+    #[test]
+    fn physical_key1_bits_distinguish_click_hold_and_feed_click() {
+        let now = Instant::now();
+
+        // feed_click / clicked：一次性 PUSH|DOWN_EDGE|DECIDE，没有 DOWN。
+        let mut input = InputSnapshot::default();
+        input.clicked = true;
+        let frame = input.effective_frame(now);
+        assert_eq!(
+            frame.bits(1),
+            OVERRIDE_IS_PUSH | OVERRIDE_IS_DOWN_EDGE | OVERRIDE_IS_DECIDE
+        );
+        assert!(!frame.has(1, OVERRIDE_IS_DOWN));
+        assert!(input.has_raw_decide_or_down_edge(1));
+
+        // 鼠标按下边沿：DOWN 与边沿位同时存在。
+        let mut input = InputSnapshot::default();
+        input.mouse_buttons_down.insert(1);
+        input.mouse_buttons_down_edge.insert(1);
+        input.keys_down.insert(1);
+        input.keys_down_edge.insert(1);
+        let frame = input.effective_frame(now);
+        assert_eq!(
+            frame.bits(1),
+            OVERRIDE_IS_DOWN | OVERRIDE_IS_DOWN_EDGE | OVERRIDE_IS_DECIDE | OVERRIDE_IS_PUSH
+        );
+
+        // 按住鼠标、边沿已清：只剩 DOWN。
+        input.mouse_buttons_down_edge.clear();
+        input.keys_down_edge.clear();
+        input.clicked = false;
+        let frame = input.effective_frame(now);
+        assert_eq!(frame.bits(1), OVERRIDE_IS_DOWN);
+        assert!(!input.has_raw_decide_or_down_edge(1));
+    }
+
+    #[test]
+    fn override_status_zero_masks_effective_frame_and_clears_after_one_tick() {
+        let mut input = InputSnapshot::default();
+        input.clicked = true;
+        input.keys_down_edge.insert(13);
+        input.key_overrides.insert(124, OVERRIDE_IS_DECIDE);
+        input.override_all_keys = Some(0);
+        let frame = input.effective_frame(Instant::now());
+        // 全键 status=0 屏蔽 raw 键；单键覆盖优先，dummy 124 仍是 DECIDE。
+        assert_eq!(frame.bits(1), 0);
+        assert_eq!(frame.bits(13), 0);
+        assert_eq!(frame.bits(124), OVERRIDE_IS_DECIDE);
+        assert!(!input.decide(1));
+        assert!(!input.decide(13));
+        assert!(input.decide(124));
+
+        // 帧末清边沿也清掉 override，下一帧 dummy decide 不能残留。
+        input.clear_edges();
+        let frame = input.effective_frame(Instant::now());
+        assert!(frame.keys.is_empty());
+        assert!(!input.decide(124));
     }
 
     #[test]

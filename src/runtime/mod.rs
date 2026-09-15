@@ -492,12 +492,20 @@ impl CoreRuntime {
             .note_frame_for_push(std::time::Instant::now());
         // getScriptStatus 的引擎状态自动迁移 + setScriptStatus(0) 的唤醒语义。
         self.sync_script_status();
-        let clicked = self.process_pointer_handlers();
+        // onEnterFrame / overrideKey 必须在指针、setonpush 和 keyconfig 之前运行，
+        // 这样本帧 effective bits 才包含 dummy decide 与 status=0 屏蔽。
+        // 原生对话框期间不跑脚本回调；HTTP 挂起和 setScriptStatus 强制停止仍要跑。
+        if self.pending_dialog.is_none() {
+            if let Err(e) = self.interpreter.fire_enter_frame() {
+                crate::core_error!("onEnterFrame 错误: {e:?}");
+            }
+        }
+        let tick = self.process_pointer_handlers();
         profile.input_ns = crate::profiler::FrameProfile::elapsed(input_started);
 
         let interpreter_started = profile.mark();
         let events_before = profile.events_ns;
-        self.advance_script(clicked, delta_ms, profile);
+        self.advance_script(tick, delta_ms, profile);
         profile.interpreter_ns = crate::profiler::FrameProfile::elapsed(interpreter_started)
             .saturating_sub(profile.events_ns - events_before);
 
@@ -672,6 +680,8 @@ impl CoreRuntime {
             self.pending_dialog.is_some(),
             self.debug_skip_active.load(Ordering::SeqCst),
             self.is_exit_requested(),
+            self.http_request_pending(),
+            self.hide_active(),
         );
         if computed != self.last_engine_status {
             self.script_status.store(computed, Ordering::SeqCst);
@@ -690,12 +700,15 @@ impl Drop for CoreRuntime {
 
 /// 把引擎运行状态映射为脚本可见的执行状态码（getScriptStatus.txt）：
 /// 0 执行中 / 1 等待点击 / 2 过渡中 / 3 停止（计时器或输入恢复）/
-/// 4 停止（仅计时器）/ 7 全屏视频播放中 / 9 对话框显示中 / 14 引擎退出。
+/// 4 停止（仅计时器）/ 5 消息窗隐藏 / 7 全屏视频 / 8 HTTP 通信中 /
+/// 9 对话框显示中 / 14 引擎退出。
 fn engine_status_for(
     wait_reason: Option<&WaitReason>,
     dialog_open: bool,
     debug_skip: bool,
     exit_requested: bool,
+    http_pending: bool,
+    hide_active: bool,
 ) -> u8 {
     if exit_requested {
         return 14;
@@ -706,6 +719,12 @@ fn engine_status_for(
     }
     if dialog_open {
         return 9;
+    }
+    if http_pending {
+        return 8;
+    }
+    if hide_active {
+        return 5;
     }
     match wait_reason {
         None => 0,
@@ -739,10 +758,20 @@ mod tests {
     #[test]
     fn engine_status_maps_wait_states_to_script_status_codes() {
         // 0 执行中。
-        assert_eq!(engine_status_for(None, false, false, false), 0);
+        assert_eq!(
+            engine_status_for(None, false, false, false, false, false),
+            0
+        );
         // 1 等待点击（@ 与 wait input=1）。
         assert_eq!(
-            engine_status_for(Some(&WaitReason::Generic), false, false, false),
+            engine_status_for(
+                Some(&WaitReason::Generic),
+                false,
+                false,
+                false,
+                false,
+                false
+            ),
             1
         );
         assert_eq!(
@@ -751,6 +780,8 @@ mod tests {
                     milliseconds: 100,
                     input: 1
                 }),
+                false,
+                false,
                 false,
                 false,
                 false
@@ -766,6 +797,8 @@ mod tests {
                 }),
                 false,
                 false,
+                false,
+                false,
                 false
             ),
             4
@@ -776,6 +809,8 @@ mod tests {
                 Some(&WaitReason::Stop {
                     reason: Some("trans".into())
                 }),
+                false,
+                false,
                 false,
                 false,
                 false
@@ -789,6 +824,8 @@ mod tests {
                 }),
                 false,
                 false,
+                false,
+                false,
                 false
             ),
             7
@@ -798,9 +835,18 @@ mod tests {
                 Some(&WaitReason::Stop { reason: None }),
                 false,
                 false,
+                false,
+                false,
                 false
             ),
             3
+        );
+        // 5 消息窗隐藏 / 8 HTTP 通信中。
+        assert_eq!(engine_status_for(None, false, false, false, false, true), 5);
+        assert_eq!(engine_status_for(None, false, false, false, true, false), 8);
+        assert_eq!(
+            engine_status_for(Some(&WaitReason::Generic), false, false, false, true, true),
+            8
         );
     }
 
@@ -808,16 +854,16 @@ mod tests {
     fn dialog_debug_skip_and_exit_take_precedence() {
         // 9 对话框优先于等待状态。
         assert_eq!(
-            engine_status_for(Some(&WaitReason::Generic), true, false, false),
+            engine_status_for(Some(&WaitReason::Generic), true, false, false, true, true),
             9
         );
         // 4 debugSkip 快进。
         assert_eq!(
-            engine_status_for(Some(&WaitReason::Generic), false, true, false),
+            engine_status_for(Some(&WaitReason::Generic), false, true, false, true, true),
             4
         );
         // 14 引擎退出最高优先。
-        assert_eq!(engine_status_for(None, true, true, true), 14);
+        assert_eq!(engine_status_for(None, true, true, true, true, true), 14);
     }
 
     #[cfg(all(target_os = "macos", feature = "gl-backend"))]

@@ -1306,6 +1306,13 @@ mod tests {
 
         let mut transparent_provider = AlphaProvider { alpha: 0 };
         assert_eq!(c.hit_test(50.0, 50.0, &mut transparent_provider), None);
+
+        let mut threshold_provider = AlphaProvider { alpha: 128 };
+        assert_eq!(
+            c.hit_test(50.0, 50.0, &mut threshold_provider),
+            None,
+            "alpha equal to clickablethreshold must not hit"
+        );
     }
 
     #[test]

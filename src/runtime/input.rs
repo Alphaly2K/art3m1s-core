@@ -1,6 +1,9 @@
+use super::callbacks::{
+    OVERRIDE_IS_DECIDE, OVERRIDE_IS_DOWN, OVERRIDE_IS_DOWN_EDGE, OVERRIDE_IS_PUSH,
+    OVERRIDE_IS_UP_EDGE,
+};
 use super::{CoreRuntime, InlineEventFrame};
 use crate::compositor::Compositor;
-use asb_interpreter::event::WaitReason;
 use std::collections::{HashMap, HashSet};
 
 impl CoreRuntime {
@@ -56,37 +59,26 @@ impl CoreRuntime {
         }
     }
 
-    pub(super) fn process_pointer_handlers(&mut self) -> bool {
+    pub(super) fn process_pointer_handlers(&mut self) -> InputTick {
         self.refresh_inline_event_frame();
-        let (
-            legacy_clicked,
-            mouse_x,
-            mouse_y,
-            mouse_buttons,
-            mouse_down_edges,
-            mouse_up_edges,
-            key_down_edges,
-            keys_down,
-        ) = {
+        let now = std::time::Instant::now();
+        let (frame, raw_edges) = {
             let s = self.input.lock().unwrap();
-            let clicked = s.clicked;
-            let mut key_down_edges: Vec<u32> = s.keys_down_edge.iter().copied().collect();
-            key_down_edges.sort_unstable();
-            (
-                clicked,
-                s.mouse_x as f32,
-                s.mouse_y as f32,
-                s.mouse_buttons_down.clone(),
-                s.mouse_buttons_down_edge.clone(),
-                s.mouse_buttons_up_edge.clone(),
-                key_down_edges,
-                s.keys_down.clone(),
-            )
+            let frame = s.effective_frame(now);
+            let raw_edges: HashSet<u32> = frame
+                .keys
+                .keys()
+                .copied()
+                .filter(|key| s.has_raw_decide_or_down_edge(*key))
+                .collect();
+            (frame, raw_edges)
         };
-        let left_down_edge = legacy_clicked || mouse_down_edges.contains(&1);
-        let left_up_edge = mouse_up_edges.contains(&1);
-        let left_down = mouse_buttons.contains(&1);
-        let pointer_position = (mouse_x as i32, mouse_y as i32);
+        let mouse_x = frame.mouse_x as f32;
+        let mouse_y = frame.mouse_y as f32;
+        let left_down_edge = frame.has(1, OVERRIDE_IS_DOWN_EDGE);
+        let left_up_edge = frame.has(1, OVERRIDE_IS_UP_EDGE);
+        let left_down = frame.has(1, OVERRIDE_IS_DOWN);
+        let pointer_position = (frame.mouse_x, frame.mouse_y);
         let pointer_moved = self.last_pointer_hit_position != Some(pointer_position);
         let texture_revision = self.gpu.texture_content_revision();
         let refresh_pointer_hit_test = pointer_hit_test_required(
@@ -97,17 +89,28 @@ impl CoreRuntime {
             texture_revision,
             left_down_edge || left_up_edge,
         );
-        self.frame_visual_dirty |= left_down_edge || left_up_edge || !key_down_edges.is_empty();
+        self.frame_visual_dirty |= left_down_edge
+            || left_up_edge
+            || frame
+                .keys
+                .values()
+                .any(|bits| bits & (OVERRIDE_IS_DOWN_EDGE | OVERRIDE_IS_UP_EDGE) != 0);
         let mut needs_inline_event_frame = false;
 
         // controlskip：按住 keyconfig role 14 的键（缺省 Ctrl=17）期间临时跳过。
+        let keys_down: HashSet<u32> = frame
+            .keys
+            .iter()
+            .filter(|(_, bits)| **bits & OVERRIDE_IS_DOWN != 0)
+            .map(|(key, _)| *key)
+            .collect();
         self.update_control_skip_from_keys(&keys_down);
 
         // hide 模式：左键单击先恢复消息窗，本帧不再进入常规点击/前进链。
         // （右键恢复走下方 trigger_rclick 的隐藏分支。）
         if self.hide_active() && left_down_edge {
             self.exit_hide_mode();
-            return false;
+            return InputTick::default();
         }
 
         // 文本内联链接（[link]）：鼠标移动刷新 hover 强调；点击命中链接则以其
@@ -116,7 +119,7 @@ impl CoreRuntime {
             self.frame_visual_dirty |= self.update_link_hover(mouse_x, mouse_y);
         }
         if left_down_edge && self.handle_link_click(mouse_x, mouse_y) {
-            return false;
+            return InputTick::default();
         }
 
         let hit_layers = if refresh_pointer_hit_test {
@@ -167,7 +170,6 @@ impl CoreRuntime {
         }
 
         let mut handled_by_layer = false;
-        let mut handled_by_left_push = false;
         let mut handled_by_drag = false;
         let click_dispatch = if left_down_edge {
             event_dispatch_layers(&self.compositor, &hit_layers, "click")
@@ -206,63 +208,79 @@ impl CoreRuntime {
             needs_inline_event_frame |= dispatch.needs_return_frame;
         }
 
-        let mut role_advance = false;
-        for key in key_down_edges {
+        let pointer_claimed = handled_by_layer || handled_by_drag;
+        let mut tick = InputTick::default();
+        let mut left_push_outcome = DispatchOutcome::NotRegistered;
+        for (key, bits) in &frame.keys {
+            let key = *key;
+            let bits = *bits;
             // 右键/ESC：先走引擎的 rclick 链（隐藏恢复 / rclick 脚本）；
             // 被消费时不再派发同键的 push 处理器。
-            if is_rclick_trigger_key(key) && self.trigger_rclick() {
+            if is_rclick_trigger_key(key)
+                && bits & OVERRIDE_IS_DOWN_EDGE != 0
+                && self.trigger_rclick()
+            {
                 continue;
             }
             let key_string = key.to_string();
-            let event_type = if is_mouse_button(key) { "click" } else { "key" };
-            let dispatch = enqueue_input_handler(
-                &self.interpreter,
-                &self.compositor,
-                "push",
-                &key_string,
-                &[("key", &key_string), ("type", event_type)],
-            );
-            needs_inline_event_frame |= dispatch.needs_return_frame;
-            if key == 1 && dispatch.handled {
-                handled_by_left_push = true;
+            if should_dispatch_push(
+                bits,
+                handler_keyrepeat(&self.compositor, "push", &key_string),
+            ) {
+                let event_type = if is_mouse_button(key) { "click" } else { "key" };
+                let dispatch = enqueue_input_handler(
+                    &self.interpreter,
+                    &self.compositor,
+                    "push",
+                    &key_string,
+                    &[("key", &key_string), ("type", event_type)],
+                );
+                needs_inline_event_frame |= dispatch.needs_return_frame;
+                if key == 1 {
+                    left_push_outcome = dispatch.outcome;
+                }
+                if !dispatch.outcome.allows_default_role() {
+                    continue;
+                }
             }
-            // keyconfig 的 role 分配（前进/隐藏/日志/自动/跳过等）。
-            role_advance |= self.handle_role_key_edge(key);
+            // 鼠标左键命中图层/拖动后不能再走默认 role / UserInput，
+            // 否则 UI 按钮会同时推进正文。
+            if key_blocks_default_role(key, pointer_claimed) {
+                continue;
+            }
+            if !should_dispatch_discrete_role(bits) {
+                continue;
+            }
+            // 未被 pointer/setonpush 截获的物理边沿就是 UserInput，
+            // 不要求该键恰好配置为 role 0。dummy decide 没有 raw edge。
+            if raw_edges.contains(&key) {
+                tick.user_input = true;
+            }
+            let advance = self.handle_role_key_edge(key, bits);
+            tick.merge_key_role(advance, raw_edges.contains(&key));
         }
 
         if needs_inline_event_frame {
             self.begin_inline_event_frame();
         }
 
-        let push_absorbs_default_click =
-            global_push_absorbs_default_click(self.wait_reason.as_ref(), handled_by_left_push);
-        let clicked = (left_down_edge
-            && !handled_by_layer
-            && !push_absorbs_default_click
-            && !handled_by_drag)
-            // keyconfig role 0（前进，缺省 Enter）与单击等效
-            || role_advance;
         if left_down_edge {
             crate::core_debug!(
-                "[input] left-down wait={:?} top={:?} click_layers={:?} layer={} push={} drag={} advance={}",
+                "[input] left-down wait={:?} top={:?} click_layers={:?} layer={} push={:?} drag={} tick={:?}",
                 self.wait_reason,
                 top_hover,
                 click_dispatch,
                 handled_by_layer,
-                handled_by_left_push,
+                left_push_outcome,
                 handled_by_drag,
-                clicked
+                tick
             );
         }
-        clicked
+        tick
     }
 
     pub(super) fn clear_input_edges(&self) {
         self.input.lock().unwrap().clear_edges();
-    }
-
-    pub(super) fn script_decide_edge(&self) -> bool {
-        self.input.lock().unwrap().scripted_down_edge()
     }
 
     /// Dispatch a script-registered global mode callback through the same
@@ -344,6 +362,7 @@ impl CoreRuntime {
                 &[("drag", "1"), ("id", layer_id)],
             );
             return HandlerDispatch {
+                outcome: dispatch.outcome,
                 handled: dispatch.handled,
                 needs_return_frame: dispatch.needs_return_frame,
                 queued: dispatch.queued,
@@ -397,6 +416,7 @@ impl CoreRuntime {
             &[("drag", "1"), ("id", layer_id)],
         );
         HandlerDispatch {
+            outcome: DispatchOutcome::NotRegistered,
             handled: true,
             needs_return_frame: dispatch.needs_return_frame,
             queued: dispatch.queued,
@@ -427,6 +447,7 @@ impl CoreRuntime {
             &[("drag", "1"), ("id", &layer_id)],
         );
         HandlerDispatch {
+            outcome: DispatchOutcome::NotRegistered,
             handled: true,
             needs_return_frame: dispatch.needs_return_frame,
             queued: dispatch.queued,
@@ -489,6 +510,7 @@ impl CoreRuntime {
             &[("drag", "0"), ("id", &layer_id)],
         );
         HandlerDispatch {
+            outcome: DispatchOutcome::NotRegistered,
             handled: true,
             needs_return_frame: dispatch.needs_return_frame,
             queued: dispatch.queued,
@@ -519,15 +541,61 @@ pub(super) fn inline_event_marker_is_active(
         .is_some_and(|marker| marker.script == frame.script && marker.return_line == frame.line)
 }
 
+/// 本帧输入对脚本等待可见的动作。wait 只消费这些动作，不再回看 raw click
+/// 或 overrideKey 边沿本身。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct InputTick {
+    pub advance: bool,
+    pub user_input: bool,
+    pub physical_click: bool,
+}
+
+impl InputTick {
+    fn merge_key_role(&mut self, advance: bool, has_raw_edge: bool) {
+        if !advance {
+            return;
+        }
+        self.advance = true;
+        if has_raw_edge {
+            self.user_input = true;
+            self.physical_click = true;
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum DispatchOutcome {
+    #[default]
+    NotRegistered,
+    Delivered,
+    SuppressedSuccess,
+    SuppressedFailure,
+    DeliveryFailed,
+}
+
+impl DispatchOutcome {
+    fn allows_default_role(self) -> bool {
+        matches!(
+            self,
+            Self::NotRegistered | Self::SuppressedFailure | Self::DeliveryFailed
+        )
+    }
+
+    fn handled(self) -> bool {
+        matches!(self, Self::Delivered | Self::SuppressedSuccess)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct HandlerDispatch {
+    outcome: DispatchOutcome,
     handled: bool,
     needs_return_frame: bool,
     queued: bool,
 }
 
 fn is_mouse_button(key: u32) -> bool {
-    matches!(key, 1..=3)
+    matches!(key, 1 | 2 | 4)
 }
 
 /// 触发右键链（rclick 脚本 / 隐藏恢复）的按键：鼠标右键(2)、ESC(27)。
@@ -536,11 +604,25 @@ fn is_rclick_trigger_key(key: u32) -> bool {
     matches!(key, 2 | 27)
 }
 
-fn global_push_absorbs_default_click(
-    wait_reason: Option<&WaitReason>,
-    handled_by_left_push: bool,
-) -> bool {
-    handled_by_left_push && !matches!(wait_reason, Some(WaitReason::Timed { input: 1, .. }))
+fn should_dispatch_push(bits: u32, keyrepeat: bool) -> bool {
+    let down_edge = bits & OVERRIDE_IS_DOWN_EDGE != 0;
+    let is_push = bits & OVERRIDE_IS_PUSH != 0;
+    down_edge || (keyrepeat && is_push && !down_edge)
+}
+
+fn should_dispatch_discrete_role(bits: u32) -> bool {
+    bits & (OVERRIDE_IS_DOWN_EDGE | OVERRIDE_IS_DECIDE) != 0
+}
+
+fn key_blocks_default_role(key: u32, pointer_claimed: bool) -> bool {
+    key == 1 && pointer_claimed
+}
+
+fn handler_keyrepeat(compositor: &Compositor, event_name: &str, key: &str) -> bool {
+    compositor
+        .get_input_handler(event_name, key)
+        .and_then(|handler| handler.params.get("keyrepeat"))
+        .is_some_and(|value| value == "1")
 }
 
 /// 计算拖动起始状态：只要求图层存在（能取到 offset），不做 draggable /
@@ -602,15 +684,18 @@ fn event_dispatch_layers(
 
 #[cfg(test)]
 mod tests {
+    use super::super::callbacks::{
+        OVERRIDE_IS_DECIDE, OVERRIDE_IS_DOWN, OVERRIDE_IS_DOWN_EDGE, OVERRIDE_IS_PUSH,
+    };
     use super::{
-        InlineEventFrame, dispatch_handler, enqueue_handler_tags, enqueue_input_handler,
-        enqueue_layer_handler, event_dispatch_layers, forced_drag_state,
-        global_push_absorbs_default_click, has_drag_handler, inline_event_marker_is_active,
-        link_area_has_jump_target, pointer_hit_test_required,
+        DispatchOutcome, InlineEventFrame, dispatch_handler, enqueue_handler_tags,
+        enqueue_input_handler, enqueue_layer_handler, event_dispatch_layers, forced_drag_state,
+        has_drag_handler, inline_event_marker_is_active, link_area_has_jump_target,
+        pointer_hit_test_required, should_dispatch_discrete_role, should_dispatch_push,
     };
     use crate::compositor::Compositor;
     use crate::text::render::LinkHitArea;
-    use asb_interpreter::event::{Event, LayerEvent, WaitReason};
+    use asb_interpreter::event::{Event, LayerEvent};
     use asb_interpreter::{CallFrame, Interpreter, InterpreterConfig};
     use std::collections::HashMap;
 
@@ -799,7 +884,11 @@ mod tests {
             &HashMap::new(),
             &[],
         );
+        assert_eq!(success.outcome, DispatchOutcome::SuppressedSuccess);
+        assert!(!success.outcome.allows_default_role());
         assert!(!failure.handled);
+        assert_eq!(failure.outcome, DispatchOutcome::SuppressedFailure);
+        assert!(failure.outcome.allows_default_role());
         assert!(
             interpreter
                 .engine_context()
@@ -886,26 +975,6 @@ mod tests {
                 .unwrap(),
             "last"
         );
-    }
-
-    #[test]
-    fn input_enabled_timed_wait_keeps_default_click_despite_global_push() {
-        let input_wait = WaitReason::Timed {
-            milliseconds: 2500,
-            input: 1,
-        };
-        let non_input_wait = WaitReason::Timed {
-            milliseconds: 2500,
-            input: 0,
-        };
-
-        assert!(!global_push_absorbs_default_click(Some(&input_wait), true));
-        assert!(global_push_absorbs_default_click(
-            Some(&non_input_wait),
-            true
-        ));
-        assert!(global_push_absorbs_default_click(None, true));
-        assert!(!global_push_absorbs_default_click(None, false));
     }
 
     #[test]
@@ -1004,7 +1073,7 @@ mod tests {
     #[test]
     fn zero_handler_target_does_not_enqueue_script_control_flow() {
         let interpreter = Interpreter::new(InterpreterConfig::default());
-        enqueue_handler_tags(
+        assert!(!enqueue_handler_tags(
             &interpreter,
             None,
             Some("0"),
@@ -1012,7 +1081,7 @@ mod tests {
             true,
             &HashMap::new(),
             &[],
-        );
+        ));
         assert!(
             interpreter
                 .engine_context()
@@ -1021,6 +1090,134 @@ mod tests {
                 .tag_queue
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn dispatch_outcomes_gate_default_role_fallback() {
+        let interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter
+            .lua()
+            .load(
+                r#"
+                __engine:setEventFilter(function(e, name, param)
+                    return verdict
+                end)
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        interpreter.lua().globals().set("verdict", 0).unwrap();
+        let delivered = dispatch_handler(
+            &interpreter,
+            "setonpush",
+            &HashMap::from([("key".into(), "1".into())]),
+            Some("calllua"),
+            None,
+            None,
+            false,
+            &HashMap::new(),
+            &[("key", "1")],
+        );
+        assert_eq!(delivered.outcome, DispatchOutcome::Delivered);
+        assert!(!delivered.outcome.allows_default_role());
+        assert_eq!(
+            interpreter.engine_context().lock().unwrap().tag_queue.len(),
+            1
+        );
+
+        let empty = dispatch_handler(
+            &interpreter,
+            "setonpush",
+            &HashMap::new(),
+            None,
+            None,
+            None,
+            false,
+            &HashMap::new(),
+            &[],
+        );
+        assert_eq!(empty.outcome, DispatchOutcome::DeliveryFailed);
+        assert!(empty.outcome.allows_default_role());
+        assert!(!empty.handled);
+
+        assert!(DispatchOutcome::NotRegistered.allows_default_role());
+        assert!(DispatchOutcome::SuppressedFailure.allows_default_role());
+        assert!(DispatchOutcome::DeliveryFailed.allows_default_role());
+        assert!(!DispatchOutcome::Delivered.allows_default_role());
+        assert!(!DispatchOutcome::SuppressedSuccess.allows_default_role());
+    }
+
+    #[test]
+    fn layer_click_tags_are_queued_before_global_push() {
+        let interpreter = Interpreter::new(InterpreterConfig::default());
+        let mut compositor = Compositor::new();
+        compositor.ensure_layer("mw.save");
+        compositor.apply_event(&Event::LayerEventHandler {
+            id: "mw.save".into(),
+            event_type: "click".into(),
+            mode: "init".into(),
+            file: None,
+            label: None,
+            call: false,
+            handler: Some("calllua".into()),
+            penetration: false,
+            extra_params: HashMap::from([
+                ("function".into(), "mark_button".into()),
+                ("key".into(), "save".into()),
+            ]),
+        });
+        compositor.apply_event(&Event::SetEventHandler {
+            event_name: "push".into(),
+            file: None,
+            label: None,
+            call: false,
+            handler: Some("calllua".into()),
+            extra_params: HashMap::from([
+                ("function".into(), "dispatch_button".into()),
+                ("key".into(), "1".into()),
+            ]),
+        });
+
+        let click = enqueue_layer_handler(
+            &interpreter,
+            &compositor,
+            "mw.save",
+            "click",
+            &[("click", "1")],
+        );
+        let push = enqueue_input_handler(
+            &interpreter,
+            &compositor,
+            "push",
+            "1",
+            &[("key", "1"), ("type", "click")],
+        );
+        assert_eq!(click.outcome, DispatchOutcome::Delivered);
+        assert_eq!(push.outcome, DispatchOutcome::Delivered);
+        let queue = interpreter
+            .engine_context()
+            .lock()
+            .unwrap()
+            .tag_queue
+            .clone();
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue[0].1.get("key").map(String::as_str), Some("save"));
+        assert_eq!(queue[1].1.get("key").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn push_repeat_waits_for_hold_after_the_initial_edge() {
+        let edge = OVERRIDE_IS_DOWN_EDGE | OVERRIDE_IS_PUSH | OVERRIDE_IS_DECIDE;
+        assert!(should_dispatch_push(edge, false));
+        assert!(should_dispatch_push(edge, true));
+        assert!(!should_dispatch_push(OVERRIDE_IS_PUSH, false));
+        assert!(should_dispatch_push(OVERRIDE_IS_PUSH, true));
+        assert!(!should_dispatch_push(OVERRIDE_IS_DOWN, true));
+        assert!(should_dispatch_discrete_role(OVERRIDE_IS_DECIDE));
+        assert!(should_dispatch_discrete_role(OVERRIDE_IS_DOWN_EDGE));
+        assert!(!should_dispatch_discrete_role(OVERRIDE_IS_DOWN));
+        assert!(!should_dispatch_discrete_role(OVERRIDE_IS_PUSH));
     }
 
     #[test]
@@ -1064,7 +1261,7 @@ pub(super) fn enqueue_handler_tags(
     call: bool,
     params: &HashMap<String, String>,
     runtime_params: &[(&str, &str)],
-) {
+) -> bool {
     // A target is optional only when *both* fields carry the sentinel.  Keep
     // a non-sentinel counterpart intact: `[call file="0" label="foo"]` is a
     // legitimate same-script call, while `[call file="foo" label="0"]`
@@ -1080,12 +1277,14 @@ pub(super) fn enqueue_handler_tags(
     };
     let ctx = interpreter.engine_context();
     let mut queue = ctx.lock().unwrap();
+    let mut queued = false;
     if let Some(tag) = handler_tag {
         let mut p = params.clone();
         for (k, v) in runtime_params {
             p.insert(k.to_string(), v.to_string());
         }
         queue.tag_queue.push((tag.to_string(), p));
+        queued = true;
     }
     if file.is_some() || label.is_some() {
         let mut p = HashMap::new();
@@ -1098,7 +1297,9 @@ pub(super) fn enqueue_handler_tags(
         queue
             .tag_queue
             .push((if call { "call" } else { "jump" }.to_string(), p));
+        queued = true;
     }
+    queued
 }
 
 /// 把一个已命中的处理器排队并给出派发结论。
@@ -1129,16 +1330,26 @@ fn dispatch_handler(
     // 1 = 假装成功，2 = 假装失败；两者都不能把原处理器排入队列。
     match interpreter.run_event_filter(filter_name, filter_params) {
         Some(1) => {
+            let outcome = DispatchOutcome::SuppressedSuccess;
             return HandlerDispatch {
-                handled: true,
+                handled: outcome.handled(),
+                outcome,
                 needs_return_frame: false,
                 queued: false,
             };
         }
-        Some(2) => return HandlerDispatch::default(),
+        Some(2) => {
+            let outcome = DispatchOutcome::SuppressedFailure;
+            return HandlerDispatch {
+                handled: outcome.handled(),
+                outcome,
+                needs_return_frame: false,
+                queued: false,
+            };
+        }
         _ => {}
     }
-    enqueue_handler_tags(
+    let queued = enqueue_handler_tags(
         interpreter,
         handler,
         file,
@@ -1147,10 +1358,16 @@ fn dispatch_handler(
         params,
         runtime_params,
     );
+    let outcome = if queued {
+        DispatchOutcome::Delivered
+    } else {
+        DispatchOutcome::DeliveryFailed
+    };
     HandlerDispatch {
-        handled: true,
-        needs_return_frame: handler.is_some() && file.is_none() && label.is_none(),
-        queued: true,
+        handled: outcome.handled(),
+        needs_return_frame: queued && handler.is_some() && file.is_none() && label.is_none(),
+        queued,
+        outcome,
     }
 }
 

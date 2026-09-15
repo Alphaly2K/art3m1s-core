@@ -1,4 +1,5 @@
 use super::CoreRuntime;
+use super::input::InputTick;
 use crate::render_pipeline::RenderPipeline;
 use asb_interpreter::event::WaitReason;
 use asb_interpreter::tags::call_lua_function;
@@ -9,7 +10,7 @@ use std::sync::atomic::Ordering;
 impl CoreRuntime {
     pub(super) fn advance_script(
         &mut self,
-        clicked: bool,
+        tick: InputTick,
         delta_ms: u64,
         profile: &mut crate::profiler::FrameProfile,
     ) {
@@ -20,17 +21,13 @@ impl CoreRuntime {
         // Native dialogs are modal from the scenario script's point of view. The dialog event can
         // be emitted from an estag queue that already contains its continuation; draining that
         // queue before the host responds runs stop/wait tags behind the dialog and corrupts the
-        // scenario wait state.
+        // scenario wait state. onEnterFrame 已在指针派发前触发；对话框期间两者都跳过。
         if self.pending_dialog.is_some() {
             return;
         }
-        // onEnterFrame
-        if let Err(e) = self.interpreter.fire_enter_frame() {
-            crate::core_error!("onEnterFrame 错误: {e:?}");
-        }
 
-        // httpget/httppost 挂起：宿主回填结果前脚本不推进。放在 onEnterFrame
-        // 之后——文档允许脚本在 Lua 每帧处理里把 s.http.cancel 置 1 中断请求。
+        // httpget/httppost 挂起：宿主回填结果前脚本不推进。onEnterFrame 已在
+        // 指针派发前触发，Lua 每帧处理仍可把 s.http.cancel 置 1 中断请求。
         if self.http_request_pending() {
             self.poll_pending_http_cancel();
             if self.http_request_pending() {
@@ -72,7 +69,7 @@ impl CoreRuntime {
                 self.maybe_autosave_on_input_wait();
             }
         } else {
-            self.advance_wait_state(clicked, delta_ms, profile);
+            self.advance_wait_state(tick, delta_ms, profile);
         }
     }
 
@@ -176,25 +173,22 @@ impl CoreRuntime {
 
     fn advance_wait_state(
         &mut self,
-        clicked: bool,
+        tick: InputTick,
         delta_ms: u64,
         profile: &mut crate::profiler::FrameProfile,
     ) {
         let Some(reason) = self.wait_reason.clone() else {
             return;
         };
-        let physical_clicked = clicked;
-        let scripted_decide = self.script_decide_edge();
-        // stopbyclick 只响应宿主真实点击。overrideKey 注入的 decide 边沿是脚本内部
-        // 推进信号，若也视作点击，自动模式会被自己的 mainloop 立即关闭。
-        let stopped_automode_by_click = physical_clicked && self.automode_stops_on_click();
+        // stopbyclick 只响应带 raw 边沿的 Advance。dummy decide 会生成 Advance，
+        // 但不能关掉自动模式，否则 mainloop 注入的点击会立刻把自己关掉。
+        let stopped_automode_by_click = tick.physical_click && self.automode_stops_on_click();
         if stopped_automode_by_click {
             self.set_automode_mode(false);
         }
         // 停止自动模式的这次点击只负责退出。尤其在 wait input=1 下若同一帧继续
         // 推进，会让脚本的 automode_stopcheck/flip 与 clickEnd 同时清理消息层。
-        let advance_requested =
-            wait_advance_requested(physical_clicked, scripted_decide, stopped_automode_by_click);
+        let advance_requested = wait_advance_requested(tick.advance, stopped_automode_by_click);
         if automode_stop_by_stop_wait(&reason) && self.automode_stops_on_stop() {
             self.set_automode_mode(false);
         }
@@ -242,7 +236,7 @@ impl CoreRuntime {
                 // input=0 is a pure timer: neither Skip nor an input edge may
                 // shorten it. input=1 is released by actual user input only;
                 // input=2 additionally permits the engine's Skip state.
-                if timed_wait_accepts_click(input, physical_clicked) {
+                if timed_wait_accepts_user_input(input, tick.user_input) {
                     self.timed_remaining_ms = 0;
                     true
                 } else if input == 2 && self.skip_active() {
@@ -257,10 +251,9 @@ impl CoreRuntime {
                     false
                 }
             }
-            // A physical click must not skip [stop]. Artemis scripts can,
-            // however, explicitly wake it by injecting a key edge with
-            // e:overrideKey(..., status=32), as UI return paths commonly do.
-            WaitReason::Stop { .. } => stop_wait_accepts_scripted_decide(scripted_decide),
+            // [stop] 不看输入边沿或 dummy decide。唤醒只走 setScriptStatus(0)、
+            // 视频/转场完成，以及上面的 exskip 处理器。
+            WaitReason::Stop { .. } => false,
             // [wait se=ID (time=N)]：等待该 SE 播放结束；带 time 时等待
             // "从 SE 开播起 N 毫秒"。变体未携带 input 参数，按缺省 input=0
             // 处理点击（不解除）；跳过态直接放行以免锁死（近似 input=2）。
@@ -592,20 +585,12 @@ fn settle_inline_event_frame(
     Ok(())
 }
 
-fn timed_wait_accepts_click(input: i32, clicked: bool) -> bool {
-    matches!(input, 1 | 2) && clicked
+fn timed_wait_accepts_user_input(input: i32, user_input: bool) -> bool {
+    input == 1 && user_input
 }
 
-fn stop_wait_accepts_scripted_decide(scripted_decide: bool) -> bool {
-    scripted_decide
-}
-
-fn wait_advance_requested(
-    physical_clicked: bool,
-    scripted_decide: bool,
-    stopped_automode_by_click: bool,
-) -> bool {
-    !stopped_automode_by_click && (physical_clicked || scripted_decide)
+fn wait_advance_requested(advance: bool, stopped_automode_by_click: bool) -> bool {
+    !stopped_automode_by_click && advance
 }
 
 fn automode_stop_by_stop_wait(reason: &WaitReason) -> bool {
@@ -645,9 +630,8 @@ pub(crate) fn wait_reason_is_input_wait(reason: Option<&WaitReason>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        automode_stop_by_stop_wait, settle_inline_event_frame, stop_wait_accepts_scripted_decide,
-        timed_wait_accepts_click, trans_input_skip_requested, wait_advance_requested,
-        wait_reason_is_input_wait,
+        automode_stop_by_stop_wait, settle_inline_event_frame, timed_wait_accepts_user_input,
+        trans_input_skip_requested, wait_advance_requested, wait_reason_is_input_wait,
     };
     use crate::runtime::InlineEventFrame;
     use asb_interpreter::event::WaitReason;
@@ -656,24 +640,24 @@ mod tests {
 
     #[test]
     fn timed_wait_only_accepts_click_for_input_one() {
-        assert!(!timed_wait_accepts_click(0, true));
-        assert!(timed_wait_accepts_click(1, true));
-        assert!(timed_wait_accepts_click(2, true));
-        assert!(!timed_wait_accepts_click(1, false));
+        assert!(!timed_wait_accepts_user_input(0, true));
+        assert!(timed_wait_accepts_user_input(1, true));
+        assert!(!timed_wait_accepts_user_input(2, true));
+        assert!(!timed_wait_accepts_user_input(1, false));
     }
 
     #[test]
-    fn stop_wait_only_accepts_a_scripted_decide_edge() {
-        assert!(stop_wait_accepts_scripted_decide(true));
-        assert!(!stop_wait_accepts_scripted_decide(false));
+    fn stop_wait_ignores_scripted_decide_and_physical_click() {
+        // Stop 的恢复不走 InputTick；这里只锁定 Generic 的 Advance 门控。
+        assert!(!wait_advance_requested(false, false));
+        assert!(!wait_advance_requested(false, true));
     }
 
     #[test]
     fn automode_stop_click_does_not_advance_the_waiting_page() {
-        assert!(!wait_advance_requested(true, false, true));
-        assert!(!wait_advance_requested(true, true, true));
-        assert!(wait_advance_requested(true, false, false));
-        assert!(wait_advance_requested(false, true, false));
+        assert!(!wait_advance_requested(true, true));
+        assert!(wait_advance_requested(true, false));
+        assert!(!wait_advance_requested(false, false));
     }
 
     #[test]
