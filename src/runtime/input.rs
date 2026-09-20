@@ -62,7 +62,7 @@ impl CoreRuntime {
     pub(super) fn process_pointer_handlers(&mut self) -> InputTick {
         self.refresh_inline_event_frame();
         let now = std::time::Instant::now();
-        let (frame, raw_edges) = {
+        let (frame, raw_edges, raw_left_down, raw_left_up_edge) = {
             let s = self.input.lock().unwrap();
             let frame = s.effective_frame(now);
             let raw_edges: HashSet<u32> = frame
@@ -71,13 +71,17 @@ impl CoreRuntime {
                 .copied()
                 .filter(|key| s.has_raw_decide_or_down_edge(*key))
                 .collect();
-            (frame, raw_edges)
+            (
+                frame,
+                raw_edges,
+                s.mouse_buttons_down.contains(&1),
+                s.mouse_buttons_up_edge.contains(&1),
+            )
         };
         let mouse_x = frame.mouse_x as f32;
         let mouse_y = frame.mouse_y as f32;
         let left_down_edge = frame.has(1, OVERRIDE_IS_DOWN_EDGE);
         let left_up_edge = frame.has(1, OVERRIDE_IS_UP_EDGE);
-        let left_down = frame.has(1, OVERRIDE_IS_DOWN);
         let pointer_position = (frame.mouse_x, frame.mouse_y);
         let pointer_moved = self.last_pointer_hit_position != Some(pointer_position);
         let texture_revision = self.gpu.texture_content_revision();
@@ -197,12 +201,17 @@ impl CoreRuntime {
             }
         }
 
-        if left_down && pointer_moved {
+        // overrideKey controls script-visible input, but must not cancel an
+        // already captured physical pointer. HENPRI masks key 1 while its
+        // tablet is being dragged; using the effective bits here swallowed
+        // mouse-up, so dragout never cleared the game's drag flag and every
+        // later click stayed masked.
+        if self.pointer_drag.layer_id.is_some() && raw_left_down && pointer_moved {
             let dispatch = self.continue_pointer_drag(mouse_x, mouse_y);
             handled_by_drag |= dispatch.handled;
             needs_inline_event_frame |= dispatch.needs_return_frame;
         }
-        if left_up_edge {
+        if self.pointer_drag.layer_id.is_some() && raw_left_up_edge {
             let dispatch = self.finish_pointer_drag();
             handled_by_drag |= dispatch.handled;
             needs_inline_event_frame |= dispatch.needs_return_frame;
