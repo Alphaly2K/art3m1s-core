@@ -21,9 +21,58 @@ impl CoreRuntime {
         let collected = self.drain_events();
         profile.event_drain_ns += crate::profiler::FrameProfile::elapsed(drain_started);
         self.frame_visual_dirty |= !collected.is_empty();
-        self.pointer_hit_test_dirty |= !collected.is_empty();
+        // Do not invalidate pointer hit testing for every interpreter event.
+        // Rollover handlers routinely change their own sprite `clip` and
+        // rewrite tooltip text. Treating those visual-only events as geometry
+        // changes creates a feedback loop for a stationary pointer:
+        // rollover -> clip/text events -> hit test -> rollout -> ...
+        self.pointer_hit_test_dirty |= collected
+            .iter()
+            .any(|runtime_event| self.event_invalidates_pointer_hit_test(&runtime_event.event));
         self.dispatch_events(&collected, profile);
         profile.events_ns += crate::profiler::FrameProfile::elapsed(started);
+    }
+
+    fn event_invalidates_pointer_hit_test(&self, event: &Event) -> bool {
+        match event {
+            Event::Layer(LayerEvent::Create { .. } | LayerEvent::Create2 { .. })
+            | Event::Layer(LayerEvent::Delete { .. })
+            | Event::LayerRename { .. }
+            | Event::LayerTween { .. }
+            | Event::LayerTweenDelete { .. }
+            | Event::LayerEventHandler { .. }
+            | Event::Anime { .. }
+            | Event::LayerEdit { .. }
+            | Event::AllDelete { .. } => true,
+            Event::Layer(LayerEvent::SetProperty { id, property, .. }) => {
+                self.layer_property_invalidates_pointer_hit_test(id, property)
+            }
+            Event::Layer(LayerEvent::SetProperties { id, properties }) => properties
+                .keys()
+                .any(|property| self.layer_property_invalidates_pointer_hit_test(id, property)),
+            _ => false,
+        }
+    }
+
+    fn layer_property_invalidates_pointer_hit_test(&self, id: &str, property: &str) -> bool {
+        pointer_property_invalidates_hit_test(
+            self.layer_subtree_has_pointer_handler(id),
+            self.hovered_layers.contains(id),
+            property,
+        )
+    }
+
+    fn layer_subtree_has_pointer_handler(&self, id: &str) -> bool {
+        let Some(layer) = self.compositor.scene().get(id) else {
+            return false;
+        };
+        layer.event_handlers.values().any(|handler| handler.enabled)
+            || self
+                .compositor
+                .scene()
+                .children(id)
+                .iter()
+                .any(|child| self.layer_subtree_has_pointer_handler(child))
     }
 
     pub(super) fn drain_events(&mut self) -> Vec<RuntimeEvent> {
@@ -1025,6 +1074,26 @@ impl CoreRuntime {
     }
 }
 
+fn pointer_property_invalidates_hit_test(
+    interactive_subtree: bool,
+    layer_is_hovered: bool,
+    property: &str,
+) -> bool {
+    if !interactive_subtree {
+        return false;
+    }
+    // A hovered sprite commonly switches atlas cells in rollover/rollout.
+    // Keep ownership sticky until pointer motion, a button edge, handler
+    // registration, geometry change, or a relevant texture upload forces a
+    // new hit test. The click path always forces a fresh test.
+    if property.eq_ignore_ascii_case("clip") && layer_is_hovered {
+        return false;
+    }
+    // Layer alpha affects drawing only; hit testing intentionally samples
+    // source texture alpha and therefore must not be invalidated by it.
+    !property.eq_ignore_ascii_case("alpha")
+}
+
 /// 钩子里可用的存档路径归一（与 save_path_for 相同规则的自由函数版本）。
 fn qualify_hook_save_path(file: &str, savepath: &str) -> Option<String> {
     super::save_io::qualify_save_path_for_hooks(file, savepath).ok()
@@ -1245,9 +1314,19 @@ fn sync_tween_finished(compositor: &crate::compositor::Compositor, id: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        crc32_ieee, layer_info_entry, sync_tween_finished, sync_tween_wait_layer,
-        sync_tween_wait_reason,
+        crc32_ieee, layer_info_entry, pointer_property_invalidates_hit_test, sync_tween_finished,
+        sync_tween_wait_layer, sync_tween_wait_reason,
     };
+
+    #[test]
+    fn rollover_visual_updates_do_not_retrigger_stationary_hit_testing() {
+        assert!(!pointer_property_invalidates_hit_test(true, true, "clip"));
+        assert!(!pointer_property_invalidates_hit_test(true, false, "alpha"));
+        assert!(!pointer_property_invalidates_hit_test(false, false, "top"));
+        assert!(pointer_property_invalidates_hit_test(true, false, "clip"));
+        assert!(pointer_property_invalidates_hit_test(true, true, "left"));
+        assert!(pointer_property_invalidates_hit_test(true, true, "visible"));
+    }
 
     #[test]
     fn crc32_matches_ieee_reference_vectors() {

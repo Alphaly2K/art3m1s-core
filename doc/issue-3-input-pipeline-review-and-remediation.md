@@ -67,6 +67,28 @@ Issue #3 报告的卡住现象真实，但“只要当前是 `Generic`，就让�
 
 这不是原引擎本身需要如此多的分支，而是不同阶段的兼容补丁没有收敛到同一个输入模型。
 
+### OpenArtemis 参考实现审阅
+
+审阅了 `luxiaoling-mc/openartemis` 的 `f7af3176c47bc44642927a37302c15fb0e857053`
+（重点为 `runtime.cpp`、`runtime_lua.cpp`、`layer.cpp`、SDL 触摸桥及
+`input_dispatch_test.cpp`）。该实现提供了真实游戏兼容性线索，但不能直接作为引擎规范，
+因为输入主链中存在多处与本文档和 `example/docs` 明确冲突的行为：
+
+- `overrideKey{status=0}` 被实现成删除覆盖，无法屏蔽该键；省略 `key` 的全键覆盖也未实现；
+- `isPush` 对按住状态逐帧返回真，没有文档规定的初次按下、0.5 秒静默、随后重复语义；
+- 物理输入没有进入 `isDecide`，而 dummy decide 依赖跨帧位差，不是当前帧状态位覆盖；
+- `keyconfig` role 在 `setonpush` 前执行，并额外保留了 `Timed input=1` 的原始点击穿透特判；
+- 中键仍按连续编号 `3` 处理，而文档键 ID 为 `4`；
+- `clickablethreshold` 使用 `<`，但文档要求只有 alpha **高于**阈值才命中，因此等于阈值也应透明；
+- 重叠事件由下层处理器自己的 `penetration=1` 选择是否接收。文档语义相反：上层处理器
+  的 `penetration=1` 才允许继续执行它下方的处理器，穿透链最终从下到上执行；
+- SDL 触摸在手指抬起后合成一个桌面鼠标按下帧。它让点击发生在抬手时，但 Lua 看到的仍是
+  Windows `isDownEdge` 位，而不是移动端文档要求的 `isUpEdge` 决定语义。
+
+可借鉴的部分仅限经文档复核后的结构性线索，例如 `onEnterFrame` 必须先于输入冻结、覆盖按帧
+清理、图层 click 先于全局 push 入队。参考实现中按具体游戏状态保留 hover、特判等待或脚本
+队列的分支不移植到 Core；需要真实游戏 A/B 轨迹时只作为假设来源。
+
 ## 第一轮审阅结果及修订
 
 第一轮确认了以下真实问题：
@@ -454,8 +476,14 @@ scriptMainloop
 
 ## 本轮验证状态
 
-- 当前上游 master：`0c06f37160961c9ff75d4937d5e6bb0500d0bef9`。
-- Issue #3 当前为 open，尚无评论。
-- 现有 `input_enabled_timed_wait_keeps_default_click_despite_global_push` 单测通过，但它只锁定旧实现，并不证明语义正确。
-- HENPRI `compatibility_probe` 在沙箱外成功运行；预设坐标没有进入正文，最终停在标题的 bare Stop。日志确认物理左键命中全局 push 且没有直接推进，这与标准系统脚本“push 成功后由 Lua 决定是否注入 dummy click”的模型一致，但不能替代 Issue 作品的实际回归验证。
-- 本文是修复设计与实施指南，未修改运行时代码。
+- 当前本地 master：`a3c4c15f164a7852d29f6c56b6be2234616cf6d0`，已包含
+  `onEnterFrame -> effective frame -> layer/push -> keyconfig` 的主链重排；工作树继续补齐
+  hit-test 失效条件、事件类型过滤和上层 `penetration` 控制语义。
+- `cargo test --no-default-features --all-targets` 通过：341 passed、8 ignored；其中新增
+  dummy decide/filter fixture、非 click 顶层不遮挡下层 click、上层 penetration 链测试。
+- HENPRI `compatibility_probe` 使用原生 Metal 在沙箱外完成真实资源回归。命令行探针不实现
+  宿主视频解码，开场全屏视频通过 `notify_video_finished(None)` 显式完成，之后按顺序验证：
+  标题 CONFIG -> 左侧 SOUND 菜单 -> SOUND 页 ON 按钮（画面由 OFF 切为 ON）-> RETURN ->
+  标题 START -> 正文背景。每次点击均命中预期图层，菜单切换后后续按钮和跨页按钮没有失效。
+- 该结果覆盖已知的“菜单点击后按钮全部失效”形态，但不替代 Issue #3 原报告作品及真实
+  Android/iOS Host 的最终验收；移动端还应由 Host 轨迹确认触摸抬起到鼠标兼容事件只转换一次。

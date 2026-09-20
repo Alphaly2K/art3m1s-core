@@ -409,6 +409,107 @@ mod tests {
 
     #[cfg(all(target_os = "macos", feature = "gl-backend"))]
     #[test]
+    fn on_enter_frame_dummy_decide_releases_generic_wait_through_role_zero() {
+        use crate::Project;
+        use crate::backend::BackendSelection;
+        use asb_interpreter::Value;
+
+        let Ok(mut runtime) = CoreRuntime::create(8, 8, BackendSelection::from_legacy_int(0))
+        else {
+            // Headless CGL availability depends on the test session.
+            return;
+        };
+        let root = std::env::temp_dir().join(format!(
+            "art3m1s-dummy-decide-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(
+            root.join("boot.iet"),
+            r#"
+[lua]
+dummy_pending = false
+function push_handler(e, p)
+    if p.key == "1" then dummy_pending = true end
+end
+function vsync(e, p)
+    if dummy_pending then
+        dummy_pending = false
+        e:overrideKey{key=124, status=32}
+    end
+end
+__engine:setEventHandler{onEnterFrame="vsync"}
+[/lua]
+[setonpush key=1 handler="calllua" function="push_handler"]
+[keyconfig role=0 keys=124]
+[var name=before data=1]
+[@]
+[var name=after data=1]
+[stop]
+"#,
+        )
+        .unwrap();
+        let project = Project::open_from_data(
+            &root,
+            "[WINDOWS]\nWIDTH=8\nHEIGHT=8\nBOOT=boot.iet\nCHARSET=UTF-8\n",
+            "windows",
+        )
+        .unwrap();
+        runtime.load_open_project(project).unwrap();
+
+        runtime.advance_without_render(17);
+        assert_eq!(
+            runtime.interpreter.get_variable("before"),
+            Some(Value::Int(1))
+        );
+        assert_eq!(runtime.interpreter.get_variable("after"), None);
+        assert!(matches!(
+            runtime.wait_reason,
+            Some(asb_interpreter::event::WaitReason::Generic)
+        ));
+
+        runtime.feed_click();
+        runtime.advance_without_render(17);
+        assert_eq!(
+            runtime.interpreter.get_variable("after"),
+            None,
+            "the physical click is owned by setonpush and must not advance directly"
+        );
+        assert!(matches!(
+            runtime.wait_reason,
+            Some(asb_interpreter::event::WaitReason::Generic)
+        ));
+        assert_eq!(
+            runtime
+                .interpreter
+                .lua()
+                .globals()
+                .get::<bool>("dummy_pending")
+                .unwrap(),
+            true
+        );
+
+        runtime.advance_without_render(17);
+        assert!(runtime.wait_reason.is_none());
+        runtime.advance_without_render(17);
+        assert_eq!(
+            runtime.interpreter.get_variable("after"),
+            Some(Value::Int(1))
+        );
+        assert!(matches!(
+            runtime.wait_reason,
+            Some(asb_interpreter::event::WaitReason::Stop { .. })
+        ));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(all(target_os = "macos", feature = "gl-backend"))]
+    #[test]
     fn exec_skip_status_is_visible_within_one_runtime_tick() {
         use crate::backend::BackendSelection;
         use asb_interpreter::Value;

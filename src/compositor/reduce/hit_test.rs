@@ -1,15 +1,44 @@
 use super::Compositor;
 use crate::compositor::build::resolved_props;
 use crate::compositor::props::LayerProps;
-use crate::render_pipeline::draw::TextureProvider;
+use crate::render_pipeline::draw::{TextureId, TextureProvider};
 use glam::{Affine2, Vec2};
+use std::collections::HashSet;
 
 impl Compositor {
+    /// Returns whether texture uploads since the previous pointer sample can
+    /// actually change alpha-based hit testing.
+    ///
+    /// The GPU revision is global: text glyphs, video frames and unrelated
+    /// layers all advance it. Re-running pointer hit testing for those uploads
+    /// can feed a rollover handler back into itself (rollover changes a sprite
+    /// clip, text rendering uploads glyphs, the global revision changes, and
+    /// the same stationary pointer is tested again). Only textures belonging
+    /// to interactive layers that opt into `clickablethreshold` are relevant.
+    pub fn pointer_hit_textures_changed(
+        &self,
+        changed: &HashSet<TextureId>,
+        provider: &mut dyn TextureProvider,
+    ) -> bool {
+        if changed.is_empty() {
+            return false;
+        }
+        self.scene.all_layers().any(|layer| {
+            layer.event_handlers.values().any(|handler| handler.enabled)
+                && layer.props.custom.contains_key("clickablethreshold")
+                && layer.file.as_deref().is_some_and(|file| {
+                    provider
+                        .resolve(file)
+                        .is_some_and(|(texture, _)| changed.contains(&texture))
+                })
+        })
+    }
+
     /// 命中测试：返回舞台坐标 (x, y) 处最上层、可接收指针输入的图层 ID。
     ///
-    /// Artemis 的命中是「单次取最上层」的：找到顶端的可交互图层后，宿主再按事件
-    /// 类型（click/rollover/...）去它的 `event_handlers` 取处理器——并**不**分事件
-    /// 类型各做一次命中。
+    /// 返回最上层的潜在交互图层。完整事件派发使用 [`Self::hit_test_all`]：先取得
+    /// 同一点的全部潜在目标，再按 click/rollover 等事件类型过滤处理器，并由最上层
+    /// 对应处理器的 `penetration` 决定是否继续向下派发。
     ///
     /// 「可交互」需同时满足：visible != false、注册了至少一个事件处理器、且未被
     /// `clickablethreshold` 判为透明。`clickablethreshold` 是 Artemis 的指针命中
@@ -23,8 +52,8 @@ impl Compositor {
 
     /// 返回舞台坐标处所有可接收指针输入的图层 ID，按从上到下排序。
     ///
-    /// hover/rollout 需要这个集合：HENPRI 的 MW dock 同时依赖上层按钮和下层
-    /// `penetration=1` 判定层接收 rollover/rollout，单一最上层命中会漏掉下层热区。
+    /// hover/rollout 和 click 穿透需要这个集合。命中测试本身只做几何、可见性和
+    /// alpha 阈值判定；事件类型过滤及 `penetration` 链由输入派发层处理。
     pub fn hit_test_all(&self, x: f32, y: f32, provider: &mut dyn TextureProvider) -> Vec<String> {
         let mut hits = Vec::new();
         // `[lyprop id="!"]` 根图层属性同样作用于命中检测：整树隐藏时无命中，

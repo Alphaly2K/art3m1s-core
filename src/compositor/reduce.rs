@@ -1316,6 +1316,31 @@ mod tests {
     }
 
     #[test]
+    fn pointer_texture_revision_only_tracks_threshold_hit_layers() {
+        let mut c = Compositor::new();
+        c.apply_event(&create("dock", "dockarea"));
+        c.apply_event(&Event::Layer(LayerEvent::SetProperties {
+            id: "dock".into(),
+            properties: HashMap::from([("clickablethreshold".into(), "128".into())]),
+        }));
+        c.apply_event(&Event::LayerEventHandler {
+            id: "dock".into(),
+            event_type: "rollover".into(),
+            mode: String::new(),
+            file: None,
+            label: None,
+            call: false,
+            handler: Some("calllua".into()),
+            penetration: false,
+            extra_params: HashMap::new(),
+        });
+
+        let mut provider = AlphaProvider { alpha: 255 };
+        assert!(!c.pointer_hit_textures_changed(&HashSet::from([TextureId(2)]), &mut provider));
+        assert!(c.pointer_hit_textures_changed(&HashSet::from([TextureId(1)]), &mut provider));
+    }
+
+    #[test]
     fn hit_test_all_returns_overlapping_hover_layers_top_to_bottom() {
         let mut c = Compositor::new();
         c.apply_event(&create("1.0", "lower"));

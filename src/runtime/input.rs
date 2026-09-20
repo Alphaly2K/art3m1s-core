@@ -1,6 +1,6 @@
 use super::callbacks::{
-    OVERRIDE_IS_DECIDE, OVERRIDE_IS_DOWN, OVERRIDE_IS_DOWN_EDGE, OVERRIDE_IS_PUSH,
-    OVERRIDE_IS_UP_EDGE,
+    EffectiveInputFrame, OVERRIDE_IS_DECIDE, OVERRIDE_IS_DOWN, OVERRIDE_IS_DOWN_EDGE,
+    OVERRIDE_IS_PUSH, OVERRIDE_IS_UP_EDGE,
 };
 use super::{CoreRuntime, InlineEventFrame};
 use crate::compositor::Compositor;
@@ -59,7 +59,7 @@ impl CoreRuntime {
         }
     }
 
-    pub(super) fn process_pointer_handlers(&mut self) -> InputTick {
+    pub(super) fn process_pointer_handlers(&mut self) -> (InputTick, InputDispatchTrace) {
         self.refresh_inline_event_frame();
         let now = std::time::Instant::now();
         let (frame, raw_edges, raw_left_down, raw_left_up_edge) = {
@@ -85,12 +85,29 @@ impl CoreRuntime {
         let pointer_position = (frame.mouse_x, frame.mouse_y);
         let pointer_moved = self.last_pointer_hit_position != Some(pointer_position);
         let texture_revision = self.gpu.texture_content_revision();
+        // Keep pointer ownership sticky while the pointer is stationary over an
+        // already-hovered layer. Rollover handlers commonly swap the same
+        // clickable sprite atlas cell; letting that upload invalidate alpha
+        // hit-testing turns the normal rollover update into:
+        // rollover -> clip/texture upload -> hit-test -> rollout/rollover ...
+        // A new texture may reveal a target when there is no current hover, but
+        // an existing hover is re-evaluated only by motion, a button edge, or
+        // an explicit scene/geometry invalidation.
+        let relevant_texture_changed = self.hovered_layers.is_empty()
+            && if self.last_pointer_hit_texture_revision != texture_revision {
+                let changed = self
+                    .gpu
+                    .changed_texture_ids_since(self.last_pointer_hit_texture_revision);
+                self.compositor
+                    .pointer_hit_textures_changed(&changed, &mut *self.gpu)
+            } else {
+                false
+            };
         let refresh_pointer_hit_test = pointer_hit_test_required(
             self.last_pointer_hit_position,
             pointer_position,
             self.pointer_hit_test_dirty,
-            self.last_pointer_hit_texture_revision,
-            texture_revision,
+            relevant_texture_changed,
             left_down_edge || left_up_edge,
         );
         self.frame_visual_dirty |= left_down_edge
@@ -114,7 +131,13 @@ impl CoreRuntime {
         // （右键恢复走下方 trigger_rclick 的隐藏分支。）
         if self.hide_active() && left_down_edge {
             self.exit_hide_mode();
-            return InputTick::default();
+            return (
+                InputTick::default(),
+                InputDispatchTrace {
+                    effective: frame,
+                    ..Default::default()
+                },
+            );
         }
 
         // 文本内联链接（[link]）：鼠标移动刷新 hover 强调；点击命中链接则以其
@@ -123,15 +146,26 @@ impl CoreRuntime {
             self.frame_visual_dirty |= self.update_link_hover(mouse_x, mouse_y);
         }
         if left_down_edge && self.handle_link_click(mouse_x, mouse_y) {
-            return InputTick::default();
+            return (
+                InputTick::default(),
+                InputDispatchTrace {
+                    effective: frame,
+                    ..Default::default()
+                },
+            );
         }
 
         let hit_layers = if refresh_pointer_hit_test {
             self.last_pointer_hit_position = Some(pointer_position);
-            self.last_pointer_hit_texture_revision = texture_revision;
             self.pointer_hit_test_dirty = false;
-            self.compositor
-                .hit_test_all(mouse_x, mouse_y, &mut *self.gpu)
+            let hits = self
+                .compositor
+                .hit_test_all(mouse_x, mouse_y, &mut *self.gpu);
+            // resolve()/pixel sampling may upload a texture. Consume the
+            // revision produced by this hit test so it cannot immediately
+            // schedule an identical second test on the next frame.
+            self.last_pointer_hit_texture_revision = self.gpu.texture_content_revision();
+            hits
         } else {
             Vec::new()
         };
@@ -175,6 +209,7 @@ impl CoreRuntime {
 
         let mut handled_by_layer = false;
         let mut handled_by_drag = false;
+        let mut layer_outcome = None;
         let click_dispatch = if left_down_edge {
             event_dispatch_layers(&self.compositor, &hit_layers, "click")
         } else {
@@ -196,6 +231,7 @@ impl CoreRuntime {
                         &[("click", "1")],
                     );
                     handled_by_layer |= dispatch.handled;
+                    layer_outcome = Some(dispatch.outcome);
                     needs_inline_event_frame |= dispatch.needs_return_frame;
                 }
             }
@@ -274,18 +310,52 @@ impl CoreRuntime {
         }
 
         if left_down_edge {
+            let queue_tags = self
+                .interpreter
+                .engine_context()
+                .lock()
+                .unwrap()
+                .tag_queue
+                .iter()
+                .map(|(tag, params)| {
+                    params
+                        .get("function")
+                        .map(|function| format!("{tag}:{function}"))
+                        .unwrap_or_else(|| tag.clone())
+                })
+                .collect::<Vec<_>>();
+            let queue_len = queue_tags.len();
             crate::core_debug!(
-                "[input] left-down wait={:?} top={:?} click_layers={:?} layer={} push={:?} drag={} tick={:?}",
+                "[input] left-down wait={:?} pc={:?}:{} pos=({}, {}) effective={:?} hits={:?} top={:?} click_layers={:?} layer={} push={:?} drag={} queue={} tags={:?} inline={} tick={:?}",
                 self.wait_reason,
+                self.interpreter.current_script(),
+                self.interpreter.current_line(),
+                frame.mouse_x,
+                frame.mouse_y,
+                frame.keys,
+                hit_layers,
                 top_hover,
                 click_dispatch,
                 handled_by_layer,
                 left_push_outcome,
                 handled_by_drag,
+                queue_len,
+                queue_tags,
+                self.active_inline_event_frame.is_some(),
                 tick
             );
         }
-        tick
+        let default_role_allowed = left_push_outcome.allows_default_role() && !pointer_claimed;
+        (
+            tick,
+            InputDispatchTrace {
+                effective: frame,
+                pointer_target: top_hover,
+                layer_outcome,
+                push_outcome: left_push_outcome,
+                default_role_allowed,
+            },
+        )
     }
 
     pub(super) fn clear_input_edges(&self) {
@@ -531,13 +601,12 @@ fn pointer_hit_test_required(
     previous_position: Option<(i32, i32)>,
     current_position: (i32, i32),
     scene_dirty: bool,
-    previous_texture_revision: u64,
-    current_texture_revision: u64,
+    relevant_texture_changed: bool,
     button_edge: bool,
 ) -> bool {
     scene_dirty
         || previous_position != Some(current_position)
-        || previous_texture_revision != current_texture_revision
+        || relevant_texture_changed
         || button_edge
 }
 
@@ -559,6 +628,15 @@ pub(super) struct InputTick {
     pub physical_click: bool,
 }
 
+#[derive(Clone, Debug, Default)]
+pub(super) struct InputDispatchTrace {
+    pub effective: EffectiveInputFrame,
+    pub pointer_target: Option<String>,
+    pub layer_outcome: Option<DispatchOutcome>,
+    pub push_outcome: DispatchOutcome,
+    pub default_role_allowed: bool,
+}
+
 impl InputTick {
     fn merge_key_role(&mut self, advance: bool, has_raw_edge: bool) {
         if !advance {
@@ -573,7 +651,7 @@ impl InputTick {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum DispatchOutcome {
+pub(super) enum DispatchOutcome {
     #[default]
     NotRegistered,
     Delivered,
@@ -671,22 +749,37 @@ fn has_drag_handler(compositor: &Compositor, layer_id: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Artemis only dispatches an overlapping pointer event to the top hit layer
-/// and lower handlers that explicitly opt into `penetration`. Penetrating
-/// handlers run from bottom to top.
+/// Artemis dispatches an overlapping pointer event to the top handler first.
+/// That handler's `penetration=1` allows dispatch to continue to the next
+/// lower handler; the chain stops at the first non-penetrating handler.
+/// A penetrating chain runs from bottom to top.
 fn event_dispatch_layers(
     compositor: &Compositor,
     hit_layers: &[String],
     event_type: &str,
 ) -> Vec<String> {
-    let mut layers = hit_layers
+    // hit_test_all includes layers that are interactive for *some* pointer
+    // event. A full-screen drag/rollover mask may therefore be above a button
+    // while having no click handler of its own. Build the chain only from
+    // enabled handlers for this event, then let each upper handler decide
+    // whether dispatch may continue below it. The lyevent documentation says
+    // `penetration=1` executes handlers on layers *below that handler*; it is
+    // not an opt-in bit belonging to the lower layer.
+    let handlers = hit_layers
         .iter()
-        .enumerate()
-        .filter_map(|(index, id)| {
+        .filter_map(|id| {
             let handler = compositor.scene().get(id)?.event_handlers.get(event_type)?;
-            (handler.enabled && (index == 0 || handler.penetration)).then(|| id.clone())
+            handler.enabled.then(|| (id.clone(), handler.penetration))
         })
         .collect::<Vec<_>>();
+
+    let mut layers = Vec::new();
+    for (id, penetration) in handlers {
+        layers.push(id);
+        if !penetration {
+            break;
+        }
+    }
     layers.reverse();
     layers
 }
@@ -694,7 +787,8 @@ fn event_dispatch_layers(
 #[cfg(test)]
 mod tests {
     use super::super::callbacks::{
-        OVERRIDE_IS_DECIDE, OVERRIDE_IS_DOWN, OVERRIDE_IS_DOWN_EDGE, OVERRIDE_IS_PUSH,
+        InputSnapshot, OVERRIDE_IS_DECIDE, OVERRIDE_IS_DOWN, OVERRIDE_IS_DOWN_EDGE,
+        OVERRIDE_IS_PUSH,
     };
     use super::{
         DispatchOutcome, InlineEventFrame, dispatch_handler, enqueue_handler_tags,
@@ -793,46 +887,131 @@ mod tests {
     }
 
     #[test]
+    fn artemis_dummy_decide_fixture_covers_filter_and_handler_outcomes() {
+        fn run_case(filter: i32, accept: bool) -> (DispatchOutcome, i32, bool) {
+            let mut interpreter = Interpreter::new(InterpreterConfig::default());
+            interpreter
+                .lua()
+                .load(
+                    r#"
+                    handler_calls = 0
+                    dummy = 0
+                    function push_handler(e, p)
+                        handler_calls = handler_calls + 1
+                        if accept_click then dummy = 1 end
+                    end
+                    __engine:setEventFilter(function(e, name, p)
+                        return filter_verdict
+                    end)
+                    "#,
+                )
+                .exec()
+                .unwrap();
+            interpreter
+                .lua()
+                .globals()
+                .set("filter_verdict", filter)
+                .unwrap();
+            interpreter
+                .lua()
+                .globals()
+                .set("accept_click", accept)
+                .unwrap();
+
+            let mut compositor = Compositor::new();
+            compositor.apply_event(&Event::SetEventHandler {
+                event_name: "push".into(),
+                file: None,
+                label: None,
+                call: false,
+                handler: Some("calllua".into()),
+                extra_params: HashMap::from([
+                    ("key".into(), "1".into()),
+                    ("function".into(), "push_handler".into()),
+                ]),
+            });
+
+            let dispatch = enqueue_input_handler(
+                &interpreter,
+                &compositor,
+                "push",
+                "1",
+                &[("key", "1"), ("type", "click")],
+            );
+            interpreter.flush_pending_tags().unwrap();
+            let handler_calls = interpreter
+                .lua()
+                .globals()
+                .get::<i32>("handler_calls")
+                .unwrap();
+            let dummy = interpreter.lua().globals().get::<i32>("dummy").unwrap();
+
+            // Minimal onEnterFrame fixture: accepted Lua state becomes
+            // overrideKey(dummy=124, DECIDE), which role 0 consumes once.
+            let mut input = InputSnapshot::default();
+            if dummy != 0 {
+                input.key_overrides.insert(124, OVERRIDE_IS_DECIDE);
+            }
+            let effective = input.effective_frame(std::time::Instant::now());
+            let role0_advance = effective.has(124, OVERRIDE_IS_DECIDE);
+            input.clear_edges();
+            assert!(
+                !input
+                    .effective_frame(std::time::Instant::now())
+                    .has(124, OVERRIDE_IS_DECIDE)
+            );
+
+            (dispatch.outcome, handler_calls, role0_advance)
+        }
+
+        assert_eq!(run_case(0, false), (DispatchOutcome::Delivered, 1, false));
+        assert_eq!(run_case(0, true), (DispatchOutcome::Delivered, 1, true));
+        assert_eq!(
+            run_case(1, true),
+            (DispatchOutcome::SuppressedSuccess, 0, false)
+        );
+        assert_eq!(
+            run_case(2, true),
+            (DispatchOutcome::SuppressedFailure, 0, false)
+        );
+    }
+
+    #[test]
     fn stationary_pointer_reuses_hit_test_until_an_input_changes() {
         let position = (640, 360);
         assert!(!pointer_hit_test_required(
             Some(position),
             position,
             false,
-            7,
-            7,
+            false,
             false
         ));
         assert!(pointer_hit_test_required(
             Some(position),
             (641, 360),
             false,
-            7,
-            7,
+            false,
             false
         ));
         assert!(pointer_hit_test_required(
             Some(position),
             position,
             true,
-            7,
-            7,
+            false,
             false
         ));
         assert!(pointer_hit_test_required(
             Some(position),
             position,
             false,
-            7,
-            8,
+            true,
             false
         ));
         assert!(pointer_hit_test_required(
             Some(position),
             position,
             false,
-            7,
-            7,
+            false,
             true
         ));
     }
@@ -987,7 +1166,7 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_events_only_include_penetrating_lower_layers_bottom_to_top() {
+    fn upper_handler_controls_penetration_and_dispatches_bottom_to_top() {
         let mut compositor = Compositor::new();
         for (id, penetration) in [("lower", true), ("middle", false), ("top", false)] {
             compositor.apply_event(&Event::LayerEventHandler {
@@ -1006,7 +1185,75 @@ mod tests {
         let hits = vec!["top".into(), "middle".into(), "lower".into()];
         assert_eq!(
             event_dispatch_layers(&compositor, &hits, "click"),
-            vec!["lower".to_string(), "top".to_string()]
+            vec!["top".to_string()]
+        );
+
+        compositor.apply_event(&Event::LayerEventHandler {
+            id: "top".into(),
+            event_type: "click".into(),
+            mode: "init".into(),
+            file: None,
+            label: None,
+            call: false,
+            handler: Some("calllua".into()),
+            penetration: true,
+            extra_params: HashMap::new(),
+        });
+        assert_eq!(
+            event_dispatch_layers(&compositor, &hits, "click"),
+            vec!["middle".to_string(), "top".to_string()]
+        );
+
+        // The middle handler stops traversal even though the lower handler
+        // has penetration enabled. A lower handler cannot punch through an
+        // opaque handler above itself.
+        compositor.apply_event(&Event::LayerEventHandler {
+            id: "middle".into(),
+            event_type: "click".into(),
+            mode: "init".into(),
+            file: None,
+            label: None,
+            call: false,
+            handler: Some("calllua".into()),
+            penetration: true,
+            extra_params: HashMap::new(),
+        });
+        assert_eq!(
+            event_dispatch_layers(&compositor, &hits, "click"),
+            vec!["lower".to_string(), "middle".to_string(), "top".to_string()]
+        );
+    }
+
+    #[test]
+    fn non_clickable_top_hit_does_not_hide_lower_click_handler() {
+        let mut compositor = Compositor::new();
+        compositor.apply_event(&Event::LayerEventHandler {
+            id: "mask".into(),
+            event_type: "rollover".into(),
+            mode: "init".into(),
+            file: None,
+            label: None,
+            call: false,
+            handler: Some("calllua".into()),
+            penetration: false,
+            extra_params: HashMap::new(),
+        });
+        compositor.apply_event(&Event::LayerEventHandler {
+            id: "button".into(),
+            event_type: "click".into(),
+            mode: "init".into(),
+            file: None,
+            label: None,
+            call: false,
+            handler: Some("calllua".into()),
+            penetration: false,
+            extra_params: HashMap::new(),
+        });
+
+        let hits = vec!["mask".into(), "button".into()];
+        assert_eq!(
+            event_dispatch_layers(&compositor, &hits, "click"),
+            vec!["button".to_string()]
         );
     }
 
