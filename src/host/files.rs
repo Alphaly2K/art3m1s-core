@@ -301,6 +301,28 @@ fn is_archive_candidate(name: &str) -> bool {
     suffix.len() == 3 && suffix.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+fn archive_entry_names(archive: &PfsArchive) -> Vec<String> {
+    let mut names: Vec<String> = archive
+        .entries()
+        .map(|entry| entry.path().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+fn select_pfs_archive_encoding(requested: PfsArchive, utf8: PfsArchive) -> PfsArchive {
+    let requested_names = archive_entry_names(&requested);
+    let utf8_names = archive_entry_names(&utf8);
+    // Prefer UTF-8 only when it actually yields different names and those
+    // names are well-formed. Real Shift_JIS Japanese typically produces
+    // U+FFFD under UTF-8, so those volumes keep the requested charset.
+    if requested_names != utf8_names && utf8_names.iter().all(|name| !name.contains('\u{FFFD}')) {
+        utf8
+    } else {
+        requested
+    }
+}
+
 fn mount_pfs_files(path: &Path, encoding: &str) -> Result<HostFiles, String> {
     let parent = path
         .parent()
@@ -337,17 +359,31 @@ fn mount_pfs_files(path: &Path, encoding: &str) -> Result<HostFiles, String> {
     // archive index rather than recursively indexing the whole volume.
     files.directory = Some(parent.to_path_buf());
     let requested = path.to_path_buf();
+    let requested_is_utf8 = encoding == UTF_8;
     for candidate in candidates {
-        match PfsArchive::open_with_encoding(&candidate, encoding) {
-            Ok(archive) => files.archives.push(archive),
-            Err(error) if candidate == requested => {
+        // Patch volumes are standalone archives, not extra bytes of the base
+        // split. Open each sibling on its own, and keep a UTF-8 decode when
+        // the game charset would otherwise mojibake UTF-8 patch names.
+        let requested_archive = PfsArchive::open_with_encoding(&candidate, encoding);
+        let utf8_archive = if requested_is_utf8 {
+            None
+        } else {
+            PfsArchive::open_with_encoding(&candidate, UTF_8).ok()
+        };
+        let archive = match (requested_archive, utf8_archive) {
+            (Ok(archive), _) if requested_is_utf8 => Some(archive),
+            (Ok(requested_archive), Some(utf8_archive)) => {
+                Some(select_pfs_archive_encoding(requested_archive, utf8_archive))
+            }
+            (Ok(archive), None) => Some(archive),
+            (Err(_), Some(utf8_archive)) => Some(utf8_archive),
+            (Err(error), None) if candidate == requested => {
                 return Err(format!("open {}: {error}", candidate.display()));
             }
-            Err(_) => {
-                // Sibling `.pfs.NNN` files include split volumes and unrelated
-                // files with the same extension. The old host attempted each
-                // archive independently and ignored invalid candidates.
-            }
+            (Err(_), None) => None,
+        };
+        if let Some(archive) = archive {
+            files.archives.push(archive);
         }
     }
     if files.archives.is_empty() {
@@ -847,6 +883,84 @@ mod tests {
 
         resources.clear();
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pfs_mount_prefers_utf8_patch_names_when_game_charset_is_shift_jis() {
+        let root =
+            std::env::temp_dir().join(format!("art3m1s-host-pfs-mixed-enc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let archive = root.join("game.pfs");
+        fs::write(
+            &archive,
+            build_pf6(&[(b"system.ini", b"[WINDOWS]\r\nCHARSET=Shift_JIS\r\n")]),
+        )
+        .unwrap();
+        fs::write(
+            root.join("game.pfs.000"),
+            build_pf6(&[("sound/se/seスマホ着信音2.ogg".as_bytes(), b"utf8-se")]),
+        )
+        .unwrap();
+        fs::write(
+            root.join("game.pfs.001"),
+            build_pf6(&[(b"sound/vo/hiy/fem_hiy_00001.ogg", b"ascii-vo")]),
+        )
+        .unwrap();
+
+        let (sjis_name, _, _) = SHIFT_JIS.encode("sound/se/se着信音.ogg");
+        let sjis_name = sjis_name.into_owned();
+        fs::write(
+            root.join("game.pfs.002"),
+            build_pf6(&[(sjis_name.as_slice(), b"sjis-se")]),
+        )
+        .unwrap();
+
+        let resources = HostResources::new();
+        resources.mount_pfs(&archive, "Shift_JIS").unwrap();
+        assert_eq!(
+            resources.read_file("sound/se/seスマホ着信音2.ogg").unwrap(),
+            b"utf8-se"
+        );
+        assert_eq!(
+            resources
+                .read_file("sound/vo/hiy/fem_hiy_00001.ogg")
+                .unwrap(),
+            b"ascii-vo"
+        );
+        assert_eq!(
+            resources.read_file("sound/se/se着信音.ogg").unwrap(),
+            b"sjis-se"
+        );
+
+        resources.clear();
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pfs_mount_reads_hamidashi_utf8_patch_media_if_present() {
+        let archive = Path::new("/Volumes/ARCH/LFPM/hamidashi.pfs");
+        if !archive.is_file() {
+            return;
+        }
+        let resources = HostResources::new();
+        resources.mount_pfs(archive, "Shift_JIS").unwrap();
+        assert!(
+            resources
+                .query_size("sound/se/seスマホ着信音2.ogg")
+                .unwrap()
+                .is_some(),
+            "utf-8 patch SE should be readable under a Shift_JIS mount"
+        );
+        assert!(
+            resources
+                .query_size("sound/vo/hiy/fem_hiy_00001.ogg")
+                .unwrap()
+                .is_some(),
+            "utf-8 patch VO should be readable under a Shift_JIS mount"
+        );
+        resources.clear();
     }
 
     #[test]
