@@ -9,6 +9,12 @@ fn main() {
     println!("cargo:rerun-if-env-changed=KRKRSDL3_SOURCE_DIR");
     println!("cargo:rerun-if-env-changed=KRKRSDL3_BUILD_DIR");
     println!("cargo:rerun-if-env-changed=ART3M1S_KRKR_REQUIRE_UPSTREAM");
+    println!("cargo:rerun-if-env-changed=ANDROID_NDK_HOME");
+    println!("cargo:rerun-if-env-changed=ANDROID_NDK_ROOT");
+    println!("cargo:rerun-if-env-changed=ANDROID_NDK");
+    println!("cargo:rerun-if-env-changed=NDK_HOME");
+    println!("cargo:rerun-if-env-changed=CARGO_NDK_ANDROID_PLATFORM");
+    println!("cargo:rerun-if-env-changed=CARGO_NDK_SYSROOT_PATH");
 
     let bootstrap = env::var_os("CARGO_FEATURE_NATIVE_BOOTSTRAP").is_some();
     let upstream_feature = env::var_os("CARGO_FEATURE_NATIVE_UPSTREAM").is_some();
@@ -147,6 +153,24 @@ fn main() {
                 configure.arg(format!("-DCMAKE_OSX_SYSROOT={sdkroot}"));
             }
         }
+        "android" => {
+            // The real Android runtime follows krkrsdl3_build's Gradle/vcpkg
+            // pipeline. The macOS-only upstream guard above means this branch
+            // currently cross-compiles only the small ABI bootstrap shim.
+            let ndk_root = android_ndk_root().unwrap_or_else(|| {
+                panic!(
+                    "Android NDK not found; set ANDROID_NDK_HOME/ANDROID_NDK_ROOT or build with cargo-ndk"
+                )
+            });
+            let toolchain = ndk_root.join("build/cmake/android.toolchain.cmake");
+            let abi = android_abi(&target_arch_value);
+            let platform = android_platform();
+            configure
+                .arg(format!("-DCMAKE_TOOLCHAIN_FILE={}", toolchain.display()))
+                .arg(format!("-DANDROID_ABI={abi}"))
+                .arg(format!("-DANDROID_PLATFORM={platform}"))
+                .arg("-DANDROID_STL=c++_shared");
+        }
         _ => {}
     }
 
@@ -171,6 +195,53 @@ fn main() {
     if matches!(target_os.as_str(), "macos" | "ios" | "linux" | "android") {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{}", out_dir.display());
     }
+}
+
+fn android_abi(target_arch: &str) -> &'static str {
+    match target_arch {
+        "aarch64" => "arm64-v8a",
+        "arm" => "armeabi-v7a",
+        "x86" => "x86",
+        "x86_64" => "x86_64",
+        arch => panic!("unsupported Android target architecture: {arch}"),
+    }
+}
+
+fn android_platform() -> String {
+    let platform = env::var("CARGO_NDK_ANDROID_PLATFORM").unwrap_or_else(|_| "21".to_string());
+    if platform.starts_with("android-") {
+        platform
+    } else {
+        format!("android-{platform}")
+    }
+}
+
+fn android_ndk_root() -> Option<PathBuf> {
+    for name in [
+        "ANDROID_NDK_HOME",
+        "ANDROID_NDK_ROOT",
+        "ANDROID_NDK",
+        "NDK_HOME",
+    ] {
+        if let Some(root) = env::var_os(name).map(PathBuf::from)
+            && is_android_ndk_root(&root)
+        {
+            return Some(root);
+        }
+    }
+
+    // cargo-ndk always exposes its selected sysroot to build scripts. Walking
+    // upwards also works when it discovered the NDK through the Android SDK
+    // instead of one of the conventional NDK environment variables.
+    let sysroot = env::var_os("CARGO_NDK_SYSROOT_PATH").map(PathBuf::from)?;
+    sysroot
+        .ancestors()
+        .find(|candidate| is_android_ndk_root(candidate))
+        .map(PathBuf::from)
+}
+
+fn is_android_ndk_root(path: &std::path::Path) -> bool {
+    path.join("build/cmake/android.toolchain.cmake").is_file()
 }
 
 fn apple_sdk_path(sdk: &str) -> Option<String> {
