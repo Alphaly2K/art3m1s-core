@@ -1,4 +1,5 @@
 use art3m1s_core::{
+    backend::BackendSelection,
     backend::gl::platform::{AngleBackend, GfxBackend},
     ffi, host_events,
     host_files::HostResources,
@@ -73,6 +74,7 @@ fn paced_tick(rt: &mut CoreRuntime, count: usize, pixels: &mut Vec<u8>) {
     for _ in 0..count {
         let started = Instant::now();
         rt.advance_and_render_into(17, pixels);
+        drain_host_events();
         std::thread::sleep(frame_time.saturating_sub(started.elapsed()));
     }
 }
@@ -129,11 +131,14 @@ fn main() {
     }
     let ini = resources.read_file("system.ini").unwrap();
     let backend = match std::env::var("ART3M1S_PROBE_BACKEND").as_deref() {
-        Ok("angle-metal") => GfxBackend::Angle(AngleBackend::Metal),
-        Ok("angle-vulkan") => GfxBackend::Angle(AngleBackend::Vulkan),
-        Ok("angle-opengl") => GfxBackend::Angle(AngleBackend::OpenGL),
-        Ok("angle-d3d11") => GfxBackend::Angle(AngleBackend::D3D11),
-        _ => GfxBackend::Cgl,
+        Ok("native") => BackendSelection::PlatformDefault,
+        #[cfg(all(feature = "metal-backend", target_os = "macos"))]
+        Ok("native-metal") => BackendSelection::NativeMetal,
+        Ok("angle-metal") => GfxBackend::Angle(AngleBackend::Metal).into(),
+        Ok("angle-vulkan") => GfxBackend::Angle(AngleBackend::Vulkan).into(),
+        Ok("angle-opengl") => GfxBackend::Angle(AngleBackend::OpenGL).into(),
+        Ok("angle-d3d11") => GfxBackend::Angle(AngleBackend::D3D11).into(),
+        _ => GfxBackend::Cgl.into(),
     };
     let mut rt = CoreRuntime::create(1280, 720, backend).unwrap();
     rt.set_resources(resources.clone());
@@ -171,6 +176,8 @@ fn main() {
                 ["dialog", accepted] => {
                     rt.submit_dialog_response(*accepted == "1", None);
                 }
+                ["video-finished"] => rt.notify_video_finished(None),
+                ["video-finished", id] => rt.notify_video_finished(Some(id)),
                 ["quit"] => break,
                 _ => println!("UNKNOWN {line}"),
             }
