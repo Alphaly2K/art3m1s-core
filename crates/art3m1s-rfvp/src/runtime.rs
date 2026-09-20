@@ -252,7 +252,9 @@ impl ExternalRenderer {
             self.backend.clear(self.clear_color);
         }
         let region = match (damage, self.damage_visualization) {
-            (Some(rect), true) => self.backend.render_damage_visualized(&adapted.draw_list, rect),
+            (Some(rect), true) => self
+                .backend
+                .render_damage_visualized(&adapted.draw_list, rect),
             (Some(rect), false) => self.backend.render_damage(&adapted.draw_list, rect),
             (None, true) => self.backend.render_visualized(&adapted.draw_list),
             (None, false) => self.backend.render(&adapted.draw_list),
@@ -472,12 +474,7 @@ impl ExternalRenderer {
     fn stage_extent(&self) -> (u32, u32) {
         self.backend
             .render_dimensions()
-            .map(|dimensions| {
-                (
-                    dimensions.render_size.width,
-                    dimensions.render_size.height,
-                )
-            })
+            .map(|dimensions| (dimensions.render_size.width, dimensions.render_size.height))
             .unwrap_or((0, 0))
     }
 }
@@ -540,7 +537,12 @@ fn hash_f32_slice(hasher: &mut impl Hasher, values: &[f32]) {
 /// `clip_bounds` when present.
 fn command_bbox(command: &DrawCommand) -> [f32; 4] {
     let (mut x0, mut y0, mut x1, mut y1) = if let Some(mesh) = &command.mesh {
-        let mut bounds = (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+        let mut bounds = (
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        );
         for vertex in mesh.vertices.iter() {
             bounds.0 = bounds.0.min(vertex[0]);
             bounds.1 = bounds.1.min(vertex[1]);
@@ -556,7 +558,12 @@ fn command_bbox(command: &DrawCommand) -> [f32; 4] {
             glam::Vec2::new(0.0, height),
             glam::Vec2::new(width, height),
         ];
-        let mut bounds = (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+        let mut bounds = (
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        );
         for corner in corners {
             let point = command.transform.transform_point2(corner);
             bounds.0 = bounds.0.min(point.x);

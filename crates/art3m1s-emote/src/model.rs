@@ -349,7 +349,13 @@ fn parse_controls(
             })
         })
         .collect();
-    (timelines, variables, selectors, eye_controls, clamp_controls)
+    (
+        timelines,
+        variables,
+        selectors,
+        eye_controls,
+        clamp_controls,
+    )
 }
 
 fn number(value: &PsbValue) -> Option<f32> {

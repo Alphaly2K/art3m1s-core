@@ -31,6 +31,7 @@ mod project;
 mod render;
 mod save_io;
 mod script;
+mod telemetry;
 mod text;
 
 #[derive(Default)]
@@ -500,7 +501,47 @@ impl CoreRuntime {
                 crate::core_error!("onEnterFrame 错误: {e:?}");
             }
         }
-        let tick = self.process_pointer_handlers();
+        let trace_input = crate::runtime::telemetry::input_telemetry_enabled();
+        let telemetry_before = trace_input.then(|| {
+            let now = std::time::Instant::now();
+            let raw = {
+                let input = self.input.lock().unwrap();
+                crate::runtime::telemetry::capture_raw_input_state(&input, now)
+            };
+            let script = self
+                .interpreter
+                .current_script()
+                .map(|file| (file.to_string(), self.interpreter.current_line()));
+            let queue_len = self
+                .interpreter
+                .engine_context()
+                .lock()
+                .unwrap()
+                .tag_queue
+                .len();
+            let (overrides, override_all) = {
+                let input = self.input.lock().unwrap();
+                (
+                    input
+                        .key_overrides
+                        .iter()
+                        .map(|(key, bits)| (*key, *bits))
+                        .collect(),
+                    input.override_all_keys,
+                )
+            };
+            (
+                raw,
+                overrides,
+                override_all,
+                self.wait_reason.clone(),
+                script,
+                queue_len,
+            )
+        });
+        let (tick, input_trace) = self.process_pointer_handlers();
+        let tick_advance = tick.advance;
+        let tick_user_input = tick.user_input;
         profile.input_ns = crate::profiler::FrameProfile::elapsed(input_started);
 
         let interpreter_started = profile.mark();
@@ -508,6 +549,41 @@ impl CoreRuntime {
         self.advance_script(tick, delta_ms, profile);
         profile.interpreter_ns = crate::profiler::FrameProfile::elapsed(interpreter_started)
             .saturating_sub(profile.events_ns - events_before);
+
+        if let Some((raw, overrides, override_all, wait_before, script_before, queue_len_before)) =
+            telemetry_before
+        {
+            let script_after = self
+                .interpreter
+                .current_script()
+                .map(|file| (file.to_string(), self.interpreter.current_line()));
+            let queue_len_after = self
+                .interpreter
+                .engine_context()
+                .lock()
+                .unwrap()
+                .tag_queue
+                .len();
+            crate::runtime::telemetry::InputTelemetry {
+                raw,
+                overrides,
+                override_all,
+                effective: input_trace.effective,
+                pointer_target: input_trace.pointer_target,
+                layer_outcome: input_trace.layer_outcome,
+                push_outcome: input_trace.push_outcome,
+                default_role_allowed: input_trace.default_role_allowed,
+                user_input: tick_user_input,
+                advance: tick_advance,
+                wait_before,
+                wait_after: self.wait_reason.clone(),
+                script_before,
+                script_after,
+                queue_len_before,
+                queue_len_after,
+            }
+            .emit();
+        }
 
         self.flush_host_events(profile);
         let event_post_started = profile.mark();

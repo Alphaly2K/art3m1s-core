@@ -81,8 +81,7 @@ impl Pf8Reader {
         reader.seek(SeekFrom::Start(0))?;
         reader.read_exact(&mut index_buffer)?;
 
-        let (raw_entries, format) =
-            format::parse_entries_with_encoding(&index_buffer, encoding)?;
+        let (raw_entries, format) = format::parse_entries_with_encoding(&index_buffer, encoding)?;
 
         // Generate encryption key only for PF8 format
         let encryption_key = match format {
@@ -178,8 +177,7 @@ impl Pf8Reader {
             return Ok(0);
         }
         let to_read = (buf.len() as u64).min(file_size - offset) as usize;
-        self.reader
-            .seek(SeekFrom::Start(start_offset + offset))?;
+        self.reader.seek(SeekFrom::Start(start_offset + offset))?;
         self.reader.read_exact(&mut buf[..to_read])?;
         if is_encrypted {
             if let Some(key) = self.encryption_key.as_deref() {

@@ -293,7 +293,7 @@ fn main() -> Result<()> {
         stage_size.1,
         image::ColorType::Rgba8,
     )
-        .with_context(|| format!("save screenshot {}", output.display()))?;
+    .with_context(|| format!("save screenshot {}", output.display()))?;
     if profiler_enabled {
         println!("profiler={}", runtime.profiler_snapshot_json());
     }

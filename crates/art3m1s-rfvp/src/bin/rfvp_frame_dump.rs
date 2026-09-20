@@ -17,8 +17,8 @@ use rfvp::host_abi::runtime::{
     rfvp_runtime_create, rfvp_runtime_destroy, rfvp_runtime_push_input, rfvp_runtime_step,
 };
 use rfvp::host_abi::v1::{
-    RFVP_INPUT_FOCUS, RFVP_INPUT_POINTER_BUTTON, RFVP_INPUT_POINTER_MOVE, RFVP_INPUT_PHASE_DOWN,
-    RFVP_INPUT_PHASE_MOVE, RFVP_INPUT_PHASE_UP, RFVP_NLS_SHIFT_JIS, RFVP_POINTER_LEFT,
+    RFVP_INPUT_FOCUS, RFVP_INPUT_PHASE_DOWN, RFVP_INPUT_PHASE_MOVE, RFVP_INPUT_PHASE_UP,
+    RFVP_INPUT_POINTER_BUTTON, RFVP_INPUT_POINTER_MOVE, RFVP_NLS_SHIFT_JIS, RFVP_POINTER_LEFT,
     RFVP_STATUS_NO_FRAME, RFVP_STATUS_OK, RfvpInputEventV1, RfvpResourcesConfigV1,
     RfvpRuntimeConfigV1,
 };
@@ -104,9 +104,8 @@ fn main() -> Result<()> {
     if status != RFVP_STATUS_OK {
         bail!("resources_create status={status}");
     }
-    let status = unsafe {
-        rfvp_resources_mount_directory(resources, game_root.as_ptr(), game_root.len())
-    };
+    let status =
+        unsafe { rfvp_resources_mount_directory(resources, game_root.as_ptr(), game_root.len()) };
     if status != RFVP_STATUS_OK {
         bail!("mount_directory status={status}");
     }
@@ -138,7 +137,12 @@ fn main() -> Result<()> {
                 unsafe { rfvp_runtime_push_input(runtime, events.as_ptr(), events.len()) };
             }
             if frame == click_frame.saturating_add(2) {
-                let events = [input(RFVP_INPUT_POINTER_BUTTON, RFVP_INPUT_PHASE_UP, *x, *y)];
+                let events = [input(
+                    RFVP_INPUT_POINTER_BUTTON,
+                    RFVP_INPUT_PHASE_UP,
+                    *x,
+                    *y,
+                )];
                 unsafe { rfvp_runtime_push_input(runtime, events.as_ptr(), events.len()) };
             }
         }
@@ -164,7 +168,11 @@ fn main() -> Result<()> {
         let commands = unsafe { std::slice::from_raw_parts(commands_ptr, command_count) };
         let textures = unsafe { std::slice::from_raw_parts(textures_ptr, texture_count) };
 
-        println!("frame={frame} draws={} textures={}", commands.len(), textures.len());
+        println!(
+            "frame={frame} draws={} textures={}",
+            commands.len(),
+            textures.len()
+        );
         if let Some(want_id) = dump_texture {
             for texture in textures {
                 if texture.texture_id == want_id
@@ -175,11 +183,11 @@ fn main() -> Result<()> {
                     let pixels = unsafe {
                         std::slice::from_raw_parts(texture.pixels, texture.pixels_size).to_vec()
                     };
-                    let nonzero_a = pixels
-                        .chunks_exact(4)
-                        .filter(|pixel| pixel[3] != 0)
-                        .count();
-                    if saved_texture.as_ref().is_none_or(|(best, ..)| nonzero_a > *best) {
+                    let nonzero_a = pixels.chunks_exact(4).filter(|pixel| pixel[3] != 0).count();
+                    if saved_texture
+                        .as_ref()
+                        .is_none_or(|(best, ..)| nonzero_a > *best)
+                    {
                         saved_texture =
                             Some((nonzero_a, frame, texture.width, texture.height, pixels));
                     }
@@ -272,15 +280,11 @@ fn main() -> Result<()> {
     }
     if let Some((nonzero_a, frame, width, height, pixels)) = saved_texture {
         let path = format!("/tmp/rfvp_dump_texture_{}.png", dump_texture.unwrap_or(0));
-        image::save_buffer(
-            &path,
-            &pixels,
-            width,
-            height,
-            image::ColorType::Rgba8,
-        )
-        .with_context(|| format!("save texture dump {path}"))?;
-        println!("saved texture dump {path} ({width}x{height}) max_nza={nonzero_a} at frame={frame}");
+        image::save_buffer(&path, &pixels, width, height, image::ColorType::Rgba8)
+            .with_context(|| format!("save texture dump {path}"))?;
+        println!(
+            "saved texture dump {path} ({width}x{height}) max_nza={nonzero_a} at frame={frame}"
+        );
     }
     Ok(())
 }

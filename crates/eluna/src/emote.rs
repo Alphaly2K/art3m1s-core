@@ -660,7 +660,6 @@ pub struct EmoteStepFrameLayerState {
     pub draw_frame_info: EmoteDrawFrameInfo,
 }
 
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct EmoteModelRuntimeState {
     pub local_time_ticks: f32,

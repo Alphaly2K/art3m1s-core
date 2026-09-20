@@ -253,9 +253,19 @@ impl EmoteMotionLibrary {
 }
 
 impl EmoteMotion {
-    fn parse(character: &str, label: &str, value: &PsbValue, easing: &[EmoteEasingCurve]) -> Option<Self> {
-        let layers: Vec<_> = value.get("layer").and_then(PsbValue::as_list)
-            .unwrap_or_default().iter().filter_map(|value| EmoteLayer::parse(value, easing)).collect();
+    fn parse(
+        character: &str,
+        label: &str,
+        value: &PsbValue,
+        easing: &[EmoteEasingCurve],
+    ) -> Option<Self> {
+        let layers: Vec<_> = value
+            .get("layer")
+            .and_then(PsbValue::as_list)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|value| EmoteLayer::parse(value, easing))
+            .collect();
         let count = layers.iter().map(EmoteLayer::node_count).sum();
         let priorities = parse_priorities(value.get("priority"), count);
         Some(Self {
@@ -272,9 +282,13 @@ impl EmoteMotion {
                 .collect(),
             layers,
             priorities,
-            parameter_index: value.get("parameterize").and_then(PsbValue::as_i64)
+            parameter_index: value
+                .get("parameterize")
+                .and_then(PsbValue::as_i64)
                 .and_then(|i| usize::try_from(i).ok()),
-            inline_parameter: value.get("parameterize").and_then(EmoteMotionParameter::parse),
+            inline_parameter: value
+                .get("parameterize")
+                .and_then(EmoteMotionParameter::parse),
             layer_index_map: value
                 .get("layerIndexMap")
                 .and_then(PsbValue::as_object)
@@ -291,31 +305,46 @@ impl EmoteMotion {
 }
 
 fn parse_priorities(value: Option<&PsbValue>, count: usize) -> Vec<EmoteMotionPriority> {
-    let mut frames: Vec<_> = value.and_then(PsbValue::as_list).unwrap_or_default().iter()
+    let mut frames: Vec<_> = value
+        .and_then(PsbValue::as_list)
+        .unwrap_or_default()
+        .iter()
         .filter_map(|frame| {
             let content = frame.get("content")?.as_list()?;
             let mut ranks = vec![usize::MAX; count];
             for (rank, entry) in content.iter().rev().enumerate() {
                 if let Some(index) = entry.as_i64().and_then(|i| usize::try_from(i).ok()) {
                     if let Some(slot) = ranks.get_mut(index) {
-                        if *slot == usize::MAX { *slot = rank; }
+                        if *slot == usize::MAX {
+                            *slot = rank;
+                        }
                     }
                 }
             }
             let mut next = content.len();
             for slot in &mut ranks {
-                if *slot == usize::MAX { *slot = next; next += 1; }
+                if *slot == usize::MAX {
+                    *slot = next;
+                    next += 1;
+                }
             }
-            Some(EmoteMotionPriority { time: frame.get("time").and_then(number).unwrap_or(0.0), ranks })
-        }).collect();
+            Some(EmoteMotionPriority {
+                time: frame.get("time").and_then(number).unwrap_or(0.0),
+                ranks,
+            })
+        })
+        .collect();
     frames.sort_by(|a, b| a.time.total_cmp(&b.time));
     frames
 }
 
 impl EmoteMotion {
     pub(crate) fn priority_at(&self, time: f32) -> Option<&[usize]> {
-        self.priorities.iter().rfind(|frame| frame.time <= time)
-            .or_else(|| self.priorities.first()).map(|frame| frame.ranks.as_slice())
+        self.priorities
+            .iter()
+            .rfind(|frame| frame.time <= time)
+            .or_else(|| self.priorities.first())
+            .map(|frame| frame.ranks.as_slice())
     }
 }
 
@@ -383,7 +412,9 @@ impl EmoteLayer {
                 .get("parameterize")
                 .and_then(PsbValue::as_i64)
                 .and_then(|index| usize::try_from(index).ok()),
-            inline_parameter: value.get("parameterize").and_then(EmoteMotionParameter::parse),
+            inline_parameter: value
+                .get("parameterize")
+                .and_then(EmoteMotionParameter::parse),
             frames,
             children: value
                 .get("children")
@@ -450,15 +481,25 @@ impl EmoteLayerFrame {
 impl EmoteFrameContent {
     fn parse(value: &PsbValue, easing: &[EmoteEasingCurve]) -> Self {
         let curves = EmoteFrameCurves {
-            coordinate: value.get("ccc").and_then(|value| resolve_curve(value, easing)),
-            angle: value.get("acc").and_then(|value| resolve_curve(value, easing)),
-            zoom: value.get("zcc").and_then(|value| resolve_curve(value, easing)),
-            shear: value.get("scc").and_then(|value| resolve_curve(value, easing)),
+            coordinate: value
+                .get("ccc")
+                .and_then(|value| resolve_curve(value, easing)),
+            angle: value
+                .get("acc")
+                .and_then(|value| resolve_curve(value, easing)),
+            zoom: value
+                .get("zcc")
+                .and_then(|value| resolve_curve(value, easing)),
+            shear: value
+                .get("scc")
+                .and_then(|value| resolve_curve(value, easing)),
             // OCC is the native colour interpolation curve. WCC belongs to
             // stencil wipe layers, which the compact renderer treats as a
             // step property.
             opacity: None,
-            color: value.get("occ").and_then(|value| resolve_curve(value, easing)),
+            color: value
+                .get("occ")
+                .and_then(|value| resolve_curve(value, easing)),
             path: value.get("cp").and_then(parse_path),
         };
         Self {
@@ -526,7 +567,10 @@ impl EmoteFrameCurves {
 
 fn resolve_curve(value: &PsbValue, easing: &[EmoteEasingCurve]) -> Option<EmoteEasingCurve> {
     if let Some(index) = value.as_i64() {
-        return usize::try_from(index).ok().and_then(|index| easing.get(index)).cloned();
+        return usize::try_from(index)
+            .ok()
+            .and_then(|index| easing.get(index))
+            .cloned();
     }
     parse_curve(value)
 }
@@ -635,22 +679,36 @@ mod tests {
     fn frame_resolves_indexed_easing_without_shifting_invalid_slots() {
         use crate::PsbValue as V;
         use std::collections::BTreeMap;
-        let curve = super::EmoteEasingCurve { x: vec![0.0, 1.0], y: vec![0.0, 0.5], p: vec![] };
+        let curve = super::EmoteEasingCurve {
+            x: vec![0.0, 1.0],
+            y: vec![0.0, 0.5],
+            p: vec![],
+        };
         let content = V::Object(BTreeMap::from([("ccc".into(), V::Integer(1))]));
-        let parsed = super::EmoteFrameContent::parse(&content, &[Default::default(), curve.clone()]);
+        let parsed =
+            super::EmoteFrameContent::parse(&content, &[Default::default(), curve.clone()]);
         assert_eq!(parsed.curves.unwrap().coordinate, Some(curve));
         let invalid = V::Object(BTreeMap::from([("ccc".into(), V::Integer(-1))]));
-        assert!(super::EmoteFrameContent::parse(&invalid, &[]).curves.is_none());
+        assert!(
+            super::EmoteFrameContent::parse(&invalid, &[])
+                .curves
+                .is_none()
+        );
     }
 
     #[test]
     fn priority_frames_use_structural_indices_and_preserve_first_emission() {
         use crate::PsbValue as V;
         use std::collections::BTreeMap;
-        let frame = |time, order: &[i64]| V::Object(BTreeMap::from([
-            ("time".into(), V::Float(time)),
-            ("content".into(), V::List(order.iter().copied().map(V::Integer).collect())),
-        ]));
+        let frame = |time, order: &[i64]| {
+            V::Object(BTreeMap::from([
+                ("time".into(), V::Float(time)),
+                (
+                    "content".into(),
+                    V::List(order.iter().copied().map(V::Integer).collect()),
+                ),
+            ]))
+        };
         let value = V::List(vec![frame(0.0, &[0, 2, 1]), frame(10.0, &[2, 0, 1, 1, 99])]);
         let frames = super::parse_priorities(Some(&value), 4);
         assert_eq!(frames[0].ranks, [2, 0, 1, 3]);

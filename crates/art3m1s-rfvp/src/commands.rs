@@ -1,10 +1,10 @@
 use std::fmt;
 use std::sync::Arc;
 
+use art3m1s_render::shader::SPRITE_NEAREST_SHADER;
 use art3m1s_render::{
     BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, DrawMesh, ShaderEffect, TextureInfo,
 };
-use art3m1s_render::shader::SPRITE_NEAREST_SHADER;
 use glam::{Affine2, Vec2};
 
 use crate::protocol::{

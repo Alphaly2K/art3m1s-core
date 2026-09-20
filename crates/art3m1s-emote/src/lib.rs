@@ -18,7 +18,7 @@ pub use model::{EmoteModel, EmoteModelInfo};
 pub use motion::{
     EmoteBezierPath, EmoteEasingCurve, EmoteFrameContent, EmoteFrameCurves, EmoteLayer,
     EmoteLayerFrame, EmoteMesh, EmoteMotion, EmoteMotionLibrary, EmoteMotionParameter,
-    EmoteMotionRef, EmoteMotionPriority,
+    EmoteMotionPriority, EmoteMotionRef,
 };
 pub use player::{EmoteCommand, EmotePlayer, EmoteTransform, TimelineState, VariableState};
 pub use psb::{PsbDocument, PsbHeader, PsbResourceData, PsbValue, ResourceRef};

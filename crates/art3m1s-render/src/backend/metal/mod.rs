@@ -2892,9 +2892,11 @@ impl MetalBackend {
                             .setFragmentTexture_atIndex(
                                 Some(&self.transparent_texture),
                                 resource.binding as usize,
+                            ),
+                        ShaderResourceKind::Sampler => encoder.setFragmentSamplerState_atIndex(
+                            Some(sampler),
+                            resource.binding as usize,
                         ),
-                        ShaderResourceKind::Sampler => encoder
-                            .setFragmentSamplerState_atIndex(Some(sampler), resource.binding as usize),
                         ShaderResourceKind::UniformBuffer => {}
                     }
                 }

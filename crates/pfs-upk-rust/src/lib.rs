@@ -10,8 +10,8 @@
 //! - 条目查找大小写不敏感、`\` 与 `/` 等价（pf8 侧统一）。
 //! - 支持分卷归档（`root.pfs` + `root.pfs.000`… 串联读取）。
 
-mod split;
 pub mod reader;
+mod split;
 
 pub use reader::PfsArchive;
 

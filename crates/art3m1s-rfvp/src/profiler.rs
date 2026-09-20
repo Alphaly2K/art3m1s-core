@@ -123,9 +123,8 @@ impl RfvpProfiler {
                 sample.rendered = true;
                 let stage_area = f64::from(stage.0) * f64::from(stage.1);
                 if stage_area > 0.0 {
-                    sample.damage_percent = (f64::from(rectangle[2]) * f64::from(rectangle[3]))
-                        / stage_area
-                        * 100.0;
+                    sample.damage_percent =
+                        (f64::from(rectangle[2]) * f64::from(rectangle[3])) / stage_area * 100.0;
                 }
             }
         }

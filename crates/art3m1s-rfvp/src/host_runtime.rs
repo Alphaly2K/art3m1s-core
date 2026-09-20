@@ -22,9 +22,8 @@ use rfvp::host_abi::runtime::{
     rfvp_runtime_next_event_size, rfvp_runtime_poll_audio_command, rfvp_runtime_poll_events,
     rfvp_runtime_push_input, rfvp_runtime_set_font_override, rfvp_runtime_set_text_hidpi,
     rfvp_runtime_set_text_replacements, rfvp_runtime_set_text_translation_enabled,
-    rfvp_runtime_set_trace_mask,
-    rfvp_runtime_stage_height, rfvp_runtime_stage_width, rfvp_runtime_step,
-    rfvp_runtime_submit_text_translation,
+    rfvp_runtime_set_trace_mask, rfvp_runtime_stage_height, rfvp_runtime_stage_width,
+    rfvp_runtime_step, rfvp_runtime_submit_text_translation,
 };
 use rfvp::host_abi::v1::{
     RFVP_AUDIO_CREATE_STREAM, RFVP_AUDIO_DESTROY_STREAM, RFVP_AUDIO_ENCODED_FLAC,
@@ -34,16 +33,15 @@ use rfvp::host_abi::v1::{
     RFVP_AUDIO_STOP, RFVP_AUDIO_SUBMIT_F32, RFVP_AUDIO_SUBMIT_I16, RFVP_BLEND_ADD,
     RFVP_BLEND_MULTIPLY, RFVP_BLEND_NORMAL, RFVP_BLEND_REVERSE_SUBTRACT, RFVP_DRAW_FLAG_HAS_EFFECT,
     RFVP_DRAW_FLAG_HAS_MESH, RFVP_DRAW_GLYPH, RFVP_DRAW_IMAGE, RFVP_DRAW_SOLID,
-    RFVP_HIT_PROXY_ENABLED, RFVP_HIT_PROXY_VISIBLE, RFVP_INPUT_FOCUS, RFVP_INPUT_KEY,
-    RFVP_INPUT_PHASE_DOWN, RFVP_INPUT_PHASE_MOVE, RFVP_INPUT_PHASE_REPEAT, RFVP_INPUT_PHASE_UP,
-    RFVP_INPUT_POINTER_BUTTON, RFVP_INPUT_POINTER_MOVE, RFVP_INPUT_QUIT, RFVP_INPUT_TEXT,
-    RFVP_INPUT_TOUCH, RFVP_INPUT_WHEEL, RFVP_NLS_GBK, RFVP_NLS_SHIFT_JIS, RFVP_NLS_UTF8,
-    RFVP_EVENT_TEXT_TRANSLATION, RFVP_POINTER_LEFT, RFVP_POINTER_MIDDLE, RFVP_POINTER_RIGHT,
-    RFVP_SERIALIZATION_JSON, RFVP_STATUS_ENGINE,
-    RFVP_STATUS_NO_COMMAND, RFVP_STATUS_NO_FRAME, RFVP_STATUS_OK, RFVP_TEXTURE_CREATE,
-    RFVP_TEXTURE_DESTROY, RFVP_TEXTURE_FORMAT_LUMA_A8, RFVP_TEXTURE_FORMAT_RGBA8,
-    RFVP_TEXTURE_FILTER_LINEAR, RFVP_TEXTURE_FILTER_NEAREST, RFVP_TEXTURE_UPDATE,
-    RfvpAudioCommandV1, RfvpDrawCommandV1, RfvpHitProxyV1, RfvpInputEventV1,
+    RFVP_EVENT_TEXT_TRANSLATION, RFVP_HIT_PROXY_ENABLED, RFVP_HIT_PROXY_VISIBLE, RFVP_INPUT_FOCUS,
+    RFVP_INPUT_KEY, RFVP_INPUT_PHASE_DOWN, RFVP_INPUT_PHASE_MOVE, RFVP_INPUT_PHASE_REPEAT,
+    RFVP_INPUT_PHASE_UP, RFVP_INPUT_POINTER_BUTTON, RFVP_INPUT_POINTER_MOVE, RFVP_INPUT_QUIT,
+    RFVP_INPUT_TEXT, RFVP_INPUT_TOUCH, RFVP_INPUT_WHEEL, RFVP_NLS_GBK, RFVP_NLS_SHIFT_JIS,
+    RFVP_NLS_UTF8, RFVP_POINTER_LEFT, RFVP_POINTER_MIDDLE, RFVP_POINTER_RIGHT,
+    RFVP_SERIALIZATION_JSON, RFVP_STATUS_ENGINE, RFVP_STATUS_NO_COMMAND, RFVP_STATUS_NO_FRAME,
+    RFVP_STATUS_OK, RFVP_TEXTURE_CREATE, RFVP_TEXTURE_DESTROY, RFVP_TEXTURE_FILTER_LINEAR,
+    RFVP_TEXTURE_FILTER_NEAREST, RFVP_TEXTURE_FORMAT_LUMA_A8, RFVP_TEXTURE_FORMAT_RGBA8,
+    RFVP_TEXTURE_UPDATE, RfvpAudioCommandV1, RfvpDrawCommandV1, RfvpHitProxyV1, RfvpInputEventV1,
     RfvpResourcesConfigV1, RfvpRuntimeConfigV1, RfvpTextureCommandV1,
 };
 use rfvp::host_api::{
@@ -560,9 +558,8 @@ impl RfvpHostRuntime {
         &mut self,
         enabled: bool,
     ) -> Result<(), RfvpHostRuntimeError> {
-        let status = unsafe {
-            rfvp_runtime_set_text_translation_enabled(self.runtime, i32::from(enabled))
-        };
+        let status =
+            unsafe { rfvp_runtime_set_text_translation_enabled(self.runtime, i32::from(enabled)) };
         if status != RFVP_STATUS_OK {
             return Err(RfvpHostRuntimeError::TranslationRejected(status));
         }
@@ -611,8 +608,7 @@ impl RfvpHostRuntime {
     /// motion/render bits in that order). `None` returns to `RFVP_TRACE*`
     /// env-var behavior. The mask is process-wide.
     pub fn set_trace_mask(&mut self, mask: Option<u32>) -> Result<(), RfvpHostRuntimeError> {
-        let status =
-            unsafe { rfvp_runtime_set_trace_mask(self.runtime, mask.unwrap_or(u32::MAX)) };
+        let status = unsafe { rfvp_runtime_set_trace_mask(self.runtime, mask.unwrap_or(u32::MAX)) };
         if status != RFVP_STATUS_OK {
             return Err(RfvpHostRuntimeError::TraceRejected(status));
         }
@@ -629,9 +625,8 @@ impl RfvpHostRuntime {
         let (pointer, length) = translated
             .map(|text| (text.as_ptr(), text.len()))
             .unwrap_or((ptr::null(), 0));
-        let status = unsafe {
-            rfvp_runtime_submit_text_translation(self.runtime, serial, pointer, length)
-        };
+        let status =
+            unsafe { rfvp_runtime_submit_text_translation(self.runtime, serial, pointer, length) };
         if status != RFVP_STATUS_OK {
             return Err(RfvpHostRuntimeError::TranslationRejected(status));
         }

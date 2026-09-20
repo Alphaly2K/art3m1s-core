@@ -176,9 +176,15 @@ fn apply_mesh_sync_to_content(
     };
     let use_xz = sync.coordinate != 0;
     let point = if use_xz {
-        [coord.first().copied().unwrap_or(0.0), coord.get(2).copied().unwrap_or(0.0)]
+        [
+            coord.first().copied().unwrap_or(0.0),
+            coord.get(2).copied().unwrap_or(0.0),
+        ]
     } else {
-        [coord.first().copied().unwrap_or(0.0), coord.get(1).copied().unwrap_or(0.0)]
+        [
+            coord.first().copied().unwrap_or(0.0),
+            coord.get(1).copied().unwrap_or(0.0),
+        ]
     };
     let Some(mapped) = sync.warp_point(point) else {
         return;
