@@ -10,3 +10,26 @@ anyhow = "1"
 art3m1s-render = { path = "../art3m1s-render" }
 glam = "0.30"
 siglus_scene_vm = { path = "../../../siglus_rs/crates/siglus_scene_vm" }
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
+
+[features]
+default = []
+frame-dump = ["art3m1s-render/metal", "dep:image"]
+window = ["art3m1s-render/metal", "dep:winit", "dep:raw-window-handle", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-quartz-core"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+winit = { version = "=0.31.0-beta.3", optional = true }
+raw-window-handle = { version = "0.6", optional = true }
+objc2 = { version = "0.6", optional = true }
+objc2-app-kit = { version = "0.3", optional = true, default-features = false, features = ["NSView", "objc2-quartz-core"] }
+objc2-quartz-core = { version = "0.3", optional = true, default-features = false, features = ["CALayer", "CAMetalLayer"] }
+
+[[bin]]
+name = "siglus_frame_dump"
+path = "src/bin/siglus_frame_dump.rs"
+required-features = ["frame-dump"]
+
+[[bin]]
+name = "siglus_window"
+path = "src/bin/siglus_window.rs"
+required-features = ["window"]

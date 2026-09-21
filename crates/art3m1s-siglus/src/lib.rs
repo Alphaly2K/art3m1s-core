@@ -1,7 +1,7 @@
 //! Siglus VM to Art3m1s GPU adapter. No Siglus-specific rendering code lives
 //! in the engine fork beyond exposing its frame and image data.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -30,10 +30,51 @@ struct CachedTexture {
     size: TextureInfo,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ColorEffects {
+    mono: u8,
+    reverse: u8,
+    bright: u8,
+    dark: u8,
+    color_rate: u8,
+    color_add: [u8; 3],
+    color_target: [u8; 3],
+}
+
+impl ColorEffects {
+    fn from_sprite(s: &Sprite) -> Self {
+        Self {
+            mono: s.mono,
+            reverse: s.reverse,
+            bright: s.bright,
+            dark: s.dark,
+            color_rate: s.color_rate,
+            color_add: [s.color_add_r, s.color_add_g, s.color_add_b],
+            color_target: [s.color_r, s.color_g, s.color_b],
+        }
+    }
+
+    fn is_identity(self) -> bool {
+        self.mono == 0
+            && self.reverse == 0
+            && self.bright == 0
+            && self.dark == 0
+            && self.color_rate == 0
+            && self.color_add == [0; 3]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum TextureKey {
+    Image(ImageKey, ColorEffects),
+    Solid(ColorEffects),
+}
+
 pub struct SiglusAdapter {
     host: SiglusHost,
-    textures: HashMap<ImageKey, CachedTexture>,
-    white: Option<TextureId>,
+    textures: HashMap<TextureKey, CachedTexture>,
+    last_sprite_count: usize,
+    last_command_count: usize,
 }
 
 impl SiglusAdapter {
@@ -41,7 +82,8 @@ impl SiglusAdapter {
         Ok(Self {
             host: SiglusHost::new_external(config)?,
             textures: HashMap::new(),
-            white: None,
+            last_sprite_count: 0,
+            last_command_count: 0,
         })
     }
 
@@ -53,29 +95,50 @@ impl SiglusAdapter {
         self.host.logical_size()
     }
 
+    pub fn last_frame_counts(&self) -> (usize, usize) {
+        (self.last_sprite_count, self.last_command_count)
+    }
+
     /// Advance the VM and submit a new frame directly to the shared backend.
     /// A missing frame means the VM did not request a redraw this step.
     pub fn step(&mut self, dt_ms: u32, gpu: &mut dyn GpuBackend) -> Result<bool> {
+        self.step_inner(dt_ms, gpu, true)
+    }
+
+    /// Headless diagnostics: draw into the backend's main target without
+    /// presenting to a native window or shared texture surface.
+    pub fn step_without_present(&mut self, dt_ms: u32, gpu: &mut dyn GpuBackend) -> Result<bool> {
+        self.step_inner(dt_ms, gpu, false)
+    }
+
+    fn step_inner(&mut self, dt_ms: u32, gpu: &mut dyn GpuBackend, present: bool) -> Result<bool> {
         let exiting = self.host.step(dt_ms)?;
         if let Some(frame) = self.host.take_external_frame() {
+            self.last_sprite_count = frame.submitted_sprite_count();
             let size = self.host.logical_size();
             let images = self.host.external_images();
             gpu.begin_access();
-            let rendered = (|| {
-                let draw = convert_frame(
-                    &frame,
-                    images,
-                    size,
-                    gpu,
-                    &mut self.textures,
-                    &mut self.white,
-                )?;
+            let rendered: Result<()> = (|| {
+                let mut used = HashSet::new();
+                let draw = convert_frame(&frame, images, size, gpu, &mut self.textures, &mut used)?;
+                self.last_command_count = draw.commands.len();
                 gpu.begin_frame(FrameTarget::Main)
                     .map_err(anyhow::Error::msg)?;
                 gpu.clear([0.0, 0.0, 0.0, 1.0]);
                 let damage = gpu.render(&draw).damage();
                 gpu.end_frame();
-                gpu.present(damage).map_err(anyhow::Error::msg)
+                if present {
+                    gpu.present(damage).map_err(anyhow::Error::msg)?;
+                }
+                self.textures.retain(|key, cached| {
+                    if used.contains(key) {
+                        true
+                    } else {
+                        gpu.destroy_texture(cached.id);
+                        false
+                    }
+                });
+                Ok(())
             })();
             gpu.end_access();
             rendered?;
@@ -89,9 +152,6 @@ impl SiglusAdapter {
         for texture in self.textures.drain().map(|(_, cached)| cached.id) {
             gpu.destroy_texture(texture);
         }
-        if let Some(white) = self.white.take() {
-            gpu.destroy_texture(white);
-        }
         gpu.end_access();
     }
 }
@@ -101,8 +161,8 @@ fn convert_frame(
     images: &ImageManager,
     size: (u32, u32),
     gpu: &mut dyn GpuBackend,
-    cache: &mut HashMap<ImageKey, CachedTexture>,
-    white: &mut Option<TextureId>,
+    cache: &mut HashMap<TextureKey, CachedTexture>,
+    used: &mut HashSet<TextureKey>,
 ) -> Result<DrawList> {
     if frame.wipe.is_some() {
         bail!("Siglus stage wipe requires a two-target compositor");
@@ -114,61 +174,63 @@ fn convert_frame(
             continue;
         }
         validate_sprite(sprite)?;
-        let (texture, texture_size) = if let Some(handle) = sprite.image_id.as_ref() {
-            let (image, version) = images
-                .get_entry(handle)
-                .context("Siglus frame references an unavailable image")?;
-            let key = handle.key();
-            if cache
-                .get(&key)
-                .is_none_or(|cached| cached.version != version)
-            {
-                let id = gpu
-                    .create_texture(
-                        &format!("siglus-image-{}-{version}", key.0),
-                        TextureDesc::sampled_rgba8(image.width, image.height),
-                        TextureData::Rgba8(&image.rgba),
-                    )
-                    .map_err(anyhow::Error::msg)?;
-                if let Some(previous) = cache.insert(
-                    key,
-                    CachedTexture {
-                        id,
-                        version,
-                        size: TextureInfo {
-                            width: image.width,
-                            height: image.height,
-                        },
-                    },
-                ) {
-                    gpu.destroy_texture(previous.id);
-                }
-            }
-            let cached = cache[&key];
-            (cached.id, cached.size)
-        } else {
-            let id = match white {
-                Some(id) => *id,
-                None => {
-                    let id = gpu
-                        .create_texture(
-                            "siglus-white",
-                            TextureDesc::sampled_rgba8(1, 1),
-                            TextureData::Rgba8(&[255, 255, 255, 255]),
-                        )
-                        .map_err(anyhow::Error::msg)?;
-                    *white = Some(id);
-                    id
-                }
-            };
-            (
-                id,
+        let effects = ColorEffects::from_sprite(sprite);
+        let image_entry = sprite
+            .image_id
+            .as_ref()
+            .map(|handle| {
+                images
+                    .get_entry(handle)
+                    .context("Siglus frame references an unavailable image")
+            })
+            .transpose()?;
+        let (key, version, texture_size, rgba): (_, _, _, &[u8]) = match &image_entry {
+            Some((image, version)) => (
+                TextureKey::Image(sprite.image_id.as_ref().unwrap().key(), effects),
+                *version,
+                TextureInfo {
+                    width: image.width,
+                    height: image.height,
+                },
+                &image.rgba,
+            ),
+            None => (
+                TextureKey::Solid(effects),
+                0,
                 TextureInfo {
                     width: 1,
                     height: 1,
                 },
-            )
+                &[255, 255, 255, 255],
+            ),
         };
+        used.insert(key);
+        if cache
+            .get(&key)
+            .is_none_or(|cached| cached.version != version)
+        {
+            let adjusted = (!effects.is_identity()).then(|| apply_color_effects(rgba, effects));
+            let pixels = adjusted.as_deref().unwrap_or(rgba);
+            let id = gpu
+                .create_texture(
+                    &format!("siglus-{:?}-{version}", key),
+                    TextureDesc::sampled_rgba8(texture_size.width, texture_size.height),
+                    TextureData::Rgba8(pixels),
+                )
+                .map_err(anyhow::Error::msg)?;
+            if let Some(previous) = cache.insert(
+                key,
+                CachedTexture {
+                    id,
+                    version,
+                    size: texture_size,
+                },
+            ) {
+                gpu.destroy_texture(previous.id);
+            }
+        }
+        let cached = cache[&key];
+        let (texture, texture_size) = (cached.id, cached.size);
         if let Some(command) = map_sprite(entry, texture, texture_size, size)? {
             draw.push(command);
         }
@@ -176,7 +238,38 @@ fn convert_frame(
     Ok(draw)
 }
 
+fn apply_color_effects(rgba: &[u8], effects: ColorEffects) -> Vec<u8> {
+    let mut pixels = rgba.to_vec();
+    let mono = effects.mono as f32 / 255.0;
+    let reverse = effects.reverse as f32 / 255.0;
+    let bright = effects.bright as f32 / 255.0;
+    let dark = effects.dark as f32 / 255.0;
+    let color_rate = effects.color_rate as f32 / 255.0;
+    for pixel in pixels.chunks_exact_mut(4) {
+        let original = [
+            pixel[0] as f32 / 255.0,
+            pixel[1] as f32 / 255.0,
+            pixel[2] as f32 / 255.0,
+        ];
+        let gray = original[0] * 0.2989 + original[1] * 0.5886 + original[2] * 0.1145;
+        for channel in 0..3 {
+            let mut value = original[channel];
+            value = value * (1.0 - reverse) + (1.0 - value) * reverse;
+            value = value * (1.0 - mono) + gray * mono;
+            value += bright - dark;
+            value = value * (1.0 - color_rate)
+                + (effects.color_target[channel] as f32 / 255.0) * color_rate;
+            value += effects.color_add[channel] as f32 / 255.0;
+            pixel[channel] = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+        }
+    }
+    pixels
+}
+
 fn validate_sprite(s: &Sprite) -> Result<()> {
+    // Siglus's ordinary 2D alpha test discards alpha < 1/255. With this
+    // adapter's color-only composition, zero-alpha texels have the same
+    // visible result under alpha blending; depth/shadow paths stay rejected.
     if s.emote_render.is_some()
         || s.mask_image_id.is_some()
         || s.tonecurve_image_id.is_some()
@@ -194,31 +287,36 @@ fn validate_sprite(s: &Sprite) -> Result<()> {
         || s.fog_enabled
         || s.wipe_fx_mode != 0
         || s.mask_mode != 0
-        || s.alpha_test
         || !s.alpha_blend
     {
-        bail!("Siglus sprite uses a render effect unsupported by the Art3m1s adapter");
+        bail!(
+            "Siglus unsupported sprite effect: emote={} mask={} tonecurve={} wipe_source={} fog_texture={} mesh_kind={} billboard={} camera={} z={} pivot_z={} scale_z={} rotate_x={} rotate_y={} light={} fog={} wipe_mode={} mask_mode={} alpha_test={} alpha_blend={}",
+            s.emote_render.is_some(),
+            s.mask_image_id.is_some(),
+            s.tonecurve_image_id.is_some(),
+            s.wipe_src_image_id.is_some(),
+            s.fog_texture_image_id.is_some(),
+            s.mesh_kind,
+            s.billboard,
+            s.camera_enabled,
+            s.z,
+            s.pivot_z,
+            s.scale_z,
+            s.rotate_x,
+            s.rotate_y,
+            s.light_enabled,
+            s.fog_enabled,
+            s.wipe_fx_mode,
+            s.mask_mode,
+            s.alpha_test,
+            s.alpha_blend,
+        );
     }
     if !matches!(
         s.blend,
         SpriteBlend::Normal | SpriteBlend::Add | SpriteBlend::Mul | SpriteBlend::Screen
     ) {
         bail!("Siglus sprite blend mode is unsupported");
-    }
-    if s.mono != 0
-        || s.reverse != 0
-        || s.bright != 0
-        || s.dark != 0
-        || s.color_rate != 0
-        || s.color_add_r != 0
-        || s.color_add_g != 0
-        || s.color_add_b != 0
-        || s.color_r != 0
-        || s.color_g != 0
-        || s.color_b != 0
-        || s.tr != 255
-    {
-        bail!("Siglus sprite color effects are not represented by DrawCommand");
     }
     Ok(())
 }
@@ -285,7 +383,7 @@ fn map_sprite(
         texture,
         size: texture_size,
         transform: glam::Affine2::IDENTITY,
-        opacity: s.alpha as f32 / 255.0,
+        opacity: (s.alpha as f32 / 255.0) * (s.tr as f32 / 255.0),
         blend,
         color: ColorFilter::default(),
         clip: ClipRect::full(texture_size),
