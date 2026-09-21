@@ -74,6 +74,10 @@ KRKR CMake 会复用该目录并关闭 manifest 自动安装。
 不会进入 Dart。core 会复制回读帧和 audio payload。宿主仍不能并发调用同一个
 runtime；创建、推进、输入、音频回传和销毁应固定在同一个 owner 线程。
 
+Kirikiri/TJS 在进程内是单例。生产宿主应把 KRKR 当作可 `frozen`/`suspended` 的
+常驻会话：回主页只暂停 tick 并交出共享纹理，不要 `runtime_destroy`。销毁后再
+创建会失败（`ART3M1S_KRKR_STATUS_ENGINE`），因为上游对象池不能安全重建。
+
 ## 帧循环
 
 ```text
