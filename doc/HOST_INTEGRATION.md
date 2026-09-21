@@ -228,7 +228,7 @@ host_allocate_or_resize_presentation(width, height)
 
 on_owner_thread_each_tick:
     krkr.runtime_push_input(rt, events, event_count)   // 可为 0 条事件
-    krkr.runtime_tick(rt)                              // 一次 application iteration
+    krkr.runtime_tick(rt)                              // 生产 render-host 模式请求异步推进
     host_drain_krkr_audio(rt)                           // 取到 NO_COMMAND 为止
     frame.struct_size = sizeof(Art3m1sKrkrFrameV1)
     status = krkr.runtime_acquire_frame(rt, &frame)
@@ -245,8 +245,16 @@ krkr.runtime_destroy(rt)
 
 - 全部 KRKR 调用应在同一个 owner 线程串行执行。创建、输入、tick、帧获取/释放、音频
   提交和销毁都不能与另一线程并发调用同一个 runtime。
-- `runtime_tick` 没有 delta 参数，它推进一次 KRKR application iteration；Host 负责
-  调度频率和暂停策略。不要拿 Artemis 的 `advance_*` delta 语义套用。
+- Kirikiri 的 TJS 对象池是进程全局的。`runtime_destroy` 会走到
+  `TVPUninitScriptEngine()`，之后同一进程再 `runtime_create` 会在
+  `tTJSScriptBlock` 构造时 SIGSEGV。Host 必须把 KRKR 会话按 `frozen` /
+  `suspended` 保活（与 RFVP/Artemis 一样），回主页时不要销毁 runtime。
+  若运行时已被销毁，adapter 会返回 `ART3M1S_KRKR_STATUS_ENGINE` 而不是再次初始化。
+- `runtime_tick` 没有 delta 参数。无 render-host 的原生 smoke 同步推进一次 KRKR
+  application iteration；生产 render-host 模式则只请求一次异步推进（重复请求合并），
+  避免脚本 `showModal` 独占 Flutter UI 线程。Host 继续按自己的帧时钟调用，并允许
+  `runtime_acquire_frame` 暂时返回 `NO_FRAME`；输入会排队，在包括模态循环在内的 KRKR
+  iteration 中消费。不要拿 Artemis 的 `advance_*` delta 语义套用。
 - `runtime_stage_width` / `runtime_stage_height` 应以创建后的实际结果为准，
   `Art3m1sKrkrRuntimeConfigV1` 只提供初始窗口尺寸。
 - `runtime_acquire_frame` 成功时返回 RGBA8、显式 `stride` 和 `frame_id`。Core facade

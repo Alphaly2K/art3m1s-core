@@ -4,12 +4,16 @@
 #include "host_audio.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if defined(__APPLE__)
@@ -33,9 +37,19 @@ struct Runtime
     art3m1s::krkr::CaptureBackend* capture = nullptr;
     uint32_t width = 0;
     uint32_t height = 0;
-    bool exit_requested = false;
+    std::atomic<bool> exit_requested{false};
+    std::atomic<bool> engine_failed{false};
+    bool async_ticks = false;
+    bool tick_requested = false;
+    std::atomic<bool> stopping{false};
+    std::mutex mutex;
+    std::condition_variable wake;
+    std::vector<Art3m1sKrkrInputEventV1> pending_input;
+    std::thread worker;
     std::string game_root;
 };
+
+std::atomic<Runtime*> g_active_runtime{nullptr};
 
 std::string LowerAscii(std::string value)
 {
@@ -274,7 +288,7 @@ int32_t RuntimeCreateImpl(const char* game_root_utf8,
         return ART3M1S_KRKR_STATUS_INVALID_ARGUMENT;
     if (save_root_utf8 && *save_root_utf8)
         return ART3M1S_KRKR_STATUS_UNSUPPORTED;
-    if (Application)
+    if (Application || g_active_runtime.load(std::memory_order_acquire))
         return ART3M1S_KRKR_STATUS_ENGINE;
     art3m1s::krkr::ResetAudioHost();
 
@@ -319,6 +333,48 @@ int32_t RuntimeCreateImpl(const char* game_root_utf8,
     runtime->width = static_cast<uint32_t>(width);
     runtime->height = static_cast<uint32_t>(height);
     runtime->game_root = std::move(game_root);
+    runtime->async_ticks = capture->UsesRenderHost();
+    if (runtime->async_ticks)
+    {
+        Runtime* active = runtime.get();
+        g_active_runtime.store(active, std::memory_order_release);
+        try
+        {
+            active->worker = std::thread([active] {
+                for (;;)
+                {
+                    {
+                        std::unique_lock<std::mutex> lock(active->mutex);
+                        active->wake.wait(lock, [active] {
+                            return active->tick_requested || active->stopping.load();
+                        });
+                        if (active->stopping.load())
+                            break;
+                        active->tick_requested = false;
+                    }
+                    try
+                    {
+                        if (!Art3m1sKrkrHeadlessIterate())
+                            active->exit_requested.store(true);
+                        if (active->capture->HostFailed())
+                            active->engine_failed.store(true);
+                    }
+                    catch (...)
+                    {
+                        active->engine_failed.store(true);
+                    }
+                    if (active->exit_requested.load() || active->engine_failed.load())
+                        break;
+                }
+            });
+        }
+        catch (...)
+        {
+            g_active_runtime.store(nullptr, std::memory_order_release);
+            Art3m1sKrkrHeadlessQuit();
+            throw;
+        }
+    }
     *out_runtime = reinterpret_cast<uint64_t>(runtime.release());
     return ART3M1S_KRKR_STATUS_OK;
 }
@@ -333,6 +389,14 @@ void RuntimeDestroyImpl(uint64_t handle)
     Runtime* runtime = GetRuntime(handle);
     if (!runtime)
         return;
+    if (runtime->async_ticks)
+    {
+        runtime->stopping.store(true);
+        runtime->wake.notify_one();
+        if (runtime->worker.joinable())
+            runtime->worker.join();
+        g_active_runtime.store(nullptr, std::memory_order_release);
+    }
     runtime->capture = nullptr;
     Art3m1sKrkrHeadlessQuit();
     art3m1s::krkr::ResetAudioHost();
@@ -363,6 +427,54 @@ uint32_t RuntimePixelBufferSize(uint64_t handle)
                : 0;
 }
 
+int32_t DispatchInputEvent(Runtime* runtime, const Art3m1sKrkrInputEventV1& event)
+{
+    switch (event.kind)
+    {
+        case ART3M1S_KRKR_INPUT_KEY:
+            if (event.phase == ART3M1S_KRKR_INPUT_PHASE_UP)
+                krkrsdl3::KRKR_Trig_KeyUp(static_cast<int>(event.code));
+            else
+                krkrsdl3::KRKR_Trig_KeyDown(static_cast<int>(event.code));
+            break;
+        case ART3M1S_KRKR_INPUT_TEXT:
+        {
+            TVPWindow* window = TVPGetActiveWindow();
+            if (window && event.code <= 0xFFFF)
+                window->PostKeyPress(static_cast<tjs_uint16>(event.code));
+            break;
+        }
+        case ART3M1S_KRKR_INPUT_POINTER_MOVE:
+            krkrsdl3::KRKR_Trig_MouseMove(event.x, event.y);
+            break;
+        case ART3M1S_KRKR_INPUT_POINTER_BUTTON:
+        {
+            const tTVPMouseButton button = ToMouseButton(event.code);
+            if (event.phase == ART3M1S_KRKR_INPUT_PHASE_UP)
+                krkrsdl3::KRKR_Trig_MouseUp(button, event.x, event.y);
+            else
+                krkrsdl3::KRKR_Trig_MouseDown(button, event.x, event.y);
+            break;
+        }
+        case ART3M1S_KRKR_INPUT_WHEEL:
+            krkrsdl3::KRKR_Trig_MouseScroll(0, event.value, event.x, event.y);
+            break;
+        case ART3M1S_KRKR_INPUT_FOCUS:
+            if (event.phase == ART3M1S_KRKR_INPUT_PHASE_UP)
+                TVPPostApplicationDeactivateEvent();
+            else
+                TVPPostApplicationActivateEvent();
+            break;
+        case ART3M1S_KRKR_INPUT_QUIT:
+            runtime->exit_requested.store(true);
+            Application->Terminate();
+            break;
+        default:
+            return ART3M1S_KRKR_STATUS_INVALID_ARGUMENT;
+    }
+    return ART3M1S_KRKR_STATUS_OK;
+}
+
 int32_t RuntimePushInputImpl(uint64_t handle,
                              const Art3m1sKrkrInputEventV1* events,
                              size_t event_count)
@@ -370,58 +482,29 @@ int32_t RuntimePushInputImpl(uint64_t handle,
     Runtime* runtime = GetRuntime(handle);
     if (!runtime || (!events && event_count))
         return ART3M1S_KRKR_STATUS_INVALID_ARGUMENT;
+    if (event_count == 0)
+        return ART3M1S_KRKR_STATUS_OK;
 
     for (size_t index = 0; index < event_count; ++index)
     {
         const Art3m1sKrkrInputEventV1& event = events[index];
-        if (event.struct_size != sizeof(Art3m1sKrkrInputEventV1))
+        if (event.struct_size != sizeof(Art3m1sKrkrInputEventV1) ||
+            event.kind < ART3M1S_KRKR_INPUT_KEY ||
+            event.kind > ART3M1S_KRKR_INPUT_QUIT)
             return ART3M1S_KRKR_STATUS_INVALID_ARGUMENT;
-
-        switch (event.kind)
-        {
-            case ART3M1S_KRKR_INPUT_KEY:
-                if (event.phase == ART3M1S_KRKR_INPUT_PHASE_UP)
-                    krkrsdl3::KRKR_Trig_KeyUp(static_cast<int>(event.code));
-                else
-                    krkrsdl3::KRKR_Trig_KeyDown(static_cast<int>(event.code));
-                break;
-            case ART3M1S_KRKR_INPUT_TEXT:
-            {
-                TVPWindow* window = TVPGetActiveWindow();
-                if (window && event.code <= 0xFFFF)
-                    window->PostKeyPress(static_cast<tjs_uint16>(event.code));
-                break;
-            }
-            case ART3M1S_KRKR_INPUT_POINTER_MOVE:
-                krkrsdl3::KRKR_Trig_MouseMove(event.x, event.y);
-                break;
-            case ART3M1S_KRKR_INPUT_POINTER_BUTTON:
-            {
-                const tTVPMouseButton button = ToMouseButton(event.code);
-                if (event.phase == ART3M1S_KRKR_INPUT_PHASE_UP)
-                    krkrsdl3::KRKR_Trig_MouseUp(button, event.x, event.y);
-                else
-                    krkrsdl3::KRKR_Trig_MouseDown(button, event.x, event.y);
-                break;
-            }
-            case ART3M1S_KRKR_INPUT_WHEEL:
-                krkrsdl3::KRKR_Trig_MouseScroll(0, event.value, event.x, event.y);
-                break;
-            case ART3M1S_KRKR_INPUT_FOCUS:
-                if (event.phase == ART3M1S_KRKR_INPUT_PHASE_UP)
-                    TVPPostApplicationDeactivateEvent();
-                else
-                    TVPPostApplicationActivateEvent();
-                break;
-            case ART3M1S_KRKR_INPUT_QUIT:
-                runtime->exit_requested = true;
-                Application->Terminate();
-                break;
-            default:
-                return ART3M1S_KRKR_STATUS_INVALID_ARGUMENT;
-        }
     }
-
+    if (runtime->async_ticks)
+    {
+        {
+            std::lock_guard<std::mutex> lock(runtime->mutex);
+            runtime->pending_input.insert(runtime->pending_input.end(), events, events + event_count);
+            runtime->tick_requested = true;
+        }
+        runtime->wake.notify_one();
+        return ART3M1S_KRKR_STATUS_OK;
+    }
+    for (size_t index = 0; index < event_count; ++index)
+        DispatchInputEvent(runtime, events[index]);
     return ART3M1S_KRKR_STATUS_OK;
 }
 
@@ -430,8 +513,22 @@ int32_t RuntimeTickImpl(uint64_t handle)
     Runtime* runtime = GetRuntime(handle);
     if (!runtime)
         return ART3M1S_KRKR_STATUS_INVALID_HANDLE;
+    if (runtime->async_ticks)
+    {
+        if (runtime->engine_failed.load())
+            return ART3M1S_KRKR_STATUS_ENGINE;
+        if (!runtime->exit_requested.load())
+        {
+            {
+                std::lock_guard<std::mutex> lock(runtime->mutex);
+                runtime->tick_requested = true;
+            }
+            runtime->wake.notify_one();
+        }
+        return ART3M1S_KRKR_STATUS_OK;
+    }
     if (!Art3m1sKrkrHeadlessIterate())
-        runtime->exit_requested = true;
+        runtime->exit_requested.store(true);
     if (runtime->capture->HostFailed())
         return ART3M1S_KRKR_STATUS_ENGINE;
     return ART3M1S_KRKR_STATUS_OK;
@@ -495,7 +592,11 @@ int32_t RuntimeSubmitAudioConsumedImpl(
 int32_t RuntimeIsExitRequestedImpl(uint64_t handle)
 {
     Runtime* runtime = GetRuntime(handle);
-    return runtime && (runtime->exit_requested || !Application || Application->IsTarminate());
+    if (!runtime)
+        return 0;
+    if (runtime->async_ticks)
+        return runtime->exit_requested.load() || runtime->engine_failed.load();
+    return runtime->exit_requested.load() || !Application || Application->IsTarminate();
 }
 
 int32_t RuntimeSetExternalSurfaceImpl(uint64_t, int32_t, void*, uint32_t, uint32_t)
@@ -708,6 +809,25 @@ const Art3m1sKrkrApiV1 kApi = {
     RuntimeSetExternalSurfaceNoThrow,
 };
 } // namespace
+
+void Art3m1sKrkrPumpInput()
+{
+    Runtime* runtime = g_active_runtime.load(std::memory_order_acquire);
+    if (!runtime)
+        return;
+    if (runtime->stopping.load())
+    {
+        Application->Terminate();
+        return;
+    }
+    std::vector<Art3m1sKrkrInputEventV1> events;
+    {
+        std::lock_guard<std::mutex> lock(runtime->mutex);
+        events.swap(runtime->pending_input);
+    }
+    for (const auto& event : events)
+        DispatchInputEvent(runtime, event);
+}
 
 extern "C" ART3M1S_KRKR_EXPORT const Art3m1sKrkrApiV1* art3m1s_krkr_native_get_api_v1(
     size_t* out_size)

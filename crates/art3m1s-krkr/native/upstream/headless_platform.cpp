@@ -23,12 +23,20 @@ int g_width = 1280;
 int g_height = 720;
 std::string g_title = "TVP Engine";
 bool g_initialized = false;
+// Kirikiri's TJS object pools are process-global and cannot be reconstructed
+// after TVPUninitScriptEngine(). A second HeadlessInit in the same process
+// previously SIGSEGV'd in tTJSScriptBlock::tTJSScriptBlock. Refuse it.
+bool g_process_consumed = false;
 }
+
+// The embedded host may deliver input while a script is inside showModal().
+// Pump it on every nested KRKR iteration, not only on top-level runtime ticks.
+void Art3m1sKrkrPumpInput();
 
 bool Art3m1sKrkrHeadlessInit(
     int argc, char* argv[], krkrsdl3::iTVPRenderBackend* backend)
 {
-    if (g_initialized || Application || argc < 2 || !backend)
+    if (g_process_consumed || g_initialized || Application || argc < 2 || !backend)
         return false;
     if (!TVPParseArguments(argc, argv))
         return false;
@@ -43,6 +51,9 @@ bool Art3m1sKrkrHeadlessInit(
     krkrsdl3::TVPSetRenderBackend(backend);
 
     Application = new tTVPApplication;
+    // StartApplication() constructs the process-global TJS engine. From this
+    // point the process cannot host another KRKR runtime, even if startup fails.
+    g_process_consumed = true;
     if (!Application->StartApplication())
     {
         delete Application;
@@ -62,7 +73,10 @@ bool Art3m1sKrkrHeadlessInit(
 
 bool Art3m1sKrkrHeadlessIterate()
 {
-    if (!g_initialized || !Application || !Application->Run())
+    if (!g_initialized || !Application)
+        return false;
+    Art3m1sKrkrPumpInput();
+    if (!Application->Run())
         return false;
     krkrsdl3::TVPRenderOnce(g_width, g_height);
     return true;
