@@ -52,6 +52,9 @@ ART3M1S_KRKR_REQUIRE_UPSTREAM=1 \
 cargo build --no-default-features --features krkr-engine
 ```
 
+若依赖已通过 vcpkg 预装，可另设 `VCPKG_INSTALLED_DIR` 指向其安装根目录；
+KRKR CMake 会复用该目录并关闭 manifest 自动安装。
+
 发布打包需要把构建后的 `libart3m1s_krkr_host`、其 `Res/` 目录和 C++ runtime
 依赖与 core 一起分发。core 会写入 native shim 输出目录的 rpath，同时附加
 `@loader_path`（Apple）或 `$ORIGIN`（Linux/Android），允许发布时统一重定位。

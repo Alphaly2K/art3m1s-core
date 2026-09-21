@@ -8,6 +8,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CMAKE");
     println!("cargo:rerun-if-env-changed=KRKRSDL3_SOURCE_DIR");
     println!("cargo:rerun-if-env-changed=KRKRSDL3_BUILD_DIR");
+    println!("cargo:rerun-if-env-changed=VCPKG_INSTALLED_DIR");
     println!("cargo:rerun-if-env-changed=ART3M1S_KRKR_REQUIRE_UPSTREAM");
     println!("cargo:rerun-if-env-changed=ANDROID_NDK_HOME");
     println!("cargo:rerun-if-env-changed=ANDROID_NDK_ROOT");
@@ -104,6 +105,14 @@ fn main() {
                     .join("scripts/buildsystems/vcpkg.cmake")
                     .display()
             ));
+        }
+        if let Some(installed_dir) = env::var_os("VCPKG_INSTALLED_DIR") {
+            configure
+                .arg(format!(
+                    "-DVCPKG_INSTALLED_DIR={}",
+                    PathBuf::from(installed_dir).display()
+                ))
+                .arg("-DVCPKG_MANIFEST_MODE=OFF");
         }
         if target_arch == "arm64" {
             configure.arg("-DVCPKG_TARGET_TRIPLET=arm64-osx");
