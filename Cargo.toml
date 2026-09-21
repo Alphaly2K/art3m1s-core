@@ -31,6 +31,7 @@ pfs-upk-rust = { path = "crates/pfs-upk-rust" }
 art3m1s-media = { path = "crates/art3m1s-media" }
 art3m1s-rfvp = { path = "crates/art3m1s-rfvp", optional = true, features = ["host-runtime"] }
 art3m1s-krkr = { path = "crates/art3m1s-krkr", optional = true }
+art3m1s-siglus = { path = "crates/art3m1s-siglus", optional = true }
 encoding_rs = "0.8"
 glam = "0.30"
 serde = { version = "1.0", features = ["derive"] }
@@ -58,6 +59,7 @@ runtime-shader = ["art3m1s-render/runtime-shader"]
 experimental-eluna = ["dep:eluna"]
 rfvp-engine = ["dep:art3m1s-rfvp"]
 krkr-engine = ["dep:art3m1s-krkr", "art3m1s-krkr/native-upstream"]
+siglus-engine = ["dep:art3m1s-siglus"]
 ffmpeg = ["art3m1s-media/ffmpeg"]
 game-probes = ["gl-backend"]
 

@@ -1,0 +1,12 @@
+[package]
+name = "art3m1s-siglus"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+description = "Siglus host and draw-command compatibility layer for Art3m1s"
+
+[dependencies]
+anyhow = "1"
+art3m1s-render = { path = "../art3m1s-render" }
+glam = "0.30"
+siglus_scene_vm = { path = "../../../siglus_rs/crates/siglus_scene_vm" }

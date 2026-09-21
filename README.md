@@ -43,6 +43,7 @@ crates/
   art3m1s-media/      独立媒体/FFmpeg 边界
   art3m1s-render/     共享 DrawList、GPU backend、surface、shader 和 post-process
   art3m1s-rfvp/       RFVP adapter 与 host-runtime
+  art3m1s-siglus/     Siglus VM 到 art3m1s-render 的兼容接口（实验）
   art3m1s-krkr/       Kirikiri/KRKR adapter、版本化 ABI 和原生 smoke host
   asb-interpreter/    ASB/AST/IET 解释器与 Lua 桥
   art3m1s-emote/      内置 E-Mote 后端
