@@ -612,6 +612,30 @@ KRKR 的 Host 侧语义和生命周期如下：
   Artemis media event 复用给 KRKR。宿主必须每次检查 `struct_size`，并对可选函数指针
   做 NULL 检查。
 
+## Siglus ABI（v1）
+
+仅当 core 构建包含 `siglus-engine` 时导出
+`const SiglusApiV1 *art3m1s_siglus_get_api_v1(size_t *out_size)`。
+表头 `struct_size=u32`、`abi_version=1`、`magic=0x53494731`；
+Host 必须校验返回的 `out_size` 与自身结构大小一致，且检查所有函数指针。
+
+| 表字段 | C 参数及语义 |
+|---|---|
+| `probe_project` | `int32(const char *root_utf8)`：1=Siglus 目录，0=否，负数=错误 |
+| `runtime_create` | `int32(const char *root_utf8, int32 backend, uint64_t *out_handle)`：自动从 Gameexe 读取舞台大小；backend 与共用 GPU 选择 ABI 一致 |
+| `runtime_destroy` | `void(uint64_t handle)`：须在创建线程调用；重复销毁无效果 |
+| `runtime_stage_width/height` | `uint32(uint64_t handle)`：无效句柄返回 0 |
+| `runtime_set_external_surface` | `int32(uint64_t handle, int32 kind, void *ptr, uint32 width, uint32 height)`；kind 0 解绑，2=IOSurface，3=Metal texture，4=CAMetalLayer |
+| `runtime_tick` | `int32(uint64_t handle, uint32 delta_ms, int32 mode, uint8_t *rgba, size_t capacity, size_t *written)`；mode 0=只推进，1=RGBA 回读，2=present；mode 1 要求完整 `width×height×4` 容量 |
+| `runtime_input` | `int32(uint64_t handle, int32 kind, int32 code, int32 x, int32 y, int32 value)`；kind 0=移动，1=鼠标键，2=触摸，3=键盘，4=滚轮；x/y 为舞台像素坐标 |
+| `runtime_is_exit_requested` | `int32(uint64_t handle)`：0/1，失效句柄返回 -2 |
+| `last_error` | `size_t(uint8_t *buffer, size_t capacity)`：返回当前线程最近错误的 UTF-8 字节数；buffer 可空 |
+
+返回状态：0 成功，-1 参数错误，-2 错误线程/未知句柄，-3 引擎或 GPU 错误。
+所有输入内存仅在本次调用期间借用；core 不存储传入的 RGBA 指针。
+Siglus VM 非 `Send`：Host 必须在同一线程创建、输入、推进和销毁。当前适配器
+不提供音视频/对话框的 Host 拉取协议，尚不能按其它引擎的媒体语义宣称完整接入。
+
 ## Host 状态、文件与全局配置
 
 | 回调/函数（省略 `art3m1s_`） | 约定 |

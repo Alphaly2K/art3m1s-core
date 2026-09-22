@@ -5,6 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
+pub use siglus_scene_vm;
+
 use anyhow::{Context, Result, bail};
 use art3m1s_render::{
     BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, DrawMesh, FrameTarget, GpuBackend,
@@ -16,6 +18,7 @@ use siglus_scene_vm::layer::{
     RenderFrame, RenderSprite, Sprite, SpriteBlend, SpriteFit, SpriteSizeMode,
 };
 use siglus_scene_vm::render_math::sprite_quad_geometry_rect;
+use siglus_scene_vm::runtime::input::VmMouseButton;
 
 /// Probe only; constructing the host performs full game initialization.
 pub fn is_siglus_project(path: &Path) -> bool {
@@ -93,6 +96,40 @@ impl SiglusAdapter {
 
     pub fn logical_size(&self) -> (u32, u32) {
         self.host.logical_size()
+    }
+
+    /// Host input coordinates are expressed in logical stage pixels.
+    pub fn pointer_move(&mut self, x: i32, y: i32) {
+        self.host.mouse_move(x as f64, y as f64);
+    }
+
+    pub fn pointer_button(&mut self, button: i32, pressed: bool) {
+        let button = match button {
+            2 => VmMouseButton::Right,
+            3 => VmMouseButton::Middle,
+            _ => VmMouseButton::Left,
+        };
+        if pressed {
+            self.host.mouse_down(button);
+        } else {
+            self.host.mouse_up(button);
+        }
+    }
+
+    pub fn touch(&mut self, phase: i32, x: i32, y: i32) {
+        self.host.touch(phase, x as f64, y as f64);
+    }
+
+    pub fn wheel(&mut self, delta_y: i32) {
+        self.host.mouse_wheel(delta_y);
+    }
+
+    pub fn key(&mut self, code: i32, pressed: bool) {
+        if pressed {
+            self.host.key_down_code(code);
+        } else {
+            self.host.key_up_code(code);
+        }
     }
 
     pub fn last_frame_counts(&self) -> (usize, usize) {

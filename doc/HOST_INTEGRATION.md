@@ -1,8 +1,9 @@
 # Host 接入指南
 
 本文面向 Flutter、原生应用及其他嵌入式 Host，以 [`src/ffi/api.rs`](../src/ffi/api.rs)
-的 Artemis 版本化 C ABI、[`src/ffi/rfvp_api.rs`](../src/ffi/rfvp_api.rs) 的 RFVP ABI 和
-[`src/ffi/krkr_api.rs`](../src/ffi/krkr_api.rs) 的 KRKR ABI 为准。它不是 Artemis 脚本
+的 Artemis 版本化 C ABI、[`src/ffi/rfvp_api.rs`](../src/ffi/rfvp_api.rs) 的 RFVP ABI、
+[`src/ffi/krkr_api.rs`](../src/ffi/krkr_api.rs) 的 KRKR ABI 和
+[`src/ffi/siglus_api.rs`](../src/ffi/siglus_api.rs) 的 Siglus ABI 为准。它不是 Artemis 脚本
 API 文档，也不要求 Host 使用 Dart 或 libmpv。完整签名、返回值和命令字段见
 [FFI_REFERENCE.md](FFI_REFERENCE.md)。
 
@@ -16,16 +17,17 @@ API 文档，也不要求 Host 使用 Dart 或 libmpv。完整签名、返回值
 | 发送媒体命令、等待播放完成 | 解码、播放、混音、全屏视频、完成通知 |
 | 发出对话框、网络、翻译等请求 | 原生 UI、网络权限、翻译服务与异步任务 |
 
-Host 只依赖引擎总抽象，不应直接依赖某个 adapter 的内部类型。当前有三个独立入口：
+Host 只依赖引擎总抽象，不应直接依赖某个 adapter 的内部类型。当前有四个独立入口：
 
 | 引擎 | 查询入口 | 当前状态 |
 |---|---|---|
 | Artemis / Art3m1s | `art3m1s_get_api_v1` | 完整生产路径；`Art3m1sApiV1` |
 | RFVP | `art3m1s_rfvp_get_api_v1` | 独立 adapter；默认 feature `rfvp-engine` |
 | KRKR / Kirikiri | `art3m1s_krkr_get_api_v1` | 早期 adapter；仅在使用 `krkr-engine` 且 native shim 可用时存在 |
+| Siglus | `art3m1s_siglus_get_api_v1` | 早期 adapter；`--features siglus-engine`，macOS Host 已接入；引擎音视频尚未迁移到 Host 媒体命令 |
 
-三个函数表不共享 runtime、资源、事件或 surface 对象。Artemis 的新宿主应只查询
-`Art3m1sApiV1`，不再逐个解析迁移期的平铺符号；RFVP 和 KRKR 必须走各自入口。媒体解码
+四个函数表不共享 runtime、资源、事件或 surface 对象。Artemis 的新宿主应只查询
+`Art3m1sApiV1`，不再逐个解析迁移期的平铺符号；RFVP、KRKR 和 Siglus 必须走各自入口。媒体解码
 可由 runtime 的 FFmpeg session 承担；真实音频输出和最终 present 仍由 Host 所有。
 游戏自己的 save/load/config/backlog 通常由脚本绘制，不需要 Host 重写。
 
@@ -38,12 +40,22 @@ Host 只依赖引擎总抽象，不应直接依赖某个 adapter 的内部类型
 - 数据走裸指针和显式长度，例如像素、INI、字体、替换表、HTTP body 和 uniform block。
   零拷贝数据仍由调用方保证调用期间有效，不由 core 猜测容器布局。跨边界的字节流
   （host-events 事件头、RFVP 日志记录头）一律固定小端。
-- 只有 `Art3m1sApiV1`、`Art3m1sRfvpApiV1`、`Art3m1sKrkrApiV1` 这种定长、版本化、
+- 只有 `Art3m1sApiV1`、`Art3m1sRfvpApiV1`、`Art3m1sKrkrApiV1`、`SiglusApiV1` 这种定长、版本化、
   全函数指针的 POD 结构可以按地址跨边界；不要新增按值传递的复杂对象结构。
 - 通信方向是 Host 调 core、core 排队、Host 拉取。不要新增 native→Host 回调入口；
   RFVP 的 `runtime_set_log_callback` 是仅存的迁移期例外，不能安全暴露回调蹦床的
   宿主（如修改过的 iOS 设备上的 Dart `NativeCallable`）必须改用
   `log_next_bytes`/`poll_log`。
+
+Siglus ABI 特别约定：`u64` handle 进程内不重复使用，但 VM 含 `Rc`，只能在创建它的
+同一线程访问；错误线程返回 `STATUS_HANDLE`，销毁也必须在 owner 线程执行。
+`runtime_tick` 的 `mode=0/1/2` 分别推进、回读 RGBA、向 Host 表面 present；
+`mode=1` 的输出缓冲至少 `stage_width × stage_height × 4` 字节。
+`runtime_set_external_surface(kind=0)` 在 Host 释放 surface 前解绑。
+当前 Siglus 原项目的 Kira 音频仍在引擎内部输出，尚未满足上表中媒体全由 Host
+管理的目标；因此冻结/挂起仅停止 VM 推进，不保证音频设备完全静默。
+Siglus 的存档路径目前也仍由原 VM 决定（通常位于游戏目录）；
+`EngineRuntime.setSaveDir` 暂未接线，不能按 Artemis 的每游戏沙箱隔离保证处理存档。
 
 ### 构建与加载
 

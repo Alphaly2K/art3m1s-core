@@ -22,6 +22,9 @@ pub mod krkr_api;
 #[cfg(feature = "krkr-engine")]
 mod krkr_renderer;
 
+#[cfg(feature = "siglus-engine")]
+pub mod siglus_api;
+
 #[cfg(any(
     feature = "gl-backend",
     feature = "metal-backend",
