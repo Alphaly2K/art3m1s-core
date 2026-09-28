@@ -8,9 +8,11 @@ Siglus VM 与 `art3m1s-render` 的宿主兼容接口。与 RFVP 一样，这个 
 若遇到 stage wipe、E-Mote、3D、蒙版或尚未等价实现的颜色/混合效果，
 会返回错误，避免悄悄显示错误画面。引擎退出由返回值传递给调用方。
 
-这个 crate 目前仅是 Rust 侧接口，还没有接入 core 的版本化 FFI 与 Flutter
-PlayerScene，也不能视为完整的 Siglus 游戏支持。顶层可通过 `siglus-engine`
-feature 引入，但默认不启用。基本编译检查：
+顶层通过 `siglus-engine` feature 接入独立 FFI 与 Flutter PlayerScene，
+默认不启用。该 feature 同时启用应用包内的 FFmpeg 解码，确保 GUI 环境不依赖
+外部 `ffmpeg` 可执行文件，并启用无设备 Kira 后端，由 macOS Flutter Host
+拉取 48 kHz 双声道 f32 PCM 输出。独立窗口样例不启用 `host-audio`，仍由
+上游 Kira 直接输出声音。基本编译检查：
 
 ```sh
 cargo check --manifest-path crates/art3m1s-siglus/Cargo.toml --lib
@@ -31,6 +33,6 @@ cargo run --manifest-path crates/art3m1s-siglus/Cargo.toml \
   /path/to/Siglus-game /tmp/siglus-frame.png 850
 ```
 
-引擎 fork 目前对 UCI/H.264 G00 图像（包括 High 10）调用系统的 `ffmpeg`
-可执行文件；这类游戏需要把 `ffmpeg` 放在 `PATH` 中，待后续打包解码器。
-不使用 UCI 图像的游戏不受影响。
+独立样例默认保留上游的 `ffmpeg` 命令解码路径。要模拟正式 Host 中的进程内
+UCI/H.264 解码（包括 High 10），给样例加上 `uci-ffmpeg` feature，并设置
+`FFMPEG_DIR` 指向已构建的 FFmpeg 前缀。正式 `siglus-engine` 会自动启用它。

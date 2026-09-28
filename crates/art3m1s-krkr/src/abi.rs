@@ -10,6 +10,8 @@ use crate::protocol::{
 
 pub const ART3M1S_KRKR_API_ABI_VERSION: u32 = 1;
 pub const ART3M1S_KRKR_API_ABI_MAGIC: u64 = 0x3156_4B52_4D33_4152; // "RA3MKRV1"
+pub const ART3M1S_KRKR_DIAGNOSTICS_ABI_VERSION: u32 = 1;
+pub const ART3M1S_KRKR_DIAGNOSTICS_ABI_MAGIC: u64 = 0x3156_4744_4D33_4152; // "RA3MDGV1"
 
 pub const ART3M1S_KRKR_API_STATUS_OK: i32 = 0;
 pub const ART3M1S_KRKR_API_STATUS_INVALID_ARGUMENT: i32 = -1;
@@ -94,6 +96,20 @@ type RuntimeSetExternalSurfaceFn = unsafe extern "C" fn(
     width: u32,
     height: u32,
 ) -> i32;
+type LogNextBytesFn = unsafe extern "C" fn() -> usize;
+type PollLogFn = unsafe extern "C" fn(output: *mut u8, capacity: usize) -> usize;
+type RuntimeSetDebugFn =
+    unsafe extern "C" fn(runtime: Art3m1sKrkrRuntimeHandle, enabled: i32) -> i32;
+
+#[repr(C)]
+pub struct Art3m1sKrkrDiagnosticsApiV1 {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub magic: u64,
+    pub log_next_bytes: Option<LogNextBytesFn>,
+    pub poll_log: Option<PollLogFn>,
+    pub runtime_set_debug: Option<RuntimeSetDebugFn>,
+}
 
 #[repr(C)]
 pub struct Art3M1sKrkrApiV1 {

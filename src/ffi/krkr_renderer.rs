@@ -28,6 +28,7 @@ pub(super) struct KrkrRenderer {
     draw_list: DrawList,
     extent: Extent2D,
     generation: u64,
+    frame_in_progress: bool,
     surface_attached: bool,
     last_region: RenderRegion,
 }
@@ -45,6 +46,7 @@ impl KrkrRenderer {
             draw_list: DrawList::new(),
             extent: Extent2D::new(width, height),
             generation: 0,
+            frame_in_progress: false,
             surface_attached: false,
             last_region: RenderRegion::Full,
         }
@@ -64,6 +66,10 @@ impl KrkrRenderer {
 
     pub(super) fn generation(&self) -> u64 {
         self.generation
+    }
+
+    pub(super) fn frame_in_progress(&self) -> bool {
+        self.frame_in_progress
     }
 
     pub(super) fn extent(&self) -> Extent2D {
@@ -103,6 +109,7 @@ impl KrkrRenderer {
         }
         self.draw_list = DrawList::new();
         self.backend.begin_frame(FrameTarget::Main)?;
+        self.frame_in_progress = true;
         self.backend.clear([0.0, 0.0, 0.0, 0.0]);
         Ok(())
     }
@@ -224,6 +231,7 @@ impl KrkrRenderer {
     fn end_frame(&mut self) -> Result<(), String> {
         self.last_region = self.backend.render(&self.draw_list);
         self.backend.end_frame();
+        self.frame_in_progress = false;
         self.generation = self.generation.wrapping_add(1).max(1);
         if self.surface_attached {
             self.backend.present(self.last_region.damage())?;
@@ -246,7 +254,10 @@ fn with_renderer(
     catch_unwind(AssertUnwindSafe(|| {
         let renderer = renderer(user_data)?;
         let mut renderer = renderer.lock().map_err(|_| ART3M1S_KRKR_STATUS_ENGINE)?;
-        callback(&mut renderer).map_err(|_| ART3M1S_KRKR_STATUS_ENGINE)?;
+        callback(&mut renderer).map_err(|error| {
+            eprintln!("[KRKR] render host callback failed: {error}");
+            ART3M1S_KRKR_STATUS_ENGINE
+        })?;
         Ok(ART3M1S_KRKR_STATUS_OK)
     }))
     .unwrap_or(Err(ART3M1S_KRKR_STATUS_ENGINE))

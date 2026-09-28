@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -11,6 +12,12 @@
 
 #include "tjsCommHead.h"
 #include "PlatformAudio.h"
+
+#if defined(__APPLE__)
+#include <SDL3/SDL_audio.h>
+#include <SDL3/SDL_init.h>
+#include <SDL3/SDL_log.h>
+#endif
 
 namespace art3m1s::krkr
 {
@@ -404,6 +411,213 @@ private:
     float volume_ = 1.0f;
     float pan_ = 0.0f;
 };
+
+#if defined(__APPLE__)
+// Apple hosts do not have a streaming PCM sink in Flutter or SwiftUI. Keep
+// playback in the embedded SDL runtime so buffer consumption follows the
+// actual audio device instead of a wall-clock estimate in either UI host.
+class Art3m1sDarwinSoundBuffer final : public iTVPSoundBuffer
+{
+public:
+    Art3m1sDarwinSoundBuffer(const tTVPWaveFormat& format, int buffer_count)
+      : format_(format), buffer_limit_(std::max(buffer_count, 1))
+    {
+    }
+
+    bool Init() override
+    {
+        if (!format_.SamplesPerSec || !format_.Channels || !format_.BytesPerSample)
+            return false;
+        SDL_AudioSpec spec{};
+        spec.freq = static_cast<int>(format_.SamplesPerSec);
+        spec.channels = static_cast<int>(format_.Channels);
+        if (format_.IsFloat && format_.BitsPerSample == 32)
+            spec.format = SDL_AUDIO_F32;
+        else if (!format_.IsFloat)
+        {
+            switch (format_.BitsPerSample)
+            {
+                case 8: spec.format = SDL_AUDIO_S8; break;
+                case 16: spec.format = SDL_AUDIO_S16; break;
+                case 24: spec.format = SDL_AUDIO_S32; break;
+                case 32: spec.format = SDL_AUDIO_S32; break;
+                default: break;
+            }
+        }
+        if (spec.format == SDL_AUDIO_UNKNOWN)
+            return false;
+        input_frame_size_ = format_.Channels * format_.BytesPerSample;
+        queued_frame_size_ = format_.Channels * SDL_AUDIO_BYTESIZE(spec.format);
+        if (!input_frame_size_ || !queued_frame_size_ ||
+            !SDL_InitSubSystem(SDL_INIT_AUDIO))
+        {
+            SDL_LogError(SDL_LOG_CATEGORY_AUDIO, "KRKR audio init failed: %s", SDL_GetError());
+            return false;
+        }
+        audio_initialized_ = true;
+        device_ = SDL_OpenAudioDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, nullptr);
+        stream_ = SDL_CreateAudioStream(&spec, nullptr);
+        if (!device_ || !stream_ || !SDL_BindAudioStream(device_, stream_) ||
+            !SDL_PauseAudioStreamDevice(stream_))
+        {
+            SDL_LogError(SDL_LOG_CATEGORY_AUDIO, "KRKR audio stream failed: %s", SDL_GetError());
+            return false;
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "KRKR audio device ready: %s (%d Hz, %d ch)",
+                    SDL_GetAudioDeviceName(device_), spec.freq, spec.channels);
+        return true;
+    }
+
+    ~Art3m1sDarwinSoundBuffer() override
+    {
+        if (stream_)
+        {
+            SDL_UnbindAudioStream(stream_);
+            SDL_DestroyAudioStream(stream_);
+        }
+        if (device_)
+            SDL_CloseAudioDevice(device_);
+        if (audio_initialized_)
+            SDL_QuitSubSystem(SDL_INIT_AUDIO);
+    }
+
+    void Release() override { delete this; }
+    void Play() override
+    {
+        if (stream_ && SDL_ResumeAudioStreamDevice(stream_))
+        {
+            if (!playing_)
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "KRKR audio playback started");
+            playing_ = true;
+        }
+    }
+    void Pause() override
+    {
+        if (stream_ && SDL_PauseAudioStreamDevice(stream_))
+            playing_ = false;
+    }
+    void Stop() override
+    {
+        Pause();
+        Reset();
+    }
+    void Reset() override
+    {
+        if (stream_)
+            SDL_ClearAudioStream(stream_);
+        appended_frames_ = 0;
+        buffer_ends_.clear();
+    }
+    bool IsPlaying() override { return playing_; }
+    void SetVolume(float volume) override
+    {
+        volume_ = std::max(0.0f, volume);
+        if (stream_)
+            SDL_SetAudioStreamGain(stream_, volume_);
+    }
+    float GetVolume() override { return volume_; }
+    void SetPan(float pan) override { pan_ = pan; }
+    float GetPan() override { return pan_; }
+
+    void AppendBuffer(const void* data, unsigned int length) override
+    {
+        if (!stream_ || !data || !input_frame_size_)
+            return;
+        const uint64_t frames = length / input_frame_size_;
+        if (!frames || frames >
+                           static_cast<uint64_t>(std::numeric_limits<int>::max()) /
+                               queued_frame_size_)
+            return;
+        const void* samples = data;
+        int bytes = static_cast<int>(frames * input_frame_size_);
+        std::vector<int32_t> converted;
+        if (format_.BitsPerSample == 24)
+        {
+            const auto* source = static_cast<const uint8_t*>(data);
+            converted.reserve(frames * format_.Channels);
+            for (uint64_t index = 0; index < frames * format_.Channels; ++index)
+            {
+                const uint32_t value = static_cast<uint32_t>(source[index * 3]) |
+                                       (static_cast<uint32_t>(source[index * 3 + 1]) << 8) |
+                                       (static_cast<uint32_t>(source[index * 3 + 2]) << 16);
+                converted.push_back(static_cast<int32_t>(value << 8));
+            }
+            samples = converted.data();
+            bytes = static_cast<int>(converted.size() * sizeof(int32_t));
+        }
+        if (!SDL_PutAudioStreamData(stream_, samples, bytes))
+        {
+            SDL_LogError(SDL_LOG_CATEGORY_AUDIO, "KRKR audio enqueue failed: %s", SDL_GetError());
+            return;
+        }
+        appended_frames_ += frames;
+        buffer_ends_.push_back(appended_frames_);
+        if (!reported_pcm_)
+        {
+            reported_pcm_ = true;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "KRKR PCM queued: %llu frames",
+                        static_cast<unsigned long long>(frames));
+        }
+    }
+
+    bool IsBufferValid() override
+    {
+        PrunePlayedBuffers();
+        return buffer_ends_.size() < static_cast<size_t>(buffer_limit_);
+    }
+    bool IsValidFormat(tTVPWaveFormat& format) override
+    {
+        return format.SamplesPerSec == format_.SamplesPerSec &&
+               format.Channels == format_.Channels &&
+               format.BitsPerSample == format_.BitsPerSample &&
+               format.IsFloat == format_.IsFloat;
+    }
+    tjs_uint GetCurrentPlaySamples() override
+    {
+        const int queued = stream_ ? SDL_GetAudioStreamQueued(stream_) : 0;
+        return queued > 0 && queued_frame_size_
+                   ? static_cast<tjs_uint>(queued / queued_frame_size_)
+                   : 0;
+    }
+    tjs_uint GetLatencySamples() override { return 0; }
+    float GetLatencySeconds() override { return 0.0f; }
+    int GetRemainBuffers() override
+    {
+        PrunePlayedBuffers();
+        return static_cast<int>(buffer_ends_.size());
+    }
+    void SetPosition(float, float, float) override {}
+
+private:
+    void PrunePlayedBuffers()
+    {
+        const uint64_t queued = GetCurrentPlaySamples();
+        const uint64_t consumed = appended_frames_ > queued ? appended_frames_ - queued : 0;
+        if (consumed && !reported_consumption_)
+        {
+            reported_consumption_ = true;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "KRKR PCM is being consumed by the audio device");
+        }
+        while (!buffer_ends_.empty() && buffer_ends_.front() <= consumed)
+            buffer_ends_.pop_front();
+    }
+
+    tTVPWaveFormat format_{};
+    int buffer_limit_ = 1;
+    uint32_t input_frame_size_ = 0;
+    uint32_t queued_frame_size_ = 0;
+    SDL_AudioDeviceID device_ = 0;
+    SDL_AudioStream* stream_ = nullptr;
+    bool audio_initialized_ = false;
+    bool playing_ = false;
+    float volume_ = 1.0f;
+    float pan_ = 0.0f;
+    uint64_t appended_frames_ = 0;
+    std::deque<uint64_t> buffer_ends_;
+    bool reported_pcm_ = false;
+    bool reported_consumption_ = false;
+};
+#endif
 } // namespace
 
 void ResetAudioHost()
@@ -433,8 +647,15 @@ void TVPUninitDirectSound()
 
 iTVPSoundBuffer* TVPCreateSoundBuffer(tTVPWaveFormat& format, int buffer_count)
 {
+#if defined(__APPLE__)
+    auto* sound_buffer = new art3m1s::krkr::Art3m1sDarwinSoundBuffer(format, buffer_count);
+    if (sound_buffer->Init())
+        return sound_buffer;
+    delete sound_buffer;
+#else
     auto* sound_buffer = new art3m1s::krkr::Art3m1sSoundBuffer(format, buffer_count);
     if (sound_buffer->Init())
         return sound_buffer;
+#endif
     return nullptr;
 }

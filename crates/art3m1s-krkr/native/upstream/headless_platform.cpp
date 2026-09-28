@@ -5,6 +5,9 @@
 #include <SDL3/SDL_init.h>
 #include <SDL3/SDL_scancode.h>
 
+#define SDL_MAIN_HANDLED 1
+#include <SDL3/SDL_main.h>
+
 #include <string>
 #include <vector>
 
@@ -41,9 +44,10 @@ bool Art3m1sKrkrHeadlessInit(
     if (!TVPParseArguments(argc, argv))
         return false;
 
-    // SDL remains a utility dependency for files, timers and threading, but
-    // no subsystem that can manufacture a native window is initialized here.
-    if (!SDL_Init(0))
+    // The embedding host owns main() on every platform. SDL's main wrapper
+    // never runs, so mark it ready before initializing the event subsystem.
+    SDL_SetMainReady();
+    if (!SDL_Init(SDL_INIT_EVENTS))
         return false;
 
     g_width = TVPSettings.window_width;
@@ -151,6 +155,7 @@ void TVPHideIME()
 {
 }
 
+#if !defined(_KRKRSDL3_ANDROID)
 int TVPShowSimpleInputBox(ttstr&,
                           const ttstr&,
                           const ttstr&,
@@ -160,6 +165,7 @@ int TVPShowSimpleInputBox(ttstr&,
     // Creating a private SDL window here would violate the embedding contract.
     return 1;
 }
+#endif
 
 int TVPConvertKeyCodeToVKCode(int key_code)
 {

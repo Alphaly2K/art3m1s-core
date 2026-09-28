@@ -17,8 +17,9 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock};
 
-pub use art3m1s_krkr::abi::Art3M1sKrkrApiV1;
 use art3m1s_krkr::abi::KrkrAbiError;
+pub use art3m1s_krkr::abi::{Art3M1sKrkrApiV1, Art3m1sKrkrDiagnosticsApiV1};
+use art3m1s_krkr::native;
 use art3m1s_krkr::native::load_api_v1;
 pub use art3m1s_krkr::protocol::*;
 use art3m1s_krkr::protocol::{
@@ -84,6 +85,49 @@ static API_V1: Art3M1sKrkrApiV1 = Art3M1sKrkrApiV1 {
     runtime_is_exit_requested: Some(runtime_is_exit_requested),
     runtime_set_external_surface: Some(runtime_set_external_surface),
 };
+
+/// Optional pull-only diagnostics table. Kept separate from the runtime v1
+/// table so older hosts retain its exact layout and size.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_krkr_get_diagnostics_api_v1(
+    out_size: *mut usize,
+) -> *const Art3m1sKrkrDiagnosticsApiV1 {
+    if !out_size.is_null() {
+        unsafe { *out_size = std::mem::size_of::<Art3m1sKrkrDiagnosticsApiV1>() };
+    }
+    std::ptr::addr_of!(DIAGNOSTICS_API_V1)
+}
+
+static DIAGNOSTICS_API_V1: Art3m1sKrkrDiagnosticsApiV1 = Art3m1sKrkrDiagnosticsApiV1 {
+    struct_size: std::mem::size_of::<Art3m1sKrkrDiagnosticsApiV1>() as u32,
+    abi_version: art3m1s_krkr::abi::ART3M1S_KRKR_DIAGNOSTICS_ABI_VERSION,
+    magic: art3m1s_krkr::abi::ART3M1S_KRKR_DIAGNOSTICS_ABI_MAGIC,
+    log_next_bytes: Some(log_next_bytes),
+    poll_log: Some(poll_log),
+    runtime_set_debug: Some(runtime_set_debug),
+};
+
+unsafe extern "C" fn log_next_bytes() -> usize {
+    catch_unwind(AssertUnwindSafe(native::log_next_bytes)).unwrap_or(0)
+}
+
+unsafe extern "C" fn poll_log(output: *mut u8, capacity: usize) -> usize {
+    catch_unwind(AssertUnwindSafe(|| {
+        if output.is_null() || capacity == 0 || capacity > 1024 * 1024 {
+            return 0;
+        }
+        native::poll_log(unsafe { std::slice::from_raw_parts_mut(output, capacity) })
+    }))
+    .unwrap_or(0)
+}
+
+unsafe extern "C" fn runtime_set_debug(runtime: u64, enabled: i32) -> i32 {
+    guard_status(|| {
+        RUNTIMES.with(runtime, STATUS_INVALID_HANDLE, |_| {
+            native::set_debug(enabled != 0)
+        })
+    })
+}
 
 fn native_api() -> Result<&'static Art3M1sKrkrApiV1, i32> {
     NATIVE_API
@@ -282,12 +326,18 @@ unsafe extern "C" fn runtime_acquire_frame(runtime: u64, out_frame: *mut CoreFra
                 Err(_) => return STATUS_ENGINE,
             };
             let generation = renderer.generation();
-            if generation == 0 || generation == runtime.last_frame_generation {
+            if renderer.frame_in_progress()
+                || generation == 0
+                || generation == runtime.last_frame_generation
+            {
                 return ART3M1S_KRKR_STATUS_NO_FRAME;
             }
             runtime.pending_frame_pixels = match renderer.readback_rgba() {
                 Ok(pixels) => pixels,
-                Err(_) => return STATUS_ENGINE,
+                Err(error) => {
+                    eprintln!("[KRKR] frame readback failed: {error}");
+                    return STATUS_ENGINE;
+                }
             };
             let extent = renderer.extent();
             drop(renderer);

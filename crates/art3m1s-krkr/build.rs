@@ -9,6 +9,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=KRKRSDL3_SOURCE_DIR");
     println!("cargo:rerun-if-env-changed=KRKRSDL3_BUILD_DIR");
     println!("cargo:rerun-if-env-changed=VCPKG_INSTALLED_DIR");
+    println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
+    println!("cargo:rerun-if-env-changed=FFMPEG_DIR");
     println!("cargo:rerun-if-env-changed=ART3M1S_KRKR_REQUIRE_UPSTREAM");
     println!("cargo:rerun-if-env-changed=ANDROID_NDK_HOME");
     println!("cargo:rerun-if-env-changed=ANDROID_NDK_ROOT");
@@ -60,11 +62,6 @@ fn main() {
         "aarch64" => "arm64",
         arch => arch,
     };
-    assert!(
-        !upstream || target_os == "macos",
-        "the upstream KRKR backend currently supports macOS only"
-    );
-
     let _ = fs::remove_dir_all(&out_dir);
 
     let cmake_source = if upstream {
@@ -114,9 +111,37 @@ fn main() {
                 ))
                 .arg("-DVCPKG_MANIFEST_MODE=OFF");
         }
-        if target_arch == "arm64" {
-            configure.arg("-DVCPKG_TARGET_TRIPLET=arm64-osx");
+        if let Some(ffmpeg_dir) = env::var_os("FFMPEG_DIR") {
+            configure.arg(format!(
+                "-DART3M1S_FFMPEG_DIR={}",
+                PathBuf::from(ffmpeg_dir).display()
+            ));
         }
+        let triplet = match (
+            target_os.as_str(),
+            target_arch_value.as_str(),
+            env::var("CARGO_CFG_TARGET_ABI")
+                .unwrap_or_default()
+                .as_str(),
+        ) {
+            ("macos", "aarch64", _) => "arm64-osx",
+            ("macos", "x86_64", _) => "x64-osx",
+            ("ios", "aarch64", "sim") => "arm64-ios-simulator",
+            ("ios", "x86_64", _) => "x64-ios-simulator",
+            ("ios", "aarch64", _) => "arm64-ios",
+            ("android", "aarch64", _) => "arm64-android",
+            ("android", "arm", _) => "arm-android",
+            ("android", "x86_64", _) => "x64-android",
+            ("linux", "x86_64", _) => "x64-linux-release",
+            ("windows", "x86_64", _)
+                if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") =>
+            {
+                "x64-windows"
+            }
+            ("windows", "x86_64", _) => "x64-mingw-dynamic",
+            _ => panic!("unsupported upstream KRKR target: {target_os}/{target_arch_value}"),
+        };
+        configure.arg(format!("-DVCPKG_TARGET_TRIPLET={triplet}"));
     }
 
     match target_os.as_str() {
@@ -163,9 +188,6 @@ fn main() {
             }
         }
         "android" => {
-            // The real Android runtime follows krkrsdl3_build's Gradle/vcpkg
-            // pipeline. The macOS-only upstream guard above means this branch
-            // currently cross-compiles only the small ABI bootstrap shim.
             let ndk_root = android_ndk_root().unwrap_or_else(|| {
                 panic!(
                     "Android NDK not found; set ANDROID_NDK_HOME/ANDROID_NDK_ROOT or build with cargo-ndk"
@@ -175,7 +197,15 @@ fn main() {
             let abi = android_abi(&target_arch_value);
             let platform = android_platform();
             configure
-                .arg(format!("-DCMAKE_TOOLCHAIN_FILE={}", toolchain.display()))
+                .arg(format!(
+                    "-D{}={}",
+                    if upstream && env::var_os("VCPKG_ROOT").is_some() {
+                        "VCPKG_CHAINLOAD_TOOLCHAIN_FILE"
+                    } else {
+                        "CMAKE_TOOLCHAIN_FILE"
+                    },
+                    toolchain.display()
+                ))
                 .arg(format!("-DANDROID_ABI={abi}"))
                 .arg(format!("-DANDROID_PLATFORM={platform}"))
                 .arg("-DANDROID_STL=c++_shared");
@@ -201,7 +231,15 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=art3m1s_krkr_host");
     println!("cargo::metadata=native_dir={}", out_dir.display());
 
-    if matches!(target_os.as_str(), "macos" | "ios" | "linux" | "android") {
+    let bundled_rpath = match target_os.as_str() {
+        "macos" => Some("@loader_path"),
+        "ios" => Some("@loader_path/.."),
+        "linux" | "android" => Some("$ORIGIN"),
+        _ => None,
+    };
+    if let Some(rpath) = bundled_rpath {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{rpath}");
+        // Keep the isolated smoke/development binary runnable from target/.
         println!("cargo:rustc-link-arg=-Wl,-rpath,{}", out_dir.display());
     }
 }

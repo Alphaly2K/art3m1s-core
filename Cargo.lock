@@ -274,6 +274,7 @@ name = "art3m1s-siglus"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "art3m1s-media",
  "art3m1s-render",
  "glam 0.30.10",
  "siglus_scene_vm",

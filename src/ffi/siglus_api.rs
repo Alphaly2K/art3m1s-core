@@ -5,12 +5,15 @@
 //! closed instead of unsafely moving the VM or graphics backend.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::{CStr, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use art3m1s_log::{Level, Record};
 use art3m1s_render::{Extent2D, FrameTarget, GpuBackend, NativeSurface};
 use art3m1s_siglus::siglus_scene_vm::host::SiglusHostConfig;
 use art3m1s_siglus::{SiglusAdapter, is_siglus_project};
@@ -21,6 +24,189 @@ pub const STATUS_OK: i32 = 0;
 pub const STATUS_ARGUMENT: i32 = -1;
 pub const STATUS_HANDLE: i32 = -2;
 pub const STATUS_ENGINE: i32 = -3;
+const DIAGNOSTICS_MAGIC: u64 = 0x3156_4753_4d33_4152; // "RA3MSGV1"
+const AUDIO_MAGIC: u64 = 0x3156_4153_4d33_4152; // "RA3MSAV1"
+const AUDIO_SAMPLE_RATE: u32 = 48_000;
+const AUDIO_CHANNELS: u32 = 2;
+const MAX_AUDIO_FRAMES: usize = 4_800;
+const MAX_LOG_RECORDS: usize = 1024;
+const MAX_LOG_MESSAGE_BYTES: usize = 16 * 1024;
+
+#[repr(C)]
+pub struct SiglusDiagnosticsApiV1 {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub magic: u64,
+    pub log_next_bytes: unsafe extern "C" fn() -> usize,
+    pub poll_log: unsafe extern "C" fn(*mut u8, usize) -> usize,
+    pub runtime_set_debug: unsafe extern "C" fn(u64, i32) -> i32,
+}
+
+#[repr(C)]
+pub struct SiglusAudioApiV1 {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub magic: u64,
+    pub sample_rate: u32,
+    pub channels: u32,
+    /// Fill exactly `frames * channels` interleaved f32 samples.
+    pub runtime_render_pcm: unsafe extern "C" fn(u64, *mut f32, usize) -> i32,
+}
+
+unsafe extern "C" fn runtime_render_pcm(handle: u64, out: *mut f32, frames: usize) -> i32 {
+    guarded(|| {
+        if out.is_null()
+            || !(1..=MAX_AUDIO_FRAMES).contains(&frames)
+            || (out as usize) % std::mem::align_of::<f32>() != 0
+        {
+            return STATUS_ARGUMENT;
+        }
+        with_runtime(handle, |runtime| {
+            let output =
+                unsafe { std::slice::from_raw_parts_mut(out, frames * AUDIO_CHANNELS as usize) };
+            runtime.adapter.render_audio(output);
+            STATUS_OK
+        })
+    })
+}
+
+struct LogRecord {
+    level: u32,
+    message: String,
+}
+
+static LOG_QUEUE: Mutex<VecDeque<LogRecord>> = Mutex::new(VecDeque::new());
+static LOG_ACTIVE: AtomicBool = AtomicBool::new(false);
+static LOG_DEBUG: AtomicBool = AtomicBool::new(false);
+static LOG_PREVIOUS_LEVEL: Mutex<Option<Level>> = Mutex::new(None);
+
+fn begin_log_session() -> bool {
+    if LOG_ACTIVE
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
+    crate::host::logging::install_once();
+    if let Ok(mut queue) = LOG_QUEUE.lock() {
+        queue.clear();
+    }
+    if let Some(logger) = art3m1s_log::global() {
+        if let Ok(mut previous) = LOG_PREVIOUS_LEVEL.lock() {
+            *previous = Some(logger.level());
+            logger.set_level(Level::Debug);
+        }
+    }
+    LOG_DEBUG.store(false, Ordering::Relaxed);
+    true
+}
+
+fn end_log_session() {
+    LOG_ACTIVE.store(false, Ordering::Release);
+    LOG_DEBUG.store(false, Ordering::Relaxed);
+    if let (Some(logger), Ok(mut previous)) = (art3m1s_log::global(), LOG_PREVIOUS_LEVEL.lock()) {
+        if let Some(level) = previous.take() {
+            logger.set_level(level);
+        }
+    }
+}
+
+struct PendingLogSession(bool);
+
+impl Drop for PendingLogSession {
+    fn drop(&mut self) {
+        if self.0 {
+            end_log_session();
+        }
+    }
+}
+
+pub(crate) fn dispatch_log(record: &Record) {
+    if !LOG_ACTIVE.load(Ordering::Acquire)
+        || (record.level() >= Level::Debug && !LOG_DEBUG.load(Ordering::Relaxed))
+    {
+        return;
+    }
+    let level = match record.level() {
+        Level::Error => 'E',
+        Level::Warn => 'W',
+        Level::Info => 'I',
+        Level::Debug | Level::Trace => 'D',
+    } as u32;
+    let message = format!("[{}] {}", record.target(), record.message());
+    let mut end = message.len().min(MAX_LOG_MESSAGE_BYTES);
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    if let Ok(mut queue) = LOG_QUEUE.lock() {
+        if queue.len() == MAX_LOG_RECORDS {
+            queue.pop_front();
+        }
+        queue.push_back(LogRecord {
+            level,
+            message: message[..end].to_owned(),
+        });
+    }
+}
+
+unsafe extern "C" fn log_next_bytes() -> usize {
+    catch_unwind(AssertUnwindSafe(|| {
+        LOG_QUEUE
+            .lock()
+            .ok()
+            .and_then(|queue| queue.front().map(|record| 8 + record.message.len()))
+            .unwrap_or(0)
+    }))
+    .unwrap_or(0)
+}
+
+unsafe extern "C" fn poll_log(out: *mut u8, capacity: usize) -> usize {
+    catch_unwind(AssertUnwindSafe(|| {
+        if out.is_null() || !(8..=1024 * 1024).contains(&capacity) {
+            return 0;
+        }
+        let Ok(mut queue) = LOG_QUEUE.lock() else {
+            return 0;
+        };
+        let mut written = 0;
+        while let Some(record) = queue.front() {
+            let needed = 8 + record.message.len();
+            if needed > capacity - written {
+                break;
+            }
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    record.level.to_le_bytes().as_ptr(),
+                    out.add(written),
+                    4,
+                );
+                std::ptr::copy_nonoverlapping(
+                    (record.message.len() as u32).to_le_bytes().as_ptr(),
+                    out.add(written + 4),
+                    4,
+                );
+                std::ptr::copy_nonoverlapping(
+                    record.message.as_ptr(),
+                    out.add(written + 8),
+                    record.message.len(),
+                );
+            }
+            written += needed;
+            queue.pop_front();
+        }
+        written
+    }))
+    .unwrap_or(0)
+}
+
+unsafe extern "C" fn runtime_set_debug(handle: u64, enabled: i32) -> i32 {
+    guarded(|| {
+        with_runtime(handle, |_| {
+            LOG_DEBUG.store(enabled != 0, Ordering::Relaxed);
+            STATUS_OK
+        })
+    })
+}
 
 #[repr(C)]
 pub struct SiglusApiV1 {
@@ -113,6 +299,7 @@ unsafe extern "C" fn runtime_create(ptr: *const c_char, backend: i32, out: *mut 
         if !is_siglus_project(&path) {
             return fail("directory has no Siglus Scene.pck and Gameexe.dat/ini");
         }
+        let mut log_session = PendingLogSession(begin_log_session());
         let adapter = match SiglusAdapter::open(SiglusHostConfig::new(path)) {
             Ok(adapter) => adapter,
             Err(error) => return fail(format!("Siglus VM initialization: {error:#}")),
@@ -153,6 +340,7 @@ unsafe extern "C" fn runtime_create(ptr: *const c_char, backend: i32, out: *mut 
             );
         });
         unsafe { *out = handle };
+        log_session.0 = false;
         STATUS_OK
     })
 }
@@ -160,9 +348,13 @@ unsafe extern "C" fn runtime_create(ptr: *const c_char, backend: i32, out: *mut 
 unsafe extern "C" fn runtime_destroy(handle: u64) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         RUNTIMES.with(|table| {
-            if let Some(mut runtime) = table.borrow_mut().remove(&handle) {
+            let mut table = table.borrow_mut();
+            if let Some(mut runtime) = table.remove(&handle) {
                 runtime.adapter.release_textures(runtime.gpu.as_mut());
                 runtime.gpu.clear_native_surface();
+                if table.is_empty() {
+                    end_log_session();
+                }
             }
         });
     }));
@@ -337,12 +529,50 @@ static API: SiglusApiV1 = SiglusApiV1 {
     last_error,
 };
 
+static DIAGNOSTICS_API: SiglusDiagnosticsApiV1 = SiglusDiagnosticsApiV1 {
+    struct_size: std::mem::size_of::<SiglusDiagnosticsApiV1>() as u32,
+    abi_version: 1,
+    magic: DIAGNOSTICS_MAGIC,
+    log_next_bytes,
+    poll_log,
+    runtime_set_debug,
+};
+
+static AUDIO_API: SiglusAudioApiV1 = SiglusAudioApiV1 {
+    struct_size: std::mem::size_of::<SiglusAudioApiV1>() as u32,
+    abi_version: 1,
+    magic: AUDIO_MAGIC,
+    sample_rate: AUDIO_SAMPLE_RATE,
+    channels: AUDIO_CHANNELS,
+    runtime_render_pcm,
+};
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_siglus_get_api_v1(out_size: *mut usize) -> *const SiglusApiV1 {
     if !out_size.is_null() {
         unsafe { *out_size = std::mem::size_of::<SiglusApiV1>() };
     }
     &API
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_siglus_get_diagnostics_api_v1(
+    out_size: *mut usize,
+) -> *const SiglusDiagnosticsApiV1 {
+    if !out_size.is_null() {
+        unsafe { *out_size = std::mem::size_of::<SiglusDiagnosticsApiV1>() };
+    }
+    &DIAGNOSTICS_API
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_siglus_get_audio_api_v1(
+    out_size: *mut usize,
+) -> *const SiglusAudioApiV1 {
+    if !out_size.is_null() {
+        unsafe { *out_size = std::mem::size_of::<SiglusAudioApiV1>() };
+    }
+    &AUDIO_API
 }
 
 #[cfg(all(test, target_os = "macos"))]

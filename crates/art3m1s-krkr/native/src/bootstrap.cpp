@@ -106,3 +106,18 @@ extern "C" ART3M1S_KRKR_EXPORT int32_t art3m1s_krkr_native_set_render_host_v1(
 {
     return ART3M1S_KRKR_STATUS_UNSUPPORTED;
 }
+
+extern "C" ART3M1S_KRKR_EXPORT size_t art3m1s_krkr_native_log_next_bytes(void)
+{
+    return 0;
+}
+
+extern "C" ART3M1S_KRKR_EXPORT size_t art3m1s_krkr_native_poll_log(uint8_t*, size_t)
+{
+    return 0;
+}
+
+extern "C" ART3M1S_KRKR_EXPORT int32_t art3m1s_krkr_native_set_debug(int32_t)
+{
+    return ART3M1S_KRKR_STATUS_UNSUPPORTED;
+}

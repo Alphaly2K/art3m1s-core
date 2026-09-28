@@ -8,6 +8,8 @@
 #include <cctype>
 #include <condition_variable>
 #include <cstdint>
+#include <cstring>
+#include <deque>
 #include <filesystem>
 #include <limits>
 #include <memory>
@@ -15,6 +17,9 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <SDL3/SDL_filesystem.h>
+#include <SDL3/SDL_log.h>
 
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
@@ -31,6 +36,75 @@ namespace
 constexpr uint32_t kAbiVersion = 1;
 constexpr uint64_t kAbiMagic = 0x31564B524D334152ULL; // "RA3MKRV1"
 Art3m1sKrkrRenderHostV1 g_render_host{};
+
+constexpr size_t kMaxLogRecords = 1024;
+constexpr size_t kMaxLogMessageBytes = 16 * 1024;
+struct LogRecord
+{
+    uint32_t level;
+    std::string message;
+};
+std::mutex g_log_mutex;
+std::deque<LogRecord> g_log_queue;
+std::once_flag g_log_tap_once;
+std::atomic<bool> g_log_capture_active{false};
+SDL_LogOutputFunction g_previous_log_output = nullptr;
+void* g_previous_log_userdata = nullptr;
+SDL_LogPriority g_default_app_log_priority = SDL_LOG_PRIORITY_INFO;
+SDL_LogPriority g_default_audio_log_priority = SDL_LOG_PRIORITY_WARN;
+
+uint32_t LogLevel(SDL_LogPriority priority)
+{
+    if (priority >= SDL_LOG_PRIORITY_ERROR)
+        return 'E';
+    if (priority == SDL_LOG_PRIORITY_WARN)
+        return 'W';
+    if (priority <= SDL_LOG_PRIORITY_DEBUG)
+        return 'D';
+    return 'I';
+}
+
+void SDLCALL CaptureSDLLog(void*, int category, SDL_LogPriority priority, const char* message)
+{
+    if (g_log_capture_active.load(std::memory_order_relaxed) && message)
+    {
+        try
+        {
+            std::lock_guard<std::mutex> lock(g_log_mutex);
+            if (g_log_queue.size() == kMaxLogRecords)
+                g_log_queue.pop_front();
+            g_log_queue.push_back({LogLevel(priority),
+                                   std::string(message, std::min(strlen(message), kMaxLogMessageBytes))});
+        }
+        catch (...)
+        {
+            // Logging must never throw through SDL or the engine's TJS logger.
+        }
+    }
+    if (g_previous_log_output)
+        g_previous_log_output(g_previous_log_userdata, category, priority, message);
+}
+
+void StartLogCapture()
+{
+    std::call_once(g_log_tap_once, [] {
+        g_default_app_log_priority = SDL_GetLogPriority(SDL_LOG_CATEGORY_APPLICATION);
+        g_default_audio_log_priority = SDL_GetLogPriority(SDL_LOG_CATEGORY_AUDIO);
+        SDL_GetLogOutputFunction(&g_previous_log_output, &g_previous_log_userdata);
+        SDL_SetLogOutputFunction(CaptureSDLLog, nullptr);
+    });
+    {
+        std::lock_guard<std::mutex> lock(g_log_mutex);
+        g_log_queue.clear();
+    }
+    g_log_capture_active.store(true, std::memory_order_release);
+}
+
+void WriteLogU32(uint8_t* output, uint32_t value)
+{
+    for (int index = 0; index < 4; ++index)
+        output[index] = static_cast<uint8_t>(value >> (index * 8));
+}
 
 struct Runtime
 {
@@ -60,18 +134,18 @@ std::string LowerAscii(std::string value)
 
 bool FileNameEquals(const std::filesystem::path& path, const char* expected)
 {
-    return LowerAscii(path.filename().string()) == LowerAscii(expected);
+    return LowerAscii(path.filename().u8string()) == LowerAscii(expected);
 }
 
 bool HasExtension(const std::filesystem::path& path, const char* expected)
 {
-    return LowerAscii(path.extension().string()) == std::string(".") + LowerAscii(expected);
+    return LowerAscii(path.extension().u8string()) == std::string(".") + LowerAscii(expected);
 }
 
 std::string NormalizeRuntimePath(std::string path)
 {
     std::error_code error;
-    const std::filesystem::path parsed(path);
+    const std::filesystem::path parsed = std::filesystem::u8path(path);
     if (std::filesystem::is_directory(parsed, error) && !error &&
         (path.empty() || (path.back() != '/' && path.back() != '\\')))
     {
@@ -83,7 +157,7 @@ std::string NormalizeRuntimePath(std::string path)
 std::string ResolveRuntimeEntry(const std::string& game_root)
 {
     std::error_code error;
-    const std::filesystem::path root(game_root);
+    const std::filesystem::path root = std::filesystem::u8path(game_root);
     if (std::filesystem::is_regular_file(root, error) && !error)
         return game_root;
     if (!std::filesystem::is_directory(root, error) || error)
@@ -118,11 +192,11 @@ std::string ResolveRuntimeEntry(const std::string& game_root)
     if (error)
         return {};
     if (!data_xp3.empty())
-        return data_xp3.string();
+        return data_xp3.u8string();
     if (has_startup_tjs)
         return NormalizeRuntimePath(game_root);
     if (xp3_count == 1)
-        return sole_xp3.string();
+        return sole_xp3.u8string();
 
     return NormalizeRuntimePath(game_root);
 }
@@ -137,8 +211,14 @@ std::filesystem::path CurrentExecutablePath()
     if (_NSGetExecutablePath(buffer.data(), &size) != 0)
         return {};
     return std::filesystem::path(buffer.data());
-#else
+#elif defined(_KRKRSDL3_ANDROID)
+    // SDLActivity was not initialized by this Flutter-hosted runtime. Its
+    // SDL_GetBasePath implementation can require that missing Java context.
     return {};
+#else
+    // SDL supplies the executable directory on Windows and Linux.
+    const char* base = SDL_GetBasePath();
+    return base ? std::filesystem::u8path(base) / "art3m1s-krkr" : std::filesystem::path{};
 #endif
 }
 
@@ -155,21 +235,23 @@ std::string ResolveResourceExecutable()
     const std::filesystem::path executable = CurrentExecutablePath();
     // A macOS app keeps non-code assets in Contents/Resources. Return a virtual
     // executable path whose sibling Res directory is relocatable with the app.
+#if defined(__APPLE__)
     const std::filesystem::path bundle_resource_executable =
         executable.parent_path().parent_path() / "Resources" / "krkr" / "art3m1s-krkr";
     if (HasRuntimeResources(bundle_resource_executable))
-        return bundle_resource_executable.string();
+        return bundle_resource_executable.u8string();
+#endif
 
     // Standalone packaged hosts may place Res next to their executable.
     if (HasRuntimeResources(executable))
-        return executable.string();
+        return executable.u8string();
 
     // The isolated smoke binary lives outside the CMake output directory, so
     // retain the configured build-tree path as a development fallback.
 #ifdef ART3M1S_KRKR_RESOURCE_EXE
     return ART3M1S_KRKR_RESOURCE_EXE;
 #else
-    return executable.empty() ? "art3m1s-krkr" : executable.string();
+    return executable.empty() ? "art3m1s-krkr" : executable.u8string();
 #endif
 }
 
@@ -193,7 +275,7 @@ int32_t ProbeProjectImpl(const char* game_root_utf8, Art3m1sKrkrProbeV1* out_pro
         return ART3M1S_KRKR_STATUS_INVALID_ARGUMENT;
 
     std::error_code error;
-    const std::filesystem::path root(game_root_utf8);
+    const std::filesystem::path root = std::filesystem::u8path(game_root_utf8);
     if (!std::filesystem::exists(root, error) || error)
         return ART3M1S_KRKR_STATUS_INVALID_ARGUMENT;
 
@@ -290,12 +372,22 @@ int32_t RuntimeCreateImpl(const char* game_root_utf8,
         return ART3M1S_KRKR_STATUS_UNSUPPORTED;
     if (Application || g_active_runtime.load(std::memory_order_acquire))
         return ART3M1S_KRKR_STATUS_ENGINE;
+    StartLogCapture();
     art3m1s::krkr::ResetAudioHost();
 
-    std::string program = ResolveResourceExecutable();
     std::string game_root = ResolveRuntimeEntry(game_root_utf8);
     if (game_root.empty())
         return ART3M1S_KRKR_STATUS_INVALID_ARGUMENT;
+    std::string program = ResolveResourceExecutable();
+#if defined(_KRKRSDL3_ANDROID)
+    // Keep the virtual executable path stable and local to the game rather
+    // than embedding the build machine's CMake output path in the APK.
+    const std::filesystem::path source = std::filesystem::u8path(game_root);
+    std::error_code source_error;
+    const std::filesystem::path directory =
+        std::filesystem::is_directory(source, source_error) ? source : source.parent_path();
+    program = (directory / "art3m1s-krkr").u8string();
+#endif
     std::string window_arg =
         "-window=" + std::to_string(config->width) + "x" + std::to_string(config->height);
     std::string render_arg = "-render=software";
@@ -401,6 +493,9 @@ void RuntimeDestroyImpl(uint64_t handle)
     Art3m1sKrkrHeadlessQuit();
     art3m1s::krkr::ResetAudioHost();
     delete runtime;
+    SDL_SetLogPriority(SDL_LOG_CATEGORY_APPLICATION, g_default_app_log_priority);
+    SDL_SetLogPriority(SDL_LOG_CATEGORY_AUDIO, g_default_audio_log_priority);
+    g_log_capture_active.store(false, std::memory_order_release);
 }
 
 uint32_t RuntimeStageWidth(uint64_t handle)
@@ -623,7 +718,11 @@ int32_t RuntimeCreateNoThrow(const char* game_root_utf8,
 {
     try
     {
-        return RuntimeCreateImpl(game_root_utf8, save_root_utf8, config, out_runtime);
+        const int32_t status =
+            RuntimeCreateImpl(game_root_utf8, save_root_utf8, config, out_runtime);
+        if (status != ART3M1S_KRKR_STATUS_OK && !Application)
+            g_log_capture_active.store(false, std::memory_order_release);
+        return status;
     }
     catch (...)
     {
@@ -637,6 +736,8 @@ int32_t RuntimeCreateNoThrow(const char* game_root_utf8,
             {
             }
         }
+        if (!Application)
+            g_log_capture_active.store(false, std::memory_order_release);
         return ART3M1S_KRKR_STATUS_ENGINE;
     }
 }
@@ -854,5 +955,58 @@ extern "C" ART3M1S_KRKR_EXPORT int32_t art3m1s_krkr_native_set_render_host_v1(
         !host->end_frame)
         return ART3M1S_KRKR_STATUS_INVALID_ARGUMENT;
     g_render_host = *host;
+    return ART3M1S_KRKR_STATUS_OK;
+}
+
+extern "C" ART3M1S_KRKR_EXPORT size_t art3m1s_krkr_native_log_next_bytes(void)
+{
+    try
+    {
+        std::lock_guard<std::mutex> lock(g_log_mutex);
+        return g_log_queue.empty() ? 0 : 8 + g_log_queue.front().message.size();
+    }
+    catch (...)
+    {
+        return 0;
+    }
+}
+
+extern "C" ART3M1S_KRKR_EXPORT size_t art3m1s_krkr_native_poll_log(
+    uint8_t* output, size_t capacity)
+{
+    if (!output || capacity < 8)
+        return 0;
+    try
+    {
+        std::lock_guard<std::mutex> lock(g_log_mutex);
+        size_t written = 0;
+        while (!g_log_queue.empty())
+        {
+            const LogRecord& record = g_log_queue.front();
+            const size_t needed = 8 + record.message.size();
+            if (needed > capacity - written)
+                break;
+            WriteLogU32(output + written, record.level);
+            WriteLogU32(output + written + 4, static_cast<uint32_t>(record.message.size()));
+            std::memcpy(output + written + 8, record.message.data(), record.message.size());
+            written += needed;
+            g_log_queue.pop_front();
+        }
+        return written;
+    }
+    catch (...)
+    {
+        return 0;
+    }
+}
+
+extern "C" ART3M1S_KRKR_EXPORT int32_t art3m1s_krkr_native_set_debug(int32_t enabled)
+{
+    if (!Application)
+        return ART3M1S_KRKR_STATUS_ENGINE;
+    SDL_SetLogPriority(SDL_LOG_CATEGORY_APPLICATION,
+                       enabled ? SDL_LOG_PRIORITY_DEBUG : g_default_app_log_priority);
+    SDL_SetLogPriority(SDL_LOG_CATEGORY_AUDIO,
+                       enabled ? SDL_LOG_PRIORITY_DEBUG : g_default_audio_log_priority);
     return ART3M1S_KRKR_STATUS_OK;
 }

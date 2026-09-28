@@ -568,6 +568,30 @@ typedef struct Art3m1sKrkrApiV1 {
 const Art3m1sKrkrApiV1 *art3m1s_krkr_get_api_v1(size_t *out_size);
 ```
 
+KRKR 日志和调试使用独立的可选函数表，不改变上述运行时 v1 的布局：
+
+```c
+typedef struct Art3m1sKrkrDiagnosticsApiV1 {
+    uint32_t struct_size;
+    uint32_t abi_version; /* 1 */
+    uint64_t magic;       /* 0x315647444D334152, "RA3MDGV1" */
+    size_t (*log_next_bytes)(void);
+    size_t (*poll_log)(uint8_t *output, size_t capacity);
+    int32_t (*runtime_set_debug)(uint64_t runtime, int32_t enabled);
+} Art3m1sKrkrDiagnosticsApiV1;
+
+const Art3m1sKrkrDiagnosticsApiV1 *
+art3m1s_krkr_get_diagnostics_api_v1(size_t *out_size);
+```
+
+宿主须单独校验大小、版本、magic 和函数指针。`log_next_bytes` 返回队首完整记录所需
+字节数；`poll_log` 只弹出可完整写入的记录。记录为小端 `level:u32`、
+`message_len:u32`、UTF-8 文本，level 使用 ASCII `E/W/I/D`。队列进程级、上限
+1024 条，单条消息最多 16 KiB，溢出丢弃最旧记录。可在 `runtime_create` 失败后
+拉取启动日志；没有诊断表的旧 core 仍可运行。`runtime_set_debug` 要求有效 runtime
+代际句柄，调整 KRKR 的 SDL 应用/音频日志级别，销毁时恢复原值；它不是脚本断点调试器。
+宿主按会话持久化日志并限制 UI 显示量，不把日志回调或原生指针交给 Dart。
+
 KRKR 的 Host 侧语义和生命周期如下：
 
 - `Art3m1sKrkrProbeV1`、`Art3m1sKrkrRuntimeConfigV1`、每个
@@ -607,7 +631,8 @@ KRKR 的 Host 侧语义和生命周期如下：
   `I8/I16/I24/I32/F32` 的每样本字节数分别是 `1/2/3/4/4`。
 - `runtime_submit_audio_consumed` 的 `consumed_samples` 是自 stream 创建或最近
   stop/reset 后的绝对 sample frame 数，不是增量；`stream_id` 和 `generation` 必须与
-  当前 stream 对应。真实播放、混音和设备输出都在 Host。
+  当前 stream 对应。Apple 嵌入构建由 native SDL 音频设备直接消费 PCM，命令队列
+  通常为空；其余平台仍使用 Host 命令路径，不能把时钟回报视为真实播放。
 - KRKR ABI 没有 Dart 反向回调，也没有把 `CoreRuntime`、`HostResources`、PFS 或
   Artemis media event 复用给 KRKR。宿主必须每次检查 `struct_size`，并对可选函数指针
   做 NULL 检查。
@@ -633,8 +658,28 @@ Host 必须校验返回的 `out_size` 与自身结构大小一致，且检查所
 
 返回状态：0 成功，-1 参数错误，-2 错误线程/未知句柄，-3 引擎或 GPU 错误。
 所有输入内存仅在本次调用期间借用；core 不存储传入的 RGBA 指针。
-Siglus VM 非 `Send`：Host 必须在同一线程创建、输入、推进和销毁。当前适配器
-不提供音视频/对话框的 Host 拉取协议，尚不能按其它引擎的媒体语义宣称完整接入。
+Siglus VM 非 `Send`：Host 必须在同一线程创建、输入、推进、拉取 PCM 和销毁。
+视频/对话框尚无 Host 拉取协议，不能宣称完整接入。
+
+Siglus 音频是独立的可选 `art3m1s_siglus_get_audio_api_v1(size_t *out_size)`
+函数表，主运行时 v1 布局不变。表头 `struct_size:u32`、`abi_version=1`、
+`magic=0x315641534D334152`，随后是 `sample_rate=48000:u32`、
+`channels=2:u32` 和 `runtime_render_pcm(uint64_t, float *, size_t frames)`。
+输出为 interleaved f32；每次须提供 1–4800 帧的完整容量，同线程调用；
+成功返回 0。启用此构建时，Kira 仅解码/混音而不开设备，Host 按音频时钟拉取 PCM
+并负责输出、排队、暂停和释放。旧 core 缺少该表时，新的 Siglus Host 应拒绝启动，
+避免意外回退到引擎侧设备输出。
+
+Siglus 日志通过独立的可选 `art3m1s_siglus_get_diagnostics_api_v1(size_t *out_size)`
+函数表拉取，主运行时 v1 布局不变。表头为 `struct_size:u32`、`abi_version=1`、
+`magic=0x315647534D334152`；后接 `log_next_bytes()`、
+`poll_log(uint8_t *, size_t)`、`runtime_set_debug(uint64_t, int32_t)` 三个函数指针。
+宿主须校验表头和函数指针；旧 core 没有诊断表时可继续运行。
+每条记录为小端 `level:u32, message_len:u32, UTF-8 message`，级别为 ASCII
+`E/W/I/D`。队列最多 1024 条，每条消息最多 16 KiB；`poll_log` 只弹出能完整写入
+的记录。日志来自上游 Rust `log` facade，初始化失败后仍可拉取启动日志；直接写入
+stderr 的上游调试输出不在此接口内。`runtime_set_debug` 需要有效、同线程的
+runtime 句柄，仅启用 Debug 日志，不是 VM 断点调试器或 profiler。
 
 ## Host 状态、文件与全局配置
 

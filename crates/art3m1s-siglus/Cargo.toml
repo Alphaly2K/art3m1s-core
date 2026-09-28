@@ -8,12 +8,15 @@ description = "Siglus host and draw-command compatibility layer for Art3m1s"
 [dependencies]
 anyhow = "1"
 art3m1s-render = { path = "../art3m1s-render" }
+art3m1s-media = { path = "../art3m1s-media", optional = true, features = ["ffmpeg"] }
 glam = "0.30"
 siglus_scene_vm = { path = "../../../siglus_rs/crates/siglus_scene_vm" }
 image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
 
 [features]
 default = []
+host-audio = ["siglus_scene_vm/art3m1s-host-audio"]
+uci-ffmpeg = ["dep:art3m1s-media"]
 frame-dump = ["art3m1s-render/metal", "dep:image"]
 window = ["art3m1s-render/metal", "dep:winit", "dep:raw-window-handle", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-quartz-core"]
 

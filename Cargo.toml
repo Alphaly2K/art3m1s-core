@@ -59,7 +59,7 @@ runtime-shader = ["art3m1s-render/runtime-shader"]
 experimental-eluna = ["dep:eluna"]
 rfvp-engine = ["dep:art3m1s-rfvp"]
 krkr-engine = ["dep:art3m1s-krkr", "art3m1s-krkr/native-upstream"]
-siglus-engine = ["dep:art3m1s-siglus"]
+siglus-engine = ["dep:art3m1s-siglus", "art3m1s-siglus/uci-ffmpeg", "art3m1s-siglus/host-audio"]
 ffmpeg = ["art3m1s-media/ffmpeg"]
 game-probes = ["gl-backend"]
 

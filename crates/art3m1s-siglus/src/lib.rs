@@ -82,6 +82,8 @@ pub struct SiglusAdapter {
 
 impl SiglusAdapter {
     pub fn open(config: SiglusHostConfig) -> Result<Self> {
+        #[cfg(feature = "uci-ffmpeg")]
+        siglus_scene_vm::assets::install_in_process_decoder(decode_uci_h264);
         Ok(Self {
             host: SiglusHost::new_external(config)?,
             textures: HashMap::new(),
@@ -134,6 +136,13 @@ impl SiglusAdapter {
 
     pub fn last_frame_counts(&self) -> (usize, usize) {
         (self.last_sprite_count, self.last_command_count)
+    }
+
+    /// Fill interleaved stereo f32 samples at 48 kHz. The Host owns the
+    /// output device and determines how many frames to request.
+    #[cfg(feature = "host-audio")]
+    pub fn render_audio(&mut self, output: &mut [f32]) {
+        self.host.render_host_audio(output);
     }
 
     /// Advance the VM and submit a new frame directly to the shared backend.
@@ -191,6 +200,51 @@ impl SiglusAdapter {
         }
         gpu.end_access();
     }
+}
+
+#[cfg(feature = "uci-ffmpeg")]
+struct UciStream(Vec<u8>);
+
+#[cfg(feature = "uci-ffmpeg")]
+impl art3m1s_media::MediaSource for UciStream {
+    fn len(&self) -> std::result::Result<u64, String> {
+        Ok(self.0.len() as u64)
+    }
+
+    fn read_at(&self, offset: u64, output: &mut [u8]) -> std::result::Result<usize, String> {
+        let offset = usize::try_from(offset).map_err(|error| error.to_string())?;
+        if offset >= self.0.len() {
+            return Ok(0);
+        }
+        let count = output.len().min(self.0.len() - offset);
+        output[..count].copy_from_slice(&self.0[offset..offset + count]);
+        Ok(count)
+    }
+}
+
+#[cfg(feature = "uci-ffmpeg")]
+fn decode_uci_h264(stream: &[u8], pixel_format: &str, expected_len: usize) -> Result<Vec<u8>> {
+    use art3m1s_media::ffmpeg::FfmpegVideoDecoder;
+
+    let mut decoder = FfmpegVideoDecoder::open(Arc::new(UciStream(stream.to_vec())))
+        .map_err(anyhow::Error::msg)
+        .context("open in-process UCI H.264 decoder")?;
+    let frame = decoder
+        .next_rgba_frame()
+        .map_err(anyhow::Error::msg)?
+        .context("UCI H.264 stream has no frame")?;
+    let pixels = match pixel_format {
+        "rgba" => frame.pixels,
+        "gray" => frame.pixels.chunks_exact(4).map(|pixel| pixel[0]).collect(),
+        _ => bail!("unsupported UCI pixel format {pixel_format}"),
+    };
+    if pixels.len() != expected_len {
+        bail!(
+            "UCI decoded frame size mismatch: got {}, expected {expected_len}",
+            pixels.len()
+        );
+    }
+    Ok(pixels)
 }
 
 fn convert_frame(

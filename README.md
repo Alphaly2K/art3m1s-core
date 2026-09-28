@@ -6,7 +6,7 @@ RFVP 和 KRKR/Kirikiri，共享日志、媒体、GPU 渲染和版本化 C ABI；
 [Art3m1s](https://github.com/Alphaly2K/art3m1s)。
 
 Artemis 仍是当前功能最完整、默认启用的引擎路径。RFVP 是独立的可选 adapter。KRKR
-adapter 处于早期接入阶段，当前 crate 主要提供 ABI、探针和 macOS smoke，不应把
+adapter 处于早期接入阶段，提供 ABI、探针和跨平台嵌入式上游构建路径，不应把
 `native-bootstrap` 当作可运行游戏后端。Artemis 路径不创建窗口；KRKR 当前由上游 C++
 runtime 管理其内部 application/window 生命周期，但最终显示和真实音频输出仍固定由
 Host 负责。
@@ -64,8 +64,9 @@ cargo fmt --check
 cargo build --release
 ```
 
-默认 features 包含 GL、原生 Metal、实验 Vulkan、实验 Eluna 和 `rfvp-engine`，
-不包含 `ffmpeg` 或 `krkr-engine`。只用无 GPU 的核心模块时
+默认 features 包含 GL、原生 Metal、实验 Vulkan、实验 Eluna、`rfvp-engine` 和
+`krkr-engine`，不包含 `ffmpeg`。未提供上游 source/build 目录时，KRKR 仅回退到
+不可运行的 bootstrap shim。只用无 GPU 的核心模块时
 `cargo build --no-default-features`。需要商业游戏资源的兼容性测试默认不执行，见
 [tests/README.md](tests/README.md)。
 
@@ -89,8 +90,10 @@ cargo build --manifest-path crates/art3m1s-krkr/Cargo.toml \
 上游 revision、CMake 前置条件和 smoke 运行参数见
 [crates/art3m1s-krkr/README.md](crates/art3m1s-krkr/README.md) 与
 [crates/art3m1s-krkr/UPSTREAM.md](crates/art3m1s-krkr/UPSTREAM.md)。`native-upstream-smoke`
-目前只支持 macOS；任意 Windows `.dll`/`.tpm` 插件、真实扬声器输出和 iOS 打包仍是
-后续工作。
+用于单机无窗口探针。生产宿主的 macOS、Windows、Linux、Android 和原生 SwiftUI iOS
+构建均须显式提供 `KRKRSDL3_SOURCE_DIR`、`KRKRSDL3_BUILD_DIR`、`VCPKG_ROOT` 并使用
+`--krkr`，以防误把 bootstrap 当成真实引擎。任意 Windows `.dll`/`.tpm` 插件和真实
+扬声器输出仍未接入；各平台需分别进行实际构建和游戏验证。
 
 ## 宿主接入
 

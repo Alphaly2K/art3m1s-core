@@ -11,6 +11,8 @@ impl Sink for HostEventSink {
         crate::ffi::log(record.level().ffi_code(), record.message());
         #[cfg(feature = "rfvp-engine")]
         crate::ffi::rfvp_api::dispatch_log(record.level().ffi_code(), record.message());
+        #[cfg(feature = "siglus-engine")]
+        crate::ffi::siglus_api::dispatch_log(record);
     }
 }
 

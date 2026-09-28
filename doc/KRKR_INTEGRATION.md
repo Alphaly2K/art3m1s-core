@@ -32,6 +32,12 @@ const Art3m1sKrkrApiV1 *art3m1s_krkr_get_api_v1(size_t *out_size);
 宿主必须同时校验 `struct_size`、`abi_version` 和 `magic`。native shim 自己的
 入口名是私有的 `art3m1s_krkr_native_get_api_v1`，core 不会把该符号暴露给宿主。
 
+日志/调试另有可选的 `art3m1s_krkr_get_diagnostics_api_v1` 版本化函数表，
+提供 `log_next_bytes`、`poll_log` 和 `runtime_set_debug`。它不改变主运行时 v1 ABI。
+日志由上游 Kirikiri/SDL 输出汇入有界队列，Host 主动拉取并持久化；调试开关
+调整 SDL 应用/音频日志级别，不提供 TJS 断点或 profiler。记录格式见
+[FFI 参考](FFI_REFERENCE.md#krkr-abiv1)。
+
 `runtime_create` 的 game root 可以是 XP3 文件，也可以是游戏目录。目录中存在
 `data.xp3` 时优先以其为入口；没有 `data.xp3` 时接受带 `startup.tjs` 的目录或仅含一个
 根级 XP3 的目录。
@@ -54,6 +60,10 @@ cargo build --no-default-features --features krkr-engine
 
 若依赖已通过 vcpkg 预装，可另设 `VCPKG_INSTALLED_DIR` 指向其安装根目录；
 KRKR CMake 会复用该目录并关闭 manifest 自动安装。
+Apple 平台若设置 `FFMPEG_DIR`，KRKR 只链接 FFmpeg 的动态
+`avformat/avcodec/avutil` 音频解码路径。Host 提供的 FFmpeg 必须是
+LGPL 构建；当前 iOS/macOS 构建脚本显式使用 `--disable-gpl`、
+`--disable-nonfree`、`--disable-version3`，不能换入 GPL/AGPL 组件。
 
 发布打包需要把构建后的 `libart3m1s_krkr_host`、其 `Res/` 目录和 C++ runtime
 依赖与 core 一起分发。core 会写入 native shim 输出目录的 rpath，同时附加
@@ -114,6 +124,6 @@ core ABI 实测：
 - 读取 4 路音频流、374 个 PCM chunk、`8,177,634` 字节非零 PCM。
 
 当前直接路径先接管最终窗口纹理与呈现；KRKR 内部 Layer/插件离屏 target、mask 和
-mesh 仍走其软件合成，后续可沿同一 vtable 逐项下沉。尚未完成：真实扬声器播放、
-任意 Windows `.dll`/`.tpm` 插件、视频帧路径、iOS 动态 framework 打包和发布级
-rpath 重定位。
+mesh 仍走其软件合成，后续可沿同一 vtable 逐项下沉。Apple 构建已由 SDL
+播放 PCM，其他平台的命令队列仍需宿主真实音频输出。尚未完成：
+任意 Windows `.dll`/`.tpm` 插件、视频帧路径和发布级 rpath 重定位验证。

@@ -24,7 +24,7 @@ Host 只依赖引擎总抽象，不应直接依赖某个 adapter 的内部类型
 | Artemis / Art3m1s | `art3m1s_get_api_v1` | 完整生产路径；`Art3m1sApiV1` |
 | RFVP | `art3m1s_rfvp_get_api_v1` | 独立 adapter；默认 feature `rfvp-engine` |
 | KRKR / Kirikiri | `art3m1s_krkr_get_api_v1` | 早期 adapter；仅在使用 `krkr-engine` 且 native shim 可用时存在 |
-| Siglus | `art3m1s_siglus_get_api_v1` | 早期 adapter；`--features siglus-engine`，macOS Host 已接入；引擎音视频尚未迁移到 Host 媒体命令 |
+| Siglus | `art3m1s_siglus_get_api_v1` | 早期 adapter；`--features siglus-engine`，macOS Host 已接入；Kira 只混音，Host 通过独立 PCM ABI 输出声音；视频/对话框仍待迁移 |
 
 四个函数表不共享 runtime、资源、事件或 surface 对象。Artemis 的新宿主应只查询
 `Art3m1sApiV1`，不再逐个解析迁移期的平铺符号；RFVP、KRKR 和 Siglus 必须走各自入口。媒体解码
@@ -40,8 +40,9 @@ Host 只依赖引擎总抽象，不应直接依赖某个 adapter 的内部类型
 - 数据走裸指针和显式长度，例如像素、INI、字体、替换表、HTTP body 和 uniform block。
   零拷贝数据仍由调用方保证调用期间有效，不由 core 猜测容器布局。跨边界的字节流
   （host-events 事件头、RFVP 日志记录头）一律固定小端。
-- 只有 `Art3m1sApiV1`、`Art3m1sRfvpApiV1`、`Art3m1sKrkrApiV1`、`SiglusApiV1` 这种定长、版本化、
-  全函数指针的 POD 结构可以按地址跨边界；不要新增按值传递的复杂对象结构。
+- 只有 `Art3m1sApiV1`、`Art3m1sRfvpApiV1`、`Art3m1sKrkrApiV1`、`SiglusApiV1`
+  及其独立诊断/音频函数表这类定长、版本化的 POD 结构可以按地址跨边界；
+  不要新增按值传递的复杂对象结构。
 - 通信方向是 Host 调 core、core 排队、Host 拉取。不要新增 native→Host 回调入口；
   RFVP 的 `runtime_set_log_callback` 是仅存的迁移期例外，不能安全暴露回调蹦床的
   宿主（如修改过的 iOS 设备上的 Dart `NativeCallable`）必须改用
@@ -49,11 +50,19 @@ Host 只依赖引擎总抽象，不应直接依赖某个 adapter 的内部类型
 
 Siglus ABI 特别约定：`u64` handle 进程内不重复使用，但 VM 含 `Rc`，只能在创建它的
 同一线程访问；错误线程返回 `STATUS_HANDLE`，销毁也必须在 owner 线程执行。
+`siglus-engine` 同时启用进程内 FFmpeg 解码 UCI/MARK 图片，不调用系统
+`ffmpeg` 命令；Host 打包与 core 链接兼容的 FFmpeg 动态库。
 `runtime_tick` 的 `mode=0/1/2` 分别推进、回读 RGBA、向 Host 表面 present；
 `mode=1` 的输出缓冲至少 `stage_width × stage_height × 4` 字节。
 `runtime_set_external_surface(kind=0)` 在 Host 释放 surface 前解绑。
-当前 Siglus 原项目的 Kira 音频仍在引擎内部输出，尚未满足上表中媒体全由 Host
-管理的目标；因此冻结/挂起仅停止 VM 推进，不保证音频设备完全静默。
+Siglus 另有可选、拉取式 `art3m1s_siglus_get_diagnostics_api_v1`，Host 应在创建、
+每帧及销毁后拉取日志并按 `E/W/I/D` 级别持久化；调试模式通过有效 runtime 句柄
+调用 `runtime_set_debug`。它只控制上游 Rust `log` facade 的 Debug 输出，
+不提供 VM 断点或 profiler，详见 [FFI_REFERENCE.md](FFI_REFERENCE.md#siglus-abiv1)。
+Siglus 上游在 `art3m1s-host-audio` feature 下以无设备 Kira 后端解码/混音；
+`art3m1s_siglus_get_audio_api_v1` 由 Host 按播放时钟拉取 48 kHz 双声道 f32 PCM，
+macOS Flutter Host 将其提交到自身拥有的 AVAudioEngine。VM 不直接打开音频设备。
+冻结/挂起时 Host 暂停播放并停止拉取 PCM；其他平台的 Siglus 音频 Host 尚未接入。
 Siglus 的存档路径目前也仍由原 VM 决定（通常位于游戏目录）；
 `EngineRuntime.setSaveDir` 暂未接线，不能按 Artemis 的每游戏沙箱隔离保证处理存档。
 
@@ -274,8 +283,9 @@ krkr.runtime_destroy(rt)
   `runtime_release_frame(frame_id)` 调用前有效；Host 必须先展示或复制，不能跨 tick
   保存指针。`NO_FRAME` 不是退出或错误。
 - `runtime_poll_audio_command` 每次取出一个宿主音频命令；`NO_COMMAND` 表示队列已空。
-  `payload` 只在下次 poll 前有效，收到后应立即复制或交给音频线程。真实播放和混音固定
-  在 Host 侧，KRKR adapter 不创建 Dart 回调，也不直接写扬声器。
+  `payload` 只在下次 poll 前有效，收到后应立即复制或交给音频线程。Apple 嵌入构建
+  目前由 native SDL 音频设备直接播放，命令队列通常为空；其余平台仍走 Host 命令路径。
+  不能把模拟的 sample 消费时钟当作扬声器播放证明。
 - `runtime_submit_audio_consumed` 回传的是自 stream 创建或最近 stop/reset 以来的
   **绝对**已消费 sample frame 数，不是本次增量。每个结构体的 `struct_size` 都必须按
   对应版本填写。
@@ -292,6 +302,11 @@ krkr.runtime_destroy(rt)
 KRKR 的 `probe_project` 是目录/XP3/TJS 入口探针，不是完整的游戏身份识别，也不替代
 Host 的权限和路径校验。`Art3m1sKrkrRuntimeConfigV1.flags` 和预留字段当前没有 Host
 语义，必须清零；`Art3m1sKrkrProbeV1` 的其他字段只作为诊断信息，不能据此执行插件。
+
+KRKR 日志通过独立的 `art3m1s_krkr_get_diagnostics_api_v1` 拉取，不改动主运行 ABI。
+启动失败也要先拉取队列再报告错误；运行中按 tick 批量拉取，退出前后再清空。
+`runtime_set_debug` 需要有效代际句柄，调试开关只能控制日志级别，不应被当作
+TJS 断点调试器或 profiler 支持。记录格式和缓冲规则见 [FFI_REFERENCE.md](FFI_REFERENCE.md#krkr-abiv1)。
 
 ## 5. 输出路径
 
