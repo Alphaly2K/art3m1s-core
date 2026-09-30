@@ -635,11 +635,9 @@ impl TextRenderer for GlyphTextRenderer {
                 layer.font = font;
             }
         }
-        // 清缓冲的同时清 link/ruby 区间与页内再现标签（区间指向旧缓冲）
-        layer.clear_page();
-        layer.reveal_index = 0;
-        layer.reveal_pending = false;
-        layer.reveal_clock_ms = 0; // 切层时也要清时钟，避免旧动画时间残留
+        // chgmsg 只切换“后续文本写入哪一层”。官方文档不清除目标层已有文本，
+        // 清页是 [rp]。脚本写完对白后会再次 chgmsg 到同一层设置 glyph；
+        // 若这里清缓冲，点击等待期间对白会消失。
     }
 
     fn pop_message_layer(&mut self) {
@@ -1910,6 +1908,43 @@ mod tests {
 
         renderer.pop_message_layer();
         assert_eq!(renderer.active_font_face(), Some("font/story.ttf"));
+    }
+
+    #[test]
+    fn chgmsg_keeps_text_already_on_the_target_layer() {
+        // chgmsg 只改当前层。写完对白后再切回同一层（例如设置 glyph）不得清页。
+        let mut renderer = GlyphTextRenderer::new();
+        renderer.switch_message_layer(Some("1.80.mw.adv_adv"), true);
+        {
+            let layer = renderer.font_state_mut().active_layer_mut();
+            layer.text_buffer = glyphs("放学后。");
+            layer.reveal_index = 4;
+            layer.reveal_clock_ms = 240;
+            layer.page_tags.push(BacklogTag::Text("放学后。".into()));
+        }
+        renderer.switch_message_layer(Some("1.80.mw.adv_name"), true);
+        renderer.font_state_mut().active_layer_mut().text_buffer = glyphs("美纱");
+        renderer.switch_message_layer(Some("1.80.mw.adv_adv"), true);
+
+        let adv = &renderer.font_state().layers["1.80.mw.adv_adv"];
+        let text: String = adv
+            .text_buffer
+            .iter()
+            .map(|glyph| glyph.character.as_str())
+            .collect();
+        assert_eq!(text, "放学后。");
+        assert_eq!(adv.reveal_index, 4);
+        assert_eq!(adv.reveal_clock_ms, 240);
+        assert!(matches!(
+            adv.page_tags.last(),
+            Some(BacklogTag::Text(text)) if text == "放学后。"
+        ));
+        let name: String = renderer.font_state().layers["1.80.mw.adv_name"]
+            .text_buffer
+            .iter()
+            .map(|glyph| glyph.character.as_str())
+            .collect();
+        assert_eq!(name, "美纱");
     }
 
     #[test]

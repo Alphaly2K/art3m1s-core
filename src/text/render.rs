@@ -669,7 +669,7 @@ impl MessageLayer {
         }
     }
 
-    /// 清空本页的文本与页内标记（换页/切层清缓冲时同步调用，
+    /// 清空本页的文本与页内标记（换页清缓冲时同步调用，
     /// 否则 link/ruby 区间与再现标签会指向已清空的缓冲）。
     pub fn clear_page(&mut self) {
         self.generation = self.generation.wrapping_add(1);
