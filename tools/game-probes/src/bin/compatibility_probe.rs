@@ -146,14 +146,18 @@ fn main() {
         let os = CString::new(os).unwrap();
         unsafe { ffi::art3m1s_runtime_set_reported_os(&mut rt, os.as_ptr()) };
     }
-    if mode.starts_with("eluna") {
-        let selected = unsafe { ffi::art3m1s_runtime_set_emote_backend(&mut rt, 1) };
-        assert_eq!(selected, 1, "select Eluna backend");
-        rt.set_profiler_enabled(true);
-    }
-    rt.load_project_bytes(&ini, "WINDOWS").unwrap();
+    let config_section = std::env::var("ART3M1S_PROBE_CONFIG").unwrap_or_else(|_| "WINDOWS".into());
+    rt.load_project_bytes(&ini, &config_section).unwrap();
     let mut pixels = vec![0; rt.pixel_buffer_size()];
-    tick(&mut rt, 900, &mut pixels);
+    if mode.ends_with("interactive") {
+        for _ in 0..900 {
+            rt.advance_without_render(17);
+            drain_host_events();
+        }
+        tick(&mut rt, 1, &mut pixels);
+    } else {
+        tick(&mut rt, 900, &mut pixels);
+    }
     snapshot(&rt, &pixels, "title");
     if mode.ends_with("interactive") {
         use std::io::BufRead;
@@ -169,6 +173,12 @@ fn main() {
                 ["button", key, down] => rt.feed_mouse_button(key.parse().unwrap(), *down == "1"),
                 ["tick", count] => tick(&mut rt, count.parse().unwrap(), &mut pixels),
                 ["pace", count] => paced_tick(&mut rt, count.parse().unwrap(), &mut pixels),
+                ["fast", count] => {
+                    for _ in 0..count.parse().unwrap() {
+                        rt.advance_without_render(17);
+                        drain_host_events();
+                    }
+                }
                 ["shot", name] => snapshot(&rt, &pixels, name),
                 ["profile"] => println!("{}", rt.profiler_snapshot_json()),
                 ["trace"] => rt.set_string_variable("codex.trace", "1"),
@@ -178,6 +188,8 @@ fn main() {
                 }
                 ["video-finished"] => rt.notify_video_finished(None),
                 ["video-finished", id] => rt.notify_video_finished(Some(id)),
+                ["sound-finished"] => rt.notify_sound_finished(None),
+                ["sound-finished", id] => rt.notify_sound_finished(Some(id)),
                 ["quit"] => break,
                 _ => println!("UNKNOWN {line}"),
             }

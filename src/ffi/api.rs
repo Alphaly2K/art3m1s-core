@@ -16,14 +16,13 @@ use crate::ffi::{
     art3m1s_runtime_load_project_bytes, art3m1s_runtime_notify_lifecycle,
     art3m1s_runtime_notify_sound_finished, art3m1s_runtime_notify_video_finished,
     art3m1s_runtime_pixel_buffer_size, art3m1s_runtime_profiler_snapshot,
-    art3m1s_runtime_set_emote_backend, art3m1s_runtime_set_external_surface,
-    art3m1s_runtime_set_profiler_enabled, art3m1s_runtime_set_render_quality_preset,
-    art3m1s_runtime_set_reported_os, art3m1s_runtime_set_resources,
-    art3m1s_runtime_set_string_variable, art3m1s_runtime_set_volume, art3m1s_runtime_stage_height,
-    art3m1s_runtime_stage_width, art3m1s_runtime_submit_dialog, art3m1s_runtime_submit_http_result,
-    art3m1s_runtime_submit_text_translation, art3m1s_runtime_upload_video_layer_frame,
-    art3m1s_set_angle_path, art3m1s_set_damage_visualization, art3m1s_set_debug,
-    art3m1s_set_font_override,
+    art3m1s_runtime_set_external_surface, art3m1s_runtime_set_profiler_enabled,
+    art3m1s_runtime_set_render_quality_preset, art3m1s_runtime_set_reported_os,
+    art3m1s_runtime_set_resources, art3m1s_runtime_set_string_variable, art3m1s_runtime_set_volume,
+    art3m1s_runtime_stage_height, art3m1s_runtime_stage_width, art3m1s_runtime_submit_dialog,
+    art3m1s_runtime_submit_http_result, art3m1s_runtime_submit_text_translation,
+    art3m1s_runtime_upload_video_layer_frame, art3m1s_set_angle_path,
+    art3m1s_set_damage_visualization, art3m1s_set_debug, art3m1s_set_font_override,
 };
 use crate::host_events::{
     HostEvents, art3m1s_clear_host_state_v1, art3m1s_host_events_create,
@@ -86,7 +85,6 @@ type RuntimeSubmitDialogFn = unsafe extern "C" fn(*mut CoreRuntime, i32, *const 
 type RuntimeSubmitTextTranslationFn =
     unsafe extern "C" fn(*mut CoreRuntime, u64, *const c_char) -> i32;
 type RuntimeSetReportedOsFn = unsafe extern "C" fn(*mut CoreRuntime, *const c_char);
-type RuntimeSetEmoteBackendFn = unsafe extern "C" fn(*mut CoreRuntime, i32) -> i32;
 type RuntimeConfigureSpatialUpscaleFn = unsafe extern "C" fn(*mut CoreRuntime, f32, f32) -> i32;
 type RuntimeSetRenderQualityPresetFn = unsafe extern "C" fn(*mut CoreRuntime, i32) -> i32;
 type RuntimeSetProfilerEnabledFn = unsafe extern "C" fn(*const CoreRuntime, i32);
@@ -152,7 +150,6 @@ pub struct Art3m1sApiV1 {
     pub runtime_submit_dialog: Option<RuntimeSubmitDialogFn>,
     pub runtime_submit_text_translation: Option<RuntimeSubmitTextTranslationFn>,
     pub runtime_set_reported_os: Option<RuntimeSetReportedOsFn>,
-    pub runtime_set_emote_backend: Option<RuntimeSetEmoteBackendFn>,
     pub runtime_configure_spatial_upscale: Option<RuntimeConfigureSpatialUpscaleFn>,
     pub runtime_set_render_quality_preset: Option<RuntimeSetRenderQualityPresetFn>,
     pub runtime_set_profiler_enabled: Option<RuntimeSetProfilerEnabledFn>,
@@ -233,7 +230,6 @@ static API_V1: Art3m1sApiV1 = Art3m1sApiV1 {
     runtime_submit_dialog: Some(art3m1s_runtime_submit_dialog),
     runtime_submit_text_translation: Some(art3m1s_runtime_submit_text_translation),
     runtime_set_reported_os: Some(art3m1s_runtime_set_reported_os),
-    runtime_set_emote_backend: Some(art3m1s_runtime_set_emote_backend),
     runtime_configure_spatial_upscale: Some(art3m1s_runtime_configure_spatial_upscale),
     runtime_set_render_quality_preset: Some(art3m1s_runtime_set_render_quality_preset),
     runtime_set_profiler_enabled: Some(art3m1s_runtime_set_profiler_enabled),

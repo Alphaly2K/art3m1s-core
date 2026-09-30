@@ -7,6 +7,10 @@
 ### 变更
 
 - core 动态库只导出 `art3m1s_get_api_v1`；原有 `art3m1s_*` 平铺符号全部退出动态库导出面。对象操作通过不透明句柄，像素/blob/字符串数据继续使用裸指针加长度。
+- 移除实验性 Eluna E-Mote 后端：删除 `crates/eluna`、`src/runtime/emote/eluna*.rs`、
+  `emote_parity_probe` 工具与函数表槽位 `runtime_set_emote_backend`。E-Mote 统一由内置
+  `crates/art3m1s-emote` 提供；这样 core 不再与 `siglus_rs` 各自 vendored 的
+  `eluna_rs` 在同一 lockfile 里同名冲突。
 - 文件挂载、存档根和资源覆盖改为独立 `HostResources` 句柄；`CoreRuntime` 在加载项目前绑定资源句柄，运行时的媒体、字体、存档和 asset 查询不再依赖进程全局文件表。
 - 不兼容旧平铺 ABI。Host 必须通过 `Art3m1sApiV1` 调用 runtime、文件、输入、profiler 和 host events 入口。
 
@@ -38,7 +42,6 @@
 - 后端无关的 post-process 管线：独立 SceneColor / output size，线性放大与空间超分配置。
 - 运行时 Artemis HLSL 子集注册与编译，供游戏自定义 shader 使用。
 - 宿主运行时覆盖字体接口（`art3m1s_set_font_override` / `art3m1s_clear_font_override`）：脚本自带字体缺译文字形时，由宿主提供 TTF/OTF 覆盖全部脚本字体的光栅化来源。
-- 新增实验性 E-Mote 后端 `crates/eluna`，可在宿主提供的 Lua 5.1/5.4/5.5/luau 环境中运行，支持部分未验证的 PSB model variant 和私有 motion 语义。
 - 脚本可见的 reported-OS 覆盖，供宿主为控制台门控逻辑指定上报机种。
 
 ### 修复
@@ -63,7 +66,7 @@
 - 原生 Vulkan 仍为实验后端：Android 默认继续使用 ANGLE / OpenGL ES。
 - MetalFX Spatial 需要 macOS 13+ / iOS 16+ 且 GPU 支持；不支持 Temporal、FSR 或帧生成。
 - HLSL 仍只兼容已验证游戏使用的 Artemis shader 子集。
-- E-Mote 对少量未验证的 PSB model variant 和私有 motion 语义仍可能不完整；Eluna 路径为实验性。
+- E-Mote 对少量未验证的 PSB model variant 和私有 motion 语义仍可能不完整。
 
 ## [0.3.0] - 2026-09-01
 

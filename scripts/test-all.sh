@@ -35,7 +35,6 @@ run cargo test --manifest-path crates/asb-interpreter/Cargo.toml --all-targets
 run cargo test --manifest-path crates/asb-interpreter/Cargo.toml \
   --no-default-features --features backend-luau --lib --tests
 run cargo test --manifest-path crates/art3m1s-emote/Cargo.toml --all-targets
-run cargo test --manifest-path crates/eluna/Cargo.toml --all-targets
 run cargo test --manifest-path crates/pf8/Cargo.toml --all-targets
 run cargo test --manifest-path crates/pfs-upk-rust/Cargo.toml --all-targets
 run cargo build --release --lib

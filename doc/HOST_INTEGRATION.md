@@ -70,8 +70,6 @@ Siglus 的存档路径目前也仍由原 VM 决定（通常位于游戏目录）
 
 - 默认图形 feature 提供 runtime 调用；FFmpeg 视频 session 额外要求 `ffmpeg` feature。
   新宿主只检查 API 表中的函数指针是否为 NULL，不把 feature 差异编码成不同的 ABI 布局。
-- `experimental-eluna` 默认编入，仍可通过关闭默认 features 排除；运行时默认使用内置
-  E-Mote 后端，Host 显式选择后才启用 Eluna。
 - 动态库、ANGLE 和可选媒体库由 Host 打包/加载。媒体库应只加载一份实例，避免重复
   全局状态或 Objective-C 类。构建方式见 [README](../README.md#构建)。
 - `art3m1s_get_api_v1` 必须返回匹配的 `struct_size`、`abi_version` 和 `magic`；否则
@@ -177,7 +175,6 @@ set_angle_path(directory)                       // 第一次加载 ANGLE 之前
 rt = runtime_create(initial_width, initial_height, gfx_backend)
 if rt == NULL: report_error_and_stop()
 runtime_set_resources(rt, resources)             // 必须在 load_project 之前
-runtime_set_emote_backend(rt, chosen_backend)    // 可选，检查返回值
 if runtime_load_project_bytes(rt, ini, ini_len, platform) != 0:
     runtime_destroy(rt)
     report_error_and_stop()

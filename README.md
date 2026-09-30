@@ -21,7 +21,7 @@ Host 负责。
 - 图层树、变换、混合、转场、动画与命中测试；Artemis HLSL shader 子集
 - 共享 GPU 后端：Apple 默认原生 Metal（可选 MetalFX Spatial），GL/ANGLE 为参考路径，
   Vulkan 为实验路径；RFVP/KRKR adapter 不直接依赖具体图形 API
-- E-Mote PSB 立绘（内置后端；`crates/eluna` 为实验后端）
+- E-Mote PSB 立绘（内置后端 `crates/art3m1s-emote`）
 - 场景文本、Ruby、逐字显示、backlog、宿主文本翻译注入与覆盖字体
 - PFS 归档（含分卷、pf8 加密）与目录资源、编号/系统存档
 - 鼠标、键盘、触摸、拖动的脚本事件派发
@@ -47,7 +47,6 @@ crates/
   art3m1s-krkr/       Kirikiri/KRKR adapter、版本化 ABI 和原生 smoke host
   asb-interpreter/    ASB/AST/IET 解释器与 Lua 桥
   art3m1s-emote/      内置 E-Mote 后端
-  eluna/              实验性 E-Mote 后端（基于 xmoezzz/eluna 适配，MPL-2.0）
   pf8/                PFS 归档库（vendored 自 sakarie9/pfs-rs，MIT；
                       本地扩展见 crates/pf8/VENDORED.md）
   pfs-upk-rust/       PFS 的 C ABI 封装（产物即 libpfs_upk）
@@ -64,7 +63,7 @@ cargo fmt --check
 cargo build --release
 ```
 
-默认 features 包含 GL、原生 Metal、实验 Vulkan、实验 Eluna、`rfvp-engine` 和
+默认 features 包含 GL、原生 Metal、实验 Vulkan、`rfvp-engine` 和
 `krkr-engine`，不包含 `ffmpeg`。未提供上游 source/build 目录时，KRKR 仅回退到
 不可运行的 bootstrap shim。只用无 GPU 的核心模块时
 `cargo build --no-default-features`。需要商业游戏资源的兼容性测试默认不执行，见
@@ -100,8 +99,6 @@ cargo build --manifest-path crates/art3m1s-krkr/Cargo.toml \
 线程、生命周期、帧循环、资源边界和 KRKR 接入约定见
 [doc/HOST_INTEGRATION.md](doc/HOST_INTEGRATION.md)；三个入口的完整 C ABI 声明与协议见
 [doc/FFI_REFERENCE.md](doc/FFI_REFERENCE.md)。
-E-Mote 后端选择：默认内置；宿主在加载项目前调用
-`art3m1s_runtime_set_emote_backend(..., 1)` 才切到实验性 Eluna。
 运行时 HLSL 的 ABI、资源 binding、编译流程和限制见
 [doc/SHADER_ABI.md](doc/SHADER_ABI.md)。
 SceneColor、render/output size 与线性 post-process 设计见

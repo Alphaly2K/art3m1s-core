@@ -17,9 +17,10 @@
 - 图层 ID 是字符串，必须保留 `1.80` 等原始身份，不能转成数值再格式化。
 - `crates/asb-interpreter` 负责脚本，`src/runtime/` 负责运行时集成，`src/render_pipeline/` 与 `src/backend/gl/` 负责绘制与 GPU 上传。
 
-## E-Mote / Eluna
+## E-Mote
 
-- 原实现：`crates/art3m1s-emote/`；Eluna：`crates/eluna/`；宿主适配：`src/runtime/emote.rs`、`src/runtime/emote/eluna.rs` 与 `eluna_mesh.rs`。
+- 实现在 `crates/art3m1s-emote/`，宿主适配在 `src/runtime/emote.rs`；不要删除或替换
+  `art3m1s-emote` 这个内置后端。
 - 保留同一 host frame 内批处理命令、在 `Advance` 时统一推进并求值的行为。不要恢复逐命令全场景重建，也不要因计算过慢截断累计动画时间。
 - 优化必须保留嵌套 motion、网格继承、HOLD 帧、前帧位置、物理、口型和眨眼语义。跳过求值前应确认所有时间依赖和外部参数变化均已覆盖。
 - 对比原 E-Mote 实现时，优先研究数据布局、静态解析缓存、变化检测和调度；不能靠降低动画速度掩盖 CPU 开销。

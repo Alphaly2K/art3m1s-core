@@ -688,46 +688,6 @@ pub unsafe extern "C" fn art3m1s_runtime_unregister_hlsl_shader(
     }
 }
 
-/// Selects the E-Mote implementation before project loading.
-///
-/// `backend=0` keeps the built-in renderer. `backend=1` enables the optional
-/// Eluna adapter when this core was built with `experimental-eluna`.
-#[cfg(any(
-    feature = "gl-backend",
-    feature = "metal-backend",
-    feature = "vulkan-backend"
-))]
-pub unsafe extern "C" fn art3m1s_runtime_set_emote_backend(
-    rt: *mut CoreRuntime,
-    backend: i32,
-) -> c_int {
-    if rt.is_null() {
-        return 0;
-    }
-    let backend = crate::runtime::emote::EmoteBackend::from_int(backend);
-    if backend == crate::runtime::emote::EmoteBackend::ElunaExperimental
-        && !cfg!(feature = "experimental-eluna")
-    {
-        core_warn!(
-            "Eluna E-Mote backend requested but this core lacks the experimental-eluna feature"
-        );
-        return 0;
-    }
-    let rt = unsafe { &mut *rt };
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        rt.set_emote_backend(backend)
-    })) {
-        Ok(()) => 1,
-        Err(panic_info) => {
-            core_error!(
-                "art3m1s_runtime_set_emote_backend panicked: {}",
-                panic_msg(&panic_info)
-            );
-            0
-        }
-    }
-}
-
 #[cfg(any(
     feature = "gl-backend",
     feature = "metal-backend",

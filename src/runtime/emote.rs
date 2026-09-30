@@ -14,9 +14,6 @@ use crate::render_pipeline::draw::{
     TextureInfo, TextureProvider,
 };
 
-#[cfg(feature = "experimental-eluna")]
-mod eluna;
-
 pub(super) type SharedEmoteState = Arc<Mutex<EmoteState>>;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -33,46 +30,9 @@ pub(super) struct EmoteProfileStats {
     pub mesh_vertices: u64,
 }
 
-impl EmoteProfileStats {
-    fn merge(&mut self, other: Self) {
-        self.worker_eval_ns = self.worker_eval_ns.saturating_add(other.worker_eval_ns);
-        self.scene_clone_ns = self.scene_clone_ns.saturating_add(other.scene_clone_ns);
-        self.draw_build_ns = self.draw_build_ns.saturating_add(other.draw_build_ns);
-        self.mesh_build_ns = self.mesh_build_ns.saturating_add(other.mesh_build_ns);
-        self.worker_updates = self.worker_updates.saturating_add(other.worker_updates);
-        self.worker_input_frames = self
-            .worker_input_frames
-            .saturating_add(other.worker_input_frames);
-        self.worker_dropped_scenes = self
-            .worker_dropped_scenes
-            .saturating_add(other.worker_dropped_scenes);
-        self.sprites = self.sprites.saturating_add(other.sprites);
-        self.mesh_sprites = self.mesh_sprites.saturating_add(other.mesh_sprites);
-        self.mesh_vertices = self.mesh_vertices.saturating_add(other.mesh_vertices);
-    }
-}
-
 pub(super) struct EmoteState {
     layers: BTreeMap<String, LayerSlots>,
     next_generation: u64,
-    backend: EmoteBackend,
-    profiling_enabled: bool,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum EmoteBackend {
-    #[default]
-    Builtin,
-    ElunaExperimental,
-}
-
-impl EmoteBackend {
-    pub(crate) fn from_int(value: i32) -> Self {
-        match value {
-            1 => Self::ElunaExperimental,
-            _ => Self::Builtin,
-        }
-    }
 }
 
 impl Default for EmoteState {
@@ -80,23 +40,15 @@ impl Default for EmoteState {
         Self {
             layers: BTreeMap::new(),
             next_generation: 0,
-            backend: EmoteBackend::Builtin,
-            profiling_enabled: false,
         }
     }
 }
 
 #[derive(Default)]
 struct LayerSlots {
-    active: Option<EmoteInstanceSlot>,
-    pending: Option<EmoteInstanceSlot>,
+    active: Option<EmoteInstance>,
+    pending: Option<EmoteInstance>,
     attach_to_scene: bool,
-}
-
-enum EmoteInstanceSlot {
-    Builtin(EmoteInstance),
-    #[cfg(feature = "experimental-eluna")]
-    Eluna(eluna::ElunaEmoteInstance),
 }
 
 struct EmoteInstance {
@@ -143,14 +95,6 @@ struct EmoteTextureState {
 }
 
 impl EmoteState {
-    pub(super) fn set_backend(&mut self, backend: EmoteBackend) -> usize {
-        if self.backend == backend {
-            return 0;
-        }
-        self.backend = backend;
-        self.clear()
-    }
-
     pub(super) fn profile_memory(&self) -> (usize, u64) {
         let mut instances = 0usize;
         let mut source_bytes = 0u64;
@@ -163,26 +107,12 @@ impl EmoteState {
         (instances, source_bytes)
     }
 
-    pub(super) fn set_profile_enabled(&mut self, enabled: bool) {
-        self.profiling_enabled = enabled;
-        for slots in self.layers.values_mut() {
-            for instance in [&mut slots.active, &mut slots.pending]
-                .into_iter()
-                .flatten()
-            {
-                instance.set_profile_enabled(enabled);
-            }
-        }
-    }
+    /// 内置 E-Mote 不做耗时采样；保留接口供运行时 profiler 调用。
+    pub(super) fn set_profile_enabled(&mut self, _enabled: bool) {}
 
+    /// Eluna 后端移除后 E-Mote 不再产出细分耗时，快照字段保持为 0。
     pub(super) fn take_profile_stats(&self) -> EmoteProfileStats {
-        let mut total = EmoteProfileStats::default();
-        for slots in self.layers.values() {
-            for instance in [&slots.active, &slots.pending].into_iter().flatten() {
-                total.merge(instance.take_profile_stats());
-            }
-        }
-        total
+        EmoteProfileStats::default()
     }
 
     pub fn create_layer(
@@ -205,31 +135,7 @@ impl EmoteState {
             .ok_or_else(|| format!("E-Mote layer {id} has no model file"))?;
         self.next_generation = self.next_generation.wrapping_add(1);
         let generation = self.next_generation;
-        let instance = match self.backend {
-            EmoteBackend::Builtin => EmoteInstanceSlot::Builtin(EmoteInstance::new(
-                generation, &path, bytes, width, height, resources,
-            )?),
-            EmoteBackend::ElunaExperimental => {
-                #[cfg(feature = "experimental-eluna")]
-                {
-                    EmoteInstanceSlot::Eluna(eluna::ElunaEmoteInstance::new(
-                        generation,
-                        &path,
-                        &bytes,
-                        width,
-                        height,
-                        self.profiling_enabled,
-                    )?)
-                }
-                #[cfg(not(feature = "experimental-eluna"))]
-                {
-                    return Err(
-                        "Eluna E-Mote backend is unavailable in this core build; enable the experimental-eluna Cargo feature"
-                            .to_owned(),
-                    );
-                }
-            }
-        };
+        let instance = EmoteInstance::new(generation, &path, bytes, width, height, resources)?;
         let slots = self.layers.entry(id.to_string()).or_default();
         slots.attach_to_scene = true;
         if slots.active.is_none() {
@@ -277,7 +183,8 @@ impl EmoteState {
             )
         })?;
 
-        instance.command(command)
+        instance.command(command);
+        Ok(())
     }
 
     pub fn advance(&mut self, delta_ms: u64) -> bool {
@@ -288,7 +195,7 @@ impl EmoteState {
                 .into_iter()
                 .flatten()
             {
-                changed |= instance.advance(delta_ms, frames);
+                changed |= instance.advance(frames);
             }
         }
         changed
@@ -334,72 +241,6 @@ impl EmoteState {
             }
         }
         (commands, retained)
-    }
-}
-
-impl EmoteInstanceSlot {
-    fn set_profile_enabled(&mut self, enabled: bool) {
-        match self {
-            Self::Builtin(_) => {}
-            #[cfg(feature = "experimental-eluna")]
-            Self::Eluna(instance) => instance.set_profile_enabled(enabled),
-        }
-    }
-
-    fn take_profile_stats(&self) -> EmoteProfileStats {
-        match self {
-            Self::Builtin(_) => EmoteProfileStats::default(),
-            #[cfg(feature = "experimental-eluna")]
-            Self::Eluna(instance) => instance.take_profile_stats(),
-        }
-    }
-
-    #[cfg(test)]
-    fn as_builtin(&self) -> &EmoteInstance {
-        match self {
-            Self::Builtin(instance) => instance,
-            #[cfg(feature = "experimental-eluna")]
-            Self::Eluna(_) => panic!("expected built-in E-Mote instance"),
-        }
-    }
-
-    fn source_bytes(&self) -> u64 {
-        match self {
-            Self::Builtin(instance) => instance.source_bytes(),
-            #[cfg(feature = "experimental-eluna")]
-            Self::Eluna(instance) => instance.source_bytes(),
-        }
-    }
-
-    fn command(&mut self, command: EmoteLayerCommand) -> Result<(), String> {
-        match self {
-            Self::Builtin(instance) => {
-                instance.command(command);
-                Ok(())
-            }
-            #[cfg(feature = "experimental-eluna")]
-            Self::Eluna(instance) => instance.command(command),
-        }
-    }
-
-    fn advance(&mut self, _delta_ms: u64, builtin_frames: f32) -> bool {
-        match self {
-            Self::Builtin(instance) => instance.advance(builtin_frames),
-            #[cfg(feature = "experimental-eluna")]
-            Self::Eluna(instance) => instance.advance(_delta_ms),
-        }
-    }
-
-    fn build_commands(
-        &mut self,
-        provider: &mut dyn TextureProvider,
-        retained: &mut HashSet<String>,
-    ) -> Result<Vec<DrawCommand>, String> {
-        match self {
-            Self::Builtin(instance) => instance.build_commands(provider, retained),
-            #[cfg(feature = "experimental-eluna")]
-            Self::Eluna(instance) => instance.build_commands(provider, retained),
-        }
     }
 }
 
@@ -1030,17 +871,6 @@ fn draw_mesh(points: Option<&[f32]>, width: f32, height: f32) -> Option<DrawMesh
 }
 
 impl CoreRuntime {
-    pub(crate) fn set_emote_backend(&mut self, backend: EmoteBackend) {
-        let cleared = self.emote.lock().unwrap().set_backend(backend);
-        self.gpu.begin_access();
-        let textures = self.gpu.evict_texture_prefix(":emote/");
-        self.gpu.end_access();
-        crate::core_info!(
-            "[E-Mote] backend={backend:?}; cleared {cleared} layer(s) and {textures} texture(s)"
-        );
-        self.last_submitted_frame = None;
-    }
-
     pub(super) fn clear_emote_state(&mut self, reason: &str) {
         let layers = self.emote.lock().unwrap().clear();
         self.gpu.begin_access();
@@ -1192,7 +1022,7 @@ mod tests {
                 )
                 .unwrap()
         );
-        let instance = state.layers["1.0"].active.as_ref().unwrap().as_builtin();
+        let instance = state.layers["1.0"].active.as_ref().unwrap();
         assert!(instance.model.source_document().is_none());
         assert!(
             instance
@@ -1201,7 +1031,7 @@ mod tests {
                 .all(|texture| texture.source.is_some())
         );
         {
-            let instance = state.layers["1.0"].active.as_ref().unwrap().as_builtin();
+            let instance = state.layers["1.0"].active.as_ref().unwrap();
             let items = EmoteMotionEvaluator::new(&instance.model)
                 .evaluate_base(&EmoteRenderState {
                     motion_time: 0.0,
@@ -1250,7 +1080,6 @@ mod tests {
                 .active
                 .as_ref()
                 .unwrap()
-                .as_builtin()
                 .model
                 .source_document()
                 .is_none()
@@ -1260,7 +1089,6 @@ mod tests {
                 .active
                 .as_ref()
                 .unwrap()
-                .as_builtin()
                 .textures
                 .values()
                 .all(|texture| texture.source.is_none())
@@ -1280,53 +1108,5 @@ mod tests {
         );
         assert_eq!(state.clear(), 1);
         assert!(state.layers.is_empty());
-    }
-
-    #[cfg(feature = "experimental-eluna")]
-    #[test]
-    #[ignore = "requires the external nekomiko fixture"]
-    fn builds_nekomiko_draw_commands_with_eluna() {
-        let path = nekomiko_model_path();
-        let bytes = std::fs::read(&path).unwrap();
-        let mut state = EmoteState::default();
-        state.set_backend(super::EmoteBackend::ElunaExperimental);
-        assert!(
-            !state
-                .create_layer(
-                    "1.0",
-                    vec![(path.display().to_string(), bytes)],
-                    1600,
-                    1350,
-                    crate::host_files::default_resources().clone(),
-                )
-                .unwrap()
-        );
-        state
-            .command(
-                "1.0",
-                false,
-                EmoteLayerCommand::SetScale {
-                    scale: 0.6,
-                    origin_x: 0.0,
-                    origin_y: 0.0,
-                },
-            )
-            .unwrap();
-        let advance_started = std::time::Instant::now();
-        state.advance(16);
-        assert!(
-            advance_started.elapsed() < std::time::Duration::from_millis(100),
-            "Eluna scene evaluation must not block the host frame"
-        );
-        let mut provider = MockProvider::new();
-        let (commands, retained) = state.build_commands(&mut provider);
-        assert!(!commands["1.0"].is_empty());
-        assert!(!retained.is_empty());
-        assert!(commands["1.0"].iter().all(|command| command.mesh.is_some()));
-        assert!(
-            commands["1.0"]
-                .iter()
-                .all(|command| command.native_emote.is_some())
-        );
     }
 }

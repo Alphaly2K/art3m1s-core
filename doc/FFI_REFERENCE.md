@@ -176,7 +176,6 @@ typedef struct Art3m1sApiV1 {
     ArtRuntimeSubmitDialogFn runtime_submit_dialog;
     ArtRuntimeSubmitTextTranslationFn runtime_submit_text_translation;
     ArtRuntimeSetReportedOsFn runtime_set_reported_os;
-    ArtRuntimeSetEmoteBackendFn runtime_set_emote_backend;
     ArtRuntimeConfigureSpatialUpscaleFn runtime_configure_spatial_upscale;
     ArtRuntimeSetRenderQualityPresetFn runtime_set_render_quality_preset;
     ArtRuntimeSetProfilerEnabledFn runtime_set_profiler_enabled;
@@ -736,7 +735,6 @@ Host 先调用 `host_events_create()`，再调用
 | `create` | 非空 runtime 指针 | NULL；尺寸须合理，细节读日志 |
 | `destroy` | 无返回 | NULL 无操作；有效指针只能销毁一次 |
 | `set_resources` | 1 绑定资源句柄 | 0 runtime 为空；必须在 `load_project` 前绑定 |
-| `set_emote_backend` | 1；0=内置、1=Eluna | 返回 0 表示失败/未编入；加载项目前设置；不要传未知值 |
 | `load_project` / `load_project_bytes` | **0** 成功 | -1 失败；参数是 INI 内容，不是文件路径 |
 | `stage_width` / `stage_height` | 舞台尺寸 | NULL 返回 0 |
 | `pixel_buffer_size` | width*height*4 字节 | u32 返回，Host 预先校验尺寸不溢出；NULL=0 |
