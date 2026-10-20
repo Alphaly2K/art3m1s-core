@@ -21,12 +21,9 @@ pub(crate) fn set_angle_path_prefix(_prefix: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendSelection {
     PlatformDefault,
-    #[cfg(all(feature = "metal-backend", any(target_os = "macos", target_os = "ios")))]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     NativeMetal,
-    #[cfg(all(
-        feature = "vulkan-backend",
-        any(target_os = "android", target_os = "windows", target_os = "linux")
-    ))]
+    #[cfg(any(target_os = "android", target_os = "windows", target_os = "linux"))]
     NativeVulkan,
     #[cfg(feature = "gl-backend")]
     ReferenceGl(gl::platform::GfxBackend),
@@ -45,15 +42,12 @@ impl BackendSelection {
             return Ok(Self::PlatformDefault);
         }
 
-        #[cfg(all(feature = "metal-backend", any(target_os = "macos", target_os = "ios")))]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         if !force_gl && value == 3 {
             return Ok(Self::NativeMetal);
         }
 
-        #[cfg(all(
-            feature = "vulkan-backend",
-            any(target_os = "android", target_os = "windows", target_os = "linux")
-        ))]
+        #[cfg(any(target_os = "android", target_os = "windows", target_os = "linux"))]
         if !force_gl && value == 2 {
             return Ok(Self::NativeVulkan);
         }
@@ -108,12 +102,9 @@ pub(crate) fn create_backend(
     crate::host::logging::install_once();
     match selection {
         BackendSelection::PlatformDefault => create_platform_default(width, height),
-        #[cfg(all(feature = "metal-backend", any(target_os = "macos", target_os = "ios")))]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         BackendSelection::NativeMetal => Ok(Box::new(metal::MetalBackend::new(width, height)?)),
-        #[cfg(all(
-            feature = "vulkan-backend",
-            any(target_os = "android", target_os = "windows", target_os = "linux")
-        ))]
+        #[cfg(any(target_os = "android", target_os = "windows", target_os = "linux"))]
         BackendSelection::NativeVulkan => Ok(Box::new(vulkan::VulkanBackend::new(width, height)?)),
         #[cfg(feature = "gl-backend")]
         BackendSelection::ReferenceGl(config) => {
@@ -125,7 +116,7 @@ pub(crate) fn create_backend(
 fn create_platform_default(width: u32, height: u32) -> Result<Box<dyn GpuBackend>, String> {
     let _ = (width, height);
 
-    #[cfg(all(feature = "metal-backend", any(target_os = "macos", target_os = "ios")))]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         return match metal::MetalBackend::new(width, height) {
             Ok(backend) => Ok(Box::new(backend)),
@@ -133,10 +124,7 @@ fn create_platform_default(width: u32, height: u32) -> Result<Box<dyn GpuBackend
         };
     }
 
-    #[cfg(all(
-        feature = "vulkan-backend",
-        any(target_os = "android", target_os = "windows", target_os = "linux")
-    ))]
+    #[cfg(any(target_os = "android", target_os = "windows", target_os = "linux"))]
     {
         return match vulkan::VulkanBackend::new(width, height) {
             Ok(backend) => Ok(Box::new(backend)),
@@ -147,11 +135,11 @@ fn create_platform_default(width: u32, height: u32) -> Result<Box<dyn GpuBackend
     #[cfg(all(
         feature = "gl-backend",
         not(any(
-            all(feature = "metal-backend", any(target_os = "macos", target_os = "ios")),
-            all(
-                feature = "vulkan-backend",
-                any(target_os = "android", target_os = "windows", target_os = "linux")
-            )
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "android",
+            target_os = "windows",
+            target_os = "linux"
         ))
     ))]
     return Ok(Box::new(gl::GlBackend::new(
@@ -165,11 +153,11 @@ fn create_platform_default(width: u32, height: u32) -> Result<Box<dyn GpuBackend
 }
 
 #[cfg(any(
-    all(feature = "metal-backend", any(target_os = "macos", target_os = "ios")),
-    all(
-        feature = "vulkan-backend",
-        any(target_os = "android", target_os = "windows", target_os = "linux")
-    )
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "android",
+    target_os = "windows",
+    target_os = "linux"
 ))]
 fn fallback_to_gl(
     width: u32,

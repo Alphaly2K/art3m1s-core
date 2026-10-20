@@ -35,6 +35,12 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # 字体光栅化（字形渲染子系统）
 ab_glyph = "0.2"
 
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+art3m1s-render = { path = "crates/art3m1s-render", features = ["metal"] }
+
+[target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "android"))'.dependencies]
+art3m1s-render = { path = "crates/art3m1s-render", features = ["vulkan"] }
+
 [target.'cfg(target_os = "ios")'.dependencies]
 asb-interpreter = { path = "crates/asb-interpreter", default-features = false, features = ["backend-luau"] }
 
@@ -45,8 +51,9 @@ ctt-astcenc = "0.5"
 asb-interpreter = { path = "crates/asb-interpreter", default-features = false, features = ["backend-lua51"] }
 
 [features]
-default = ["gl-backend", "metal-backend", "vulkan-backend", "rfvp-engine", "krkr-engine"]
+default = ["gl-backend"]
 gl-backend = ["art3m1s-render/gl"]
+# Compatibility aliases; native backends are enabled by target dependencies above.
 metal-backend = ["runtime-shader", "art3m1s-render/metal"]
 vulkan-backend = ["runtime-shader", "art3m1s-render/vulkan"]
 runtime-shader = ["art3m1s-render/runtime-shader"]
