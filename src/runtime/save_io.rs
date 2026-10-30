@@ -315,6 +315,16 @@ impl CoreRuntime {
         data.restore(&mut self.interpreter)
             .map_err(|e| format!("恢复存档状态失败: {e:?}"))?;
 
+        // Bind the saved wait before onLoad can enter a helper script.
+        // Otherwise the checkpoint captures the helper's PC and suspends it.
+        let waiting = match data.waiting_for_input {
+            Some(value) => value,
+            None => saved_position_resumes_input_wait(&self.interpreter),
+        };
+        if waiting {
+            self.interpreter.hold_queued_input_wait();
+        }
+
         // A reset keeps the Lua VM, but the game's boot flow may have cleared
         // its persistent globals before the next load.  The onLoad handler is
         // allowed to populate these tables from the restored variables, yet
@@ -355,16 +365,10 @@ impl CoreRuntime {
             self.compositor.apply_event(&event);
         }
 
-        let waiting = match data.waiting_for_input {
-            Some(value) => value,
-            None => saved_position_resumes_input_wait(&self.interpreter),
-        };
         self.pending_message_text = data.message_text.clone();
         if waiting {
-            // Saved click-waits snapshot the PC after the queued `@`/`[wait]`.
-            // Hold that wait so onLoad follow-up can run, then stop before the
-            // message macro's post-wait cleanup (rp / text_erase) executes.
-            self.interpreter.hold_queued_input_wait();
+            // Keep the saved message pending while onLoad follow-up runs,
+            // then stop before the message macro's post-wait cleanup.
             self.pending_load_resume = Some(super::PendingLoadResume {
                 script: data.current_script.clone(),
                 line: data.current_line,
@@ -734,6 +738,84 @@ mod tests {
         saved_position_resumes_input_wait,
     };
     use asb_interpreter::{Interpreter, InterpreterConfig};
+
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "windows",
+        target_os = "linux",
+        target_os = "android"
+    ))]
+    #[test]
+    #[ignore = "requires a native GPU"]
+    fn load_wait_stays_on_saved_frame_when_onload_calls_a_helper() {
+        use asb_interpreter::{Event, ExecutionResult, Value, event::WaitReason};
+
+        let mut runtime =
+            super::CoreRuntime::create(64, 64, crate::backend::BackendSelection::PlatformDefault)
+                .unwrap();
+        runtime
+            .interpreter
+            .load_script(
+                "story",
+                "*main\n[wait input=1]\n[@]\n[var name=after_wait data=1]\n[stop]\n",
+            )
+            .unwrap();
+        runtime
+            .interpreter
+            .load_script(
+                "helper",
+                "*main\n[var name=onload_helper data=1]\n[return]\n",
+            )
+            .unwrap();
+        runtime.interpreter.start("story", "main").unwrap();
+        runtime
+            .interpreter
+            .restore_position("story", 2, Vec::new())
+            .unwrap();
+        let mut saved = crate::save::SaveData::from_interpreter(&runtime.interpreter);
+        saved.waiting_for_input = Some(true);
+        let resources = crate::host_files::HostResources::new();
+        resources
+            .set_override("save/probe.dat", serde_json::to_vec(&saved).unwrap())
+            .unwrap();
+        runtime.set_resources(resources);
+        runtime
+            .interpreter
+            .lua()
+            .load(
+                r#"
+                function restore(e, p)
+                    e:tag{"call", file="helper", label="main"}
+                end
+                __engine:setEventHandler{onLoad="restore"}
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        runtime.handle_load_game("probe.dat", None).unwrap();
+        assert!(matches!(
+            runtime.interpreter.run().unwrap(),
+            ExecutionResult::Wait(Event::Wait {
+                reason: WaitReason::Generic
+            })
+        ));
+        assert_eq!(
+            runtime.interpreter.get_variable("onload_helper"),
+            Some(Value::Int(1))
+        );
+        assert_eq!(runtime.interpreter.current_script(), Some("story"));
+        assert_eq!(runtime.interpreter.current_line(), 2);
+        assert!(runtime.interpreter.get_variable("after_wait").is_none());
+
+        runtime.interpreter.advance_line();
+        runtime.interpreter.run().unwrap();
+        assert_eq!(
+            runtime.interpreter.get_variable("after_wait"),
+            Some(Value::Int(1))
+        );
+    }
 
     #[test]
     fn legacy_saves_resume_wait_when_pc_is_after_a_queued_click_wait() {

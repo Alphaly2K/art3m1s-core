@@ -3,7 +3,9 @@
 //! ASB 脚本解释器的核心实现，使用迭代而非递归来避免栈溢出。
 
 use crate::error::{Error, Result};
-use crate::event::{CallbackResult, Event, EventCallback, ScriptLoader, WaitReason, default_callback};
+use crate::event::{
+    CallbackResult, Event, EventCallback, ScriptLoader, WaitReason, default_callback,
+};
 use crate::expression::ExpressionEvaluator;
 use crate::lua_engine::{DefaultEngineCallbacks, EngineContext, TAG_FILTER_REGISTRY_KEY};
 use crate::r#macro::MacroRegistry;
@@ -1497,7 +1499,23 @@ impl Interpreter {
             // 空数组：无处可去，忽略（脚本至少要留 1 帧）。
             return Ok(());
         };
-        self.queued_wait_checkpoints.clear();
+        // A restored wait belongs to its saved frame, which onLoad may keep
+        // while rewriting or unwinding helper frames. Discard it only when
+        // that frame or its caller chain is absent from the replacement stack.
+        self.queued_wait_checkpoints.retain(|checkpoint| {
+            checkpoint.allow_queue
+                && frames
+                    .get(checkpoint.stack.len())
+                    .is_some_and(|(file, index)| {
+                        file == &checkpoint.script && *index == checkpoint.line
+                    })
+                && frames
+                    .iter()
+                    .zip(&checkpoint.stack)
+                    .all(|((file, index), frame)| {
+                        file == &frame.script && *index == frame.return_line
+                    })
+        });
         self.active_queued_wait = None;
         self.call_stack = rest
             .iter()
@@ -2833,6 +2851,125 @@ mod tests {
 
         it.advance_line();
         it.run().unwrap();
+        assert_eq!(it.get_variable("after_wait"), Some(Value::Int(1)));
+    }
+
+    #[test]
+    fn load_restored_click_wait_survives_onload_stack_rewrites() {
+        for (onload, helper_command, helper_entered, helper_finished) in [
+            ("e:setScriptStack(e:getScriptStack())", "", None, None),
+            (
+                "e:tag{'call', file='helper', label='main'}; e:tag{'calllua', ['function']='rewrite'}",
+                "",
+                Some(Value::Int(1)),
+                Some(Value::Int(1)),
+            ),
+            (
+                "e:tag{'call', file='helper', label='main'}",
+                "[calllua function=rewrite unwind=1]",
+                Some(Value::Int(1)),
+                None,
+            ),
+        ] {
+            let mut it = Interpreter::new(InterpreterConfig::default());
+            it.load_script("caller", "*main\n[stop]\n").unwrap();
+            it.load_script(
+                "story",
+                "*main\n[wait input=1]\n[@]\n[var name=after_wait data=1]\n[stop]\n",
+            )
+            .unwrap();
+            it.load_script(
+                "helper",
+                &format!(
+                    "*main\n[var name=helper_entered data=1]\n{helper_command}\n[var name=helper_finished data=1]\n[return]\n"
+                ),
+            )
+            .unwrap();
+            it.lua()
+                .load(format!(
+                    r#"
+                    function restore(e) {onload} end
+                    function rewrite(e, p)
+                        local frames = e:getScriptStack()
+                        if p.unwind == "1" then table.remove(frames) end
+                        e:setScriptStack(frames)
+                    end
+                    __engine:setEventHandler{{onLoad="restore"}}
+                    "#
+                ))
+                .exec()
+                .unwrap();
+            it.set_callback(|event| match event {
+                Event::Wait { .. } => CallbackResult::Pause,
+                _ => CallbackResult::Continue,
+            });
+            it.restore_position(
+                "story",
+                2,
+                vec![super::CallFrame {
+                    script: "caller".into(),
+                    return_line: 0,
+                }],
+            )
+            .unwrap();
+            it.hold_queued_input_wait();
+            it.fire_load_handler().unwrap();
+            it.flush_pending_tags().unwrap();
+
+            assert!(matches!(
+                it.run().unwrap(),
+                ExecutionResult::Wait(Event::Wait {
+                    reason: WaitReason::Generic
+                })
+            ));
+            assert_eq!(it.current_script(), Some("story"));
+            assert_eq!(it.current_line(), 2);
+            assert_eq!(it.get_variable("helper_entered"), helper_entered);
+            assert_eq!(it.get_variable("helper_finished"), helper_finished);
+            assert!(it.get_variable("after_wait").is_none());
+
+            it.advance_line();
+            it.run().unwrap();
+            assert_eq!(it.get_variable("after_wait"), Some(Value::Int(1)));
+        }
+    }
+
+    #[test]
+    fn load_restored_click_wait_is_dropped_when_onload_replaces_the_saved_stack() {
+        let mut it = Interpreter::new(InterpreterConfig::default());
+        it.load_script(
+            "story",
+            "*main\n[wait input=1]\n[@]\n*resume\n[var name=after_wait data=1]\n[stop]\n",
+        )
+        .unwrap();
+        it.load_script("replacement", "*main\n[jump file=story label=resume]\n")
+            .unwrap();
+        it.lua()
+            .load(
+                r#"
+                function restore(e)
+                    e:setScriptStack{{file="replacement", index=0}}
+                end
+                __engine:setEventHandler{onLoad="restore"}
+                "#,
+            )
+            .exec()
+            .unwrap();
+        it.set_callback(|event| match event {
+            Event::Wait { .. } => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        it.restore_position("story", 2, Vec::new()).unwrap();
+        it.hold_queued_input_wait();
+        it.fire_load_handler().unwrap();
+        it.flush_pending_tags().unwrap();
+
+        assert!(matches!(
+            it.run().unwrap(),
+            ExecutionResult::Wait(Event::Wait {
+                reason: WaitReason::Stop { .. }
+            })
+        ));
         assert_eq!(it.get_variable("after_wait"), Some(Value::Int(1)));
     }
 
