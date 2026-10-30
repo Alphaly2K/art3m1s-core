@@ -21,16 +21,16 @@ fn main() {
             if matches!(target_os.as_str(), "macos" | "ios" | "linux" | "android") {
                 println!("cargo:rustc-link-arg=-Wl,-rpath,{}", native_dir.display());
             }
-            match target_os.as_str() {
-                "macos" | "ios" => {
-                    println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path");
-                }
-                "linux" | "android" => {
-                    println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
-                }
-                _ => {}
-            }
         }
+    }
+    match target_os.as_str() {
+        "macos" | "ios" => {
+            println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path");
+        }
+        "linux" | "android" => {
+            println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+        }
+        _ => {}
     }
     if (target_os == "macos" || target_os == "ios")
         && std::env::var_os("CARGO_FEATURE_METAL_BACKEND").is_some()

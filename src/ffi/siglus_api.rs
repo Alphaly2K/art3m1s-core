@@ -239,6 +239,7 @@ struct Runtime {
     height: u32,
     exiting: bool,
     surface_attached: bool,
+    audio_output: Option<super::siglus_output::Output>,
 }
 
 thread_local! {
@@ -336,6 +337,7 @@ unsafe extern "C" fn runtime_create(ptr: *const c_char, backend: i32, out: *mut 
                     height,
                     exiting: false,
                     surface_attached: false,
+                    audio_output: None,
                 },
             );
         });
@@ -431,6 +433,18 @@ unsafe extern "C" fn runtime_tick(
             match step {
                 Ok(exiting) => rt.exiting = exiting,
                 Err(error) => return fail(format!("Siglus frame: {error:#}")),
+            }
+            if let Some(output) = &rt.audio_output {
+                if output.failed() {
+                    return fail("Siglus audio device disconnected");
+                }
+                let frames = (dt_ms.min(100) as usize * AUDIO_SAMPLE_RATE as usize / 1000)
+                    .min(output.capacity());
+                if frames > 0 {
+                    let mut pcm = vec![0.0; frames * AUDIO_CHANNELS as usize];
+                    rt.adapter.render_audio(&mut pcm);
+                    output.append(&pcm);
+                }
             }
             if mode == 1 {
                 rt.gpu.begin_access();
@@ -575,6 +589,108 @@ pub unsafe extern "C" fn art3m1s_siglus_get_audio_api_v1(
     &AUDIO_API
 }
 
+#[repr(C)]
+pub struct SiglusOutputApiV1 {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub magic: u64,
+    pub runtime_start: unsafe extern "C" fn(u64) -> i32,
+    pub runtime_stop: unsafe extern "C" fn(u64) -> i32,
+    pub runtime_suspend: unsafe extern "C" fn(u64, i32) -> i32,
+    pub runtime_volume: unsafe extern "C" fn(u64, f32) -> i32,
+    pub initialize_android: unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32,
+}
+
+unsafe extern "C" fn output_start(handle: u64) -> i32 {
+    guarded(|| {
+        with_runtime(handle, |rt| {
+            if rt.audio_output.is_some() {
+                return STATUS_OK;
+            }
+            match super::siglus_output::Output::start() {
+                Ok(output) => {
+                    rt.audio_output = Some(output);
+                    STATUS_OK
+                }
+                Err(error) => fail(error),
+            }
+        })
+    })
+}
+unsafe extern "C" fn output_stop(handle: u64) -> i32 {
+    guarded(|| {
+        with_runtime(handle, |rt| {
+            rt.audio_output = None;
+            STATUS_OK
+        })
+    })
+}
+unsafe extern "C" fn output_suspend(handle: u64, suspended: i32) -> i32 {
+    guarded(|| {
+        with_runtime(handle, |rt| {
+            if let Some(output) = &rt.audio_output {
+                output.suspend(suspended != 0);
+            }
+            STATUS_OK
+        })
+    })
+}
+unsafe extern "C" fn output_volume(handle: u64, volume: f32) -> i32 {
+    guarded(|| {
+        if !volume.is_finite() {
+            return STATUS_ARGUMENT;
+        }
+        with_runtime(handle, |rt| {
+            if let Some(output) = &rt.audio_output {
+                output.volume(volume);
+            }
+            STATUS_OK
+        })
+    })
+}
+unsafe extern "C" fn output_initialize_android(vm: *mut c_void, context: *mut c_void) -> i32 {
+    guarded(|| {
+        if vm.is_null() || context.is_null() {
+            return STATUS_ARGUMENT;
+        }
+        #[cfg(target_os = "android")]
+        {
+            static INITIALIZED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+            INITIALIZED.get_or_init(|| unsafe {
+                ndk_context::initialize_android_context(vm, context);
+            });
+            STATUS_OK
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            STATUS_ARGUMENT
+        }
+    })
+}
+static OUTPUT_API: SiglusOutputApiV1 = SiglusOutputApiV1 {
+    struct_size: std::mem::size_of::<SiglusOutputApiV1>() as u32,
+    abi_version: 1,
+    magic: 0x3156_4f53_4d33_4152,
+    runtime_start: output_start,
+    runtime_stop: output_stop,
+    runtime_suspend: output_suspend,
+    runtime_volume: output_volume,
+    initialize_android: output_initialize_android,
+};
+
+/// Output owns a bounded PCM queue and never calls the VM from the device thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_siglus_get_output_api_v1(
+    out_size: *mut usize,
+) -> *const SiglusOutputApiV1 {
+    if !out_size.is_null() {
+        unsafe {
+            *out_size = std::mem::size_of::<SiglusOutputApiV1>();
+        }
+    }
+    &OUTPUT_API
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
@@ -630,6 +746,43 @@ mod tests {
         assert_eq!(
             unsafe { (api.runtime_is_exit_requested)(handle) },
             STATUS_HANDLE
+        );
+    }
+}
+
+#[cfg(test)]
+mod output_contract_tests {
+    use super::*;
+
+    #[test]
+    fn public_audio_tables_preserve_host_layout_and_reject_invalid_handles() {
+        assert_eq!(
+            std::mem::size_of::<SiglusApiV1>(),
+            16 + 10 * std::mem::size_of::<usize>()
+        );
+        let mut size = 0;
+        let output = unsafe { &*art3m1s_siglus_get_output_api_v1(&mut size) };
+        assert_eq!(size, 16 + 5 * std::mem::size_of::<usize>());
+        assert_eq!(output.struct_size as usize, size);
+        assert_eq!(output.abi_version, 1);
+        assert_eq!(output.magic, 0x3156_4f53_4d33_4152);
+        assert_eq!(unsafe { (output.runtime_start)(u64::MAX) }, STATUS_HANDLE);
+        assert_eq!(unsafe { (output.runtime_stop)(u64::MAX) }, STATUS_HANDLE);
+        assert_eq!(
+            unsafe { (output.runtime_suspend)(u64::MAX, 1) },
+            STATUS_HANDLE
+        );
+        assert_eq!(
+            unsafe { (output.runtime_volume)(u64::MAX, 0.5) },
+            STATUS_HANDLE
+        );
+        assert_eq!(
+            unsafe { (output.runtime_volume)(u64::MAX, f32::NAN) },
+            STATUS_ARGUMENT
+        );
+        assert_eq!(
+            unsafe { (output.initialize_android)(std::ptr::null_mut(), std::ptr::null_mut()) },
+            STATUS_ARGUMENT
         );
     }
 }

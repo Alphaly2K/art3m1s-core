@@ -1,18 +1,21 @@
-# Third-Party Notices
+# Third-party notices
 
-This crate currently contains no KRKRSDL3 source code.
+The native host compiles external KRKRSDL3 sources and links SDL3, SDL3_ttf,
+FreeType, PNG, JPEG, WebP, Vorbis, Ogg, Opus, OpusFile, Oniguruma, plutovg,
+zlib and their enabled dependencies. FFmpeg is included on targets that enable
+its wave decoder. The application build copies the vcpkg package copyright
+files alongside the host's license notices.
 
-The planned native host shim will consume `krkrsdl3` and its build repository
-at pinned revisions. KRKRSDL3 is distributed under the terms reproduced in
-the upstream `LICENSE`:
+KRKRSDL3 is distributed under the terms in its upstream `LICENSE`:
 
 <https://github.com/krkrsdl3/krkrsdl3/blob/main/LICENSE>
 
 The upstream license includes a supplementary condition for binary ports of
 commercial games that were not originally developed with KRKRSDL3. If the
-KRKRSDL3 code itself is modified, the complete corresponding modifications
-must be made publicly available under the same terms when such a binary is
-distributed.
+KRKRSDL3 code itself is modified, complete corresponding modifications must
+be made publicly available under the same terms when the binary is distributed.
 
-Before enabling distribution builds, keep the upstream copyright and license
-text with the binary and publish the complete source of any KRKRSDL3 changes.
+Distribution builds must retain upstream copyright and license texts and
+publish corresponding source and build materials required by enabled copyleft
+dependencies. The FFmpeg build must use a license configuration compatible
+with the application's distribution terms.

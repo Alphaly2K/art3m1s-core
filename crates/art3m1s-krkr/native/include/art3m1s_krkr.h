@@ -248,11 +248,22 @@ typedef struct Art3m1sKrkrDiagnosticsApiV1 {
     ArtKrkrRuntimeSetDebugFn runtime_set_debug;
 } Art3m1sKrkrDiagnosticsApiV1;
 
+typedef int32_t (*ArtKrkrRuntimeSetMasterVolumeFn)(uint64_t runtime, float volume);
+typedef struct Art3m1sKrkrControlApiV1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint64_t magic; /* 0x3156434B4D334152, "RA3MKCV1" */
+    ArtKrkrRuntimeSetMasterVolumeFn runtime_set_master_volume;
+} Art3m1sKrkrControlApiV1;
+
 /* Public entry point exported by the Art3m1s core library. */
 ART3M1S_KRKR_EXPORT const Art3m1sKrkrApiV1* art3m1s_krkr_get_api_v1(
     size_t* out_size);
 ART3M1S_KRKR_EXPORT const Art3m1sKrkrDiagnosticsApiV1*
 art3m1s_krkr_get_diagnostics_api_v1(size_t* out_size);
+
+ART3M1S_KRKR_EXPORT const Art3m1sKrkrControlApiV1*
+art3m1s_krkr_get_control_api_v1(size_t* out_size);
 
 /* Private entry point exported by the native KRKR host shim. */
 ART3M1S_KRKR_EXPORT const Art3m1sKrkrApiV1* art3m1s_krkr_native_get_api_v1(
@@ -261,6 +272,8 @@ ART3M1S_KRKR_EXPORT size_t art3m1s_krkr_native_log_next_bytes(void);
 ART3M1S_KRKR_EXPORT size_t art3m1s_krkr_native_poll_log(uint8_t* output,
                                                           size_t capacity);
 ART3M1S_KRKR_EXPORT int32_t art3m1s_krkr_native_set_debug(int32_t enabled);
+
+ART3M1S_KRKR_EXPORT int32_t art3m1s_krkr_native_set_master_volume(float volume);
 
 /* Private setup used by the Rust facade before runtime_create. */
 ART3M1S_KRKR_EXPORT int32_t art3m1s_krkr_native_set_render_host_v1(

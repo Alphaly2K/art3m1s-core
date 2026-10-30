@@ -1,6 +1,9 @@
 #include "host_audio.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <unordered_set>
 #include <cstring>
 #include <deque>
 #include <limits>
@@ -13,11 +16,9 @@
 #include "tjsCommHead.h"
 #include "PlatformAudio.h"
 
-#if defined(__APPLE__)
 #include <SDL3/SDL_audio.h>
 #include <SDL3/SDL_init.h>
 #include <SDL3/SDL_log.h>
-#endif
 
 namespace art3m1s::krkr
 {
@@ -412,14 +413,17 @@ private:
     float pan_ = 0.0f;
 };
 
-#if defined(__APPLE__)
-// Apple hosts do not have a streaming PCM sink in Flutter or SwiftUI. Keep
-// playback in the embedded SDL runtime so buffer consumption follows the
-// actual audio device instead of a wall-clock estimate in either UI host.
-class Art3m1sDarwinSoundBuffer final : public iTVPSoundBuffer
+class Art3m1sNativeSoundBuffer;
+std::mutex g_device_mutex;
+std::unordered_set<Art3m1sNativeSoundBuffer*> g_devices;
+std::atomic<float> g_master_volume{1.0f};
+std::atomic<bool> g_host_suspended{false};
+
+// Keep consumption and buffering tied to SDL's output device on every target.
+class Art3m1sNativeSoundBuffer final : public iTVPSoundBuffer
 {
 public:
-    Art3m1sDarwinSoundBuffer(const tTVPWaveFormat& format, int buffer_count)
+    Art3m1sNativeSoundBuffer(const tTVPWaveFormat& format, int buffer_count)
       : format_(format), buffer_limit_(std::max(buffer_count, 1))
     {
     }
@@ -465,11 +469,18 @@ public:
         }
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "KRKR audio device ready: %s (%d Hz, %d ch)",
                     SDL_GetAudioDeviceName(device_), spec.freq, spec.channels);
+        {
+            std::lock_guard<std::mutex> lock(g_device_mutex);
+            g_devices.insert(this);
+            ApplyHostVolume();
+        }
         return true;
     }
 
-    ~Art3m1sDarwinSoundBuffer() override
+    ~Art3m1sNativeSoundBuffer() override
     {
+        std::lock_guard<std::mutex> lock(g_device_mutex);
+        g_devices.erase(this);
         if (stream_)
         {
             SDL_UnbindAudioStream(stream_);
@@ -484,7 +495,7 @@ public:
     void Release() override { delete this; }
     void Play() override
     {
-        if (stream_ && SDL_ResumeAudioStreamDevice(stream_))
+        if (stream_ && (g_host_suspended.load() || SDL_ResumeAudioStreamDevice(stream_)))
         {
             if (!playing_)
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "KRKR audio playback started");
@@ -513,10 +524,10 @@ public:
     {
         volume_ = std::max(0.0f, volume);
         if (stream_)
-            SDL_SetAudioStreamGain(stream_, volume_);
+            ApplyHostVolume();
     }
     float GetVolume() override { return volume_; }
-    void SetPan(float pan) override { pan_ = pan; }
+    void SetPan(float pan) override { pan_ = std::clamp(pan, -1.0f, 1.0f); }
     float GetPan() override { return pan_; }
 
     void AppendBuffer(const void* data, unsigned int length) override
@@ -588,6 +599,15 @@ public:
     }
     void SetPosition(float, float, float) override {}
 
+    void ApplyHostVolume() {
+        if (stream_) SDL_SetAudioStreamGain(stream_, volume_.load() * g_master_volume.load());
+    }
+    void ApplyHostSuspended() {
+        if (!stream_) return;
+        if (g_host_suspended.load() || !playing_.load()) SDL_PauseAudioStreamDevice(stream_);
+        else SDL_ResumeAudioStreamDevice(stream_);
+    }
+
 private:
     void PrunePlayedBuffers()
     {
@@ -609,20 +629,36 @@ private:
     SDL_AudioDeviceID device_ = 0;
     SDL_AudioStream* stream_ = nullptr;
     bool audio_initialized_ = false;
-    bool playing_ = false;
-    float volume_ = 1.0f;
+    std::atomic<bool> playing_{false};
+    std::atomic<float> volume_{1.0f};
     float pan_ = 0.0f;
     uint64_t appended_frames_ = 0;
     std::deque<uint64_t> buffer_ends_;
     bool reported_pcm_ = false;
     bool reported_consumption_ = false;
 };
-#endif
+
 } // namespace
+
+void SetAudioHostVolume(float volume)
+{
+    g_master_volume.store(std::isfinite(volume) ? std::clamp(volume, 0.0f, 1.0f) : 0.0f);
+    std::lock_guard<std::mutex> lock(g_device_mutex);
+    for (auto* device : g_devices) device->ApplyHostVolume();
+}
+
+void SetAudioHostSuspended(bool suspended)
+{
+    g_host_suspended.store(suspended);
+    std::lock_guard<std::mutex> lock(g_device_mutex);
+    for (auto* device : g_devices) device->ApplyHostSuspended();
+}
 
 void ResetAudioHost()
 {
     Host().Reset();
+    SetAudioHostVolume(1.0f);
+    SetAudioHostSuspended(false);
 }
 
 bool PollAudioCommand(Art3m1sKrkrAudioCommandV1* out_command)
@@ -647,15 +683,8 @@ void TVPUninitDirectSound()
 
 iTVPSoundBuffer* TVPCreateSoundBuffer(tTVPWaveFormat& format, int buffer_count)
 {
-#if defined(__APPLE__)
-    auto* sound_buffer = new art3m1s::krkr::Art3m1sDarwinSoundBuffer(format, buffer_count);
-    if (sound_buffer->Init())
-        return sound_buffer;
+    auto* sound_buffer = new art3m1s::krkr::Art3m1sNativeSoundBuffer(format, buffer_count);
+    if (sound_buffer->Init()) return sound_buffer;
     delete sound_buffer;
-#else
-    auto* sound_buffer = new art3m1s::krkr::Art3m1sSoundBuffer(format, buffer_count);
-    if (sound_buffer->Init())
-        return sound_buffer;
-#endif
     return nullptr;
 }

@@ -173,6 +173,11 @@ if(APPLE AND ART3M1S_FFMPEG_DIR)
         "${ART3M1S_FFMPEG_DIR}/lib/libavformat.dylib"
         "${ART3M1S_FFMPEG_DIR}/lib/libavcodec.dylib"
         "${ART3M1S_FFMPEG_DIR}/lib/libavutil.dylib")
+elseif(USE_FFMPEG)
+    find_package(FFMPEG REQUIRED)
+    target_include_directories(art3m1s_krkr_host PRIVATE ${FFMPEG_INCLUDE_DIRS})
+    target_link_directories(art3m1s_krkr_host PRIVATE ${FFMPEG_LIBRARY_DIRS})
+    target_link_libraries(art3m1s_krkr_host PRIVATE ${FFMPEG_LIBRARIES})
 endif()
 
 find_package(PNG REQUIRED)

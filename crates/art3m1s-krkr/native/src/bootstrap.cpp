@@ -121,3 +121,8 @@ extern "C" ART3M1S_KRKR_EXPORT int32_t art3m1s_krkr_native_set_debug(int32_t)
 {
     return ART3M1S_KRKR_STATUS_UNSUPPORTED;
 }
+
+extern "C" ART3M1S_KRKR_EXPORT int32_t art3m1s_krkr_native_set_master_volume(float)
+{
+    return ART3M1S_KRKR_STATUS_UNSUPPORTED;
+}

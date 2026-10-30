@@ -132,7 +132,7 @@ fn main() {
             ("android", "aarch64", _) => "arm64-android",
             ("android", "arm", _) => "arm-android",
             ("android", "x86_64", _) => "x64-android",
-            ("linux", "x86_64", _) => "x64-linux-release",
+            ("linux", "x86_64", _) => "x64-linux",
             ("windows", "x86_64", _)
                 if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") =>
             {

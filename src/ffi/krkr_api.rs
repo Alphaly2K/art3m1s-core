@@ -535,6 +535,24 @@ mod tests {
     }
 
     #[test]
+    fn control_table_preserves_host_layout_and_rejects_invalid_calls() {
+        let mut size = 0;
+        let table = unsafe { &*art3m1s_krkr_get_control_api_v1(&mut size) };
+        assert_eq!(size, 16 + std::mem::size_of::<usize>());
+        assert_eq!(table.struct_size as usize, size);
+        assert_eq!(table.abi_version, 1);
+        assert_eq!(table.magic, 0x3156_434b_4d33_4152);
+        assert_eq!(
+            unsafe { (table.runtime_set_master_volume)(u64::MAX, 0.5) },
+            STATUS_INVALID_HANDLE
+        );
+        assert_eq!(
+            unsafe { (table.runtime_set_master_volume)(u64::MAX, f32::NAN) },
+            STATUS_INVALID_ARGUMENT
+        );
+    }
+
+    #[test]
     fn frame_acquire_validates_the_public_output_layout() {
         let mut frame = CoreFrameV1::default();
         frame.struct_size = 0;
@@ -543,4 +561,43 @@ mod tests {
             STATUS_INVALID_ARGUMENT
         );
     }
+}
+
+#[repr(C)]
+pub struct KrkrControlApiV1 {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub magic: u64,
+    pub runtime_set_master_volume: unsafe extern "C" fn(u64, f32) -> i32,
+}
+
+unsafe extern "C" fn runtime_set_master_volume(runtime: u64, volume: f32) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        if !volume.is_finite() {
+            return STATUS_INVALID_ARGUMENT;
+        }
+        RUNTIMES.with(runtime, STATUS_INVALID_HANDLE, |_| {
+            native::set_master_volume(volume.clamp(0.0, 1.0))
+        })
+    }))
+    .unwrap_or(STATUS_ENGINE)
+}
+
+static CONTROL_API: KrkrControlApiV1 = KrkrControlApiV1 {
+    struct_size: std::mem::size_of::<KrkrControlApiV1>() as u32,
+    abi_version: 1,
+    magic: 0x3156_434b_4d33_4152,
+    runtime_set_master_volume,
+};
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_krkr_get_control_api_v1(
+    out_size: *mut usize,
+) -> *const KrkrControlApiV1 {
+    if !out_size.is_null() {
+        unsafe {
+            *out_size = std::mem::size_of::<KrkrControlApiV1>();
+        }
+    }
+    &CONTROL_API
 }

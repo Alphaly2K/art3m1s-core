@@ -11,6 +11,7 @@ unsafe extern "C" {
     fn art3m1s_krkr_native_log_next_bytes() -> usize;
     fn art3m1s_krkr_native_poll_log(output: *mut u8, capacity: usize) -> usize;
     fn art3m1s_krkr_native_set_debug(enabled: i32) -> i32;
+    fn art3m1s_krkr_native_set_master_volume(volume: f32) -> i32;
 }
 
 pub fn log_next_bytes() -> usize {
@@ -78,4 +79,8 @@ mod tests {
             crate::protocol::ART3M1S_KRKR_STATUS_INVALID_ARGUMENT
         );
     }
+}
+
+pub fn set_master_volume(volume: f32) -> i32 {
+    unsafe { art3m1s_krkr_native_set_master_volume(volume) }
 }

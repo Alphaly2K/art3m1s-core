@@ -7,6 +7,8 @@
 namespace art3m1s::krkr
 {
 void ResetAudioHost();
+void SetAudioHostVolume(float volume);
+void SetAudioHostSuspended(bool suspended);
 bool PollAudioCommand(Art3m1sKrkrAudioCommandV1* out_command);
 int32_t SubmitAudioConsumed(const Art3m1sKrkrAudioConsumedV1* consumed);
 } // namespace art3m1s::krkr

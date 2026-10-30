@@ -555,6 +555,7 @@ int32_t DispatchInputEvent(Runtime* runtime, const Art3m1sKrkrInputEventV1& even
             krkrsdl3::KRKR_Trig_MouseScroll(0, event.value, event.x, event.y);
             break;
         case ART3M1S_KRKR_INPUT_FOCUS:
+            art3m1s::krkr::SetAudioHostSuspended(event.phase == ART3M1S_KRKR_INPUT_PHASE_UP);
             if (event.phase == ART3M1S_KRKR_INPUT_PHASE_UP)
                 TVPPostApplicationDeactivateEvent();
             else
@@ -1008,5 +1009,11 @@ extern "C" ART3M1S_KRKR_EXPORT int32_t art3m1s_krkr_native_set_debug(int32_t ena
                        enabled ? SDL_LOG_PRIORITY_DEBUG : g_default_app_log_priority);
     SDL_SetLogPriority(SDL_LOG_CATEGORY_AUDIO,
                        enabled ? SDL_LOG_PRIORITY_DEBUG : g_default_audio_log_priority);
+    return ART3M1S_KRKR_STATUS_OK;
+}
+
+extern "C" ART3M1S_KRKR_EXPORT int32_t art3m1s_krkr_native_set_master_volume(float volume)
+{
+    art3m1s::krkr::SetAudioHostVolume(volume);
     return ART3M1S_KRKR_STATUS_OK;
 }
