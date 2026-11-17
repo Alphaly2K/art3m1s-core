@@ -1,4 +1,4 @@
-# Artemis Host ABI v2：接口标准与迁移计划（草案）
+# Artemis Host ABI v2：接口契约（草案）
 
 日期：2026-11-17。状态：供评审的设计，未实现，不能用于加载当前动态库。
 现状证据见 [EXPORT_AUDIT.md](EXPORT_AUDIT.md)，C 接口骨架见
@@ -10,7 +10,7 @@
 独立 ABI、构建和适配，不纳入统一 runtime，不修改它们的上游补丁。共同依赖 crate 的
 破坏性调整必须另行评估；本方案不能用一次共享接口替换迫使其他引擎一起迁移。
 
-用户已确认画面边界：**core 生成渲染数据，Host 绘制并呈现**。据此，core 保留引擎语义
+**core 生成渲染数据，Host 绘制并呈现**。core 保留引擎语义
 与 CPU 侧计算，Host 执行物理 IO、GPU 绘制、音视频解码/输出和最终呈现。Host 拥有
 renderer，core 不保留原生 GPU 合成与 present 的生产路径；现有 renderer 以 Host SDK 复用。
 
@@ -23,9 +23,8 @@ renderer，core 不保留原生 GPU 合成与 present 的生产路径；现有 r
 5. 统一 status、代际句柄、明确所有权；不公开 Rust 容器、trait、DrawList 内存布局或平台指针。
 6. 先完成 IO continuation 与帧契约验证，再冻结 v2 的消息编号、capability 位和绑定。
 
-这份草案冻结的是评审范围和目标约束；尚未冻结可发布 ABI。头文件故意不为尚未验证的
-消息 kind、能力位和完整渲染 opcode 编造稳定编号。P0 必须补齐 schema，P1/P2/P3 验证
-通过后才可称为可接入的标准。
+发布的 ABI 必须定义完整的消息 kind、能力位、渲染 opcode 和资源格式，并提供对应的
+Host 一致性验证。目前头文件中的这些协议部分仍待实现，尚未冻结编号。
 
 ## 2. 职责边界
 
@@ -213,7 +212,7 @@ Host 的 unsupported/permission/error 必须能进入脚本原有失败分支，
 
 **同步 Lua 是必须先解决的实现门槛：**当前同步 EngineCallbacks 需要改成可保留调用现场的
 资源依赖/continuation，或在进入该调用前完整准备它所需数据。索引预载只能解决已知查询，
-不能宣称覆盖任意动态文件名、写入确认和 Lua 中间加载。统一 Luau 后必须验证能从
+还需覆盖任意动态文件名、写入确认和 Lua 中间加载。统一 Luau 后必须验证能从
 原位置恢复且不重复前面的副作用。若任一生产路径不能安全挂起，先保留 v1，不发布不完整 v2；
 也不偷偷恢复磁盘回退、阻塞 GUI 的桥接或反向回调。
 
@@ -245,7 +244,7 @@ core 输出 `FramePacket`，Host 管理 GPU、编译执行 shader、上传、同
 
 FramePacket 必须采用有版本的二进制 schema，所有偏移以 packet 起点计算、做范围/溢出检查；
 不能包含 Rust 内存地址。schema 完整定义、资源数据组织和 opcode 编号是 P0/P3 冻结项。
-不能因为 C 骨架可编译就宣称任意 Host 已能绘制。
+Host renderer 接入以完整帧 schema 和绘制回归为验收依据。
 
 `acquire_latest(after_render_frame_id)` 返回不可变快照和 lease token；无新帧为 NO_DATA。
 快照及所有引用的 CPU 资源版本在 release 前跨 step/reload 保持有效；默认至多两个
@@ -293,66 +292,4 @@ SDK 产物应包含唯一 schema、可编译 C 头、生成的 Dart/Swift/C# 绑
 Flutter 的最小 Host 样例。平台 IO/render/media 适配器可以复用，但不链接进纯核心。
 不用在每种语言里手写第二份函数顺序、长度类型和 magic。
 
-## 10. 分阶段实施与退出条件
-
-| 阶段 | 工作和可评审产物 | 通过条件 |
-|---|---|---|
-| P0：标准与基线 | 落实已确认画面边界；冻结 v1 inventory；确定状态、消息 schema、kind/能力位、错误、所有权；建立独立 C 调用样例和 schema 生成源 | 所有 59 槽与 26 个未入表函数有去向；输入/媒体/IO/渲染格式无未定义关键项；v1 不动 |
-| P1：runtime 会话化 | 显式 RuntimeContext，移除 Artemis 对 ACTIVE/default/global font/debug/cache 的依赖；注入时钟；给 v2 facade 加代际句柄与统一错误 | 两 runtime 的不同资源/字体/窗口/请求交错不串流；reload 后旧完成无效；旧 v1 回归通过 |
-| P2：Host IO | 先做 Luau continuation 验证；重建纯内存资源/cache 与异步 IO 状态机；Host SDK 承担目录/PFS/save | 动态资源 miss 不重跑 Lua；写入失败/取消/短读/空文件可恢复；无磁盘回退；旧存档兼容 |
-| P3：Host renderer | core CPU 资源与 render plan 分离；新增帧 schema 与 Host adapter，复用现有 renderer；迁出 surface/present/媒体临时文件 | 无 GPU 创建也能启动逻辑/probe；帧 lease/设备重建可靠；文字/E-Mote/转场/HLSL/截图像素与行为对照通过 |
-| P4：新 Host 验证 | 完成生成绑定和独立最小 Host，再迁移 Flutter 的 Artemis adapter；IO/render/media 分别可替换 | 第二种 Host 不依赖 Flutter 或 v1 资源挂载；完整帧循环和媒体完成协议运行；v1/v2 可分别构建 |
-| P5：收口 | v2 默认纯核心；v1 平台依赖移到独立 legacy 包/构建产物；清理弃用 pub API 和内部 C 壳 | core 依赖图无原生 GPU/物理 IO adapter；符号 allowlist 与绑定 CI 固定；其他引擎特征构建无行为变化 |
-
-P0/P1 可以先在现有 crate 新增内部层，P2/P3 验证期间不更改默认生产路径。
-最终 core 与 legacy 的独立产物边界必须落实，否则只加一个 `core-only` feature 无法保证
-目标依赖不会重新拉入 Metal/Vulkan。其他引擎继续使用原有聚合/legacy 构建；不以本轮
-v2 纯核心目标为由更改它们的功能或强迫上游迁移。
-
-v1 adapter 可以复用逐步拆出的内部逻辑，但继续暴露原语义。**不能**把同步 v1 调用简单
-转发给异步 v2 后返回“成功”；在无法保持原同步时序时，兼容 facade 必须保留独立实现，
-直到 Host 迁移。删除旧代码前逐项证明没有内部/Rust 调用者。
-
-### 每阶段需要的验证
-
-1. ABI：C/C++ 编译、sizeof/offsetof、生成绑定匹配、大小前缀协商、未知能力与空指针、
-   buffer 重试、错误文本；对新产物执行 Mach-O/ELF/PE 动态符号 allowlist。
-2. 会话和协议：两个实例交错、wrong thread、假/旧/错类型 handle、重复销毁、reload epoch、
-   取消后迟到结果、队列总字节预算/溢出、控制事件不丢，诊断丢弃可见。
-3. 时间和输入：同帧 IO resume 不重复输入或 onEnterFrame；跳过渲染不跳逻辑；后台恢复、
-   日历变化、按键重复、touch/鼠标顺序；保留字符串图层 ID。
-4. 业务：存档/系统存档/已读/截图回归，HTTP/dialog/翻译，BGM/SE/voice/视频完成与 A/B 循环，
-   E-Mote 同 Host frame 批处理和 Advance 求值；统一 Luau 后端验证。
-5. 画面与性能：同素材/脚本/输入比较文字、clip/mask、混合、转场、lyedit、HLSL 和 E-Mote；
-   对比 tick/构帧/拷贝字节数/CPU/GPU 内存，不能仅以函数数量减少或编译通过认定成功。
-6. 平台边界：无文件系统/无 renderer 的内存 Host 跑 probe 与逻辑；依赖图、Lua 标准库和
-   源码检查覆盖间接 IO；真实平台/游戏使用外部 fixture，路径不写进仓库。
-
-生产逻辑变更按 `AGENT.md` 执行 `cargo check --all-features`、`cargo fmt --check` 和
-`./scripts/test-all.sh`；图形变更补独立 CGL 与实际 Host 测试，各子 crate 和 Lua 后端
-不能由顶层一次 cargo test 代替。仅文档/头文件草案阶段做静态一致性和 C/C++ 语法检查，
-不把它们描述为已完成运行时验证。
-
-## 11. 实施记录
-
-2026-11-17，首批基础改造：
-
-- 所有平台的 asb-interpreter 固定使用 Luau，移除可选择的标准 Lua feature 和目标平台分叉。
-  mlua 的 Luau 源码自动随库构建，不再启用额外的 vendored Lua/LuaJIT 源码依赖。
-- Luau 的 Host 文件兼容层支持读、写、追加、更新、seek、flush、lines，均使用解释器的
-  Host 资源读写入口；不回退标准 Lua 的本机 io 库。
-- 新增同步 Rust `host::ResourceProvider`；`HostResources::from_provider` 允许 Host
-  实现资源和持久化，保留短读、空文件、失败和实例隔离。此接口是过渡层，不是 v2 异步协议。
-- 新增 `CoreRuntime::with_host_backend`，显式注入资源与 Host renderer，不选择原生后端或
-  默认资源，不允许工作目录读取回退。原 create/v1 路径保留兼容行为。
-- 项目初始化读取 tag.ini 时使用该 runtime 的资源；surface 绑定缓存改为 runtime 所有，
-  销毁一个实例不会清空另一个实例的 surface 引用。
-
-尚未完成：v2 C 查询入口与可发布 schema、全部全局配置/查询快照的会话化、Luau IO
-continuation、纯核心依赖拆分以及独立 FramePacket/Host renderer SDK。不要把本阶段的
-Rust 注入入口标记为 v2 ABI 已完成，或将 P1–P5 整体标记为通过。
-
-本批验证：`cargo check --locked --offline --all-features`、根 crate 与解释器的 fmt 检查、
-完整 `scripts/test-all.sh`（655 passed、9 ignored，含原有未跟踪测试）以及 release 构建通过。
-未执行外部商业游戏 fixture 或可选 CGL 硬件组。macOS 默认 release 动态库的 `nm -gU`
-结果为 `art3m1s_get_api_v1` 和 9 个独立 `pfs_*`，未新增平铺 runtime 符号或 v2 查询入口。
+实施阶段与进度见 [GOAL.md](../GOAL.md)。

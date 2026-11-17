@@ -105,7 +105,7 @@ SceneColor、render/output size 与线性 post-process 设计见
 [doc/POST_PROCESS.md](doc/POST_PROCESS.md)。
 
 Artemis 导出重构的现状审计见 [doc/EXPORT_AUDIT.md](doc/EXPORT_AUDIT.md)，
-Host ABI v2 的职责边界、接口草案和迁移计划见 [doc/HOST_ABI_V2.md](doc/HOST_ABI_V2.md)。
+Host ABI v2 的接口契约见 [doc/HOST_ABI_V2.md](doc/HOST_ABI_V2.md)，实施进度见 [GOAL.md](GOAL.md)。
 v2 尚未实现；RFVP、KRKR、Siglus 不在本轮重构范围内。
 
 ## 状态与限制
