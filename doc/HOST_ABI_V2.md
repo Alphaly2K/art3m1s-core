@@ -1,6 +1,6 @@
 # Artemis Host ABI v2：接口契约（草案）
 
-日期：2026-11-17。状态：供评审的设计，未实现，不能用于加载当前动态库。
+日期：2026-11-17。状态：C ABI 和完整服务 schema 尚未发布，当前动态库继续使用 v1。
 现状证据见 [EXPORT_AUDIT.md](EXPORT_AUDIT.md)，C 接口骨架见
 [abi/art3m1s_core_v2.draft.h](abi/art3m1s_core_v2.draft.h)。
 
@@ -107,7 +107,7 @@ flowchart LR
 错误至少区分 ARGUMENT、HANDLE、THREAD、UNSUPPORTED、BUFFER、STATE、STALE、LIMIT、PANIC。
 
 BUFFER 返回所需大小且不消费队首记录。NO_DATA 表示没有新数据。WOULD_BLOCK 表示本次
-操作未被接受，可在排空队列/释放 lease 后重试，不表示应重复推进同一 frame。
+操作未被接受，可在排空队列、消费结果、完成请求或释放 lease 后重试，不表示应重复推进同一 frame。
 异步服务失败（not_found/denied/io_error/cancelled 等）走对应结果消息，不冒充 ABI 调用失败。
 poll 若至少写出一条完整记录则返回 OK，并在 out 标出下一条所需空间；仅首条装不下时
 返回 BUFFER。输出参数清零不得造成已交付记录被隐藏；NO_DATA/BUFFER 都不移除未交付记录。
@@ -159,7 +159,7 @@ onEnterFrame 或累计动画 delta；更小 ID/时间返回 ARGUMENT。后一 Ho
 | 4 | u16 | envelope_version，初值 2 |
 | 6 | u16 | domain |
 | 8 | u32 | kind，domain 内稳定编号 |
-| 12 | u32 | flags，含 requires_reply / critical / body 格式 |
+| 12 | u32 | flags：0x1 requires_reply，0x2 critical，0x100 JSON/blob body |
 | 16 | u64 | runtime_handle |
 | 24 | u64 | session_epoch |
 | 32 | u64 | sequence，runtime 生命周期单调递增 |
@@ -169,7 +169,10 @@ onEnterFrame 或累计动画 delta；更小 ID/时间返回 ARGUMENT。后一 Ho
 
 头长 56，`record_bytes = 56 + body_bytes`。控制记录 body 是小端
 `metadata_bytes:u32, blob_bytes:u32, UTF-8 JSON metadata, raw blob`，两段长度相加加 8
-必须等于 body_bytes；无 NUL/隐含 padding。高频 input/render 可以使用独立版本化二进制
+必须等于 body_bytes；metadata 必须为 JSON object，无 NUL/隐含 padding。诊断使用相同 body。
+Runtime domain=1、kind=1 为 `session_changed`，request_id=0，metadata=`{}`，blob 为空。
+服务请求只使用 IO/UI/media/render domain；其余 service kind 和 payload 由各自 schema 定义。
+高频 input/render 可以使用独立版本化二进制
 body，由 flags/kind 唯一标识。JSON 中的 u64/i64 使用十进制字符串，避免宿主 Number 精度丢失。
 禁止把图片/存档/HTTP body 转成 JSON 数组或 base64 作为常规传输。
 
@@ -177,6 +180,19 @@ body，由 flags/kind 唯一标识。JSON 中的 u64/i64 使用十进制字符�
 1024 条/1 MiB；实际配置和上限需可查询。请求和媒体控制消息可靠，日志可丢并计数。
 满载时必须在产生副作用前预留控制记录，或挂起尚未提交的内部操作；不能先推进脚本再
 丢请求。即便游戏等待 Host，也要允许 poll 和结果回填；关键请求不能被日志阻塞。
+
+控制记录按 FIFO 优先交付，排空后才交付诊断；跨队列不承诺 sequence 递增。
+诊断满载或超过单条预算时丢弃新记录，
+累计丢弃次数；其容量不占用控制预算。重载清除两个队列与旧结果，保留生命周期丢弃计数。
+已受理结果另有默认 4096 条/16 MiB 预算，等待请求默认上限为 4096。metadata 和 blob
+各默认限 1 MiB。字节预算按信封、长度头、metadata 和 blob 的编码总长计算。
+单条或整批超过空队列总预算返回 LIMIT；仅因现有积压而放不下时返回 WOULD_BLOCK。
+
+只有已被 poll 交付的请求可以接收结果，提前提交返回 STATE。结果批次的重复身份、
+错误 runtime/epoch/service kind、已受理/取消的请求均返回 STALE，并保留整批原状态。
+结果受理后从等待请求中移除，按提交顺序进入结果队列；等待计数与已受理结果计数分别查询。
+消费结果后释放其容量。取消尚未交付的请求同时移除该控制记录；已派发的外部任务需要
+服务层另发取消通知。本地取消不代表 Host 已停止外部工作。
 
 可靠控制按 sequence 交付，诊断可分批穿插；Host 不得等待 sequence 连续，因为日志
 允许丢失。新帧可以合并，但影响转场或存档的资源版本不能随着“丢中间帧”丢掉。

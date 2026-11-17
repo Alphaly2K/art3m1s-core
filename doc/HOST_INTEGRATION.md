@@ -54,6 +54,27 @@ provider 接收已解析 magic path 的逻辑 key（`/` 分隔、ASCII 小写）
 GPU 对象和呈现由其实现管理。纯核心的独立构建、v2 帧 lease 和可靠请求协议仍在实施中，
 当前 C ABI 继续使用 v1。
 
+### v2 Rust 会话传输
+
+`host::protocol::SessionTransport` 提供 v2 facade 的纯内存传输组件。创建时传入已校验的
+非零 runtime handle 和 `TransportLimits`；句柄代际、owner 线程和服务 schema 由 facade
+负责。它独立于 `HostSession` 的 v1 格式队列，不能直接替代当前 runtime 的同步执行路径。
+
+`begin_session()` 递增 epoch，清除旧请求、结果和未交付输出，首先排入 `session_changed`。
+core 在提交业务副作用前调用 `request(service, body)` 或 `notify(kind, body)`；
+`WouldBlock` 表示本次没有受理，也没有消耗请求/序列 ID。两种 ID 在 runtime 生命周期内
+不重用。`MessageBody` 保留 UTF-8 JSON object 和原始 blob；具体字段由服务层校验。
+
+Host 用 `poll_events(&mut buffer)` 获取 56 字节头的完整小端记录。返回值同时给出状态、
+记录数、写入字节数和下一条所需大小；`Buffer` 和部分成功均保留尚未交付的记录。
+控制记录优先交付，诊断独立限额并计数丢弃。格式、flags 和默认预算见
+[消息契约](HOST_ABI_V2.md#5-消息可靠性与能力协商)，实际预算与积压可通过 `limits()`/`state()` 查询。
+
+Host 以 `HostReply` 批量回填，完整保留原请求的 runtime、epoch、request_id 和 service。
+`submit_replies(&batch)` 先校验整批身份和容量，再复制并统一受理；失败保留全部请求。
+它不执行脚本，core 只在 step 边界按顺序 `pop_reply()`。`cancel(identity)` 使本地请求失效；
+外部任务取消由服务层另行处理。重载、取消、重复或串实例结果不会重新进入可执行队列。
+
 ## 1. 职责与能力边界
 
 | Core | Host |

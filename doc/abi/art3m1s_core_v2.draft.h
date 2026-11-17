@@ -1,4 +1,4 @@
-/* Design artifact only. No implementation or binary ABI is shipped for v2.
+/* Design artifact only. No C implementation or binary ABI is shipped for v2.
  * See ../HOST_ABI_V2.md. Do not use this draft to load the current library.
  * Native structs use the target C ABI; queued records use explicit LE encoding.
  */
