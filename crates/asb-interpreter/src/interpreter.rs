@@ -243,6 +243,11 @@ struct ParkedSaveQueue {
     stack_override: Option<Vec<(String, usize)>>,
 }
 
+struct DeferredEvents {
+    remaining: Vec<Event>,
+    queued: bool,
+}
+
 fn lua_filter_consumes(value: &mlua::Value) -> bool {
     match value {
         mlua::Value::Nil => false,
@@ -345,6 +350,7 @@ pub struct Interpreter {
     io_filter: Option<PendingLuaFilter>,
     io_resource: Option<PendingHostResource>,
     parked_save_queue: Option<ParkedSaveQueue>,
+    deferred_events: Option<DeferredEvents>,
 }
 
 fn json_to_lua_value(lua: &Lua, value: serde_json::Value) -> mlua::Result<mlua::Value> {
@@ -613,6 +619,7 @@ impl Interpreter {
             io_filter: None,
             io_resource: None,
             parked_save_queue: None,
+            deferred_events: None,
         }
     }
 
@@ -716,6 +723,7 @@ impl Interpreter {
         self.loading_lua_key = None;
         self.io_filter = None;
         self.io_resource = None;
+        self.deferred_events = None;
     }
 
     fn check_io_idle(&self) -> Result<()> {
@@ -1084,6 +1092,7 @@ impl Interpreter {
     }
 
     fn set_start_position(&mut self, script: &str, line: usize) {
+        self.deferred_events = None;
         self.current_script = Some(script.to_string());
         self.current_line = line;
         self.call_stack.clear();
@@ -1162,6 +1171,14 @@ impl Interpreter {
             }
             if self.drive_loading_lua()? {
                 return Ok(ExecutionResult::HostIoPending);
+            }
+            if let Some(deferred) = self.deferred_events.take() {
+                if let Some(result) = self.emit_many(deferred.remaining, deferred.queued)? {
+                    return Ok(result);
+                }
+                if !deferred.queued {
+                    self.current_line += 1;
+                }
             }
             let resuming_inline_filter = self.io_filter.as_ref().is_some_and(|filter| {
                 filter.origin != FilterOrigin::Queued && filter.decision.is_some()
@@ -1410,17 +1427,8 @@ impl Interpreter {
                     }
                 }
                 TagResult::EmitMany(events) => {
-                    for event in events {
-                        let result = self.emit_event(event.clone());
-                        match result {
-                            CallbackResult::Continue => {}
-                            CallbackResult::Pause => {
-                                return Ok(ExecutionResult::Wait(event));
-                            }
-                            CallbackResult::Abort => {
-                                return Err(Error::Aborted);
-                            }
-                        }
+                    if let Some(result) = self.emit_many(events, false)? {
+                        return Ok(result);
                     }
                     self.current_line += 1;
                     continue;
@@ -1485,17 +1493,8 @@ impl Interpreter {
                             }
                         }
                         TagResult::EmitMany(events) => {
-                            for event in events {
-                                let result = self.emit_event(event.clone());
-                                match result {
-                                    CallbackResult::Continue => {}
-                                    CallbackResult::Pause => {
-                                        return Ok(ExecutionResult::Wait(event));
-                                    }
-                                    CallbackResult::Abort => {
-                                        return Err(Error::Aborted);
-                                    }
-                                }
+                            if let Some(result) = self.emit_many(events, false)? {
+                                return Ok(result);
                             }
                             self.current_line += 1;
                             continue;
@@ -1686,19 +1685,8 @@ impl Interpreter {
                     }
                 }
                 TagResult::EmitMany(events) => {
-                    for event in events {
-                        match self.emit_event(event.clone()) {
-                            CallbackResult::Continue => {}
-                            CallbackResult::Pause => {
-                                self.last_wait_from_queue = true;
-                                self.last_queue_pause_is_wait = matches!(event, Event::Wait { .. });
-                                if self.last_queue_pause_is_wait {
-                                    self.record_queued_wait_checkpoint(&event);
-                                }
-                                return Ok(Some(ExecutionResult::Wait(event)));
-                            }
-                            CallbackResult::Abort => return Err(Error::Aborted),
-                        }
+                    if let Some(result) = self.emit_many(events, true)? {
+                        return Ok(Some(result));
                     }
                     continue;
                 }
@@ -1833,6 +1821,33 @@ impl Interpreter {
                 ctx.tag_queue.extend(barrier.deferred);
             }
         }
+    }
+
+    fn emit_many(&mut self, events: Vec<Event>, queued: bool) -> Result<Option<ExecutionResult>> {
+        let mut events = events.into_iter();
+        while let Some(event) = events.next() {
+            match self.emit_event(event.clone()) {
+                CallbackResult::Continue => {}
+                CallbackResult::Pause => {
+                    if queued {
+                        self.last_wait_from_queue = true;
+                        self.last_queue_pause_is_wait = matches!(event, Event::Wait { .. });
+                        if self.last_queue_pause_is_wait {
+                            self.record_queued_wait_checkpoint(&event);
+                        }
+                    }
+                    if self.resumable_io && events.len() != 0 {
+                        self.deferred_events = Some(DeferredEvents {
+                            remaining: events.collect(),
+                            queued,
+                        });
+                    }
+                    return Ok(Some(ExecutionResult::Wait(event)));
+                }
+                CallbackResult::Abort => return Err(Error::Aborted),
+            }
+        }
+        Ok(None)
     }
 
     fn emit_event(&mut self, event: Event) -> CallbackResult {
@@ -2894,6 +2909,9 @@ impl Interpreter {
         // 宿主 advance = 等待结束：清掉 getScriptWaitReason 的数据源。
         self.engine_ctx.lock().unwrap().wait_reason_info = None;
         if self.release_queued_wait() {
+            return;
+        }
+        if self.deferred_events.is_some() {
             return;
         }
         self.current_line = self.current_line.saturating_add(1);

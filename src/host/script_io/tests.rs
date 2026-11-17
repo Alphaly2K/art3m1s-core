@@ -1420,6 +1420,49 @@ fn timed_wait_uses_elapsed_monotonic_time_and_starts_in_its_own_frame() {
 }
 
 #[test]
+fn compound_events_resume_in_order_without_reexecuting_the_tag() {
+    use asb_interpreter::event::LayerEvent;
+
+    let mut session = session(1, TransportLimits::default(), 4096);
+    session
+        .open_scenario(
+            br#"
+*main
+[lyc id=inline width=10 height=20 color=112233]
+[tag data="lyc,id,dynamic,width,10,height,20,color,112233"]
+[calllua function=queue]
+[caption data=done]
+[lua]
+function queue()
+    __engine:enqueueTag{'lyc', id='queued', width='10', height='20', color='112233'}
+end
+[/lua]
+"#,
+            "boot.iet",
+            "main",
+        )
+        .unwrap();
+    for expected in ["inline", "dynamic", "queued"] {
+        assert_eq!(session.step().unwrap(), ScriptIoProgress::Event);
+        assert!(matches!(session.pending_event(),
+            Some(Event::Layer(LayerEvent::Create { id, .. })) if id == expected));
+        assert_eq!(session.step().unwrap(), ScriptIoProgress::Event);
+        assert!(matches!(session.pending_event(),
+            Some(Event::Layer(LayerEvent::Create { id, .. })) if id == expected));
+        session.resume_scenario().unwrap();
+        assert_eq!(session.step().unwrap(), ScriptIoProgress::Event);
+        assert!(matches!(session.pending_event(),
+            Some(Event::Layer(LayerEvent::SetProperties { id, properties }))
+            if id == expected && properties["width"] == "10"));
+        session.resume_scenario().unwrap();
+    }
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::Event);
+    assert!(matches!(session.pending_event(), Some(Event::Caption { data }) if data == "done"));
+    session.resume_scenario().unwrap();
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::Completed);
+}
+
+#[test]
 fn project_applies_compound_layer_events_before_asb_and_lua_queries() {
     let mut session = session(1, TransportLimits::default(), 4096);
     let mut host = MemoryHost::default();
