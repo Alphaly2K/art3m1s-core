@@ -31,6 +31,7 @@ impl ScriptIoSession {
                     | WaitReason::Se { .. }
                     | WaitReason::VideoLayer { .. }
                     | WaitReason::FullscreenVideo
+                    | WaitReason::ScenarioTween { .. }
             })
         )
     }
@@ -71,7 +72,18 @@ impl ScriptIoSession {
             WaitReason::FullscreenVideo => self.video.finished(None),
             _ => false,
         };
-        if !input_satisfied && !elapsed && !audio_finished && !video_finished {
+        if input_satisfied
+            && matches!(reason, WaitReason::Generic | WaitReason::Generic0)
+            && let Some(scene) = &self.scene
+            && !scene.text_revealed()
+        {
+            scene.reveal_text();
+            self.wait_start = Some((frame.id, frame.monotonic_ns));
+            return Ok(Some(ScriptIoProgress::Event));
+        }
+        let text_finished = matches!(reason, WaitReason::ScenarioTween { mode }
+            if *mode != 1 || self.scene.as_ref().is_none_or(|scene| scene.text_revealed()));
+        if !input_satisfied && !elapsed && !audio_finished && !video_finished && !text_finished {
             return Ok(Some(ScriptIoProgress::Event));
         }
         self.resume_scenario()?;

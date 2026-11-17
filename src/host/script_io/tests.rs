@@ -1447,7 +1447,7 @@ fn queued_input_preserves_edges_across_io_and_releases_only_the_current_wait() {
     host.asset(
         "boot.iet",
         br#"*top
-[wt]
+[wt0]
 [caption data=click]
 [exkey btn=13]
 [caption data=key]
@@ -1908,6 +1908,144 @@ fn host_video_layers_publish_immutable_frames_and_resume_media_waits() {
         [(UI_CAPTION.kind, json!({"text":"full_done"}))]
     );
     runtime::destroy(handle).unwrap();
+}
+
+#[test]
+fn host_font_draws_text_on_click_wait_and_keeps_previous_atlas_alive() {
+    use crate::host::{input::HostInput, runtime};
+
+    let handle = runtime::create(0, TransportLimits::default(), 4096).unwrap();
+    let epoch = runtime::open_project(
+        handle,
+        b"[WINDOWS]\nWIDTH=320\nHEIGHT=200\nBOOT=boot.iet\n",
+        "windows",
+        None,
+    )
+    .unwrap();
+    runtime::set_default_font(handle, epoch, &test_font()).unwrap();
+    let mut host = MemoryHost::default();
+    host.asset(
+        "boot.iet",
+        br#"*top
+[chgmsg id=message layered=1]
+[lyprop id=~ left=10 top=5]
+[scetween type=in delay=100 param=alpha diff=-255]
+AA
+[@]
+[rp]
+B
+[wt0]
+[stop]
+"#,
+    );
+    let step = |id| {
+        runtime::step(
+            handle,
+            HostFrame {
+                id,
+                monotonic_ns: id * 1_000_000,
+                utc_unix_ms: 0,
+                utc_offset_minutes: 0,
+            },
+        )
+        .unwrap()
+    };
+    for _ in 0..1024 {
+        match step(1) {
+            ScriptIoProgress::Waiting => {
+                let mut bytes = [0; 4096];
+                let polled = runtime::poll_events(handle, &mut bytes).unwrap();
+                let request = decode_requests(&bytes[..polled.written_bytes])
+                    .pop()
+                    .unwrap();
+                runtime::submit_replies(handle, &[host.complete(&request)]).unwrap();
+            }
+            ScriptIoProgress::Event => break,
+            progress => panic!("unexpected text progress {progress:?}"),
+        }
+    }
+    let key = |down| HostInput::Key { code: 13, down };
+    runtime::submit_input(handle, epoch, &[key(true)]).unwrap();
+    assert_eq!(step(2), ScriptIoProgress::Event);
+    let first = runtime::acquire_latest(handle, 0).unwrap().unwrap();
+    assert_eq!(first.sprites.len(), 2);
+    assert_eq!(first.sprites[0].layer_id, "message");
+    assert!(first.sprites[0].transform[4] >= 10.0);
+    assert!(first.sprites[0].transform[5] >= 5.0);
+    let atlas = first.texture(first.sprites[0].texture).unwrap();
+    let coverage = |pixels: &[u8]| pixels.iter().skip(3).step_by(4).filter(|&&a| a > 0).count();
+    let old_coverage = coverage(atlas.rgba());
+    assert!(old_coverage > 0);
+    assert_eq!(step(2), ScriptIoProgress::Event);
+    assert!(
+        runtime::acquire_latest(handle, first.render_frame_id)
+            .unwrap()
+            .is_none()
+    );
+
+    runtime::submit_input(handle, epoch, &[key(false), key(true)]).unwrap();
+    assert_eq!(step(3), ScriptIoProgress::Event);
+    assert_eq!(step(4), ScriptIoProgress::Event);
+    let next = runtime::acquire_latest(handle, first.render_frame_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.sprites.len(), 1);
+    let next_atlas = next.texture(next.sprites[0].texture).unwrap();
+    assert_ne!(atlas.revision, next_atlas.revision);
+    assert!(coverage(next_atlas.rgba()) > old_coverage);
+    assert_eq!(coverage(atlas.rgba()), old_coverage);
+    drop(next);
+    drop(first);
+    runtime::destroy(handle).unwrap();
+}
+
+// Two synthetic rectangle glyphs so this test never consults a system font.
+fn test_font() -> Vec<u8> {
+    fn put16(data: &mut [u8], at: usize, value: u16) {
+        data[at..at + 2].copy_from_slice(&value.to_be_bytes());
+    }
+    let mut head = vec![0; 54];
+    head[0..4].copy_from_slice(&[0, 1, 0, 0]);
+    head[12..16].copy_from_slice(&[0x5f, 0x0f, 0x3c, 0xf5]);
+    put16(&mut head, 18, 1000);
+    let mut hhea = vec![0; 36];
+    hhea[0..4].copy_from_slice(&[0, 1, 0, 0]);
+    put16(&mut hhea, 4, 800);
+    put16(&mut hhea, 6, (-200i16) as u16);
+    put16(&mut hhea, 34, 3);
+    let mut cmap = vec![0; 12 + 262];
+    put16(&mut cmap, 2, 1);
+    put16(&mut cmap, 6, 3);
+    cmap[11] = 12;
+    put16(&mut cmap, 14, 262);
+    cmap[18 + b'A' as usize] = 1;
+    cmap[18 + b'B' as usize] = 2;
+    let glyph = [
+        0, 1, 0, 0, 0, 0, 1, 244, 2, 188, 0, 3, 0, 0, 0x31, 0x21, 0x11, 0x21, 1, 244, 254, 12, 2,
+        188,
+    ];
+    let tables = [
+        (*b"cmap", cmap),
+        (*b"glyf", glyph.repeat(2)),
+        (*b"head", head),
+        (*b"hhea", hhea),
+        (*b"hmtx", [2, 188, 0, 0].repeat(3)),
+        (*b"loca", vec![0, 0, 0, 0, 0, 12, 0, 24]),
+        (*b"maxp", vec![0, 0, 0x50, 0, 0, 3]),
+    ];
+    let mut font = vec![0; 12 + 16 * tables.len()];
+    font[0..4].copy_from_slice(&[0, 1, 0, 0]);
+    put16(&mut font, 4, tables.len() as u16);
+    for (index, (name, table)) in tables.into_iter().enumerate() {
+        let at = 12 + 16 * index;
+        let offset = (font.len() as u32).to_be_bytes();
+        font[at..at + 4].copy_from_slice(&name);
+        font[at + 8..at + 12].copy_from_slice(&offset);
+        font[at + 12..at + 16].copy_from_slice(&(table.len() as u32).to_be_bytes());
+        font.extend_from_slice(&table);
+        font.resize(font.len().next_multiple_of(4), 0);
+    }
+    font
 }
 
 #[test]

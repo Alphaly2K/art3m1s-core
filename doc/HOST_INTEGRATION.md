@@ -144,6 +144,8 @@ Artemis 键码，并把屏幕坐标换算为舞台坐标。Core 在下一个受�
 对话框结果待处理时需先完成这些请求。`destroy` 可以直接释放句柄并放弃未确认的写入。
 
 `acquire_latest(handle, after_render_frame_id)` 借用最新基础图层帧，`None` 表示暂无更新。
+需要文本时，在 `open_project` 后、首帧前用 `set_default_font(handle, epoch, bytes)` 提交字体
+数据。字形和图集通过同一帧接口交付。
 Host 从快照的纹理表读取像素，并按 `sprites` 的顺序绘制。`[flip]` 提交当前视觉状态，
 IO 挂起期间可继续呈现上次取得的帧。借用跨重载有效；单个运行时最多借用两帧，销毁前需
 归还。`packet()` 可读取同一快照的二进制描述，像素继续通过纹理表借用。格式、蒙版和资源

@@ -234,6 +234,18 @@ pub fn submit_video_frame(
     })
 }
 
+/// Supply the fallback font for this project before accepting its first frame.
+pub fn set_default_font(
+    handle: RuntimeHandle,
+    epoch: u64,
+    bytes: &[u8],
+) -> Result<(), RuntimeError> {
+    with_session(
+        handle,
+        |session| Ok(session.set_default_font(epoch, bytes)?),
+    )
+}
+
 pub fn step(handle: RuntimeHandle, frame: HostFrame) -> Result<ScriptIoProgress, RuntimeError> {
     with_session(handle, |session| {
         let progress = session.step_queued_frame(frame)?;

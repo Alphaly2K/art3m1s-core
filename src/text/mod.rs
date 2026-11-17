@@ -30,3 +30,15 @@ pub use render::{
     FontDesc, FontMetrics, FontState, GlyphInfo, LinkHitArea, LinkRange, MessageLayer, RubyRange,
     ScetweenConfig, ScetweenMode, ScetweenSetMode, TextAlignment, TextRenderer, TextSpanToken,
 };
+
+pub(crate) fn message_layer_scene_id(message_id: &str, layered: bool) -> String {
+    if layered {
+        return message_id.to_string();
+    }
+    use std::fmt::Write;
+    let mut encoded = String::from(crate::compositor::scene::MESSAGE_LAYER_OVERLAY_PREFIX);
+    for byte in message_id.as_bytes() {
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}

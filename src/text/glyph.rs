@@ -94,6 +94,7 @@ pub struct GlyphTextRenderer {
     next_font_generation: u64,
     fonts: HashMap<String, (FontArc, u64)>,
     atlases: Vec<Atlas>,
+    atlas_limit: usize,
     cache: HashMap<(u64, u16, u32), (usize, u32, u32, u32, u32)>,
     /// atlas 里的纯白小块（link type=0 hover 强调的白色方形板用），惰性分配
     white_patch: Option<(usize, u32, u32)>,
@@ -399,6 +400,10 @@ pub(crate) fn layout_glyphs(
 
 impl GlyphTextRenderer {
     pub fn new() -> Self {
+        Self::with_atlas_limit(usize::MAX)
+    }
+
+    pub(crate) fn with_atlas_limit(atlas_limit: usize) -> Self {
         Self {
             state: FontState::new(),
             font: None,
@@ -406,6 +411,7 @@ impl GlyphTextRenderer {
             next_font_generation: 0,
             fonts: HashMap::new(),
             atlases: vec![Atlas::new(0)],
+            atlas_limit,
             cache: HashMap::new(),
             white_patch: None,
         }
@@ -421,20 +427,23 @@ impl GlyphTextRenderer {
         Ok(())
     }
 
-    fn alloc_atlas_region(&mut self, w: u32, h: u32) -> (usize, u32, u32) {
+    fn alloc_atlas_region(&mut self, w: u32, h: u32) -> Option<(usize, u32, u32)> {
         for (index, atlas) in self.atlases.iter_mut().enumerate() {
             if let Some((x, y)) = atlas.alloc(w, h) {
-                return (index, x, y);
+                return Some((index, x, y));
             }
         }
         let index = self.atlases.len();
+        if index >= self.atlas_limit {
+            return None;
+        }
         let mut atlas = Atlas::new(index);
         let (x, y) = atlas
             .alloc(w, h)
             .expect("单个字形尺寸已在分配 atlas 前校验");
         self.atlases.push(atlas);
         crate::core_info!("[text] 字形 atlas 已扩展至 {} 页", self.atlases.len());
-        (index, x, y)
+        Some((index, x, y))
     }
 
     /// 光栅化单个字符（按字号 `sz`），写入 atlas 并返回字形信息。
@@ -455,7 +464,7 @@ impl GlyphTextRenderer {
             if let Some(cached) = self.cache.get(&k).copied() {
                 cached
             } else {
-                let (page, x, y) = self.alloc_atlas_region(w + 1, h + 1);
+                let (page, x, y) = self.alloc_atlas_region(w + 1, h + 1)?;
                 let mut g = vec![0u8; (w * h) as usize];
                 q.draw(|px, py, v| {
                     let ix = py as usize * w as usize + px as usize;
@@ -493,7 +502,7 @@ impl GlyphTextRenderer {
         if let Some(p) = self.white_patch {
             return Some(p);
         }
-        let (page, x, y) = self.alloc_atlas_region(4, 4);
+        let (page, x, y) = self.alloc_atlas_region(4, 4)?;
         self.atlases[page].write(x, y, 4, 4, &[255u8; 4 * 4 * 4]);
         // 取内缩 1px 的中心点，避免采样到邻近字形
         let p = (page, x + 1, y + 1);
@@ -1655,7 +1664,7 @@ mod tests {
         renderer.atlases[0].rows.push((0, ATLAS_SZ));
         renderer.atlases[0].cur.push(ATLAS_SZ);
 
-        let (page, x, y) = renderer.alloc_atlas_region(4, 4);
+        let (page, x, y) = renderer.alloc_atlas_region(4, 4).unwrap();
 
         assert_eq!((page, x, y), (1, 0, 0));
         assert_eq!(

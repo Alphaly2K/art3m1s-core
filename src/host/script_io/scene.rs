@@ -10,6 +10,7 @@ use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 
 mod frames;
+mod text;
 
 const MAX_TEXTURES: usize = 4096;
 const MAX_TEXTURE_BYTES: usize = 128 * 1024 * 1024;
@@ -154,6 +155,7 @@ struct SceneProjection {
     video_frames: HashMap<String, Arc<FrameTexture>>,
     pending_video_frames: HashMap<String, Arc<FrameTexture>>,
     video_revision: u64,
+    text: text::SceneText,
     dirty: bool,
     group_sync_layers: Vec<String>,
 }
@@ -354,6 +356,7 @@ impl SceneIo {
         let mut scene = self.scene.lock().unwrap();
         let delta_ms = elapsed_ms - scene.compositor.clock_ms();
         scene.dirty |= scene.compositor.advance(delta_ms);
+        scene.dirty |= scene.text.advance(delta_ms);
         self.tween_handlers.extend(
             scene
                 .compositor

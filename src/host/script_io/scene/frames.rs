@@ -2,6 +2,8 @@ use super::{SceneProjection, ScriptIoProgress, ScriptIoSession};
 use crate::compositor::{BlendMode, TextureId, TextureInfo, TextureProvider, build};
 use crate::host::frame::{FrameSnapshot, FrameSprite, FrameTexture, SpriteBlend};
 use crate::host::protocol::ProtocolError;
+use crate::render_pipeline::draw::LayerCommandKind;
+use crate::text::{TextRenderer, message_layer_scene_id};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -42,7 +44,7 @@ impl ScriptIoSession {
 
 impl SceneProjection {
     fn build_frame(
-        &self,
+        &mut self,
         session_epoch: u64,
         host_frame_id: u64,
         stage_size: [u32; 2],
@@ -50,10 +52,25 @@ impl SceneProjection {
         let mut textures = CpuTextureView {
             assets: &self.textures,
             video: &self.video_frames,
+            atlases: &mut self.text.atlases,
+            atlas_revision: &mut self.text.atlas_revision,
             revisions: HashMap::new(),
             table: Vec::new(),
         };
         let scene = self.compositor.scene();
+        let renderer = &mut self.text.renderer;
+        let mut text_commands: HashMap<_, _> = renderer
+            .build_text_commands(&mut textures)
+            .into_iter()
+            .filter_map(|(id, commands)| {
+                if !self.compositor.is_message_layer_visible(&id) {
+                    return None;
+                }
+                let layer = renderer.font_state().layers.get(&id)?;
+                Some((message_layer_scene_id(&id, layer.layered), commands))
+            })
+            .collect();
+        let mut text_for = |id: &str| text_commands.remove(id).unwrap_or_default();
         let files = (!self.video_frames.is_empty()).then(|| {
             self.video_frames
                 .keys()
@@ -65,7 +82,7 @@ impl SceneProjection {
             self.compositor.clock_ms(),
             &mut textures,
             None,
-            None,
+            Some(&mut text_for),
             files.as_ref(),
         );
         if !frame.shader_groups.is_empty() || !frame.mask_commands.is_empty() {
@@ -81,18 +98,22 @@ impl SceneProjection {
                 return None;
             }
             let key = frame.command_key(index)?;
-            let mask = scene
-                .get(&key.layer_id)
-                .filter(|layer| {
-                    self.video_frames.contains_key(&key.layer_id)
-                        || layer.file.as_deref().is_some_and(|file| !file.is_empty())
+            let mask = (key.kind != LayerCommandKind::Text)
+                .then(|| {
+                    scene
+                        .get(&key.layer_id)
+                        .filter(|layer| {
+                            self.video_frames.contains_key(&key.layer_id)
+                                || layer.file.as_deref().is_some_and(|file| !file.is_empty())
+                        })
+                        .and_then(|layer| layer.mask.as_deref())
+                        .and_then(|mask| textures.assets.get(mask)?.clone())
+                        .filter(|mask| {
+                            mask.width == command.size.width && mask.height == command.size.height
+                        })
+                        .map(|mask| textures.record(mask).0.0 as usize)
                 })
-                .and_then(|layer| layer.mask.as_deref())
-                .and_then(|mask| textures.assets.get(mask)?.clone())
-                .filter(|mask| {
-                    mask.width == command.size.width && mask.height == command.size.height
-                })
-                .map(|mask| textures.record(mask).0.0 as usize);
+                .flatten();
             let transform = command.transform.to_cols_array();
             if !transform
                 .into_iter()
@@ -142,6 +163,8 @@ impl SceneProjection {
 struct CpuTextureView<'a> {
     assets: &'a HashMap<String, Option<Arc<FrameTexture>>>,
     video: &'a HashMap<String, Arc<FrameTexture>>,
+    atlases: &'a mut HashMap<String, Arc<FrameTexture>>,
+    atlas_revision: &'a mut u64,
     revisions: HashMap<u64, TextureId>,
     table: Vec<Arc<FrameTexture>>,
 }
@@ -163,6 +186,9 @@ impl CpuTextureView<'_> {
 
 impl TextureProvider for CpuTextureView<'_> {
     fn resolve(&mut self, name: &str) -> Option<(TextureId, TextureInfo)> {
+        if let Some(texture) = self.atlases.get(name) {
+            return Some(self.record(texture.clone()));
+        }
         if let Some(id) = name.strip_prefix(crate::video::VIDEO_LAYER_TEXTURE_PREFIX)
             && let Some(texture) = self.video.get(id)
         {
@@ -173,12 +199,24 @@ impl TextureProvider for CpuTextureView<'_> {
 
     fn upload_rgba(
         &mut self,
-        _: &str,
-        _: u32,
-        _: u32,
-        _: &[u8],
+        name: &str,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
     ) -> Option<(TextureId, TextureInfo)> {
-        None
+        let revision = self
+            .atlas_revision
+            .checked_add(1)
+            .filter(|id| *id < 1 << 61)?;
+        let texture = Arc::new(FrameTexture {
+            revision: (1 << 61) | revision,
+            width,
+            height,
+            rgba: rgba.into(),
+        });
+        *self.atlas_revision = revision;
+        self.atlases.insert(name.to_owned(), texture.clone());
+        Some(self.record(texture))
     }
 
     fn solid_texture(&mut self, rgba: [u8; 4]) -> Option<(TextureId, TextureInfo)> {

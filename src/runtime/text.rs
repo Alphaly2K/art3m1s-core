@@ -1,5 +1,6 @@
 use super::CoreRuntime;
 use crate::render_pipeline::draw::DrawCommand;
+use crate::text::message_layer_scene_id;
 use crate::text::render::{ScetweenConfig, TextRenderer, TextSpanToken};
 use asb_interpreter::Event;
 use std::collections::HashMap;
@@ -102,21 +103,6 @@ fn apply_message_layer_binding(
         // 后续 [lyprop id="~"] 找不到默认层时按合成器约定忽略该操作。
         None => compositor.set_default_message_layer(None),
     }
-}
-
-fn message_layer_scene_id(message_id: &str, layered: bool) -> String {
-    if layered {
-        return message_id.to_string();
-    }
-    let mut encoded = String::with_capacity(
-        crate::compositor::scene::MESSAGE_LAYER_OVERLAY_PREFIX.len() + message_id.len() * 2,
-    );
-    encoded.push_str(crate::compositor::scene::MESSAGE_LAYER_OVERLAY_PREFIX);
-    for byte in message_id.as_bytes() {
-        use std::fmt::Write;
-        let _ = write!(encoded, "{byte:02x}");
-    }
-    encoded
 }
 
 impl CoreRuntime {

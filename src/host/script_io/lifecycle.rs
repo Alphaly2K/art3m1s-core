@@ -78,7 +78,7 @@ impl ScriptIoSession {
                     self.start_persistence().map(|()| None)
                 }
                 ScriptIoProgress::Event => self.dispatch_audio_event().and_then(|handled| {
-                    if handled || self.dispatch_video_event()? {
+                    if handled || self.dispatch_video_event()? || self.dispatch_text_event()? {
                         Ok(None)
                     } else {
                         self.dispatch_ui_event()
