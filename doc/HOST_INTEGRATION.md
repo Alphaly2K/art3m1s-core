@@ -30,6 +30,12 @@ Artemis 解释器在所有平台统一使用 Luau。现有 v1 C 函数表保持�
 bash scripts/test-host-v2.sh
 ```
 
+macOS Host 可单独运行离屏像素探针。它需要可访问的 Metal 设备，不需要窗口或游戏素材：
+
+```sh
+cargo run --no-default-features --features metal-backend --example host_v2_metal
+```
+
 Rust Host 通过 `host::ResourceProvider` 提供逻辑资源，通过
 `CoreRuntime::with_host_backend` 提供 renderer，入口不自行选择平台 GPU：
 

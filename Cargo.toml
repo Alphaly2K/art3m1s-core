@@ -17,6 +17,11 @@ name = "probe_caption_test"
 path = "tools/game-probes/src/bin/probe_caption_test.rs"
 required-features = ["game-probes"]
 
+[[example]]
+name = "host_v2_metal"
+path = "tools/host-smoke/metal.rs"
+required-features = ["metal-backend"]
+
 [dependencies]
 asb-interpreter = { path = "crates/asb-interpreter" }
 art3m1s-emote = { path = "crates/art3m1s-emote", optional = true }
