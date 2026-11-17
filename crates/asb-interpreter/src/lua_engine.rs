@@ -353,6 +353,7 @@ impl EngineCallbacks for DefaultEngineCallbacks {
 
 /// 共享的引擎上下文
 pub struct EngineContext {
+    pub(crate) environment: crate::host_time::SharedEnvironment,
     /// Logical host ticks, independent of whether a frame is rendered.
     pub(crate) frame_number: u64,
     pub callbacks: Box<dyn EngineCallbacks + Send + Sync>,
@@ -413,6 +414,7 @@ pub(crate) const MESSAGE_LAYER_STATE_PREAPPLIED: &str = "__art3m1s_message_layer
 impl EngineContext {
     pub fn new(callbacks: Box<dyn EngineCallbacks + Send + Sync>) -> Self {
         Self {
+            environment: Arc::new(Mutex::new(crate::host_time::ScriptEnvironment::default())),
             frame_number: 0,
             callbacks,
             tag_queue: Vec::new(),
@@ -626,7 +628,8 @@ impl UserData for EngineApi {
                                 Some(raw) => crate::expression::ExpressionEvaluator::new(&store)
                                     .resolve_param_str(raw)
                                     .map_err(mlua::Error::external)?,
-                                None => crate::tags::next_anonymous_message_layer_id(),
+                                None => crate::tags::next_anonymous_message_layer_id(&store)
+                                    .map_err(mlua::Error::external)?,
                             };
                             let stack = params
                                 .get("stack")
@@ -755,10 +758,20 @@ impl UserData for EngineApi {
         });
 
         // e:random()
-        methods.add_method("random", |_lua, _this, _: ()| Ok(rand_i64()));
+        methods.add_method("random", |_lua, this, _: ()| {
+            let environment = this.ctx.lock().unwrap().environment.clone();
+            let value = environment.lock().unwrap().random();
+            Ok((value >> 33) as i64)
+        });
 
         // e:now()
-        methods.add_method("now", |_lua, _this, _: ()| Ok(now_millis()));
+        methods.add_method("now", |_lua, this, _: ()| {
+            let environment = this.ctx.lock().unwrap().environment.clone();
+            let time = environment.lock().unwrap().time;
+            Ok(time
+                .map(|time| time.monotonic_ms)
+                .unwrap_or_else(now_millis))
+        });
         methods.add_method("getFrameNumber", |_lua, this, _: ()| {
             Ok(this.ctx.lock().unwrap().frame_number)
         });
@@ -1560,26 +1573,6 @@ fn apply_system_var_query_inner(
         }
         _ => None,
     }
-}
-
-/// 随机整数（非负 31 位），对应 Artemis 的 `e:random()`。
-///
-/// 注意：游戏脚本里清一色是 `e:random() % N + 1` 的整数取模用法（见
-/// sysvo/macro/user/config 等），因此必须返回**整数**而非 [0,1) 浮点，
-/// 否则 `% N` 会得到小数、`tbl[小数]` 取到 nil，触发
-/// "attempt to get length of field '?'" 之类崩溃。
-fn rand_i64() -> i64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static STATE: AtomicU64 = AtomicU64::new(0);
-    // 用毫秒时间播种一次，之后靠原子计数推进，保证同毫秒内连续调用也不同。
-    let prev = STATE.load(Ordering::Relaxed);
-    let seed = if prev == 0 { now_millis() as u64 } else { prev };
-    let x = seed
-        .wrapping_mul(6364136223846793005)
-        .wrapping_add(1442695040888963407);
-    STATE.store(x, Ordering::Relaxed);
-    // 取高位做 31 位非负整数
-    ((x >> 33) & 0x7fff_ffff) as i64
 }
 
 /// 初始化 Lua 环境，注入 engine 对象

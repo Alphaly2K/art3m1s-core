@@ -2,6 +2,30 @@ use super::*;
 use crate::{CallbackResult, Event, ExecutionResult};
 
 #[test]
+fn restored_variables_keep_current_host_services_and_monotonic_wait_deadlines() {
+    let mut i = Interpreter::default();
+    i.enable_host_services(7).unwrap();
+    i.set_callback(|_| CallbackResult::Pause);
+    let snapshot = serde_json::to_vec(&i.variables()).unwrap();
+    i.set_host_time(crate::HostTime {
+        monotonic_ms: 250,
+        utc_unix_ms: -1000,
+        utc_offset_minutes: 60,
+    })
+    .unwrap();
+    i.restore_variables(serde_json::from_slice(&snapshot).unwrap());
+    i.load_script(
+        "wait",
+        "*main\n[var system=unixtime name=t.unix]\n[wait time=50]",
+    )
+    .unwrap();
+    i.start("wait", "main").unwrap();
+    assert!(matches!(i.run().unwrap(), ExecutionResult::Wait(_)));
+    assert_eq!(i.get_variable("t.unix").and_then(|v| v.as_int()), Some(-1));
+    i.lua().load("assert(__engine:now()==250 and __engine:getScriptWaitReason().time==300); assert(os.date('%c')=='1970-01-01 00:59:59')").exec().unwrap();
+}
+
+#[test]
 fn loading_and_inline_calls_preserve_the_pc_queue_and_host_frame() {
     let mut i = Interpreter::default();
     i.enable_resumable_io().unwrap();

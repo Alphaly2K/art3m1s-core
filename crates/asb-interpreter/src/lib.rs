@@ -49,6 +49,7 @@
 pub mod error;
 pub mod event;
 pub mod expression;
+pub mod host_time;
 pub mod interpreter;
 pub mod io_continuation;
 pub mod lua_engine;
@@ -65,6 +66,7 @@ pub use event::{
     ScriptFileLoader, ScriptLoader, SystemUiAction, TransitionEvent, WaitReason,
 };
 pub use expression::ExpressionEvaluator;
+pub use host_time::HostTime;
 pub use interpreter::{CallFrame, ExecutionResult, Interpreter, InterpreterConfig};
 pub use lua_engine::{
     DefaultEngineCallbacks, EmoteLayerApi, EmoteLayerCommand, EngineApi, EngineCallbacks,

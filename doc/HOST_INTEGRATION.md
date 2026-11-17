@@ -120,8 +120,19 @@ ASB；按 main/start/_start/文件开头选择入口。该调用不读取文件�
 场景及 Lua `e:tag` 的 `file_exists`/`file_exist`、`file_crc`、`file_update_time` 均等待
 Host 结果再更新变量，支持原有 CRC 大小写/前缀、日期 format/noexist 和 writelocal。
 save=1 使用配置的逻辑 save 前缀；`.exe` 存在性检查保留引擎的虚拟存在语义。
-修改时间由 stat 的可选 `modified_utc_ms` 提供，以规范十进制 i64 字符串传输，当前日期
-分量按 UTC 计算；未提供时间时使用 noexist，不查询系统文件或本机时区。
+修改时间由 stat 的可选 `modified_utc_ms` 提供，以规范十进制 i64 字符串传输，日期
+分量使用 Host 提交的时区偏移；未提供时间时使用 noexist，不查询系统文件或本机时区。
+
+`set_host_time(HostTime { monotonic_ms, utc_unix_ms, utc_offset_minutes })` 仅更新时钟快照，
+不执行 Lua。单调时间用于 e:now/os.clock 和等待截止时间；日历时间用于 os.time/date、
+date/unixtime 变量和文件日期。时区偏移范围为 -1440 到 1440 分钟；os.date 的 `!` 前缀
+始终使用 UTC，os.time(table) 按当前 Host 偏移解释本地时间。UTC 可回拨，Host 应保持
+单调时间不回退；帧 ID 和时间顺序由帧驱动校验。
+
+新会话时钟和随机种子默认为零，Host 在首次 step 前提交时间，并可在首次 open 前调用
+`set_random_seed(u64)`。e:random 与 var random 使用实例内状态；Luau math.random
+使用种子的低 32 位。新场景 VM 使用相同配置重新初始化，chunk 替换保留当前 VM 状态。
+变量快照恢复保留当前实例的时钟、随机状态及匿名消息层 ID 序列，不从存档恢复环境服务。
 
 IO domain 的 kind=1 为 stat、2 为 read、4 为 write_atomic，结果保留请求的 service kind。
 具体 payload 见 [IO 契约](HOST_ABI_V2.md#6-iohost-实现core-保留语义)。底层

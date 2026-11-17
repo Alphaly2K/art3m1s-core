@@ -189,16 +189,29 @@ impl TagHandler for GlyphHandler {
 /// [chgmsg] 切换消息层
 pub struct ChgmsgHandler;
 
-/// chgmsg 匿名消息层的序号（保证同进程内生成的随机 ID 不重复）
+// Standalone tag contexts have no interpreter environment.
 static CHGMSG_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-pub(crate) fn next_anonymous_message_layer_id() -> String {
-    let serial = CHGMSG_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    format!("chgmsg_{nanos:x}_{serial}")
+pub(crate) fn next_anonymous_message_layer_id(variables: &crate::VariableStore) -> Result<String> {
+    let exhausted = || crate::Error::RuntimeError {
+        line: 0,
+        message: "message layer ID exhausted".into(),
+    };
+    let serial = if let Some(environment) = &variables.environment {
+        let mut environment = environment.lock().unwrap();
+        let serial = environment.message_layer_serial;
+        environment.message_layer_serial = serial.checked_add(1).ok_or_else(exhausted)?;
+        serial
+    } else {
+        CHGMSG_SERIAL
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |serial| serial.checked_add(1),
+            )
+            .map_err(|_| exhausted())?
+    };
+    Ok(format!("chgmsg_{serial}"))
 }
 
 impl TagHandler for ChgmsgHandler {
@@ -207,7 +220,7 @@ impl TagHandler for ChgmsgHandler {
         // 而不是落回缺省消息层（一次性切换后通常由 /chgmsg 回退）。
         let id = match ctx.instruction.get("id").filter(|v| !v.is_empty()) {
             Some(_) => Some(ctx.resolve_param_str("id")?),
-            None => Some(next_anonymous_message_layer_id()),
+            None => Some(next_anonymous_message_layer_id(ctx.variables)?),
         };
         // stack=0 时不把前一设置压入消息层堆栈（防存档膨胀），缺省 1 压栈
         let stack = ctx

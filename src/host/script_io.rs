@@ -5,7 +5,9 @@ use super::protocol::*;
 use asb_interpreter::io_continuation::{
     self, IoFailure, IoProgress, IoRequest, IoResponse, IoTask,
 };
-use asb_interpreter::{CallbackResult, Event, ExecutionResult, Interpreter, InterpreterConfig};
+use asb_interpreter::{
+    CallbackResult, Event, ExecutionResult, HostTime, Interpreter, InterpreterConfig,
+};
 use serde_json::{Value, json};
 use std::fmt;
 
@@ -116,6 +118,8 @@ pub struct ScriptIoSession {
     cancelled: bool,
     mode: ExecutionMode,
     scenario_event: Option<Event>,
+    host_time: HostTime,
+    random_seed: u64,
 }
 
 impl ScriptIoSession {
@@ -130,7 +134,8 @@ impl ScriptIoSession {
             return Err(ProtocolError::Argument("IO byte budgets must be nonzero").into());
         }
         let transport = SessionTransport::new(runtime, limits)?;
-        let interpreter = Interpreter::new(config);
+        let mut interpreter = Interpreter::new(config);
+        interpreter.enable_host_services(0)?;
         io_continuation::install(&interpreter)?;
         Ok(Self {
             interpreter,
@@ -145,6 +150,8 @@ impl ScriptIoSession {
             cancelled: false,
             mode: ExecutionMode::Idle,
             scenario_event: None,
+            host_time: HostTime::default(),
+            random_seed: 0,
         })
     }
 
@@ -156,6 +163,26 @@ impl ScriptIoSession {
     }
     pub fn limits(&self) -> TransportLimits {
         self.transport.limits()
+    }
+
+    /// Select the session's deterministic seed before opening a task. The same
+    /// seed initializes each fresh scenario VM, including Luau's math.random.
+    pub fn set_random_seed(&mut self, seed: u64) -> Result<(), ScriptIoError> {
+        if self.mode != ExecutionMode::Idle {
+            return Err(ProtocolError::State.into());
+        }
+        self.interpreter.enable_host_services(seed)?;
+        self.interpreter.set_host_time(self.host_time)?;
+        self.random_seed = seed;
+        Ok(())
+    }
+
+    /// Update script-visible time without running Lua. Frame ordering belongs
+    /// to the frame driver; a calendar correction may move UTC backwards.
+    pub fn set_host_time(&mut self, time: HostTime) -> Result<(), ScriptIoError> {
+        self.interpreter.set_host_time(time)?;
+        self.host_time = time;
+        Ok(())
     }
 
     /// Replace the current chunk and invalidate its outstanding IO. Compilation
@@ -183,9 +210,7 @@ impl ScriptIoSession {
         name: &str,
         label: &str,
     ) -> Result<u64, ScriptIoError> {
-        let mut interpreter = Interpreter::new(self.interpreter.config().clone());
-        interpreter.enable_resumable_io()?;
-        interpreter.set_callback(|_| CallbackResult::Pause);
+        let mut interpreter = self.scenario_interpreter()?;
         interpreter.load_file(name, source)?;
         interpreter.start(name, label)?;
         self.replace_scenario(interpreter)
@@ -195,11 +220,18 @@ impl ScriptIoSession {
     /// through Host IO. Parsing and loading errors are reported by `step`.
     pub fn open_boot(&mut self, name: &str) -> Result<u64, ScriptIoError> {
         logical_key(name)?;
-        let mut interpreter = Interpreter::new(self.interpreter.config().clone());
-        interpreter.enable_resumable_io()?;
-        interpreter.set_callback(|_| CallbackResult::Pause);
+        let mut interpreter = self.scenario_interpreter()?;
         interpreter.boot(name)?;
         self.replace_scenario(interpreter)
+    }
+
+    fn scenario_interpreter(&self) -> Result<Interpreter, ScriptIoError> {
+        let mut interpreter = Interpreter::new(self.interpreter.config().clone());
+        interpreter.enable_host_services(self.random_seed)?;
+        interpreter.set_host_time(self.host_time)?;
+        interpreter.enable_resumable_io()?;
+        interpreter.set_callback(|_| CallbackResult::Pause);
+        Ok(interpreter)
     }
 
     fn replace_scenario(&mut self, interpreter: Interpreter) -> Result<u64, ScriptIoError> {

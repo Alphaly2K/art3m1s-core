@@ -563,6 +563,7 @@ impl Interpreter {
             }
         }
         let mut engine_ctx_inner = EngineContext::new(Box::new(DefaultEngineCallbacks));
+        variables.lock().unwrap().environment = Some(engine_ctx_inner.environment.clone());
         // 共享同一份变量存储给 engine 上下文，使 e:var 能读到解释器写入的变量。
         engine_ctx_inner.variables = Some(Arc::clone(&variables));
         let engine_ctx = Arc::new(Mutex::new(engine_ctx_inner));
@@ -618,6 +619,44 @@ impl Interpreter {
     pub fn enable_resumable_io(&mut self) -> Result<()> {
         crate::io_continuation::install(self)?;
         self.resumable_io = true;
+        Ok(())
+    }
+
+    /// Configure deterministic Host time and random state before loading scripts.
+    /// Until the first snapshot, calendar and monotonic time both start at zero.
+    pub fn enable_host_services(&mut self, random_seed: u64) -> Result<()> {
+        self.check_io_idle()?;
+        if !self.scripts.is_empty() {
+            return Err(Error::RuntimeError {
+                line: self.current_line,
+                message: "Host services must be configured before loading scripts".into(),
+            });
+        }
+        let seed: mlua::Function = self
+            .lua
+            .globals()
+            .get::<mlua::Table>("math")?
+            .get("randomseed")?;
+        seed.call::<()>(random_seed as u32)?;
+        let environment = self.engine_ctx.lock().unwrap().environment.clone();
+        let mut environment = environment.lock().unwrap();
+        environment.time = Some(crate::HostTime::default());
+        environment.random_state = Some(random_seed);
+        Ok(())
+    }
+
+    /// Update an enabled Host clock without running Lua or restarting suspended IO.
+    pub fn set_host_time(&mut self, time: crate::HostTime) -> Result<()> {
+        time.validate()?;
+        let environment = self.engine_ctx.lock().unwrap().environment.clone();
+        let mut environment = environment.lock().unwrap();
+        if environment.time.is_none() {
+            return Err(Error::RuntimeError {
+                line: self.current_line,
+                message: "Host services have not been enabled".into(),
+            });
+        }
+        environment.time = Some(time);
         Ok(())
     }
 
@@ -1841,7 +1880,14 @@ impl Interpreter {
         match reason {
             // time 键：与 e:now() 兼容的时间戳（等待截止时刻）。
             WR::Timed { milliseconds, .. } => {
-                let deadline = now_millis_i64().saturating_add(*milliseconds as i64);
+                let environment = self.engine_ctx.lock().unwrap().environment.clone();
+                let now = environment
+                    .lock()
+                    .unwrap()
+                    .time
+                    .map(|time| time.monotonic_ms.min(i64::MAX as u64) as i64)
+                    .unwrap_or_else(now_millis_i64);
+                let deadline = now.saturating_add((*milliseconds).min(i64::MAX as u64) as i64);
                 info.insert("time".to_string(), deadline.to_string());
             }
             // scenario=1 等待文本出现缓动；2 等待消失缓动。
@@ -2816,7 +2862,7 @@ impl Interpreter {
     /// 恢复变量状态（用于读档）
     pub fn restore_variables(&mut self, mut store: VariableStore) {
         let mut current = self.variables.lock().unwrap();
-        store.restore_host_query_hooks(&current);
+        store.restore_runtime_services(&current);
         *current = store;
     }
 

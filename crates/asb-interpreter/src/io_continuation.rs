@@ -277,7 +277,15 @@ pub fn install(interpreter: &Interpreter) -> Result<()> {
                         };
                         let text = match time {
                             Some(time) => crate::tags::var_handler::format_update_time(
-                                &crate::luau_polyfill::utc_components_from_millis(time),
+                                &crate::luau_polyfill::utc_components_from_seconds(
+                                    query_variables
+                                        .lock()
+                                        .unwrap()
+                                        .host_time()
+                                        .map_or(time.div_euclid(1000), |host| {
+                                            host.local_unix_seconds(time)
+                                        }),
+                                ),
                                 query_param(&params, "format")?
                                     .as_deref()
                                     .filter(|format| !format.is_empty())

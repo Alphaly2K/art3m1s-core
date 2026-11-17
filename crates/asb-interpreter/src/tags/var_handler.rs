@@ -223,14 +223,17 @@ pub fn execute_var_system(
                 .unwrap_or(i64::MAX);
 
             let result = if max > min {
-                let seed = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as i64)
-                    .unwrap_or(0);
-                let range = (max - min + 1) as u64;
-                let rand_val =
-                    ((seed.wrapping_mul(6364136223846793005).wrapping_add(1)) as u64) % range;
-                min + rand_val as i64
+                let value = if let Some(environment) = &variables.environment {
+                    environment.lock().unwrap().random()
+                } else {
+                    let seed = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(0);
+                    seed.wrapping_mul(6364136223846793005).wrapping_add(1)
+                };
+                let range = (i128::from(max) - i128::from(min) + 1) as u128;
+                (i128::from(min) + (u128::from(value) % range) as i128) as i64
             } else {
                 min
             };
@@ -326,7 +329,11 @@ pub fn execute_var_system(
 
         "date" => {
             let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
-            let now = local_datetime();
+            let now = if let Some(time) = variables.host_time() {
+                utc_datetime_from_unix(time.local_unix_seconds(time.utc_unix_ms))
+            } else {
+                local_datetime()
+            };
             variables.set(&format!("{}.year", name), Value::Int(now.year));
             variables.set(&format!("{}.month", name), Value::Int(now.month));
             variables.set(&format!("{}.day", name), Value::Int(now.day));
@@ -337,10 +344,15 @@ pub fn execute_var_system(
 
         "unixtime" => {
             let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
+            let ts = variables
+                .host_time()
+                .map(|time| time.utc_unix_ms.div_euclid(1000))
+                .unwrap_or_else(|| {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0)
+                });
             variables.set(name, Value::Int(ts));
         }
 

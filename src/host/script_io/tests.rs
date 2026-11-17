@@ -71,6 +71,7 @@ struct MemoryHost {
     files: HashMap<(String, String), (u64, Vec<u8>)>,
     reads: Vec<(String, usize)>,
     captions: Vec<String>,
+    message_layers: Vec<String>,
     modified_times: HashMap<(String, String), i64>,
 }
 
@@ -128,10 +129,13 @@ impl MemoryHost {
             match session.step().unwrap() {
                 ScriptIoProgress::Completed => return,
                 ScriptIoProgress::Event => {
-                    let Some(Event::Caption { data }) = session.pending_event() else {
-                        panic!("unexpected scenario event")
-                    };
-                    self.captions.push(data.clone());
+                    match session.pending_event() {
+                        Some(Event::Caption { data }) => self.captions.push(data.clone()),
+                        Some(Event::MessageLayerSwitch { id: Some(id), .. }) => {
+                            self.message_layers.push(id.clone())
+                        }
+                        _ => panic!("unexpected scenario event"),
+                    }
                     assert_eq!(session.step().unwrap(), ScriptIoProgress::Event);
                     session.resume_scenario().unwrap();
                 }
@@ -302,6 +306,117 @@ fn boot_reads_its_entry_and_optional_text_or_binary_macros_through_the_host() {
             1
         );
     }
+}
+
+#[test]
+fn host_calendar_and_monotonic_clocks_remain_distinct_across_io_suspension() {
+    let mut session = session(1, TransportLimits::default(), 1024);
+    session
+        .set_host_time(HostTime {
+            monotonic_ms: 1000,
+            utc_unix_ms: -1,
+            utc_offset_minutes: 480,
+        })
+        .unwrap();
+    session.open_chunk(br#"
+local e=__engine
+assert(e:now()==1000 and os.clock()==1 and os.time()==-1)
+assert(os.date('%Y-%m-%d %H:%M:%S')=='1970-01-01 07:59:59')
+assert(os.date('!%Y-%m-%d %H:%M:%S')=='1969-12-31 23:59:59')
+assert(os.time(os.date('*t'))==-1)
+e:tag{'var', system='date', name='t.date'}
+assert(e:var('t.date.hour')=='7')
+local before=e:now()
+assert(e:file('probe')=='ok')
+assert(e:now()-before==100 and os.clock()==1.1 and os.time()==-3601)
+assert(os.date('%c')=='1969-12-31 21:59:59')
+e:tag{'var', system='unixtime', name='t.unix'}
+assert(e:var('t.unix')=='-3601')
+e:tag{'var', system='file_update_time', file='probe', name='t.modified', format='yyyy-MM-dd hh:mm:ss'}
+assert(e:var('t.modified')=='1969-12-31 22:59:59')
+"#, "clock").unwrap();
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
+    session
+        .set_host_time(HostTime {
+            monotonic_ms: 1100,
+            utc_unix_ms: -3_600_001,
+            utc_offset_minutes: -60,
+        })
+        .unwrap();
+    assert!(
+        session
+            .set_host_time(HostTime {
+                utc_offset_minutes: 1441,
+                ..HostTime::default()
+            })
+            .is_err()
+    );
+    let mut host = MemoryHost::default();
+    host.asset("probe", b"ok");
+    host.modified_times
+        .insert(("asset".into(), "probe".into()), -1);
+    host.run(&mut session);
+}
+
+#[test]
+fn seeded_random_streams_are_isolated_between_interleaved_vms_and_fresh_scenarios() {
+    let mut a = session(1, TransportLimits::default(), 1024);
+    let mut b = session(2, TransportLimits::default(), 1024);
+    let script = br#"
+local e=__engine
+values={e:random(),math.random(1,1000000)}
+e:tag{'chgmsg'}
+ids={e:var('s.current_message_layer')}
+assert(e:file('probe')=='ok')
+e:tag{'var',system='random',name='t.random',min=-1000,max=1000}
+values[3]=tonumber(e:var('t.random'))
+values[4]=e:random()
+values[5]=math.random(1,1000000)
+e:tag{'chgmsg'}
+ids[2]=e:var('s.current_message_layer')
+e:tag{'var',system='random',name='t.wide'}
+values[6]=tonumber(e:var('t.wide'))
+"#;
+    for session in [&mut a, &mut b] {
+        session.set_random_seed(19).unwrap();
+        session.open_chunk(script, "random").unwrap();
+        assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
+        assert!(session.set_random_seed(23).is_err());
+    }
+    let mut host = MemoryHost::default();
+    host.asset("probe", b"ok");
+    host.run(&mut a);
+    host.run(&mut b);
+    let values = |session: &ScriptIoSession| {
+        session
+            .interpreter()
+            .lua()
+            .globals()
+            .get::<Vec<f64>>("values")
+            .unwrap()
+    };
+    assert_eq!(values(&a), values(&b));
+    for session in [&a, &b] {
+        assert_eq!(
+            session
+                .interpreter()
+                .lua()
+                .globals()
+                .get::<Vec<String>>("ids")
+                .unwrap(),
+            ["chgmsg_0", "chgmsg_1"]
+        );
+    }
+    let expected = values(&a);
+    let scenario = format!(
+        "*main\n[lua]\n{}\n[/lua]",
+        std::str::from_utf8(script).unwrap()
+    );
+    a.open_scenario(scenario.as_bytes(), "fresh", "main")
+        .unwrap();
+    host.run(&mut a);
+    assert_eq!(values(&a), expected);
+    assert_eq!(host.message_layers, ["chgmsg_0", "chgmsg_1"]);
 }
 
 #[test]

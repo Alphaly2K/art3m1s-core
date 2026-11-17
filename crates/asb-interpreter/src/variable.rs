@@ -162,6 +162,8 @@ pub struct VariableStore {
     write_macro_local: bool,
     #[serde(skip)]
     host_query_hooks: Option<Arc<crate::tags::var_handler::HostQueryHooks>>,
+    #[serde(skip)]
+    pub(crate) environment: Option<crate::host_time::SharedEnvironment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,8 +186,13 @@ impl VariableStore {
         self.host_query_hooks.clone()
     }
 
-    pub(crate) fn restore_host_query_hooks(&mut self, current: &Self) {
+    pub(crate) fn restore_runtime_services(&mut self, current: &Self) {
         self.host_query_hooks = current.host_query_hooks.clone();
+        self.environment = current.environment.clone();
+    }
+
+    pub(crate) fn host_time(&self) -> Option<crate::HostTime> {
+        self.environment.as_ref()?.lock().unwrap().time
     }
 
     /// 设置目标平台标识（windows/android/ios/wasm 等）。

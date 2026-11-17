@@ -8,6 +8,21 @@
 
 ## 当前阶段
 
+已接入实例内 Host 时钟和随机服务：
+
+- e:now/os.clock、等待截止时间使用单调时间，os.time/date、日期变量和文件日期使用
+  Host 的 UTC/偏移快照；新会话默认零时间，不读取本机时钟/时区。
+- e:random 与 var random 共享实例内随机状态，math.random 使用显式种子。
+- 匿名消息层 ID 使用实例内序列；变量快照恢复保留当前环境服务。
+
+新增 3 项必要回归，验证 UTC 回拨、负日期、显式偏移、IO 恢复、等待截止、
+变量反序列化和多个 VM 的随机/消息层隔离。完整解释器 259 项与 core/Host 381 项通过，
+共 640 项通过、2 项既有测试跳过；全 feature 编译与格式检查通过。测试均使用内存输入。
+
+下一步接入其余 Lua/事件处理器，并实现同 Host frame 内 IO resume 不重复回调的调度。
+
+## 已完成：外部场景与 BOOT
+
 已接入外部场景资源与 BOOT 的 Host 读取：
 
 - 内联、动态展开、排队 call/jump 保存已解析的目标和调用栈，不重跑过滤器或入栈。
@@ -27,7 +42,7 @@ core/Host 379 项通过，共 637 项通过、2 项既有测试跳过；全 feat
 - 过滤器保留原指令、来源和返回值，恢复后先完成原标签，再抽干过滤器生成的命令。
 - 内联、动态展开、排队及 elseif 跳转均不重跑过滤器；旧 queued stop 在 continuation 后恢复。
 - AST 与 Lua 的 file_exists/file_exist、file_crc、file_update_time 共用 Host 请求路径。
-  CRC/日期格式沿用已有逻辑；stat 可携带 modified_utc_ms，当前按 UTC 生成日期分量。
+  CRC/日期格式沿用已有逻辑；stat 可携带 modified_utc_ms，日期偏移由 Host 时钟提供。
 - restore_position 与 reset 释放旧任务和过滤器状态，阻止旧调用现场继续改写场景。
 
 验证使用内存 Host，包含 IEEE CRC32 参考输入、负时间戳、空文件、save namespace、过滤输出

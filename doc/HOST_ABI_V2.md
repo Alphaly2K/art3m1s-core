@@ -143,6 +143,10 @@ Loading 完成必须有事件和状态转换；`open_project` 返回 OK 只表�
 onEnterFrame 或累计动画 delta；更小 ID/时间返回 ARGUMENT。后一 Host frame 的时间差
 只累计一次。后台冻结通过 Host 明确的 pause/resume 策略处理，不任意截断 E-Mote 时间。
 日历 API 可使用更新的 UTC，逻辑时间不得由日历时钟倒退影响；诊断计时与游戏时钟分离。
+日历时区使用 Host 提交的 UTC 分钟偏移（-1440..1440），core 不读取本机时区。
+e:now、os.clock 和等待截止时间使用逻辑单调时间；os.time/date、date/unixtime 变量
+及文件修改时间格式使用日历快照，os.date 的 `!` 前缀使用 UTC。
+随机状态由每个 VM 持有，Host 可提供种子；变量快照恢复不替换当前环境服务。
 
 ## 5. 消息、可靠性与能力协商
 

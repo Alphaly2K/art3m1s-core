@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 pub fn install(lua: &Lua, engine_ctx: Arc<Mutex<EngineContext>>) -> mlua::Result<()> {
     install_lua51_compat(lua)?;
     install_table_maxn(lua)?;
-    install_os_polyfills(lua)?;
+    install_os_polyfills(lua, engine_ctx.lock().unwrap().environment.clone())?;
     install_io_polyfills(lua, engine_ctx)?;
     Ok(())
 }
@@ -83,12 +83,29 @@ fn install_table_maxn(lua: &Lua) -> mlua::Result<()> {
     table_lib.set("maxn", maxn)
 }
 
-fn install_os_polyfills(lua: &Lua) -> mlua::Result<()> {
+fn install_os_polyfills(
+    lua: &Lua,
+    environment: crate::host_time::SharedEnvironment,
+) -> mlua::Result<()> {
     let os_lib: mlua::Table = lua.globals().get("os")?;
+    let clock: mlua::Function = os_lib.get("clock")?;
+    let clock_environment = environment.clone();
+    os_lib.set(
+        "clock",
+        lua.create_function(move |_, ()| {
+            let time = clock_environment.lock().unwrap().time;
+            match time {
+                Some(time) => Ok(time.monotonic_ms as f64 / 1000.0),
+                None => clock.call::<f64>(()),
+            }
+        })?,
+    )?;
 
+    let time_environment = environment.clone();
     os_lib.set(
         "time",
-        lua.create_function(|_, value: Option<mlua::Table>| {
+        lua.create_function(move |_, value: Option<mlua::Table>| {
+            let time = time_environment.lock().unwrap().time;
             if let Some(table) = value {
                 let year: i64 = table.get("year")?;
                 let month: i64 = table.get("month").unwrap_or(1);
@@ -96,25 +113,35 @@ fn install_os_polyfills(lua: &Lua) -> mlua::Result<()> {
                 let hour: i64 = table.get("hour").unwrap_or(12);
                 let min: i64 = table.get("min").unwrap_or(0);
                 let sec: i64 = table.get("sec").unwrap_or(0);
-                return Ok(unix_from_utc_parts(year, month, day, hour, min, sec));
+                let seconds = unix_from_utc_parts(year, month, day, hour, min, sec);
+                return Ok(seconds.saturating_sub(
+                    time.map_or(0, |time| i64::from(time.utc_offset_minutes) * 60),
+                ));
             }
 
-            Ok(std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0))
+            Ok(time
+                .map(|time| time.utc_unix_ms.div_euclid(1000))
+                .unwrap_or_else(current_unix_seconds))
         })?,
     )?;
 
     os_lib.set(
         "date",
-        lua.create_function(|lua, (format, time): (Option<String>, Option<i64>)| {
+        lua.create_function(move |lua, (format, time): (Option<String>, Option<i64>)| {
+            let host = environment.lock().unwrap().time;
             let format = format.unwrap_or_else(|| "%c".to_string());
             let use_utc = format.starts_with('!');
             let format = if use_utc { &format[1..] } else { &format };
-            let seconds = time.unwrap_or_else(current_unix_seconds);
+            let seconds = time.unwrap_or_else(|| {
+                host.map(|time| time.utc_unix_ms.div_euclid(1000))
+                    .unwrap_or_else(current_unix_seconds)
+            });
             let parts = if use_utc {
                 utc_datetime_from_unix(seconds)
+            } else if let Some(host) = host {
+                utc_datetime_from_unix(
+                    seconds.saturating_add(i64::from(host.utc_offset_minutes) * 60),
+                )
             } else {
                 local_datetime_from_unix(seconds).unwrap_or_else(|| utc_datetime_from_unix(seconds))
             };
@@ -555,8 +582,8 @@ fn utc_datetime_from_unix(seconds: i64) -> DateTimeParts {
     }
 }
 
-pub(crate) fn utc_components_from_millis(milliseconds: i64) -> [i64; 6] {
-    let p = utc_datetime_from_unix(milliseconds.div_euclid(1000));
+pub(crate) fn utc_components_from_seconds(seconds: i64) -> [i64; 6] {
+    let p = utc_datetime_from_unix(seconds);
     [p.year, p.month, p.day, p.hour, p.minute, p.second]
 }
 
