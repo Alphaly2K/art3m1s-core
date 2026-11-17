@@ -151,6 +151,8 @@ pub struct Scene {
     /// `start_ms`; the compositor rebases it to its current clock on restore.
     #[serde(default)]
     pub(crate) anime_states: HashMap<String, crate::compositor::anim::AnimeState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) host_clock_ms: Option<u64>,
 }
 
 impl Scene {
@@ -160,6 +162,35 @@ impl Scene {
 
     pub fn replace_with(&mut self, other: Scene) {
         *self = other;
+    }
+
+    pub(crate) fn valid_host_snapshot(&self) -> bool {
+        let mut linked = std::collections::HashSet::new();
+        for root in &self.roots {
+            if parent_id(root).is_some() || !self.nodes.contains_key(root) || !linked.insert(root) {
+                return false;
+            }
+        }
+        for (id, layer) in &self.nodes {
+            if id != &layer.id
+                || id.bytes().filter(|&byte| byte == b'.').count() > 128
+                || layer
+                    .tweens
+                    .iter()
+                    .any(|tween| tween.set_id.is_some_and(|id| id > u64::from(u32::MAX)))
+            {
+                return false;
+            }
+            for child in &layer.children {
+                if parent_id(child) != Some(id.as_str())
+                    || !self.nodes.contains_key(child)
+                    || !linked.insert(child)
+                {
+                    return false;
+                }
+            }
+        }
+        linked.len() == self.nodes.len()
     }
 
     pub fn get(&self, id: &str) -> Option<&Layer> {

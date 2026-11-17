@@ -2081,6 +2081,120 @@ end
 }
 
 #[test]
+fn numbered_save_restores_scene_assets_and_tween_clock_in_a_fresh_runtime() {
+    use crate::host::runtime;
+
+    let mut host = MemoryHost::default();
+    let pixels = [20, 40, 60, 190];
+    let mask = [128, 128, 128, 255];
+    host.asset("hero.png", &png_bytes(1, 1, &pixels));
+    host.asset("mask.png", &png_bytes(1, 1, &mask));
+    host.asset(
+        "store.iet",
+        br#"*top
+[lyc id=1.80 file=hero mask=mask]
+[lytween id=1.80 param=left from=0 to=20 time=10 ease=linear]
+[flip]
+[wait time=4 input=0]
+[save file=slot]
+[stop]
+"#,
+    );
+    host.asset(
+        "load.iet",
+        br#"*top
+[lyc id=99 width=1 height=1 color=112233]
+[flip]
+[load file=slot]
+[stop]
+"#,
+    );
+    let create = |boot: &str| {
+        let handle = runtime::create(0, TransportLimits::default(), 8192).unwrap();
+        let ini = format!("[WINDOWS]\nWIDTH=320\nHEIGHT=200\nBOOT={boot}\n");
+        runtime::open_project(handle, ini.as_bytes(), "windows", None).unwrap();
+        handle
+    };
+    let drive = |handle, frame, host: &mut MemoryHost, cancel_mask| {
+        for _ in 0..8192 {
+            let progress = runtime::step(handle, frame).unwrap();
+            let mut bytes = [0; 8192];
+            let polled = runtime::poll_events(handle, &mut bytes).unwrap();
+            if progress == ScriptIoProgress::Event {
+                return;
+            }
+            assert_eq!(progress, ScriptIoProgress::Waiting);
+            for request in decode_requests(&bytes[..polled.written_bytes]) {
+                let response = if cancel_mask && request.metadata["key"] == "mask.png" {
+                    reply(&request, json!({"status":"cancelled"}), vec![])
+                } else {
+                    host.complete(&request)
+                };
+                runtime::submit_replies(handle, &[response]).unwrap();
+            }
+        }
+        panic!("runtime did not reach its scene boundary");
+    };
+    let start = HostFrame {
+        id: 1,
+        monotonic_ns: 0,
+        utc_unix_ms: 0,
+        utc_offset_minutes: 0,
+    };
+    let saver = create("store.iet");
+    drive(saver, start, &mut host, false);
+    drive(saver, start, &mut host, false);
+    let save_time = HostFrame {
+        id: 2,
+        monotonic_ns: 4_000_000,
+        ..start
+    };
+    drive(saver, save_time, &mut host, false);
+    assert!(host.files.contains_key(&("save".into(), "slot".into())));
+    runtime::destroy(saver).unwrap();
+
+    for cancel_mask in [true, false] {
+        host.reads.clear();
+        let loader = create("load.iet");
+        drive(loader, start, &mut host, false);
+        let original = runtime::acquire_latest(loader, 0).unwrap().unwrap();
+        assert_eq!(original.sprites[0].layer_id, "99");
+        drive(loader, start, &mut host, cancel_mask);
+        assert!(host.reads.contains(&("hero.png".into(), 0)));
+        if cancel_mask {
+            assert!(
+                runtime::acquire_latest(loader, original.render_frame_id)
+                    .unwrap()
+                    .is_none()
+            );
+        } else {
+            assert!(host.reads.contains(&("mask.png".into(), 0)));
+            let restored = runtime::acquire_latest(loader, original.render_frame_id)
+                .unwrap()
+                .unwrap();
+            let sprite = &restored.sprites[0];
+            assert_eq!(sprite.layer_id, "1.80");
+            assert_eq!(sprite.transform[4], 8.0);
+            assert_eq!(restored.texture(sprite.texture).unwrap().rgba(), pixels);
+            assert_eq!(restored.texture(sprite.mask.unwrap()).unwrap().rgba(), mask);
+            let after = restored.render_frame_id;
+            drop(restored);
+            let finished = HostFrame {
+                id: 2,
+                monotonic_ns: 6_000_000,
+                ..start
+            };
+            drive(loader, finished, &mut host, false);
+            let frame = runtime::acquire_latest(loader, after).unwrap().unwrap();
+            assert_eq!(frame.sprites[0].transform[4], 20.0);
+        }
+        assert_eq!(original.sprites[0].layer_id, "99");
+        drop(original);
+        runtime::destroy(loader).unwrap();
+    }
+}
+
+#[test]
 fn host_calendar_and_monotonic_clocks_remain_distinct_across_io_suspension() {
     let mut session = session(1, TransportLimits::default(), 1024);
     session

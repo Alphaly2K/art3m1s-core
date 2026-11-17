@@ -28,6 +28,7 @@ impl ScriptIoSession {
             scene: scene.0.clone(),
             pending: None,
             clock_origin_ns: None,
+            clock_base_ms: 0,
             tween_handlers: Vec::new(),
         });
         self.interpreter.set_engine_callbacks(Box::new(scene));
@@ -192,13 +193,33 @@ pub(super) struct SceneIo {
     scene: Arc<Mutex<SceneProjection>>,
     pending: Option<PendingAsset>,
     clock_origin_ns: Option<u64>,
+    clock_base_ms: u64,
     tween_handlers: Vec<TweenHandler>,
 }
 
 struct PendingAsset {
     event: Event,
+    read: TextureRead,
+}
+
+pub(super) struct TextureRead {
     file: String,
     try_exact: bool,
+}
+
+impl TextureRead {
+    pub(super) fn start(file: String) -> (Self, IoRequest) {
+        let request = IoRequest::Read {
+            path: format!("{file}.png"),
+        };
+        (
+            Self {
+                file,
+                try_exact: true,
+            },
+            request,
+        )
+    }
 }
 
 impl SceneIo {
@@ -215,7 +236,9 @@ impl SceneIo {
 
     pub(super) fn advance_clock(&mut self, monotonic_ns: u64) {
         let origin = *self.clock_origin_ns.get_or_insert(monotonic_ns);
-        let elapsed_ms = (monotonic_ns - origin) / 1_000_000;
+        let elapsed_ms = self
+            .clock_base_ms
+            .saturating_add((monotonic_ns - origin) / 1_000_000);
         let mut scene = self.scene.lock().unwrap();
         let delta_ms = elapsed_ms - scene.compositor.clock_ms();
         scene.dirty |= scene.compositor.advance(delta_ms);
@@ -232,21 +255,75 @@ impl SceneIo {
         self.pending.is_some()
     }
 
+    pub(super) fn save_snapshot(&self) -> crate::compositor::Scene {
+        self.scene.lock().unwrap().compositor.snapshot_for_host()
+    }
+
+    pub(super) fn restore_snapshot(
+        &mut self,
+        snapshot: Option<crate::compositor::Scene>,
+        frame: Option<HostFrame>,
+    ) {
+        let mut scene = self.scene.lock().unwrap();
+        scene
+            .compositor
+            .restore_host_snapshot(snapshot.unwrap_or_default());
+        self.clock_base_ms = scene.compositor.clock_ms();
+        self.clock_origin_ns = frame.map(|frame| frame.monotonic_ns);
+        scene.group_sync_layers.clear();
+        self.tween_handlers.clear();
+        scene.dirty = true;
+    }
+
+    pub(super) fn missing_snapshot_textures(
+        &self,
+        snapshot: &crate::compositor::Scene,
+    ) -> VecDeque<String> {
+        let scene = self.scene.lock().unwrap();
+        snapshot
+            .all_layers()
+            .flat_map(|layer| [layer.file.as_deref(), layer.mask.as_deref()])
+            .flatten()
+            .chain(snapshot.anime_states.values().flat_map(|state| {
+                state
+                    .frames
+                    .iter()
+                    .flat_map(|frame| [Some(frame.file.as_str()), frame.mask.as_deref()])
+                    .flatten()
+            }))
+            .filter(|file| !file.is_empty() && !scene.textures.contains_key(*file))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
     pub(super) fn prepare_asset(&mut self, event: &Event) -> Option<IoRequest> {
         let scene = self.scene.lock().unwrap();
         let file = scene.missing_asset(event)?;
+        let (read, request) = TextureRead::start(file.to_owned());
         self.pending = Some(PendingAsset {
             event: event.clone(),
-            file: file.to_owned(),
-            try_exact: true,
+            read,
         });
-        Some(IoRequest::Read {
-            path: format!("{file}.png"),
-        })
+        Some(request)
     }
 
     pub(super) fn complete_asset(&mut self, response: IoResponse) -> Option<IoRequest> {
-        let pending = self.pending.as_mut().unwrap();
+        let mut pending = self.pending.take().unwrap();
+        if let Some(request) = self.complete_texture(&mut pending.read, response) {
+            self.pending = Some(pending);
+            return Some(request);
+        }
+        self.scene.lock().unwrap().apply(&pending.event);
+        None
+    }
+
+    pub(super) fn complete_texture(
+        &self,
+        read: &mut TextureRead,
+        response: IoResponse,
+    ) -> Option<IoRequest> {
         let mut scene = self.scene.lock().unwrap();
         let image = match &response {
             IoResponse::Read(bytes) if scene.textures.len() < MAX_TEXTURES => {
@@ -255,7 +332,7 @@ impl SceneIo {
             _ => None,
         };
         if image.is_none()
-            && pending.try_exact
+            && read.try_exact
             && !matches!(
                 response,
                 IoResponse::Failed {
@@ -264,12 +341,11 @@ impl SceneIo {
                 }
             )
         {
-            pending.try_exact = false;
+            read.try_exact = false;
             return Some(IoRequest::Read {
-                path: pending.file.clone(),
+                path: read.file.clone(),
             });
         }
-        let PendingAsset { event, file, .. } = self.pending.take().unwrap();
         if scene.textures.len() < MAX_TEXTURES {
             let texture = image.map(|image| {
                 let (width, height) = image.dimensions();
@@ -282,9 +358,10 @@ impl SceneIo {
                     rgba,
                 })
             });
-            scene.textures.insert(file, texture);
+            scene
+                .textures
+                .insert(std::mem::take(&mut read.file), texture);
         }
-        scene.apply(&event);
         None
     }
 }

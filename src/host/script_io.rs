@@ -150,10 +150,20 @@ enum SaveWork {
 }
 
 enum NumberedLoadWork {
-    Queued { key: String },
+    Queued {
+        key: String,
+    },
     ReadingSave,
     ReadingTarget(Box<crate::save::SaveData>),
-    Initializing { file: String },
+    ReadingScene {
+        save: Box<crate::save::SaveData>,
+        source: Option<Vec<u8>>,
+        remaining: VecDeque<String>,
+        pending: scene::TextureRead,
+    },
+    Initializing {
+        file: String,
+    },
     Hook,
     Finished(Option<NumberedLoadResult>),
 }
@@ -1114,6 +1124,9 @@ impl ScriptIoSession {
         let mut save = crate::save::SaveData::from_interpreter(&self.interpreter);
         save.current_line = self.interpreter.position_after_event();
         save.waiting_for_input = Some(false);
+        if let Some(scene) = &self.scene {
+            save.scene = Some(scene.save_snapshot());
+        }
         let data = match serde_json::to_vec(&save) {
             Ok(data) => data,
             Err(error) => return self.fail_save_hook(error),
@@ -1207,7 +1220,7 @@ impl ScriptIoSession {
                     _ => return Err(ProtocolError::State.into()),
                 };
                 if let NumberedLoadWork::ReadingTarget(save) = work {
-                    return self.restore_numbered_load(*save, Some(&bytes));
+                    return self.prepare_numbered_load_scene(*save, Some(bytes));
                 }
                 let save: crate::save::SaveData = match serde_json::from_slice(&bytes) {
                     Ok(save) => save,
@@ -1216,7 +1229,7 @@ impl ScriptIoSession {
                     }
                 };
                 if save.version > crate::save::SAVE_FORMAT_VERSION
-                    || save.scene.is_some()
+                    || (save.scene.is_some() && self.scene.is_none())
                     || save.audio.is_some()
                     || save.message_text.is_some()
                 {
@@ -1246,12 +1259,41 @@ impl ScriptIoSession {
                             "save position is beyond the script",
                         ));
                     }
-                    self.restore_numbered_load(save, None)
+                    self.prepare_numbered_load_scene(save, None)
                 } else {
                     let path = save.current_script.clone();
                     self.numbered_load = Some(NumberedLoadWork::ReadingTarget(Box::new(save)));
                     Ok(ScenarioStep::Request(IoRequest::Read { path }))
                 }
+            }
+            NumberedLoadWork::ReadingScene {
+                save,
+                source,
+                mut remaining,
+                mut pending,
+            } => {
+                let response = response.ok_or(ProtocolError::State)?;
+                if let IoResponse::Failed {
+                    kind: IoFailure::Cancelled,
+                    message,
+                } = response
+                {
+                    return Ok(self.fail_numbered_load(IoFailure::Cancelled, message));
+                }
+                let scene = self.scene.as_ref().ok_or(ProtocolError::State)?;
+                if let Some(request) = scene.complete_texture(&mut pending, response) {
+                    self.numbered_load = Some(NumberedLoadWork::ReadingScene {
+                        save,
+                        source,
+                        remaining,
+                        pending,
+                    });
+                    return Ok(ScenarioStep::Request(request));
+                }
+                if let Some(file) = remaining.pop_front() {
+                    return Ok(self.read_saved_scene_texture(save, source, remaining, file));
+                }
+                self.restore_numbered_load(*save, source.as_deref())
             }
             NumberedLoadWork::Initializing { file } => {
                 let _ = self
@@ -1280,6 +1322,43 @@ impl ScriptIoSession {
                 Ok(ScenarioStep::Progress(progress))
             }
         }
+    }
+
+    fn prepare_numbered_load_scene(
+        &mut self,
+        save: crate::save::SaveData,
+        source: Option<Vec<u8>>,
+    ) -> Result<ScenarioStep, ScriptIoError> {
+        if let (Some(scene), Some(snapshot)) = (&self.scene, &save.scene) {
+            if !snapshot.valid_host_snapshot() {
+                return Ok(self.fail_numbered_load(IoFailure::IoError, "invalid saved scene tree"));
+            }
+            let mut remaining = scene.missing_snapshot_textures(snapshot);
+            if remaining.iter().any(|file| logical_key(file).is_err()) {
+                return Ok(self.fail_numbered_load(IoFailure::Denied, "invalid saved texture path"));
+            }
+            if let Some(file) = remaining.pop_front() {
+                return Ok(self.read_saved_scene_texture(Box::new(save), source, remaining, file));
+            }
+        }
+        self.restore_numbered_load(save, source.as_deref())
+    }
+
+    fn read_saved_scene_texture(
+        &mut self,
+        save: Box<crate::save::SaveData>,
+        source: Option<Vec<u8>>,
+        remaining: VecDeque<String>,
+        file: String,
+    ) -> ScenarioStep {
+        let (pending, request) = scene::TextureRead::start(file);
+        self.numbered_load = Some(NumberedLoadWork::ReadingScene {
+            save,
+            source,
+            remaining,
+            pending,
+        });
+        ScenarioStep::Request(request)
     }
 
     fn restore_numbered_load(
@@ -1312,6 +1391,10 @@ impl ScriptIoSession {
         if save.waiting_for_input == Some(true) {
             self.interpreter.hold_queued_input_wait();
         }
+        if let Some(scene) = &mut self.scene {
+            scene.restore_snapshot(save.scene, self.frame);
+        }
+        self.timed_wait_start = None;
         self.scenario_event = None;
         self.start_numbered_load_hook(file)
     }

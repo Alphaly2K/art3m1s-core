@@ -183,6 +183,28 @@ impl Compositor {
         scene
     }
 
+    pub(crate) fn snapshot_for_host(&self) -> Scene {
+        let mut scene = self.scene_snapshot_with_animations();
+        scene.host_clock_ms = Some(self.clock_ms);
+        scene
+    }
+
+    pub(crate) fn restore_host_snapshot(&mut self, mut scene: Scene) {
+        self.reset_for_load();
+        if let Some(clock_ms) = scene.host_clock_ms.take() {
+            self.clock_ms = clock_ms;
+        }
+        let max_set = scene
+            .all_layers()
+            .flat_map(|layer| &layer.tweens)
+            .filter_map(|tween| tween.set_id)
+            .max();
+        if let Some(max_set) = max_set {
+            self.next_tween_set_id = self.next_tween_set_id.max(max_set + 1);
+        }
+        self.restore_scene(scene);
+    }
+
     /// Refresh the CPU-only projection used by synchronous script queries.
     /// Render targets, transition captures and input callbacks are not copied.
     pub(crate) fn sync_query_scene_from(&mut self, other: &Self) {
