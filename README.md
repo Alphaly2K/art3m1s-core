@@ -104,6 +104,10 @@ cargo build --manifest-path crates/art3m1s-krkr/Cargo.toml \
 SceneColor、render/output size 与线性 post-process 设计见
 [doc/POST_PROCESS.md](doc/POST_PROCESS.md)。
 
+Artemis 导出重构的现状审计见 [doc/EXPORT_AUDIT.md](doc/EXPORT_AUDIT.md)，
+Host ABI v2 的职责边界、接口草案和迁移计划见 [doc/HOST_ABI_V2.md](doc/HOST_ABI_V2.md)。
+v2 尚未实现；RFVP、KRKR、Siglus 不在本轮重构范围内。
+
 ## 状态与限制
 
 - 原生 Vulkan 仍为实验后端；Android 生产路径继续使用 ANGLE / OpenGL ES。

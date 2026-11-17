@@ -1,0 +1,1272 @@
+{
+  "schema_version": 1,
+  "audit_date": "2026-11-17",
+  "source_revision": "a809729bcc179ee56a7bae6aaab71b23fd4ea8e6",
+  "method": "Source declaration and API_V1 initializer inventory, not compiled reachability or linked dynamic-symbol verification",
+  "scope": "Artemis migration only; other engine and PFS source export intents recorded as frozen/independent boundaries",
+  "counts": {
+    "v1_function_slots": 59,
+    "artemis_c_abi_implementations": 85,
+    "implementations_not_in_v1": 26,
+    "artemis_explicit_query_exports": 1,
+    "other_engine_explicit_query_exports": 8,
+    "independent_pfs_export_declarations": 9
+  },
+  "v1_table": {
+    "source": "src/ffi/api.rs",
+    "name": "Art3m1sApiV1",
+    "header_fields": [
+      "struct_size",
+      "abi_version",
+      "magic"
+    ],
+    "function_slots_in_order": [
+      "host_events_create",
+      "host_events_destroy",
+      "host_events_enable",
+      "host_events_next",
+      "poll_events",
+      "set_font_list",
+      "set_window_state",
+      "set_text_replacements",
+      "set_text_translation_enabled",
+      "clear_host_state",
+      "resources_create",
+      "resources_destroy",
+      "resources_clear",
+      "resources_mount_directory",
+      "resources_mount_pfs",
+      "resources_set_save_dir",
+      "resources_set_override",
+      "resources_clear_overrides",
+      "runtime_create",
+      "runtime_destroy",
+      "runtime_set_resources",
+      "runtime_set_runtime_media_enabled",
+      "runtime_advance_and_present",
+      "runtime_advance_without_render",
+      "runtime_stage_width",
+      "runtime_stage_height",
+      "runtime_load_project",
+      "runtime_load_project_bytes",
+      "runtime_pixel_buffer_size",
+      "runtime_advance_and_render",
+      "runtime_set_external_surface",
+      "runtime_clear_external_surface",
+      "runtime_feed_mouse",
+      "runtime_feed_click",
+      "runtime_feed_mouse_button",
+      "runtime_feed_touch",
+      "runtime_feed_key",
+      "runtime_submit_dialog",
+      "runtime_submit_text_translation",
+      "runtime_set_reported_os",
+      "runtime_configure_spatial_upscale",
+      "runtime_set_render_quality_preset",
+      "runtime_set_profiler_enabled",
+      "runtime_profiler_snapshot",
+      "runtime_set_volume",
+      "runtime_notify_video_finished",
+      "runtime_notify_sound_finished",
+      "runtime_notify_lifecycle",
+      "runtime_is_exit_requested",
+      "runtime_backend_capabilities",
+      "runtime_submit_http_result",
+      "runtime_set_string_variable",
+      "probe_caption",
+      "set_angle_path",
+      "set_debug",
+      "set_damage_visualization",
+      "set_font_override",
+      "clear_font_override",
+      "runtime_upload_video_layer_frame"
+    ],
+    "availability": "facade gated by gl-backend OR metal-backend OR vulkan-backend",
+    "optional_slots": {
+      "runtime_set_runtime_media_enabled": "NULL unless ffmpeg feature enabled"
+    }
+  },
+  "artemis_functions": [
+    {
+      "name": "art3m1s_set_debug",
+      "source": "src/ffi/mod.rs",
+      "line": 138,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_set_debug(enabled: c_int)",
+      "v1_table_field": "set_debug",
+      "individual_no_mangle_export": false,
+      "migration_group": "diagnostics",
+      "proposed_destination": "Runtime-scoped diagnostics messages/snapshots; renderer metrics owned by Host",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_set_damage_visualization",
+      "source": "src/ffi/mod.rs",
+      "line": 150,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_set_damage_visualization(enabled: c_int)",
+      "v1_table_field": "set_damage_visualization",
+      "individual_no_mangle_export": false,
+      "migration_group": "diagnostics",
+      "proposed_destination": "Runtime-scoped diagnostics messages/snapshots; renderer metrics owned by Host",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_set_font_override",
+      "source": "src/ffi/mod.rs",
+      "line": 342,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_set_font_override(data: *const u8, len: c_int) -> c_int",
+      "v1_table_field": "set_font_override",
+      "individual_no_mangle_export": false,
+      "migration_group": "session_configuration",
+      "proposed_destination": "Runtime-scoped submit messages; no process-global font/window/text/volume state",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_clear_font_override",
+      "source": "src/ffi/mod.rs",
+      "line": 357,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_clear_font_override()",
+      "v1_table_field": "clear_font_override",
+      "individual_no_mangle_export": false,
+      "migration_group": "session_configuration",
+      "proposed_destination": "Runtime-scoped submit messages; no process-global font/window/text/volume state",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_set_angle_path",
+      "source": "src/ffi/mod.rs",
+      "line": 363,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_set_angle_path(path: *const c_char)",
+      "v1_table_field": "set_angle_path",
+      "individual_no_mangle_export": false,
+      "migration_group": "host_renderer",
+      "proposed_destination": "Host renderer SDK configuration/execution; core exposes versioned frame semantics and resources",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_create",
+      "source": "src/ffi/mod.rs",
+      "line": 491,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_create(w: u32, h: u32, backend: i32) -> *mut CoreRuntime",
+      "v1_table_field": "runtime_create",
+      "individual_no_mangle_export": false,
+      "migration_group": "runtime",
+      "proposed_destination": "Runtime create/destroy/open_project/get_state; caption uses a headless probe runtime",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_set_resources",
+      "source": "src/ffi/mod.rs",
+      "line": 514,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_set_resources( rt: *mut CoreRuntime, resources: *mut crate::host_files::HostResources, ) -> c_int",
+      "v1_table_field": "runtime_set_resources",
+      "individual_no_mangle_export": false,
+      "migration_group": "host_io",
+      "proposed_destination": "Physical mounts/save roots move to Host IO adapter; logical bytes/revisions delivered to core",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_backend_kind",
+      "source": "src/ffi/mod.rs",
+      "line": 536,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_backend_kind(rt: *const CoreRuntime) -> i32",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "host_renderer",
+      "proposed_destination": "Host renderer SDK configuration/execution; core exposes versioned frame semantics and resources",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_backend_stability",
+      "source": "src/ffi/mod.rs",
+      "line": 549,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_backend_stability(rt: *const CoreRuntime) -> i32",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "host_renderer",
+      "proposed_destination": "Host renderer SDK configuration/execution; core exposes versioned frame semantics and resources",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_backend_capabilities",
+      "source": "src/ffi/mod.rs",
+      "line": 562,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_backend_capabilities(rt: *const CoreRuntime) -> u64",
+      "v1_table_field": "runtime_backend_capabilities",
+      "individual_no_mangle_export": false,
+      "migration_group": "host_renderer",
+      "proposed_destination": "Host renderer SDK configuration/execution; core exposes versioned frame semantics and resources",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_register_hlsl_shader",
+      "source": "src/ffi/mod.rs",
+      "line": 576,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_register_hlsl_shader( rt: *mut CoreRuntime, name: *const c_char, source: *const u8, source_len: c_int, ) -> i64",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "host_renderer",
+      "proposed_destination": "Host renderer SDK configuration/execution; core exposes versioned frame semantics and resources",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_replace_hlsl_shader",
+      "source": "src/ffi/mod.rs",
+      "line": 615,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_replace_hlsl_shader( rt: *mut CoreRuntime, name: *const c_char, source: *const u8, source_len: c_int, ) -> i64",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "host_renderer",
+      "proposed_destination": "Host renderer SDK configuration/execution; core exposes versioned frame semantics and resources",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_reload_hlsl_shader",
+      "source": "src/ffi/mod.rs",
+      "line": 653,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_reload_hlsl_shader( rt: *mut CoreRuntime, name: *const c_char, source: *const u8, source_len: c_int, ) -> i64",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "host_renderer",
+      "proposed_destination": "Host renderer SDK configuration/execution; core exposes versioned frame semantics and resources",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_unregister_hlsl_shader",
+      "source": "src/ffi/mod.rs",
+      "line": 667,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_unregister_hlsl_shader( rt: *mut CoreRuntime, name: *const c_char, ) -> c_int",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "host_renderer",
+      "proposed_destination": "Host renderer SDK configuration/execution; core exposes versioned frame semantics and resources",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_load_project",
+      "source": "src/ffi/mod.rs",
+      "line": 698,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_load_project( rt: *mut CoreRuntime, ini_content: *const c_char, platform: *const c_char, ) -> i32",
+      "v1_table_field": "runtime_load_project",
+      "individual_no_mangle_export": false,
+      "migration_group": "runtime",
+      "proposed_destination": "Runtime create/destroy/open_project/get_state; caption uses a headless probe runtime",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_load_project_bytes",
+      "source": "src/ffi/mod.rs",
+      "line": 734,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_load_project_bytes( rt: *mut CoreRuntime, ini_content: *const u8, ini_len: usize, platform: *const c_char, ) -> i32",
+      "v1_table_field": "runtime_load_project_bytes",
+      "individual_no_mangle_export": false,
+      "migration_group": "runtime",
+      "proposed_destination": "Runtime create/destroy/open_project/get_state; caption uses a headless probe runtime",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_probe_caption",
+      "source": "src/ffi/mod.rs",
+      "line": 769,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_probe_caption( resources: *mut crate::host_files::HostResources, ini_content: *const u8, ini_len: usize, platform: *const c_char, out_buf: *mut u8, out_cap: c_int, ) -> c_int",
+      "v1_table_field": "probe_caption",
+      "individual_no_mangle_export": false,
+      "migration_group": "runtime",
+      "proposed_destination": "Runtime create/destroy/open_project/get_state; caption uses a headless probe runtime",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_feed_mouse",
+      "source": "src/ffi/mod.rs",
+      "line": 816,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_feed_mouse(rt: *mut CoreRuntime, x: i32, y: i32)",
+      "v1_table_field": "runtime_feed_mouse",
+      "individual_no_mangle_export": false,
+      "migration_group": "input",
+      "proposed_destination": "Typed ordered input/Host-state messages; preserve stage coordinates and original string layer identities",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_feed_click",
+      "source": "src/ffi/mod.rs",
+      "line": 829,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_feed_click(rt: *mut CoreRuntime)",
+      "v1_table_field": "runtime_feed_click",
+      "individual_no_mangle_export": false,
+      "migration_group": "input",
+      "proposed_destination": "Typed ordered input/Host-state messages; preserve stage coordinates and original string layer identities",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_feed_mouse_button",
+      "source": "src/ffi/mod.rs",
+      "line": 842,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_feed_mouse_button( rt: *mut CoreRuntime, button: u32, pressed: i32, )",
+      "v1_table_field": "runtime_feed_mouse_button",
+      "individual_no_mangle_export": false,
+      "migration_group": "input",
+      "proposed_destination": "Typed ordered input/Host-state messages; preserve stage coordinates and original string layer identities",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_feed_touch",
+      "source": "src/ffi/mod.rs",
+      "line": 861,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_feed_touch( rt: *mut CoreRuntime, id: u32, phase: u8, x: i32, y: i32, )",
+      "v1_table_field": "runtime_feed_touch",
+      "individual_no_mangle_export": false,
+      "migration_group": "input",
+      "proposed_destination": "Typed ordered input/Host-state messages; preserve stage coordinates and original string layer identities",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_feed_key",
+      "source": "src/ffi/mod.rs",
+      "line": 880,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_feed_key(rt: *mut CoreRuntime, vk: u32, pressed: i32)",
+      "v1_table_field": "runtime_feed_key",
+      "individual_no_mangle_export": false,
+      "migration_group": "input",
+      "proposed_destination": "Typed ordered input/Host-state messages; preserve stage coordinates and original string layer identities",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_submit_dialog",
+      "source": "src/ffi/mod.rs",
+      "line": 897,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_submit_dialog( rt: *mut CoreRuntime, accepted: i32, text: *const c_char, ) -> i32",
+      "v1_table_field": "runtime_submit_dialog",
+      "individual_no_mangle_export": false,
+      "migration_group": "service_result",
+      "proposed_destination": "Typed submit result/command with epoch and request or playback identity; preserve native variable semantics",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_submit_text_translation",
+      "source": "src/ffi/mod.rs",
+      "line": 920,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_submit_text_translation( rt: *mut CoreRuntime, serial: u64, text: *const c_char, ) -> i32",
+      "v1_table_field": "runtime_submit_text_translation",
+      "individual_no_mangle_export": false,
+      "migration_group": "service_result",
+      "proposed_destination": "Typed submit result/command with epoch and request or playback identity; preserve native variable semantics",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_destroy",
+      "source": "src/ffi/mod.rs",
+      "line": 942,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_destroy(rt: *mut CoreRuntime)",
+      "v1_table_field": "runtime_destroy",
+      "individual_no_mangle_export": false,
+      "migration_group": "runtime",
+      "proposed_destination": "Runtime create/destroy/open_project/get_state; caption uses a headless probe runtime",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_stage_width",
+      "source": "src/ffi/mod.rs",
+      "line": 955,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_stage_width(rt: *const CoreRuntime) -> u32",
+      "v1_table_field": "runtime_stage_width",
+      "individual_no_mangle_export": false,
+      "migration_group": "runtime",
+      "proposed_destination": "Runtime create/destroy/open_project/get_state; caption uses a headless probe runtime",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_stage_height",
+      "source": "src/ffi/mod.rs",
+      "line": 967,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_stage_height(rt: *const CoreRuntime) -> u32",
+      "v1_table_field": "runtime_stage_height",
+      "individual_no_mangle_export": false,
+      "migration_group": "runtime",
+      "proposed_destination": "Runtime create/destroy/open_project/get_state; caption uses a headless probe runtime",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_render_width",
+      "source": "src/ffi/mod.rs",
+      "line": 980,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_render_width(rt: *const CoreRuntime) -> u32",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "host_renderer",
+      "proposed_destination": "Host renderer SDK configuration/execution; core exposes versioned frame semantics and resources",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_render_height",
+      "source": "src/ffi/mod.rs",
+      "line": 995,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_render_height(rt: *const CoreRuntime) -> u32",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "host_renderer",
+      "proposed_destination": "Host renderer SDK configuration/execution; core exposes versioned frame semantics and resources",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_output_width",
+      "source": "src/ffi/mod.rs",
+      "line": 1010,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_output_width(rt: *const CoreRuntime) -> u32",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "host_renderer",
+      "proposed_destination": "Host renderer SDK configuration/execution; core exposes versioned frame semantics and resources",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_output_height",
+      "source": "src/ffi/mod.rs",
+      "line": 1025,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_output_height(rt: *const CoreRuntime) -> u32",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "host_renderer",
+      "proposed_destination": "Host renderer SDK configuration/execution; core exposes versioned frame semantics and resources",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_set_upscale_mode",
+      "source": "src/ffi/mod.rs",
+      "line": 1042,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_set_upscale_mode( rt: *mut CoreRuntime, mode: c_int, sharpness: f32, ) -> c_int",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "host_renderer",
+      "proposed_destination": "Host renderer SDK configuration/execution; core exposes versioned frame semantics and resources",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_set_render_scale",
+      "source": "src/ffi/mod.rs",
+      "line": 1085,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_set_render_scale( rt: *mut CoreRuntime, scale: f32, ) -> c_int",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "host_renderer",
+      "proposed_destination": "Host renderer SDK configuration/execution; core exposes versioned frame semantics and resources",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_configure_spatial_upscale",
+      "source": "src/ffi/mod.rs",
+      "line": 1118,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_configure_spatial_upscale( rt: *mut CoreRuntime, render_scale: f32, sharpness: f32, ) -> c_int",
+      "v1_table_field": "runtime_configure_spatial_upscale",
+      "individual_no_mangle_export": false,
+      "migration_group": "host_renderer",
+      "proposed_destination": "Host renderer SDK configuration/execution; core exposes versioned frame semantics and resources",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_set_render_quality_preset",
+      "source": "src/ffi/mod.rs",
+      "line": 1151,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_set_render_quality_preset( rt: *mut CoreRuntime, preset: c_int, ) -> c_int",
+      "v1_table_field": "runtime_set_render_quality_preset",
+      "individual_no_mangle_export": false,
+      "migration_group": "host_renderer",
+      "proposed_destination": "Host renderer SDK configuration/execution; core exposes versioned frame semantics and resources",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_pixel_buffer_size",
+      "source": "src/ffi/mod.rs",
+      "line": 1185,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_pixel_buffer_size(rt: *const CoreRuntime) -> u32",
+      "v1_table_field": "runtime_pixel_buffer_size",
+      "individual_no_mangle_export": false,
+      "migration_group": "host_renderer",
+      "proposed_destination": "Host renderer SDK configuration/execution; core exposes versioned frame semantics and resources",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_advance_and_render",
+      "source": "src/ffi/mod.rs",
+      "line": 1197,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_advance_and_render( rt: *mut CoreRuntime, delta_ms: u32, out_pixels: *mut u8, out_capacity: u32, ) -> u32",
+      "v1_table_field": "runtime_advance_and_render",
+      "individual_no_mangle_export": false,
+      "migration_group": "host_renderer",
+      "proposed_destination": "Host renderer SDK configuration/execution; core exposes versioned frame semantics and resources",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_advance_without_render",
+      "source": "src/ffi/mod.rs",
+      "line": 1236,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_advance_without_render( rt: *mut CoreRuntime, delta_ms: u32, ) -> i32",
+      "v1_table_field": "runtime_advance_without_render",
+      "individual_no_mangle_export": false,
+      "migration_group": "runtime_step",
+      "proposed_destination": "Pure logical step independent of renderer; input edges and onEnterFrame consumed once per Host frame",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_set_external_surface",
+      "source": "src/ffi/mod.rs",
+      "line": 1267,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_set_external_surface( rt: *mut CoreRuntime, kind: i32, handle: *mut c_void, width: u32, height: u32, ) -> i32",
+      "v1_table_field": "runtime_set_external_surface",
+      "individual_no_mangle_export": false,
+      "migration_group": "host_renderer",
+      "proposed_destination": "Host renderer SDK configuration/execution; core exposes versioned frame semantics and resources",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_clear_external_surface",
+      "source": "src/ffi/mod.rs",
+      "line": 1303,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_clear_external_surface(rt: *mut CoreRuntime)",
+      "v1_table_field": "runtime_clear_external_surface",
+      "individual_no_mangle_export": false,
+      "migration_group": "host_renderer",
+      "proposed_destination": "Host renderer SDK configuration/execution; core exposes versioned frame semantics and resources",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_advance_and_present",
+      "source": "src/ffi/mod.rs",
+      "line": 1319,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_advance_and_present( rt: *mut CoreRuntime, delta_ms: u32, ) -> i32",
+      "v1_table_field": "runtime_advance_and_present",
+      "individual_no_mangle_export": false,
+      "migration_group": "host_renderer",
+      "proposed_destination": "Host renderer SDK configuration/execution; core exposes versioned frame semantics and resources",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_set_profiler_enabled",
+      "source": "src/ffi/mod.rs",
+      "line": 1353,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_set_profiler_enabled( rt: *const CoreRuntime, enabled: c_int, )",
+      "v1_table_field": "runtime_set_profiler_enabled",
+      "individual_no_mangle_export": false,
+      "migration_group": "diagnostics",
+      "proposed_destination": "Runtime-scoped diagnostics messages/snapshots; renderer metrics owned by Host",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_profiler_snapshot",
+      "source": "src/ffi/mod.rs",
+      "line": 1370,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_profiler_snapshot( rt: *const CoreRuntime, out: *mut u8, capacity: u32, ) -> i32",
+      "v1_table_field": "runtime_profiler_snapshot",
+      "individual_no_mangle_export": false,
+      "migration_group": "diagnostics",
+      "proposed_destination": "Runtime-scoped diagnostics messages/snapshots; renderer metrics owned by Host",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_set_volume",
+      "source": "src/ffi/mod.rs",
+      "line": 1397,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_set_volume( rt: *mut CoreRuntime, volume_type: *const c_char, value: f32, )",
+      "v1_table_field": "runtime_set_volume",
+      "individual_no_mangle_export": false,
+      "migration_group": "session_configuration",
+      "proposed_destination": "Runtime-scoped submit messages; no process-global font/window/text/volume state",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_set_runtime_media_enabled_v1",
+      "source": "src/ffi/mod.rs",
+      "line": 1426,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_set_runtime_media_enabled_v1( rt: *mut CoreRuntime, enabled: c_int, )",
+      "v1_table_field": "runtime_set_runtime_media_enabled",
+      "individual_no_mangle_export": false,
+      "migration_group": "host_media",
+      "proposed_destination": "Decode selection and execution move to Host media adapter; no core temporary audio files",
+      "availability": "ffmpeg only"
+    },
+    {
+      "name": "art3m1s_runtime_notify_video_finished",
+      "source": "src/ffi/mod.rs",
+      "line": 1441,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_notify_video_finished( rt: *mut CoreRuntime, id: *const c_char, )",
+      "v1_table_field": "runtime_notify_video_finished",
+      "individual_no_mangle_export": false,
+      "migration_group": "service_result",
+      "proposed_destination": "Typed submit result/command with epoch and request or playback identity; preserve native variable semantics",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_video_gl_get_proc_address",
+      "source": "src/ffi/mod.rs",
+      "line": 1466,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_video_gl_get_proc_address( ctx: *mut std::ffi::c_void, name: *const c_char, ) -> *mut std::ffi::c_void",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "host_media_renderer",
+      "proposed_destination": "Host media/renderer bridge; platform handles remain outside the pure core",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_video_gl_begin",
+      "source": "src/ffi/mod.rs",
+      "line": 1486,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_video_gl_begin(rt: *mut CoreRuntime) -> c_int",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "host_media_renderer",
+      "proposed_destination": "Host media/renderer bridge; platform handles remain outside the pure core",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_video_gl_framebuffer",
+      "source": "src/ffi/mod.rs",
+      "line": 1510,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_video_gl_framebuffer( rt: *mut CoreRuntime, id: *const c_char, width: u32, height: u32, ) -> u32",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "host_media_renderer",
+      "proposed_destination": "Host media/renderer bridge; platform handles remain outside the pure core",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_video_gl_commit",
+      "source": "src/ffi/mod.rs",
+      "line": 1537,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_video_gl_commit( rt: *mut CoreRuntime, id: *const c_char, ) -> c_int",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "host_media_renderer",
+      "proposed_destination": "Host media/renderer bridge; platform handles remain outside the pure core",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_video_gl_end",
+      "source": "src/ffi/mod.rs",
+      "line": 1559,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_video_gl_end(rt: *mut CoreRuntime)",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "host_media_renderer",
+      "proposed_destination": "Host media/renderer bridge; platform handles remain outside the pure core",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_upload_video_layer_frame",
+      "source": "src/ffi/mod.rs",
+      "line": 1582,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_upload_video_layer_frame( rt: *mut CoreRuntime, id: *const c_char, width: u32, height: u32, rgba: *const u8, rgba_len: usize, ) -> c_int",
+      "v1_table_field": "runtime_upload_video_layer_frame",
+      "individual_no_mangle_export": false,
+      "migration_group": "host_media_renderer",
+      "proposed_destination": "Host media/renderer bridge; platform handles remain outside the pure core",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_video_import_kind",
+      "source": "src/ffi/mod.rs",
+      "line": 1634,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_video_import_kind(rt: *const CoreRuntime) -> i32",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "host_media_renderer",
+      "proposed_destination": "Host media/renderer bridge; platform handles remain outside the pure core",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_import_video_frame",
+      "source": "src/ffi/mod.rs",
+      "line": 1654,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_import_video_frame( rt: *mut CoreRuntime, id: *const c_char, image_kind: i32, native_handle: *mut c_void, width: u32, height: u32, ownership: i32, wait_kind: i32, wait_handle: *mut c_void, wait_value: u64, rgba: *const u8, rgba_len: usize, out_texture: *mut u64, ) -> c_int",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "host_media_renderer",
+      "proposed_destination": "Host media/renderer bridge; platform handles remain outside the pure core",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_release_video_frame",
+      "source": "src/ffi/mod.rs",
+      "line": 1729,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_release_video_frame( rt: *mut CoreRuntime, texture_handle: u64, ) -> c_int",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "host_media_renderer",
+      "proposed_destination": "Host media/renderer bridge; platform handles remain outside the pure core",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_video_frame_consumed",
+      "source": "src/ffi/mod.rs",
+      "line": 1751,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_video_frame_consumed( rt: *mut CoreRuntime, surface_handle: u64, ) -> c_int",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "host_media_renderer",
+      "proposed_destination": "Host media/renderer bridge; platform handles remain outside the pure core",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_acquire_video_surface",
+      "source": "src/ffi/mod.rs",
+      "line": 1775,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_acquire_video_surface( rt: *mut CoreRuntime, id: *const c_char, width: u32, height: u32, out_surface: *mut u64, ) -> c_int",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "host_media_renderer",
+      "proposed_destination": "Host media/renderer bridge; platform handles remain outside the pure core",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_commit_video_surface",
+      "source": "src/ffi/mod.rs",
+      "line": 1815,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_commit_video_surface( rt: *mut CoreRuntime, surface_handle: u64, ) -> c_int",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "host_media_renderer",
+      "proposed_destination": "Host media/renderer bridge; platform handles remain outside the pure core",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_capture_screenshot",
+      "source": "src/ffi/mod.rs",
+      "line": 1839,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_capture_screenshot( rt: *mut CoreRuntime, out_pixels: *mut u8, out_capacity: u32, ) -> u32",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "render_capture",
+      "proposed_destination": "Versioned logical capture request/result at the original script time; Host GPU readback and IO",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_notify_sound_finished",
+      "source": "src/ffi/mod.rs",
+      "line": 1864,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_notify_sound_finished( rt: *mut CoreRuntime, id: *const c_char, )",
+      "v1_table_field": "runtime_notify_sound_finished",
+      "individual_no_mangle_export": false,
+      "migration_group": "service_result",
+      "proposed_destination": "Typed submit result/command with epoch and request or playback identity; preserve native variable semantics",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_is_exit_requested",
+      "source": "src/ffi/mod.rs",
+      "line": 1885,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_is_exit_requested(rt: *const CoreRuntime) -> i32",
+      "v1_table_field": "runtime_is_exit_requested",
+      "individual_no_mangle_export": false,
+      "migration_group": "runtime",
+      "proposed_destination": "Runtime create/destroy/open_project/get_state; caption uses a headless probe runtime",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_notify_lifecycle",
+      "source": "src/ffi/mod.rs",
+      "line": 1900,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_notify_lifecycle(rt: *mut CoreRuntime, state: c_int)",
+      "v1_table_field": "runtime_notify_lifecycle",
+      "individual_no_mangle_export": false,
+      "migration_group": "lifecycle",
+      "proposed_destination": "Runtime submit lifecycle/shutdown with explicit final IO acknowledgement",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_notify_window_button",
+      "source": "src/ffi/mod.rs",
+      "line": 1923,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_notify_window_button(rt: *mut CoreRuntime, button: c_int)",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "input",
+      "proposed_destination": "Typed ordered input/Host-state messages; preserve stage coordinates and original string layer identities",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_notify_direction_changed",
+      "source": "src/ffi/mod.rs",
+      "line": 1938,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_notify_direction_changed( rt: *mut CoreRuntime, direction: c_int, )",
+      "v1_table_field": null,
+      "individual_no_mangle_export": false,
+      "migration_group": "input",
+      "proposed_destination": "Typed ordered input/Host-state messages; preserve stage coordinates and original string layer identities",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_submit_http_result",
+      "source": "src/ffi/mod.rs",
+      "line": 1956,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_submit_http_result( rt: *mut CoreRuntime, status_code: c_int, body: *const u8, body_len: c_int, ) -> c_int",
+      "v1_table_field": "runtime_submit_http_result",
+      "individual_no_mangle_export": false,
+      "migration_group": "service_result",
+      "proposed_destination": "Typed submit result/command with epoch and request or playback identity; preserve native variable semantics",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_set_string_variable",
+      "source": "src/ffi/mod.rs",
+      "line": 1994,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_set_string_variable( rt: *mut CoreRuntime, name: *const c_char, value: *const c_char, )",
+      "v1_table_field": "runtime_set_string_variable",
+      "individual_no_mangle_export": false,
+      "migration_group": "service_result",
+      "proposed_destination": "Typed submit result/command with epoch and request or playback identity; preserve native variable semantics",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_runtime_set_reported_os",
+      "source": "src/ffi/mod.rs",
+      "line": 2021,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_runtime_set_reported_os(rt: *mut CoreRuntime, os: *const c_char)",
+      "v1_table_field": "runtime_set_reported_os",
+      "individual_no_mangle_export": false,
+      "migration_group": "session_configuration",
+      "proposed_destination": "Runtime-scoped submit messages; no process-global font/window/text/volume state",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_host_events_create",
+      "source": "src/host/events.rs",
+      "line": 340,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_host_events_create() -> *mut HostEvents",
+      "v1_table_field": "host_events_create",
+      "individual_no_mangle_export": false,
+      "migration_group": "session_events",
+      "proposed_destination": "Runtime-owned poll_events queue; no separate active/global event handle",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_host_events_destroy",
+      "source": "src/host/events.rs",
+      "line": 344,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_host_events_destroy(events: *mut HostEvents)",
+      "v1_table_field": "host_events_destroy",
+      "individual_no_mangle_export": false,
+      "migration_group": "session_events",
+      "proposed_destination": "Runtime-owned poll_events queue; no separate active/global event handle",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_host_events_enable_v1",
+      "source": "src/host/events.rs",
+      "line": 353,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_host_events_enable_v1(events: *mut HostEvents, enabled: i32)",
+      "v1_table_field": "host_events_enable",
+      "individual_no_mangle_export": false,
+      "migration_group": "session_events",
+      "proposed_destination": "Runtime-owned poll_events queue; no separate active/global event handle",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_host_events_next_v1",
+      "source": "src/host/events.rs",
+      "line": 359,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_host_events_next_v1(events: *mut HostEvents) -> usize",
+      "v1_table_field": "host_events_next",
+      "individual_no_mangle_export": false,
+      "migration_group": "session_events",
+      "proposed_destination": "Runtime-owned poll_events queue; no separate active/global event handle",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_poll_events_v1",
+      "source": "src/host/events.rs",
+      "line": 365,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_poll_events_v1( events: *mut HostEvents, output: *mut u8, capacity: usize, out_count: *mut u32, ) -> usize",
+      "v1_table_field": "poll_events",
+      "individual_no_mangle_export": false,
+      "migration_group": "session_events",
+      "proposed_destination": "Runtime-owned poll_events queue; no separate active/global event handle",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_set_font_list_v1",
+      "source": "src/host/events.rs",
+      "line": 419,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_set_font_list_v1( events: *mut HostEvents, monospace: i32, vertical: i32, data: *const u8, len: usize, ) -> i32",
+      "v1_table_field": "set_font_list",
+      "individual_no_mangle_export": false,
+      "migration_group": "session_configuration",
+      "proposed_destination": "Runtime-scoped submit messages; no process-global font/window/text/volume state",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_set_window_state_v1",
+      "source": "src/host/events.rs",
+      "line": 441,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_set_window_state_v1(events: *mut HostEvents, flags: i32)",
+      "v1_table_field": "set_window_state",
+      "individual_no_mangle_export": false,
+      "migration_group": "session_configuration",
+      "proposed_destination": "Runtime-scoped submit messages; no process-global font/window/text/volume state",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_set_text_replacements_v1",
+      "source": "src/host/events.rs",
+      "line": 447,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_set_text_replacements_v1( events: *mut HostEvents, data: *const u8, len: usize, ) -> i32",
+      "v1_table_field": "set_text_replacements",
+      "individual_no_mangle_export": false,
+      "migration_group": "session_configuration",
+      "proposed_destination": "Runtime-scoped submit messages; no process-global font/window/text/volume state",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_set_text_translation_enabled_v1",
+      "source": "src/host/events.rs",
+      "line": 476,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_set_text_translation_enabled_v1( events: *mut HostEvents, enabled: i32, )",
+      "v1_table_field": "set_text_translation_enabled",
+      "individual_no_mangle_export": false,
+      "migration_group": "session_configuration",
+      "proposed_destination": "Runtime-scoped submit messages; no process-global font/window/text/volume state",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_clear_host_state_v1",
+      "source": "src/host/events.rs",
+      "line": 485,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_clear_host_state_v1(events: *mut HostEvents)",
+      "v1_table_field": "clear_host_state",
+      "individual_no_mangle_export": false,
+      "migration_group": "session_configuration",
+      "proposed_destination": "Runtime-scoped submit messages; no process-global font/window/text/volume state",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_resources_create",
+      "source": "src/host/files.rs",
+      "line": 602,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_resources_create() -> *mut HostResources",
+      "v1_table_field": "resources_create",
+      "individual_no_mangle_export": false,
+      "migration_group": "host_io",
+      "proposed_destination": "Physical mounts/save roots move to Host IO adapter; logical bytes/revisions delivered to core",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_resources_destroy",
+      "source": "src/host/files.rs",
+      "line": 606,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_resources_destroy(resources: *mut HostResources)",
+      "v1_table_field": "resources_destroy",
+      "individual_no_mangle_export": false,
+      "migration_group": "host_io",
+      "proposed_destination": "Physical mounts/save roots move to Host IO adapter; logical bytes/revisions delivered to core",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_resources_clear",
+      "source": "src/host/files.rs",
+      "line": 612,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_resources_clear(resources: *mut HostResources)",
+      "v1_table_field": "resources_clear",
+      "individual_no_mangle_export": false,
+      "migration_group": "host_io",
+      "proposed_destination": "Physical mounts/save roots move to Host IO adapter; logical bytes/revisions delivered to core",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_resources_mount_directory",
+      "source": "src/host/files.rs",
+      "line": 618,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_resources_mount_directory( resources: *mut HostResources, path: *const c_char, ) -> c_int",
+      "v1_table_field": "resources_mount_directory",
+      "individual_no_mangle_export": false,
+      "migration_group": "host_io",
+      "proposed_destination": "Physical mounts/save roots move to Host IO adapter; logical bytes/revisions delivered to core",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_resources_mount_pfs",
+      "source": "src/host/files.rs",
+      "line": 636,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_resources_mount_pfs( resources: *mut HostResources, path: *const c_char, encoding: *const c_char, ) -> c_int",
+      "v1_table_field": "resources_mount_pfs",
+      "individual_no_mangle_export": false,
+      "migration_group": "host_io",
+      "proposed_destination": "Physical mounts/save roots move to Host IO adapter; logical bytes/revisions delivered to core",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_resources_set_save_dir",
+      "source": "src/host/files.rs",
+      "line": 662,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_resources_set_save_dir( resources: *mut HostResources, path: *const c_char, ) -> c_int",
+      "v1_table_field": "resources_set_save_dir",
+      "individual_no_mangle_export": false,
+      "migration_group": "host_io",
+      "proposed_destination": "Physical mounts/save roots move to Host IO adapter; logical bytes/revisions delivered to core",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_resources_set_override",
+      "source": "src/host/files.rs",
+      "line": 684,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_resources_set_override( resources: *mut HostResources, path: *const c_char, data: *const u8, len: usize, ) -> c_int",
+      "v1_table_field": "resources_set_override",
+      "individual_no_mangle_export": false,
+      "migration_group": "host_io",
+      "proposed_destination": "Physical mounts/save roots move to Host IO adapter; logical bytes/revisions delivered to core",
+      "availability": "source declaration; cfg not evaluated"
+    },
+    {
+      "name": "art3m1s_resources_clear_overrides",
+      "source": "src/host/files.rs",
+      "line": 712,
+      "signature": "pub unsafe extern \"C\" fn art3m1s_resources_clear_overrides(resources: *mut HostResources)",
+      "v1_table_field": "resources_clear_overrides",
+      "individual_no_mangle_export": false,
+      "migration_group": "host_io",
+      "proposed_destination": "Physical mounts/save roots move to Host IO adapter; logical bytes/revisions delivered to core",
+      "availability": "source declaration; cfg not evaluated"
+    }
+  ],
+  "explicit_export_declarations": [
+    {
+      "name": "art3m1s_get_api_v1",
+      "source": "src/ffi/api.rs",
+      "line": 259,
+      "scope": "artemis",
+      "availability": "source export intent; target/features/linker must be checked on the built artifact"
+    },
+    {
+      "name": "art3m1s_rfvp_get_api_v1",
+      "source": "src/ffi/rfvp_api.rs",
+      "line": 301,
+      "scope": "frozen_other_engine",
+      "availability": "source export intent; target/features/linker must be checked on the built artifact"
+    },
+    {
+      "name": "art3m1s_krkr_get_api_v1",
+      "source": "src/ffi/krkr_api.rs",
+      "line": 62,
+      "scope": "frozen_other_engine",
+      "availability": "source export intent; target/features/linker must be checked on the built artifact"
+    },
+    {
+      "name": "art3m1s_krkr_get_diagnostics_api_v1",
+      "source": "src/ffi/krkr_api.rs",
+      "line": 92,
+      "scope": "frozen_other_engine",
+      "availability": "source export intent; target/features/linker must be checked on the built artifact"
+    },
+    {
+      "name": "art3m1s_krkr_get_control_api_v1",
+      "source": "src/ffi/krkr_api.rs",
+      "line": 594,
+      "scope": "frozen_other_engine",
+      "availability": "source export intent; target/features/linker must be checked on the built artifact"
+    },
+    {
+      "name": "art3m1s_siglus_get_api_v1",
+      "source": "src/ffi/siglus_api.rs",
+      "line": 565,
+      "scope": "frozen_other_engine",
+      "availability": "source export intent; target/features/linker must be checked on the built artifact"
+    },
+    {
+      "name": "art3m1s_siglus_get_diagnostics_api_v1",
+      "source": "src/ffi/siglus_api.rs",
+      "line": 573,
+      "scope": "frozen_other_engine",
+      "availability": "source export intent; target/features/linker must be checked on the built artifact"
+    },
+    {
+      "name": "art3m1s_siglus_get_audio_api_v1",
+      "source": "src/ffi/siglus_api.rs",
+      "line": 583,
+      "scope": "frozen_other_engine",
+      "availability": "source export intent; target/features/linker must be checked on the built artifact"
+    },
+    {
+      "name": "art3m1s_siglus_get_output_api_v1",
+      "source": "src/ffi/siglus_api.rs",
+      "line": 683,
+      "scope": "frozen_other_engine",
+      "availability": "source export intent; target/features/linker must be checked on the built artifact"
+    },
+    {
+      "name": "pfs_open",
+      "source": "crates/pfs-upk-rust/src/lib.rs",
+      "line": 65,
+      "scope": "independent_archive",
+      "availability": "source export intent; target/features/linker must be checked on the built artifact"
+    },
+    {
+      "name": "pfs_open_with_encoding",
+      "source": "crates/pfs-upk-rust/src/lib.rs",
+      "line": 76,
+      "scope": "independent_archive",
+      "availability": "source export intent; target/features/linker must be checked on the built artifact"
+    },
+    {
+      "name": "pfs_file_size",
+      "source": "crates/pfs-upk-rust/src/lib.rs",
+      "line": 92,
+      "scope": "independent_archive",
+      "availability": "source export intent; target/features/linker must be checked on the built artifact"
+    },
+    {
+      "name": "pfs_entry_count",
+      "source": "crates/pfs-upk-rust/src/lib.rs",
+      "line": 111,
+      "scope": "independent_archive",
+      "availability": "source export intent; target/features/linker must be checked on the built artifact"
+    },
+    {
+      "name": "pfs_entry_path",
+      "source": "crates/pfs-upk-rust/src/lib.rs",
+      "line": 123,
+      "scope": "independent_archive",
+      "availability": "source export intent; target/features/linker must be checked on the built artifact"
+    },
+    {
+      "name": "pfs_entry_size",
+      "source": "crates/pfs-upk-rust/src/lib.rs",
+      "line": 149,
+      "scope": "independent_archive",
+      "availability": "source export intent; target/features/linker must be checked on the built artifact"
+    },
+    {
+      "name": "pfs_read",
+      "source": "crates/pfs-upk-rust/src/lib.rs",
+      "line": 165,
+      "scope": "independent_archive",
+      "availability": "source export intent; target/features/linker must be checked on the built artifact"
+    },
+    {
+      "name": "pfs_close",
+      "source": "crates/pfs-upk-rust/src/lib.rs",
+      "line": 188,
+      "scope": "independent_archive",
+      "availability": "source export intent; target/features/linker must be checked on the built artifact"
+    },
+    {
+      "name": "pfs_unpack",
+      "source": "crates/pfs-upk-rust/src/lib.rs",
+      "line": 197,
+      "scope": "independent_archive",
+      "availability": "source export intent; target/features/linker must be checked on the built artifact"
+    }
+  ],
+  "rust_root_public_declarations": {
+    "source": "src/lib.rs",
+    "note": "Lexical root declarations; not a complete Rust public reachability/semver graph",
+    "items": [
+      {
+        "declaration": "pub mod audio;",
+        "line": 13
+      },
+      {
+        "declaration": "pub mod backend;",
+        "line": 14
+      },
+      {
+        "declaration": "pub mod compositor;",
+        "line": 15
+      },
+      {
+        "declaration": "pub mod ffi;",
+        "line": 16
+      },
+      {
+        "declaration": "pub use ffi::api as ffi_api;",
+        "line": 22
+      },
+      {
+        "declaration": "pub mod host;",
+        "line": 23
+      },
+      {
+        "declaration": "pub use host::{events as host_events, files as host_files, media as host_media};",
+        "line": 24
+      },
+      {
+        "declaration": "pub mod profiler;",
+        "line": 31
+      },
+      {
+        "declaration": "pub mod render_pipeline;",
+        "line": 32
+      },
+      {
+        "declaration": "pub mod runtime;",
+        "line": 33
+      },
+      {
+        "declaration": "pub mod save;",
+        "line": 34
+      },
+      {
+        "declaration": "pub mod text;",
+        "line": 35
+      },
+      {
+        "declaration": "pub mod video;",
+        "line": 36
+      },
+      {
+        "declaration": "pub use art3m1s_emote as emote;",
+        "line": 38
+      },
+      {
+        "declaration": "pub use art3m1s_media as media;",
+        "line": 39
+      },
+      {
+        "declaration": "pub use asb_interpreter as script;",
+        "line": 40
+      },
+      {
+        "declaration": "pub use pfs_upk as archive;",
+        "line": 41
+      },
+      {
+        "declaration": "pub type Result<T> = std::result::Result<T, CoreError>;",
+        "line": 44
+      },
+      {
+        "declaration": "pub enum CoreError {",
+        "line": 48
+      },
+      {
+        "declaration": "pub struct ProjectConfig {",
+        "line": 124
+      },
+      {
+        "declaration": "pub struct Project {",
+        "line": 226
+      },
+      {
+        "declaration": "pub fn probe_caption_from_bytes(ini_content: &[u8], platform: &str) -> Option<String> {",
+        "line": 412
+      },
+      {
+        "declaration": "pub fn probe_caption_from_bytes_with_resources(",
+        "line": 416
+      },
+      {
+        "declaration": "pub fn load_font_ffi(path: &str) -> std::result::Result<Vec<u8>, String> {",
+        "line": 439
+      },
+      {
+        "declaration": "pub fn resolve_project_path(root: &Path, virtual_path: &str) -> Result<PathBuf> {",
+        "line": 593
+      }
+    ]
+  },
+  "source_sha256": {
+    "src/ffi/api.rs": "a4b9d01e54e72753eefcbbd027fc66031113105179411384fd962c16a5431b7f",
+    "src/ffi/mod.rs": "ccb93c641883d242a6d3607b4433083dca7c2afdcccd6b4243f743b58b9ad635",
+    "src/host/events.rs": "1d9ffd61680321955da3b9a5cac54f16c91b36e1683261edd44df03aeb452677",
+    "src/host/files.rs": "019ec451c58110182127ba33a118df90b435c863b21df0028fb87f337d7c4ee8",
+    "src/ffi/rfvp_api.rs": "4515e6abde6a3deee1393075e664cef553044ccfd7a33dfbba0b0224fcb7b6de",
+    "src/ffi/krkr_api.rs": "f497cff5cb43eaa9cf54b3e420897576eaf412c7dc065560c9811a3646af9b4b",
+    "src/ffi/siglus_api.rs": "18d097a9d64f22db42be1112d6d87f0cf23d72dc4b843a0ff99864d50a736487",
+    "crates/pfs-upk-rust/src/lib.rs": "63ca8cd11dd1ef296d252e796374bfb803cc57cd9daeeb58fb74bc73abf69465",
+    "src/lib.rs": "faf02437f51a2e152a46eae37217668497604bf8155fdc385cf70a23e7ebb352",
+    "Cargo.toml": "729fb8b8195b1483f8f7dfd6b2c6189e0c1ad27aba01a51fc603afeef585b4ae"
+  }
+}
