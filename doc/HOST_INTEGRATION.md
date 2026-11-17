@@ -136,6 +136,13 @@ IO 等待期间，新帧返回 `WouldBlock` 且不受理；提交结果后以相
 已有场景事件保持到 `resume_scenario()`；帧回调产生的标签在确认该事件后才派发，模态对话
 期间暂停帧回调。当前接口尚未消费 Host 输入边沿、驱动媒体或生成渲染帧。
 
+已完成命中判断的事件可用 `submit_event_filter(tag, params)` 排队，参数使用注册标签名和原始
+字符串参数。一次只能有一个待判定事件；旧 IO 未完成时返回 `WouldBlock`，调用方保留原事件。
+过滤函数在 `step` 或 `step_frame` 执行，可以通过同一 IO 通道暂停。收到 `EventFilterReady`
+后调用 `take_event_filter_decision()`。`DispatchDefault` 继续原派发，`Handled` 和 `Rejected`
+都抑制原派发，分别表示成功和失败。未安装过滤器时继续默认派发；过滤器报错时拒绝。
+取走判定前不会推进场景。已有场景事件仍须单独确认。替换会话会清除过滤请求和判定。
+
 新会话时钟和随机种子默认为零，Host 在首次 step 前提交时间，并可在首次 open 前调用
 `set_random_seed(u64)`。e:random 与 var random 使用实例内状态；Luau math.random
 使用种子的低 32 位。新场景 VM 使用相同配置重新初始化，chunk 替换保留当前 VM 状态。

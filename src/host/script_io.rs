@@ -9,6 +9,7 @@ use asb_interpreter::{
     CallbackResult, Event, ExecutionResult, HostTime, Interpreter, InterpreterConfig,
 };
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::fmt;
 
 pub const IO_STAT: MessageKind = MessageKind {
@@ -56,6 +57,14 @@ pub enum ScriptIoProgress {
     WouldBlock,
     Completed,
     Event,
+    EventFilterReady,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventFilterDecision {
+    DispatchDefault,
+    Handled,
+    Rejected,
 }
 
 /// Time supplied by the Host for one logical scenario frame.
@@ -72,6 +81,17 @@ enum ExecutionMode {
     Idle,
     Chunk,
     Scenario,
+}
+
+enum EventFilterWork {
+    Queued(String, HashMap<String, String>),
+    Running(IoTask),
+    Ready(EventFilterDecision),
+}
+
+enum ScenarioStep {
+    Request(IoRequest),
+    Progress(ScriptIoProgress),
 }
 
 enum Operation {
@@ -131,6 +151,7 @@ pub struct ScriptIoSession {
     random_seed: u64,
     frame: Option<HostFrame>,
     frame_handler_due: bool,
+    event_filter: Option<EventFilterWork>,
 }
 
 impl ScriptIoSession {
@@ -165,6 +186,7 @@ impl ScriptIoSession {
             random_seed: 0,
             frame: None,
             frame_handler_due: false,
+            event_filter: None,
         })
     }
 
@@ -220,6 +242,7 @@ impl ScriptIoSession {
         self.scenario_event = None;
         self.frame = None;
         self.frame_handler_due = false;
+        self.event_filter = None;
         Ok(epoch)
     }
 
@@ -268,6 +291,7 @@ impl ScriptIoSession {
         self.scenario_event = None;
         self.frame = None;
         self.frame_handler_due = false;
+        self.event_filter = None;
         Ok(epoch)
     }
 
@@ -275,8 +299,52 @@ impl ScriptIoSession {
         self.scenario_event.as_ref()
     }
 
+    /// Queue one already matched event for filtering. Runs only in `step`.
+    /// The caller dispatches the original binding only on DispatchDefault.
+    pub fn submit_event_filter(
+        &mut self,
+        name: &str,
+        params: &HashMap<String, String>,
+    ) -> Result<(), ProtocolError> {
+        if self.mode != ExecutionMode::Scenario || self.completed || self.faulted {
+            return Err(ProtocolError::State);
+        }
+        if self.event_filter.is_some() || self.operation.is_some() || self.cancelled {
+            return Err(ProtocolError::WouldBlock);
+        }
+        if name.is_empty() {
+            return Err(ProtocolError::Argument("event filter name is empty"));
+        }
+        let bytes = params
+            .iter()
+            .try_fold(name.len(), |bytes, (key, value)| {
+                bytes
+                    .checked_add(key.len())?
+                    .checked_add(value.len())?
+                    .checked_add(1)
+            })
+            .ok_or(ProtocolError::Limit)?;
+        if bytes > self.limits().metadata_bytes {
+            return Err(ProtocolError::Limit);
+        }
+        self.event_filter = Some(EventFilterWork::Queued(name.into(), params.clone()));
+        Ok(())
+    }
+
+    pub fn take_event_filter_decision(&mut self) -> Option<EventFilterDecision> {
+        if let Some(EventFilterWork::Ready(decision)) = self.event_filter {
+            self.event_filter = None;
+            Some(decision)
+        } else {
+            None
+        }
+    }
+
     pub fn resume_scenario(&mut self) -> Result<(), ProtocolError> {
-        if self.faulted || self.interpreter.pending_host_io().is_some() {
+        if self.faulted
+            || self.interpreter.pending_host_io().is_some()
+            || self.event_filter.is_some()
+        {
             return Err(ProtocolError::State);
         }
         if self.scenario_event.take().is_none() {
@@ -346,6 +414,7 @@ impl ScriptIoSession {
         if self.scenario_event.is_some()
             && !self.frame_handler_due
             && self.interpreter.pending_host_io().is_none()
+            && self.event_filter.is_none()
         {
             return Ok(ScriptIoProgress::Event);
         }
@@ -377,7 +446,11 @@ impl ScriptIoSession {
             return Ok(ScriptIoProgress::Completed);
         }
         let new_frame = self.frame.is_none_or(|previous| frame.id != previous.id);
-        if new_frame && (self.operation.is_some() || self.cancelled) {
+        if new_frame
+            && (self.operation.is_some()
+                || self.cancelled
+                || matches!(self.event_filter, Some(EventFilterWork::Ready(_))))
+        {
             return Ok(ScriptIoProgress::WouldBlock);
         }
         self.update_host_time(HostTime {
@@ -451,27 +524,10 @@ impl ScriptIoSession {
                     }
                     task.pending_request().unwrap().clone()
                 }
-                ExecutionMode::Scenario => {
-                    if let Some(response) = response.take() {
-                        self.interpreter.resume_host_io(response)?;
-                    }
-                    match self.step_scenario()? {
-                        ExecutionResult::HostIoPending => self
-                            .interpreter
-                            .pending_host_io()
-                            .ok_or(ProtocolError::State)?
-                            .clone(),
-                        ExecutionResult::Wait(event) => {
-                            self.scenario_event = Some(event);
-                            return Ok(ScriptIoProgress::Event);
-                        }
-                        ExecutionResult::Completed => {
-                            self.completed = true;
-                            return Ok(ScriptIoProgress::Completed);
-                        }
-                        _ => return Err(ProtocolError::State.into()),
-                    }
-                }
+                ExecutionMode::Scenario => match self.step_scenario(response.take())? {
+                    ScenarioStep::Request(request) => request,
+                    ScenarioStep::Progress(progress) => return Ok(progress),
+                },
                 ExecutionMode::Idle => return Err(ProtocolError::State.into()),
             };
             match self.operation_for(request) {
@@ -481,27 +537,123 @@ impl ScriptIoSession {
         }
     }
 
-    fn step_scenario(&mut self) -> Result<ExecutionResult, ScriptIoError> {
+    fn step_scenario(
+        &mut self,
+        response: Option<IoResponse>,
+    ) -> Result<ScenarioStep, ScriptIoError> {
+        if matches!(self.event_filter, Some(EventFilterWork::Running(_))) {
+            let Some(EventFilterWork::Running(task)) = self.event_filter.take() else {
+                unreachable!()
+            };
+            return self.step_event_filter(task, response);
+        }
+        if let Some(response) = response {
+            self.interpreter.resume_host_io(response)?;
+        }
+        if (self.frame_handler_due
+            || matches!(self.event_filter, Some(EventFilterWork::Queued(..))))
+            && self.interpreter.prepare_host_handler()? == IoProgress::Waiting
+        {
+            return self.interpreter_request();
+        }
         if self.frame_handler_due {
-            if self.interpreter.prepare_host_handler()? == IoProgress::Waiting {
-                return Ok(ExecutionResult::HostIoPending);
-            }
             self.frame_handler_due = false;
             if self
                 .interpreter
                 .start_host_event_handler("onEnterFrame", &Default::default())?
                 == IoProgress::Waiting
             {
-                return Ok(ExecutionResult::HostIoPending);
+                return self.interpreter_request();
             }
         }
         if self.interpreter.pending_host_io().is_some() {
-            return Ok(ExecutionResult::HostIoPending);
+            return self.interpreter_request();
         }
-        if let Some(event) = &self.scenario_event {
-            return Ok(ExecutionResult::Wait(event.clone()));
+        match self.event_filter.take() {
+            Some(EventFilterWork::Queued(name, params)) => {
+                return match self.interpreter.host_event_filter_task(&name, &params) {
+                    Ok(Some(task)) => self.step_event_filter(task, None),
+                    Ok(None) => self.finish_event_filter(EventFilterDecision::DispatchDefault),
+                    Err(error) => self.reject_event_filter(error),
+                };
+            }
+            Some(ready @ EventFilterWork::Ready(_)) => {
+                self.event_filter = Some(ready);
+                return Ok(ScenarioStep::Progress(ScriptIoProgress::EventFilterReady));
+            }
+            Some(EventFilterWork::Running(_)) => unreachable!(),
+            None => {}
         }
-        Ok(self.interpreter.step()?)
+        if self.scenario_event.is_some() {
+            return Ok(ScenarioStep::Progress(ScriptIoProgress::Event));
+        }
+        match self.interpreter.step()? {
+            ExecutionResult::HostIoPending => self.interpreter_request(),
+            ExecutionResult::Wait(event) => {
+                self.scenario_event = Some(event);
+                Ok(ScenarioStep::Progress(ScriptIoProgress::Event))
+            }
+            ExecutionResult::Completed => {
+                self.completed = true;
+                Ok(ScenarioStep::Progress(ScriptIoProgress::Completed))
+            }
+            _ => Err(ProtocolError::State.into()),
+        }
+    }
+
+    fn interpreter_request(&self) -> Result<ScenarioStep, ScriptIoError> {
+        Ok(ScenarioStep::Request(
+            self.interpreter
+                .pending_host_io()
+                .ok_or(ProtocolError::State)?
+                .clone(),
+        ))
+    }
+
+    fn step_event_filter(
+        &mut self,
+        mut task: IoTask,
+        response: Option<IoResponse>,
+    ) -> Result<ScenarioStep, ScriptIoError> {
+        match task.step(response) {
+            Ok(IoProgress::Waiting) => {
+                let request = task.pending_request().ok_or(ProtocolError::State)?.clone();
+                self.event_filter = Some(EventFilterWork::Running(task));
+                Ok(ScenarioStep::Request(request))
+            }
+            Ok(IoProgress::Completed) => match self
+                .interpreter
+                .lua()
+                .unpack_multi::<i32>(task.take_result().unwrap_or_default())
+            {
+                Ok(1) => self.finish_event_filter(EventFilterDecision::Handled),
+                Ok(2) => self.finish_event_filter(EventFilterDecision::Rejected),
+                Ok(_) => self.finish_event_filter(EventFilterDecision::DispatchDefault),
+                Err(error) => self.reject_event_filter(error),
+            },
+            Err(error) => self.reject_event_filter(error),
+        }
+    }
+
+    fn finish_event_filter(
+        &mut self,
+        decision: EventFilterDecision,
+    ) -> Result<ScenarioStep, ScriptIoError> {
+        self.event_filter = Some(EventFilterWork::Ready(decision));
+        Ok(ScenarioStep::Progress(ScriptIoProgress::EventFilterReady))
+    }
+
+    fn reject_event_filter(
+        &mut self,
+        error: impl fmt::Display,
+    ) -> Result<ScenarioStep, ScriptIoError> {
+        self.interpreter
+            .engine_context()
+            .lock()
+            .unwrap()
+            .callbacks
+            .debug(0, &format!("eventFilter error: {error}"), false);
+        self.finish_event_filter(EventFilterDecision::Rejected)
     }
 
     fn operation_for(&self, request: IoRequest) -> Result<Operation, ProtocolError> {

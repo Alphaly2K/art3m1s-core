@@ -834,14 +834,9 @@ impl Interpreter {
         name: &str,
         params: &std::collections::HashMap<String, String>,
     ) -> Option<i32> {
-        let filter: mlua::Function = {
-            let ctx = self.engine_ctx.lock().unwrap();
-            let key = ctx.event_filter.as_ref()?;
-            self.lua.registry_value(key).ok()?
-        };
-
-        let params_table = match self.lua.create_table() {
-            Ok(table) => table,
+        let (filter, args) = match self.event_filter_invocation(name, params) {
+            Ok(Some(invocation)) => invocation,
+            Ok(None) => return None,
             Err(err) => {
                 self.engine_ctx.lock().unwrap().callbacks.debug(
                     0,
@@ -851,23 +846,7 @@ impl Interpreter {
                 return Some(2);
             }
         };
-        for (k, v) in params {
-            let _ = params_table.set(k.as_str(), v.as_str());
-        }
-        // setEventFilter specifies the same engine object as calllua, not an
-        // empty placeholder table: filters may call e:var and e:tag.
-        let engine_obj: mlua::AnyUserData = match self.lua.globals().get("__engine") {
-            Ok(engine) => engine,
-            Err(err) => {
-                self.engine_ctx.lock().unwrap().callbacks.debug(
-                    0,
-                    &format!("eventFilter setup error: missing __engine: {err}"),
-                    false,
-                );
-                return Some(2);
-            }
-        };
-        match filter.call::<i32>((engine_obj, name, params_table)) {
+        match filter.call::<i32>(args) {
             Ok(result) => Some(result),
             Err(err) => {
                 self.engine_ctx.lock().unwrap().callbacks.debug(
@@ -880,6 +859,47 @@ impl Interpreter {
                 Some(2)
             }
         }
+    }
+
+    fn event_filter_invocation(
+        &self,
+        name: &str,
+        params: &HashMap<String, String>,
+    ) -> mlua::Result<Option<(mlua::Function, mlua::MultiValue)>> {
+        let filter = {
+            let ctx = self.engine_ctx.lock().unwrap();
+            let Some(key) = ctx.event_filter.as_ref() else {
+                return Ok(None);
+            };
+            self.lua.registry_value(key)?
+        };
+        let table = self.lua.create_table()?;
+        for (key, value) in params {
+            table.set(key.as_str(), value.as_str())?;
+        }
+        let engine = self.lua.globals().get::<mlua::AnyUserData>("__engine")?;
+        let args = mlua::MultiValue::from_vec(vec![
+            mlua::Value::UserData(engine),
+            mlua::Value::String(self.lua.create_string(name)?),
+            mlua::Value::Table(table),
+        ]);
+        Ok(Some((filter, args)))
+    }
+
+    /// Prepare the filter for a matched event without invoking it. The caller
+    /// owns this task and must finish it before advancing the scenario.
+    pub fn host_event_filter_task(
+        &self,
+        name: &str,
+        params: &HashMap<String, String>,
+    ) -> Result<Option<crate::io_continuation::IoTask>> {
+        self.check_host_handler_ready()?;
+        self.sync_script_state_to_engine();
+        self.event_filter_invocation(name, params)?
+            .map(|(filter, args)| {
+                crate::io_continuation::IoTask::from_function(&self.lua, filter, args)
+            })
+            .transpose()
     }
 
     /// 加载脚本（从文本）
@@ -2521,13 +2541,7 @@ impl Interpreter {
         params: &HashMap<String, String>,
     ) -> Result<crate::io_continuation::IoProgress> {
         use crate::io_continuation::{IoProgress, IoTask};
-        self.check_io_idle()?;
-        if !self.resumable_io || !self.loading_lua.is_empty() {
-            return Err(Error::RuntimeError {
-                line: self.current_line,
-                message: "Host event handler requires an initialized resumable interpreter".into(),
-            });
-        }
+        self.check_host_handler_ready()?;
         let handler = self
             .engine_ctx
             .lock()
@@ -2545,6 +2559,17 @@ impl Interpreter {
             }
         }
         Ok(IoProgress::Completed)
+    }
+
+    fn check_host_handler_ready(&self) -> Result<()> {
+        self.check_io_idle()?;
+        if !self.resumable_io || !self.loading_lua.is_empty() {
+            return Err(Error::RuntimeError {
+                line: self.current_line,
+                message: "Host event handler requires an initialized resumable interpreter".into(),
+            });
+        }
+        Ok(())
     }
 
     /// 触发注册在 `onEnterFrame` 上的每帧回调（Artemis 约定 `e:setEventHandler{

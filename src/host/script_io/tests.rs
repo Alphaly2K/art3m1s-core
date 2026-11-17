@@ -594,6 +594,111 @@ e:setEventHandler{onEnterFrame='tick'}
 }
 
 #[test]
+fn event_filter_holds_dispatch_until_io_completes_and_rejects_script_errors() {
+    let mut session = session(1, TransportLimits::default(), 1024);
+    session
+        .open_scenario(
+            br#"
+*main
+[stop]
+[caption data=after]
+[lua]
+__engine:setEventFilter(function(e,name,p)
+    assert(name=='lyevent' and p.id=='dialog')
+    attempts=(attempts or 0)+1
+    local before=p.decision
+    assert(e:file(p.key)=='')
+    if before=='error' then error('rejected') end
+    return tonumber(before)
+end)
+[/lua]
+"#,
+            "event-filter",
+            "main",
+        )
+        .unwrap();
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::Event);
+    let globals = session.interpreter().lua().globals();
+    let mut host = MemoryHost::default();
+    for (index, (decision, response, expected)) in [
+        ("1", true, EventFilterDecision::Handled),
+        ("0", true, EventFilterDecision::DispatchDefault),
+        ("error", true, EventFilterDecision::Rejected),
+        ("0", false, EventFilterDecision::Rejected),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let key = format!("request-{index}");
+        if response {
+            host.asset(&key, b"");
+        }
+        let mut params = HashMap::from([
+            ("id".into(), "dialog".into()),
+            ("key".into(), key.clone()),
+            ("decision".into(), decision.into()),
+        ]);
+        session.submit_event_filter("lyevent", &params).unwrap();
+        params.insert("key".into(), "changed-after-submit".into());
+        assert_eq!(
+            globals
+                .get::<Option<usize>>("attempts")
+                .unwrap()
+                .unwrap_or(0),
+            index
+        );
+        assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
+        let request = requests(&mut session).pop().unwrap();
+        assert_eq!(request.metadata["key"], key);
+        assert_eq!(
+            session.submit_event_filter("lyevent", &params),
+            Err(ProtocolError::WouldBlock)
+        );
+        assert_eq!(session.resume_scenario(), Err(ProtocolError::State));
+        assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
+        session.submit_replies(&[host.complete(&request)]).unwrap();
+        assert_eq!(session.take_event_filter_decision(), None);
+        assert_eq!(session.step().unwrap(), ScriptIoProgress::EventFilterReady);
+        assert_eq!(session.step().unwrap(), ScriptIoProgress::EventFilterReady);
+        assert_eq!(session.take_event_filter_decision(), Some(expected));
+        assert_eq!(session.take_event_filter_decision(), None);
+        assert_eq!(globals.get::<usize>("attempts").unwrap(), index + 1);
+        assert_eq!(session.step().unwrap(), ScriptIoProgress::Event);
+        assert!(matches!(session.pending_event(), Some(Event::Wait { .. })));
+    }
+    session.resume_scenario().unwrap();
+    host.run(&mut session);
+    assert_eq!(host.captions, ["after"]);
+}
+
+#[test]
+fn scenario_replacement_drops_a_running_event_filter() {
+    let mut session = session(1, TransportLimits::default(), 1024);
+    session.open_scenario(b"*main\n[stop]\n[lua]\n__engine:setEventFilter(function(e) e:file('old'); return 1 end)\n[/lua]", "old", "main").unwrap();
+    session
+        .submit_event_filter("lyevent", &HashMap::new())
+        .unwrap();
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
+    let old = requests(&mut session).pop().unwrap();
+    session
+        .open_scenario(b"*main\n[stop]", "new", "main")
+        .unwrap();
+    assert!(matches!(
+        session.submit_replies(&[reply(&old, json!({"status":"ok","found":false}), vec![])]),
+        Err(ProtocolError::Stale)
+    ));
+    session
+        .submit_event_filter("lyevent", &HashMap::new())
+        .unwrap();
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::EventFilterReady);
+    assert_eq!(
+        session.take_event_filter_decision(),
+        Some(EventFilterDecision::DispatchDefault)
+    );
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::Event);
+}
+
+#[test]
 fn scenario_replacement_is_atomic_and_stale_loading_results_cannot_touch_the_new_vm() {
     let mut session = session(1, TransportLimits::default(), 128);
     let old = b"[lua]\nmarker='old'; __engine:file('old')\n[/lua]\n*main\n";
