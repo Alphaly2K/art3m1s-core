@@ -1,8 +1,8 @@
 use super::*;
 use crate::compositor::query::layer_info_entry;
-use crate::compositor::{Compositor, TextureInfo};
+use crate::compositor::{Compositor, TextureInfo, TweenHandler};
 use crate::host::frame::FrameTexture;
-use asb_interpreter::event::LayerEvent;
+use asb_interpreter::event::{LayerEvent, WaitReason};
 use asb_interpreter::lua_engine::EngineCallbacks;
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
@@ -28,21 +28,11 @@ impl ScriptIoSession {
             scene: scene.0.clone(),
             pending: None,
             clock_origin_ns: None,
+            tween_handlers: Vec::new(),
         });
         self.interpreter.set_engine_callbacks(Box::new(scene));
         self.interpreter.set_callback(move |event| match event {
-            Event::Layer(_)
-            | Event::LayerRename { .. }
-            | Event::LayerTweenDelete { .. }
-            | Event::TweenSetStart
-            | Event::TweenSetEnd
-            | Event::LayerTween {
-                sync: false,
-                handler_file: None,
-                handler_label: None,
-                handler_handler: None,
-                ..
-            } => {
+            Event::Layer(_) | Event::LayerRename { .. } | Event::LayerTweenDelete { .. } => {
                 let mut scene = reduced_scene.lock().unwrap();
                 if scene.missing_asset(&event).is_some() {
                     return CallbackResult::Pause;
@@ -50,9 +40,97 @@ impl ScriptIoSession {
                 scene.apply(&event);
                 CallbackResult::Continue
             }
+            Event::TweenSetStart => {
+                let mut scene = reduced_scene.lock().unwrap();
+                scene.group_sync_layers.clear();
+                scene.apply(&event);
+                CallbackResult::Continue
+            }
+            Event::TweenSetEnd => {
+                let mut scene = reduced_scene.lock().unwrap();
+                scene.apply(&event);
+                if scene.group_sync_layers.is_empty() {
+                    CallbackResult::Continue
+                } else {
+                    CallbackResult::Pause
+                }
+            }
+            Event::LayerTween { sync, ref id, .. } => {
+                let mut scene = reduced_scene.lock().unwrap();
+                scene.apply(&event);
+                if !sync {
+                    CallbackResult::Continue
+                } else if scene.compositor.collecting_tweens() {
+                    scene.group_sync_layers.push(id.clone());
+                    CallbackResult::Continue
+                } else {
+                    CallbackResult::Pause
+                }
+            }
             _ => CallbackResult::Pause,
         });
         Ok(epoch)
+    }
+
+    pub(super) fn scene_handlers_ready(&self) -> bool {
+        matches!(self.shutdown, Shutdown::Open)
+            && matches!(self.scenario_event, None | Some(Event::Wait { .. }))
+            && self
+                .scene
+                .as_ref()
+                .is_some_and(|scene| !scene.tween_handlers.is_empty())
+    }
+
+    pub(super) fn dispatch_scene_handlers(&mut self) -> Result<(), ScriptIoError> {
+        if !self.scene_handlers_ready() {
+            return Ok(());
+        }
+        let tags: Vec<_> = self
+            .scene
+            .as_mut()
+            .unwrap()
+            .tween_handlers
+            .drain(..)
+            .flat_map(|h| {
+                crate::script_handler::handler_tags(
+                    h.handler.as_deref(),
+                    h.file.as_deref(),
+                    h.label.as_deref(),
+                    h.call,
+                    &h.extra_params,
+                    &[],
+                )
+            })
+            .collect();
+        if !tags.is_empty() {
+            if let Some(event) = self.scenario_event.take() {
+                self.interpreter
+                    .park_wait_for_host_dispatch(&event, self.timed_wait_start.take())?;
+            }
+            self.interpreter.append_queued_tags(tags);
+            self.completed = false;
+        }
+        Ok(())
+    }
+
+    pub(super) fn sync_tween_finished(&self) -> bool {
+        let (
+            Some(scene),
+            Some(Event::Wait {
+                reason: WaitReason::LayerTweens { layers },
+            }),
+        ) = (&self.scene, &self.scenario_event)
+        else {
+            return false;
+        };
+        let scene = scene.scene.lock().unwrap();
+        layers.iter().all(|id| {
+            scene
+                .compositor
+                .scene()
+                .get(id)
+                .is_none_or(|layer| layer.tweens.is_empty())
+        })
     }
 }
 
@@ -62,6 +140,7 @@ struct SceneProjection {
     textures: HashMap<String, Option<Arc<FrameTexture>>>,
     texture_bytes: usize,
     dirty: bool,
+    group_sync_layers: Vec<String>,
 }
 
 impl SceneProjection {
@@ -113,6 +192,7 @@ pub(super) struct SceneIo {
     scene: Arc<Mutex<SceneProjection>>,
     pending: Option<PendingAsset>,
     clock_origin_ns: Option<u64>,
+    tween_handlers: Vec<TweenHandler>,
 }
 
 struct PendingAsset {
@@ -122,12 +202,30 @@ struct PendingAsset {
 }
 
 impl SceneIo {
+    pub(super) fn take_scene_wait(&self, event: Event) -> Event {
+        let layers = match event {
+            Event::LayerTween { id, sync: true, .. } => vec![id],
+            Event::TweenSetEnd => std::mem::take(&mut self.scene.lock().unwrap().group_sync_layers),
+            other => return other,
+        };
+        Event::Wait {
+            reason: WaitReason::LayerTweens { layers },
+        }
+    }
+
     pub(super) fn advance_clock(&mut self, monotonic_ns: u64) {
         let origin = *self.clock_origin_ns.get_or_insert(monotonic_ns);
         let elapsed_ms = (monotonic_ns - origin) / 1_000_000;
         let mut scene = self.scene.lock().unwrap();
         let delta_ms = elapsed_ms - scene.compositor.clock_ms();
         scene.dirty |= scene.compositor.advance(delta_ms);
+        self.tween_handlers.extend(
+            scene
+                .compositor
+                .poll_tween_events()
+                .into_iter()
+                .filter(|h| h.handler.is_some() || h.file.is_some() || h.label.is_some()),
+        );
     }
 
     pub(super) fn asset_pending(&self) -> bool {

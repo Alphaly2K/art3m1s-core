@@ -81,6 +81,12 @@ struct QueuedWaitCheckpoint {
     immediate_count: usize,
     /// When true, onLoad follow-up may run before this wait is re-emitted.
     allow_queue: bool,
+    host_interrupt: Option<HostWaitTiming>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HostWaitTiming {
+    start: Option<(u64, u64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -1955,13 +1961,18 @@ impl Interpreter {
         match reason {
             // time 键：与 e:now() 兼容的时间戳（等待截止时刻）。
             WR::Timed { milliseconds, .. } => {
-                let environment = self.engine_ctx.lock().unwrap().environment.clone();
-                let now = environment
-                    .lock()
-                    .unwrap()
-                    .time
-                    .map(|time| time.monotonic_ms.min(i64::MAX as u64) as i64)
-                    .unwrap_or_else(now_millis_i64);
+                let now = self
+                    .current_host_wait_start()
+                    .map(|(_, ns)| (ns / 1_000_000) as i64)
+                    .unwrap_or_else(|| {
+                        let environment = self.engine_ctx.lock().unwrap().environment.clone();
+                        environment
+                            .lock()
+                            .unwrap()
+                            .time
+                            .map(|time| time.monotonic_ms.min(i64::MAX as u64) as i64)
+                            .unwrap_or_else(now_millis_i64)
+                    });
                 let deadline = now.saturating_add((*milliseconds).min(i64::MAX as u64) as i64);
                 info.insert("time".to_string(), deadline.to_string());
             }
@@ -2988,6 +2999,7 @@ impl Interpreter {
             deferred,
             immediate_count,
             allow_queue: false,
+            host_interrupt: None,
         });
         self.active_queued_wait = Some(self.queued_wait_checkpoints.len() - 1);
     }
@@ -2999,7 +3011,10 @@ impl Interpreter {
             // follow-up helpers jump through another script.  Keep that
             // checkpoint until the helper returns to the saved PC; ordinary
             // queued waits still follow the stack-depth pruning rule.
-            .retain(|checkpoint| checkpoint.allow_queue || checkpoint.stack.len() < depth);
+            .retain(|checkpoint| {
+                (checkpoint.allow_queue && checkpoint.host_interrupt.is_none())
+                    || checkpoint.stack.len() < depth
+            });
         self.active_queued_wait = None;
     }
 
@@ -3200,6 +3215,40 @@ impl Interpreter {
         ctx.tag_queue.extend(tags);
     }
 
+    /// Park the current wait before appending Host-dispatched tags. Returning
+    /// to this position re-emits the wait without executing its instruction.
+    /// `start` is the Host frame ID and monotonic nanoseconds of a timed wait.
+    pub fn park_wait_for_host_dispatch(
+        &mut self,
+        event: &Event,
+        start: Option<(u64, u64)>,
+    ) -> Result<()> {
+        self.check_io_idle()?;
+        if !self.resumable_io || self.current_script.is_none() || self.deferred_events.is_some() {
+            return Err(Error::RuntimeError {
+                line: self.current_line,
+                message: "cannot interrupt the current script wait".into(),
+            });
+        }
+        if !self.last_wait_from_queue {
+            self.current_line = self.current_line.saturating_add(1);
+        }
+        self.record_queued_wait_checkpoint(event);
+        let checkpoint = &mut self.queued_wait_checkpoints[self.active_queued_wait.unwrap()];
+        checkpoint.allow_queue = true;
+        checkpoint.host_interrupt = Some(HostWaitTiming { start });
+        Ok(())
+    }
+
+    /// The original clock anchor of the wait re-emitted by the last step.
+    pub fn current_host_wait_start(&self) -> Option<(u64, u64)> {
+        if !self.last_wait_from_queue || !self.last_queue_pause_is_wait {
+            return None;
+        }
+        let checkpoint = self.queued_wait_checkpoints.get(self.active_queued_wait?)?;
+        checkpoint.host_interrupt?.start
+    }
+
     /// Restore a click/key wait whose script PC already points at the next line.
     ///
     /// Queued `@` / `[wait]` waits advance the PC before pausing. Loading that
@@ -3246,6 +3295,7 @@ impl Interpreter {
             deferred: Vec::new(),
             immediate_count: 0,
             allow_queue: true,
+            host_interrupt: None,
         });
         self.active_queued_wait = Some(self.queued_wait_checkpoints.len() - 1);
         self.mark_queued_input_wait();

@@ -21,10 +21,12 @@ impl ScriptIoSession {
         else {
             return Err(ProtocolError::State);
         };
-        let start = self.timed_wait_start.get_or_insert(frame);
+        let &(start_id, start_ns) = &*self
+            .timed_wait_start
+            .get_or_insert((frame.id, frame.monotonic_ns));
         // A new wait starts in the frame that reached it, even if resuming IO.
-        let elapsed_ns = frame.monotonic_ns - start.monotonic_ns;
-        if frame.id == start.id || elapsed_ns / 1_000_000 < milliseconds {
+        let elapsed_ns = frame.monotonic_ns - start_ns;
+        if frame.id == start_id || elapsed_ns / 1_000_000 < milliseconds {
             return Ok(Some(ScriptIoProgress::Event));
         }
         self.resume_scenario()?;

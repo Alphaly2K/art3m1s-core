@@ -65,6 +65,9 @@ impl ScriptIoSession {
                     self.notify_exit().map(Some)
                 }
                 ScriptIoProgress::Event if self.has_timed_wait() => self.advance_timed_wait(frame),
+                ScriptIoProgress::Event if self.sync_tween_finished() => {
+                    self.resume_scenario().map(|()| None)
+                }
                 ScriptIoProgress::Event
                     if self.scene.is_some() && matches!(self.scenario_event, Some(Event::Flip)) =>
                 {

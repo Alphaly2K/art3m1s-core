@@ -1821,6 +1821,167 @@ fn sprite_tween_advances_on_host_frames_after_scenario_completion() {
 }
 
 #[test]
+fn tween_callbacks_resume_host_io_once_and_keep_the_scenario_wait() {
+    use crate::host::runtime;
+
+    let ini = b"[WINDOWS]\nWIDTH=320\nHEIGHT=200\nBOOT=boot.iet\n";
+    for (sync, grouped, queued) in [
+        (1, false, false),
+        (0, false, false),
+        (1, true, false),
+        (0, false, true),
+    ] {
+        let prelude = if grouped {
+            "[lyc id=2 width=2 height=2 color=334455]\n[tweenset]\n[lytween id=2 param=left from=0 to=8 time=2 sync=1]\n"
+        } else {
+            ""
+        };
+        let time = if grouped { 3 } else { 5 };
+        let after_tween = if grouped {
+            "[/tweenset]\n"
+        } else if queued {
+            "[calllua function=queue_wait]\n"
+        } else if sync == 0 {
+            "[wait time=10 input=0]\n"
+        } else {
+            ""
+        };
+        let source = format!(
+            r#"*top
+[lyc id=1 width=2 height=2 color=112233]
+{prelude}[lytween id=1 param=left from=0 to=20 time={time} sync={sync} handler=calllua function=finish]
+{after_tween}[caption data="$g.finished"]
+[stop]
+[lua]
+function finish()
+    local e=__engine
+    assert(e:var('g.finished')~='1')
+    e:tag{{'var', name='g.finished', data=1}}
+    assert(e:file('effect.dat')=='x')
+    assert(e:var('g.finished')=='1')
+    e:enqueueTag{{'caption', data='callback'}}
+end
+function queue_wait()
+    local e=__engine
+    e:enqueueTag{{'lytween', id='1', param='top', from='0', to='20', time='10', sync='1'}}
+    e:enqueueTag{{'caption', data='deferred'}}
+end
+[/lua]
+"#
+        );
+        let mut host = MemoryHost::default();
+        host.asset("boot.iet", source.as_bytes());
+        host.asset("effect.dat", b"x");
+        let handle = runtime::create(0, TransportLimits::default(), 4096).unwrap();
+        runtime::open_project(handle, ini, "windows", None).unwrap();
+        let first = HostFrame {
+            id: 1,
+            monotonic_ns: 0,
+            utc_unix_ms: 0,
+            utc_offset_minutes: 0,
+        };
+        let poll = || {
+            let mut bytes = vec![0; 4096];
+            let result = runtime::poll_events(handle, &mut bytes).unwrap();
+            bytes.truncate(result.written_bytes);
+            bytes
+        };
+        let captions = |bytes: Vec<u8>| {
+            let mut remaining = bytes.as_slice();
+            let mut out = Vec::new();
+            while !remaining.is_empty() {
+                let len = u32::from_le_bytes(remaining[..4].try_into().unwrap()) as usize;
+                let (record, rest) = remaining.split_at(len);
+                assert_eq!(
+                    u16::from_le_bytes(record[6..8].try_into().unwrap()),
+                    Domain::Ui as u16
+                );
+                assert_eq!(
+                    u32::from_le_bytes(record[8..12].try_into().unwrap()),
+                    UI_CAPTION.kind
+                );
+                let metadata: Value = serde_json::from_slice(&record[64..]).unwrap();
+                out.push(metadata["text"].as_str().unwrap().to_owned());
+                remaining = rest;
+            }
+            out
+        };
+        for _ in 0..1024 {
+            let progress = runtime::step(handle, first).unwrap();
+            let bytes = poll();
+            if progress == ScriptIoProgress::Event {
+                assert_eq!(
+                    u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+                    PROJECT_READY.kind
+                );
+                break;
+            }
+            assert_eq!(progress, ScriptIoProgress::Waiting);
+            for request in decode_requests(&bytes) {
+                runtime::submit_replies(handle, &[host.complete(&request)]).unwrap();
+            }
+        }
+        if grouped {
+            let intermediate = HostFrame {
+                id: 2,
+                monotonic_ns: 2_000_000,
+                ..first
+            };
+            assert_eq!(
+                runtime::step(handle, intermediate).unwrap(),
+                ScriptIoProgress::Event
+            );
+            assert!(poll().is_empty());
+        }
+        let finished = HostFrame {
+            id: 3,
+            monotonic_ns: 5_000_000,
+            ..first
+        };
+        for service in [IO_STAT, IO_READ] {
+            assert_eq!(
+                runtime::step(handle, finished).unwrap(),
+                ScriptIoProgress::Waiting
+            );
+            let request = decode_requests(&poll()).pop().unwrap();
+            assert_eq!(request.identity.service, service);
+            assert_eq!(request.metadata["key"], "effect.dat");
+            assert_eq!(
+                runtime::step(handle, finished).unwrap(),
+                ScriptIoProgress::Waiting
+            );
+            assert!(poll().is_empty());
+            runtime::submit_replies(handle, &[host.complete(&request)]).unwrap();
+        }
+        assert_eq!(
+            runtime::step(handle, finished).unwrap(),
+            ScriptIoProgress::Event
+        );
+        let delivered = captions(poll());
+        if sync == 0 {
+            assert_eq!(delivered, ["callback"]);
+            let deadline = HostFrame {
+                id: 4,
+                monotonic_ns: 10_000_000,
+                ..first
+            };
+            assert_eq!(
+                runtime::step(handle, deadline).unwrap(),
+                ScriptIoProgress::Event
+            );
+            if queued {
+                assert_eq!(captions(poll()), ["deferred", "1"]);
+            } else {
+                assert_eq!(captions(poll()), ["1"]);
+            }
+        } else {
+            assert_eq!(delivered, ["callback", "1"]);
+        }
+        runtime::destroy(handle).unwrap();
+    }
+}
+
+#[test]
 fn host_calendar_and_monotonic_clocks_remain_distinct_across_io_suspension() {
     let mut session = session(1, TransportLimits::default(), 1024);
     session

@@ -255,6 +255,10 @@ impl Compositor {
         self.clock_ms
     }
 
+    pub(crate) fn collecting_tweens(&self) -> bool {
+        self.tween_set_pending.is_some()
+    }
+
     /// 设置舞台缩放因子（HiDPI scale）。宿主在窗口初始化/缩放变化时调用。
     pub fn set_stage_scale(&mut self, scale: f32) {
         self.stage_scale = scale;

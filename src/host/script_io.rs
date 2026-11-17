@@ -222,7 +222,7 @@ pub struct ScriptIoSession {
     random_seed: u64,
     frame: Option<HostFrame>,
     frame_handler_due: bool,
-    timed_wait_start: Option<HostFrame>,
+    timed_wait_start: Option<(u64, u64)>,
     event_filter: Option<EventFilterWork>,
     save_work: Option<SaveWork>,
     numbered_load: Option<NumberedLoadWork>,
@@ -684,7 +684,8 @@ impl ScriptIoSession {
         if matches!(self.shutdown, Shutdown::Reporting(_)) {
             return Ok(ScriptIoProgress::SaveReady);
         }
-        if self.completed && !self.shutdown.is_closing_or_closed() {
+        let dispatch_tweens = self.scene_handlers_ready();
+        if self.completed && !self.shutdown.is_closing_or_closed() && !dispatch_tweens {
             return Ok(ScriptIoProgress::Completed);
         }
         if self.scenario_event.is_some()
@@ -693,6 +694,7 @@ impl ScriptIoSession {
             && self.event_filter.is_none()
             && self.save_work.is_none()
             && self.numbered_load.is_none()
+            && !dispatch_tweens
         {
             return Ok(ScriptIoProgress::Event);
         }
@@ -909,6 +911,10 @@ impl ScriptIoSession {
             Some(EventFilterWork::Running(_)) => unreachable!(),
             None => {}
         }
+        self.dispatch_scene_handlers()?;
+        if self.completed {
+            return Ok(ScenarioStep::Progress(ScriptIoProgress::Completed));
+        }
         if self.scenario_event.is_some() {
             return Ok(ScenarioStep::Progress(ScriptIoProgress::Event));
         }
@@ -923,7 +929,12 @@ impl ScriptIoSession {
                 if matches!(event, Event::ScenarioText { .. }) {
                     self.record_read_history();
                 }
-                self.scenario_event = Some(event);
+                self.timed_wait_start = self.interpreter.current_host_wait_start();
+                self.scenario_event = Some(if let Some(scene) = &self.scene {
+                    scene.take_scene_wait(event)
+                } else {
+                    event
+                });
                 Ok(ScenarioStep::Progress(ScriptIoProgress::Event))
             }
             ExecutionResult::Completed => {

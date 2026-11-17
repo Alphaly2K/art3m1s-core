@@ -687,6 +687,8 @@ pub enum WaitReason {
         /// 1=等待场景文本出现的 Tween 完成，2=等待场景文本隐藏的 Tween 完成
         mode: i32,
     },
+    /// A Host scenario is waiting for these layers' property tweens to finish.
+    LayerTweens { layers: Vec<String> },
 }
 
 /// 加载遮罩操作

@@ -32,6 +32,7 @@ pub mod profiler;
 pub mod render_pipeline;
 pub mod runtime;
 pub mod save;
+mod script_handler;
 pub mod text;
 pub mod video;
 
