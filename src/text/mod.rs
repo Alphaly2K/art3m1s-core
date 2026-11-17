@@ -42,3 +42,47 @@ pub(crate) fn message_layer_scene_id(message_id: &str, layered: bool) -> String 
     }
     encoded
 }
+
+pub(crate) fn font_fallback_candidates(face: &str) -> Vec<String> {
+    let (stem, extension) = face.rsplit_once('.').unwrap_or((face, ""));
+    let lower = stem.to_ascii_lowercase();
+    for separator in ['-', '_'] {
+        let suffix = format!("{separator}medium");
+        if lower.ends_with(&suffix) {
+            let family = &stem[..stem.len() - suffix.len()];
+            let extension = if extension.is_empty() {
+                String::new()
+            } else {
+                format!(".{extension}")
+            };
+            return ["regular", "bold"]
+                .into_iter()
+                .map(|weight| format!("{family}{separator}{weight}{extension}"))
+                .collect();
+        }
+    }
+    Vec::new()
+}
+
+pub(crate) fn capture_message_text(state: &FontState) -> Option<crate::save::MessageTextSnapshot> {
+    use crate::save::{MessageLayerTextSnapshot, MessageTextSnapshot};
+
+    let mut layers: Vec<_> = state
+        .layers
+        .iter()
+        .filter(|(_, layer)| !layer.page_tags.is_empty())
+        .map(|(id, layer)| MessageLayerTextSnapshot {
+            id: id.clone(),
+            page_font: layer.page_font.clone(),
+            tags: layer.page_tags.clone(),
+        })
+        .collect();
+    if layers.is_empty() {
+        return None;
+    }
+    layers.sort_by(|a, b| a.id.cmp(&b.id));
+    Some(MessageTextSnapshot {
+        active_layer: state.active_layer.clone(),
+        layers,
+    })
+}

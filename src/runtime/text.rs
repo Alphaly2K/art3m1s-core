@@ -1,7 +1,7 @@
 use super::CoreRuntime;
 use crate::render_pipeline::draw::DrawCommand;
-use crate::text::message_layer_scene_id;
 use crate::text::render::{ScetweenConfig, TextRenderer, TextSpanToken};
+use crate::text::{capture_message_text, font_fallback_candidates, message_layer_scene_id};
 use asb_interpreter::Event;
 use std::collections::HashMap;
 
@@ -505,26 +505,7 @@ impl CoreRuntime {
 
     pub(super) fn capture_message_text_snapshot(&self) -> Option<crate::save::MessageTextSnapshot> {
         let renderer = self.text_renderer.as_ref()?;
-        let state = renderer.font_state();
-        let mut layers = Vec::new();
-        for (id, layer) in &state.layers {
-            if layer.page_tags.is_empty() {
-                continue;
-            }
-            layers.push(crate::save::MessageLayerTextSnapshot {
-                id: id.clone(),
-                page_font: layer.page_font.clone(),
-                tags: layer.page_tags.clone(),
-            });
-        }
-        if layers.is_empty() {
-            return None;
-        }
-        layers.sort_by(|a, b| a.id.cmp(&b.id));
-        Some(crate::save::MessageTextSnapshot {
-            active_layer: state.active_layer.clone(),
-            layers,
-        })
+        capture_message_text(renderer.font_state())
     }
 
     pub(super) fn restore_pending_message_text(&mut self) {
@@ -730,27 +711,6 @@ pub(super) fn apply_font_override(
             false
         }
     }
-}
-
-pub(super) fn font_fallback_candidates(face: &str) -> Vec<String> {
-    let (stem, extension) = face.rsplit_once('.').unwrap_or((face, ""));
-    let lower = stem.to_ascii_lowercase();
-    for separator in ['-', '_'] {
-        let suffix = format!("{separator}medium");
-        if lower.ends_with(&suffix) {
-            let family = &stem[..stem.len() - suffix.len()];
-            let extension = if extension.is_empty() {
-                String::new()
-            } else {
-                format!(".{extension}")
-            };
-            return ["regular", "bold"]
-                .into_iter()
-                .map(|weight| format!("{family}{separator}{weight}{extension}"))
-                .collect();
-        }
-    }
-    Vec::new()
 }
 
 #[cfg(test)]

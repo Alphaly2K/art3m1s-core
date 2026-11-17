@@ -427,6 +427,14 @@ impl GlyphTextRenderer {
         Ok(())
     }
 
+    pub(crate) fn cache_font(&mut self, face: &str, bytes: Vec<u8>) -> Result<(), String> {
+        let font = FontArc::try_from_vec(bytes).map_err(|e| format!("{e}"))?;
+        self.next_font_generation = self.next_font_generation.wrapping_add(1);
+        self.fonts
+            .insert(face.to_owned(), (font, self.next_font_generation));
+        Ok(())
+    }
+
     fn alloc_atlas_region(&mut self, w: u32, h: u32) -> Option<(usize, u32, u32)> {
         for (index, atlas) in self.atlases.iter_mut().enumerate() {
             if let Some((x, y)) = atlas.alloc(w, h) {
@@ -542,12 +550,8 @@ impl TextRenderer for GlyphTextRenderer {
     }
 
     fn set_named_font_bytes(&mut self, face: &str, bytes: Vec<u8>) -> Result<(), String> {
-        let font = FontArc::try_from_vec(bytes).map_err(|e| format!("{e}"))?;
-        self.next_font_generation = self.next_font_generation.wrapping_add(1);
-        self.font_generation = self.next_font_generation;
-        self.font = Some(font.clone());
-        self.fonts
-            .insert(face.to_string(), (font, self.font_generation));
+        self.cache_font(face, bytes)?;
+        self.select_cached_font(face);
         Ok(())
     }
 

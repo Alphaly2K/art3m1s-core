@@ -2697,7 +2697,7 @@ end
 }
 
 #[test]
-fn numbered_save_restores_scene_tweens_and_audio_in_a_fresh_runtime() {
+fn numbered_save_restores_scene_text_and_audio_in_a_fresh_runtime() {
     use crate::host::{
         media::PlaybackStatus,
         runtime::{self, RuntimeError},
@@ -2708,6 +2708,7 @@ fn numbered_save_restores_scene_tweens_and_audio_in_a_fresh_runtime() {
     let mask = [128, 128, 128, 255];
     host.asset("hero.png", &png_bytes(1, 1, &pixels));
     host.asset("mask.png", &png_bytes(1, 1, &mask));
+    host.asset("font/fixture-regular.ttf", &test_font());
     host.asset(
         "store.iet",
         br#"*top
@@ -2717,6 +2718,9 @@ fn numbered_save_restores_scene_tweens_and_audio_in_a_fresh_runtime() {
 [voice id=line file=voice.ogg]
 [lyc id=1.80 file=hero mask=mask]
 [lytween id=1.80 param=left from=0 to=20 time=10 ease=linear]
+[chgmsg id=dialog layered=1]
+[font face=font/fixture-medium.ttf]
+AB
 [flip]
 [wait time=4 input=0]
 [save file=slot]
@@ -2739,7 +2743,7 @@ fn numbered_save_restores_scene_tweens_and_audio_in_a_fresh_runtime() {
         runtime::open_project(handle, ini.as_bytes(), "windows", None).unwrap();
         handle
     };
-    let drive = |handle, frame, host: &mut MemoryHost, cancel_mask| {
+    let drive = |handle, frame, host: &mut MemoryHost, cancel_key: Option<&str>| {
         let mut audio = Vec::new();
         for _ in 0..8192 {
             let progress = runtime::step(handle, frame).unwrap();
@@ -2763,7 +2767,7 @@ fn numbered_save_restores_scene_tweens_and_audio_in_a_fresh_runtime() {
             }
             assert_eq!(progress, ScriptIoProgress::Waiting);
             for request in decode_requests(&bytes[..polled.written_bytes]) {
-                let response = if cancel_mask && request.metadata["key"] == "mask.png" {
+                let response = if cancel_key.is_some_and(|key| request.metadata["key"] == key) {
                     reply(&request, json!({"status":"cancelled"}), vec![])
                 } else {
                     host.complete(&request)
@@ -2780,26 +2784,42 @@ fn numbered_save_restores_scene_tweens_and_audio_in_a_fresh_runtime() {
         utc_offset_minutes: 0,
     };
     let saver = create("store.iet");
-    drive(saver, start, &mut host, false);
-    drive(saver, start, &mut host, false);
+    drive(saver, start, &mut host, None);
+    let page = runtime::acquire_latest(saver, 0).unwrap().unwrap();
+    assert_eq!(
+        page.sprites
+            .iter()
+            .filter(|sprite| sprite.layer_id == "dialog")
+            .count(),
+        2
+    );
+    drop(page);
+    drive(saver, start, &mut host, None);
     let save_time = HostFrame {
         id: 2,
         monotonic_ns: 4_000_000,
         ..start
     };
-    drive(saver, save_time, &mut host, false);
+    drive(saver, save_time, &mut host, None);
     let saved = &host.files[&("save".into(), "slot".into())].1;
     let saved: crate::save::SaveData = serde_json::from_slice(saved).unwrap();
     let snapshot = saved.audio.unwrap();
     assert_eq!(snapshot.bgm.as_ref().unwrap().gain, 480);
     assert_eq!(snapshot.bgm.as_ref().unwrap().pan, -40);
     assert_eq!(snapshot.voice[0].id, "line");
+    let text = saved.message_text.unwrap();
+    assert_eq!(text.active_layer.as_deref(), Some("dialog"));
+    assert!(
+        text.layers[0]
+            .tags
+            .contains(&crate::text::BacklogTag::Text("AB".into()))
+    );
     runtime::destroy(saver).unwrap();
 
-    for cancel_mask in [true, false] {
+    for cancel_key in [Some("mask.png"), Some("font/fixture-regular.ttf"), None] {
         host.reads.clear();
         let loader = create("load.iet");
-        let initial = drive(loader, start, &mut host, false);
+        let initial = drive(loader, start, &mut host, None);
         assert_eq!(initial.len(), 1);
         assert_eq!(initial[0]["key"], "old.ogg");
         let playback = |value: &Value| {
@@ -2813,9 +2833,9 @@ fn numbered_save_restores_scene_tweens_and_audio_in_a_fresh_runtime() {
         let epoch = runtime::get_state(loader).unwrap().transport.epoch;
         let original = runtime::acquire_latest(loader, 0).unwrap().unwrap();
         assert_eq!(original.sprites[0].layer_id, "99");
-        let audio = drive(loader, start, &mut host, cancel_mask);
+        let audio = drive(loader, start, &mut host, cancel_key);
         assert!(host.reads.contains(&("hero.png".into(), 0)));
-        if cancel_mask {
+        if cancel_key.is_some() {
             assert!(audio.is_empty());
             runtime::submit_playback_status(loader, epoch, old_id, PlaybackStatus::Started)
                 .unwrap();
@@ -2852,6 +2872,23 @@ fn numbered_save_restores_scene_tweens_and_audio_in_a_fresh_runtime() {
             let restored = runtime::acquire_latest(loader, original.render_frame_id)
                 .unwrap()
                 .unwrap();
+            assert!(host.reads.contains(&("font/fixture-regular.ttf".into(), 0)));
+            let restored_text: Vec<_> = restored
+                .sprites
+                .iter()
+                .filter(|sprite| sprite.layer_id == "dialog")
+                .collect();
+            assert_eq!(restored_text.len(), 2);
+            assert!(
+                restored
+                    .texture(restored_text[0].texture)
+                    .unwrap()
+                    .rgba()
+                    .iter()
+                    .skip(3)
+                    .step_by(4)
+                    .any(|&alpha| alpha != 0)
+            );
             let sprite = &restored.sprites[0];
             assert_eq!(sprite.layer_id, "1.80");
             assert_eq!(sprite.transform[4], 8.0);
@@ -2864,7 +2901,7 @@ fn numbered_save_restores_scene_tweens_and_audio_in_a_fresh_runtime() {
                 monotonic_ns: 6_000_000,
                 ..start
             };
-            drive(loader, finished, &mut host, false);
+            drive(loader, finished, &mut host, None);
             let frame = runtime::acquire_latest(loader, after).unwrap().unwrap();
             assert_eq!(frame.sprites[0].transform[4], 20.0);
         }

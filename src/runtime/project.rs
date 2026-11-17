@@ -235,7 +235,7 @@ impl CoreRuntime {
         let mut text = GlyphTextRenderer::new();
         let mut errors = Vec::new();
         for candidate in std::iter::once(Self::DEFAULT_FONT_PATH.to_string()).chain(
-            super::text::font_fallback_candidates(Self::DEFAULT_FONT_PATH),
+            crate::text::font_fallback_candidates(Self::DEFAULT_FONT_PATH),
         ) {
             match self
                 .resources

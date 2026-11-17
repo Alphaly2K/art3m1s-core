@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 
 mod frames;
 mod text;
+pub(super) use text::FontRead;
 
 const MAX_TEXTURES: usize = 4096;
 const MAX_TEXTURE_BYTES: usize = 128 * 1024 * 1024;
@@ -30,6 +31,7 @@ impl ScriptIoSession {
         self.scene = Some(SceneIo {
             scene: scene.0.clone(),
             pending: None,
+            pending_font: None,
             clock_origin_ns: None,
             clock_base_ms: 0,
             tween_handlers: Vec::new(),
@@ -223,6 +225,7 @@ struct SceneCallbacks(Arc<Mutex<SceneProjection>>);
 pub(super) struct SceneIo {
     scene: Arc<Mutex<SceneProjection>>,
     pending: Option<PendingAsset>,
+    pending_font: Option<(Event, FontRead)>,
     clock_origin_ns: Option<u64>,
     clock_base_ms: u64,
     tween_handlers: Vec<TweenHandler>,

@@ -165,6 +165,11 @@ enum NumberedLoadWork {
         remaining: VecDeque<String>,
         pending: scene::TextureRead,
     },
+    ReadingSavedFont {
+        save: Box<crate::save::SaveData>,
+        source: Option<Vec<u8>>,
+        pending: scene::FontRead,
+    },
     ReadyToRestore {
         save: Box<crate::save::SaveData>,
         source: Option<Vec<u8>>,
@@ -867,6 +872,16 @@ impl ScriptIoSession {
         mut response: Option<IoResponse>,
     ) -> Result<ScenarioStep, ScriptIoError> {
         if let Some(scene) = self.scene.as_mut()
+            && scene.font_pending()
+        {
+            if let Some(request) =
+                scene.complete_event_font(response.take().ok_or(ProtocolError::State)?)
+            {
+                return Ok(ScenarioStep::Request(request));
+            }
+            self.interpreter.advance_line();
+        }
+        if let Some(scene) = self.scene.as_mut()
             && scene.asset_pending()
         {
             if let Some(request) =
@@ -953,7 +968,9 @@ impl ScriptIoSession {
             ExecutionResult::HostIoPending => self.interpreter_request(),
             ExecutionResult::Wait(event) => {
                 if let Some(scene) = self.scene.as_mut()
-                    && let Some(request) = scene.prepare_asset(&event)
+                    && let Some(request) = scene
+                        .prepare_asset(&event)
+                        .or_else(|| scene.prepare_event_font(&event))
                 {
                     return Ok(ScenarioStep::Request(request));
                 }
@@ -1146,6 +1163,7 @@ impl ScriptIoSession {
         if let Some(scene) = &self.scene {
             save.scene = Some(scene.save_snapshot());
             save.audio = Some(self.audio.snapshot());
+            save.message_text = scene.capture_text();
         }
         let data = match serde_json::to_vec(&save) {
             Ok(data) => data,
@@ -1249,8 +1267,10 @@ impl ScriptIoSession {
                     }
                 };
                 if save.version > crate::save::SAVE_FORMAT_VERSION
-                    || ((save.scene.is_some() || save.audio.is_some()) && self.scene.is_none())
-                    || save.message_text.is_some()
+                    || ((save.scene.is_some()
+                        || save.audio.is_some()
+                        || save.message_text.is_some())
+                        && self.scene.is_none())
                 {
                     return Ok(self.fail_numbered_load(
                         IoFailure::Unsupported,
@@ -1315,6 +1335,30 @@ impl ScriptIoSession {
                 self.restore_numbered_load(*save, source)
             }
             NumberedLoadWork::ReadyToRestore { save, source } => {
+                self.restore_numbered_load(*save, source)
+            }
+            NumberedLoadWork::ReadingSavedFont {
+                save,
+                source,
+                mut pending,
+            } => {
+                let response = response.ok_or(ProtocolError::State)?;
+                if let IoResponse::Failed {
+                    kind: IoFailure::Cancelled,
+                    message,
+                } = response
+                {
+                    return Ok(self.fail_numbered_load(IoFailure::Cancelled, message));
+                }
+                let scene = self.scene.as_ref().ok_or(ProtocolError::State)?;
+                if let Some(request) = scene.complete_font(&mut pending, response) {
+                    self.numbered_load = Some(NumberedLoadWork::ReadingSavedFont {
+                        save,
+                        source,
+                        pending,
+                    });
+                    return Ok(ScenarioStep::Request(request));
+                }
                 self.restore_numbered_load(*save, source)
             }
             NumberedLoadWork::Initializing { file } => {
@@ -1392,6 +1436,17 @@ impl ScriptIoSession {
             return Err(ProtocolError::State.into());
         };
         let file = file.clone();
+        if let Some(scene) = &self.scene
+            && let Some(snapshot) = &save.message_text
+            && let Some((pending, request)) = scene.prepare_saved_font(snapshot)
+        {
+            self.numbered_load = Some(NumberedLoadWork::ReadingSavedFont {
+                save: Box::new(save),
+                source,
+                pending,
+            });
+            return Ok(ScenarioStep::Request(request));
+        }
         let audio = if let Some(scene) = &self.scene {
             match self.audio.prepare_restore(
                 scene,
@@ -1442,6 +1497,7 @@ impl ScriptIoSession {
         }
         if let Some(scene) = &mut self.scene {
             scene.restore_snapshot(save.scene, self.frame);
+            scene.restore_text(save.message_text);
         }
         self.audio.commit_restore(audio, &mut self.transport)?;
         self.video.reset_playback();

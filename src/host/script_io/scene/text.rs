@@ -1,10 +1,25 @@
 use super::*;
-use crate::text::{GlyphTextRenderer, ScetweenConfig, TextRenderer, message_layer_scene_id};
+use crate::save::MessageTextSnapshot;
+use crate::text::{
+    BacklogTag, FontDesc, GlyphTextRenderer, ScetweenConfig, TextRenderer, capture_message_text,
+    font_fallback_candidates, message_layer_scene_id,
+};
+use std::collections::HashSet;
+
+const DEFAULT_FACE: &str = ":host/default-font";
+const MAX_FONT_FACES: usize = 128;
+
+pub(in crate::host::script_io) struct FontRead {
+    face: String,
+    remaining: VecDeque<String>,
+}
 
 pub(super) struct SceneText {
     pub renderer: GlyphTextRenderer,
     pub atlases: HashMap<String, Arc<FrameTexture>>,
     pub atlas_revision: u64,
+    known_faces: HashSet<String>,
+    font_bytes: usize,
 }
 
 impl Default for SceneText {
@@ -13,6 +28,8 @@ impl Default for SceneText {
             renderer: GlyphTextRenderer::with_atlas_limit(16),
             atlases: HashMap::new(),
             atlas_revision: 0,
+            known_faces: HashSet::new(),
+            font_bytes: 0,
         }
     }
 }
@@ -49,7 +66,7 @@ impl ScriptIoSession {
             .unwrap()
             .text
             .renderer
-            .set_font(bytes)
+            .set_named_font_bytes(DEFAULT_FACE, bytes.to_vec())
             .map_err(|_| ProtocolError::Argument("invalid fallback font"))
     }
 
@@ -68,6 +85,149 @@ impl ScriptIoSession {
 }
 
 impl SceneIo {
+    pub(in crate::host::script_io) fn capture_text(&self) -> Option<MessageTextSnapshot> {
+        capture_message_text(self.scene.lock().unwrap().text.renderer.font_state())
+    }
+
+    pub(in crate::host::script_io) fn prepare_saved_font(
+        &self,
+        snapshot: &MessageTextSnapshot,
+    ) -> Option<(FontRead, IoRequest)> {
+        snapshot
+            .layers
+            .iter()
+            .flat_map(|layer| {
+                std::iter::once(&layer.page_font).chain(layer.tags.iter().filter_map(
+                    |tag| match tag {
+                        BacklogTag::Font(settings) => Some(settings),
+                        _ => None,
+                    },
+                ))
+            })
+            .filter_map(|settings| settings.get("face"))
+            .find_map(|face| self.prepare_font(face))
+    }
+
+    pub(in crate::host::script_io) fn restore_text(&self, snapshot: Option<MessageTextSnapshot>) {
+        let mut scene = self.scene.lock().unwrap();
+        scene.text.renderer.clear_scene_text();
+        scene.text.renderer.font_state_mut().active_layer = None;
+        if let Some(snapshot) = snapshot {
+            for page in snapshot.layers {
+                let overlay = message_layer_scene_id(&page.id, false);
+                let layered = scene.compositor.scene().get(&overlay).is_none()
+                    && scene.compositor.scene().get(&page.id).is_some();
+                scene.apply_text(&Event::MessageLayerSwitch {
+                    id: Some(page.id),
+                    stack: false,
+                    layered: Some(i32::from(layered)),
+                });
+                let layer = scene.text.renderer.font_state_mut().active_layer_mut();
+                layer.font = FontDesc::from_raw(&page.page_font);
+                layer.page_font = page.page_font;
+                layer.text_hidden = false;
+                scene.select_text_face();
+                for tag in page.tags {
+                    match tag {
+                        BacklogTag::Text(content) => scene.text.renderer.push_text(&content, false),
+                        BacklogTag::LineBreak => scene.text.renderer.push_line_break(),
+                        BacklogTag::Font(settings) => {
+                            scene.text.renderer.apply_font_settings(&settings);
+                            scene.select_text_face();
+                        }
+                        BacklogTag::RubyStart(text) => scene.text.renderer.ruby_start(&text),
+                        BacklogTag::RubyEnd => scene.text.renderer.ruby_end(),
+                    }
+                }
+            }
+            scene.text.renderer.font_state_mut().active_layer = snapshot.active_layer;
+            scene.text.renderer.reveal_all();
+        }
+        let active = scene.text.renderer.font_state().active_layer.clone();
+        scene.compositor.set_default_message_layer(active);
+        scene.select_text_face();
+        scene.dirty = true;
+    }
+
+    pub(in crate::host::script_io) fn font_pending(&self) -> bool {
+        self.pending_font.is_some()
+    }
+
+    pub(in crate::host::script_io) fn prepare_event_font(
+        &mut self,
+        event: &Event,
+    ) -> Option<IoRequest> {
+        let (Event::FontSettings(settings) | Event::FontDefault(settings)) = event else {
+            return None;
+        };
+        let (font, request) = self.prepare_font(settings.get("face")?)?;
+        self.pending_font = Some((event.clone(), font));
+        Some(request)
+    }
+
+    fn prepare_font(&self, face: &str) -> Option<(FontRead, IoRequest)> {
+        let key = self.resolve_media_asset(face).ok()?;
+        let scene = self.scene.lock().unwrap();
+        if scene.text.font_bytes >= MAX_TEXTURE_BYTES
+            || scene.text.known_faces.len() >= MAX_FONT_FACES
+            || scene.text.known_faces.contains(&key)
+        {
+            return None;
+        }
+        Some((
+            FontRead {
+                face: key.clone(),
+                remaining: font_fallback_candidates(&key).into(),
+            },
+            IoRequest::Read { path: key },
+        ))
+    }
+
+    pub(in crate::host::script_io) fn complete_event_font(
+        &mut self,
+        response: IoResponse,
+    ) -> Option<IoRequest> {
+        let (event, mut font) = self.pending_font.take().unwrap();
+        if let Some(request) = self.complete_font(&mut font, response) {
+            self.pending_font = Some((event, font));
+            return Some(request);
+        }
+        self.scene.lock().unwrap().apply_text(&event);
+        None
+    }
+
+    pub(in crate::host::script_io) fn complete_font(
+        &self,
+        font: &mut FontRead,
+        response: IoResponse,
+    ) -> Option<IoRequest> {
+        let mut scene = self.scene.lock().unwrap();
+        if matches!(
+            &response,
+            IoResponse::Failed {
+                kind: IoFailure::Cancelled,
+                ..
+            }
+        ) {
+            return None;
+        }
+        if let IoResponse::Read(bytes) = response {
+            let len = bytes.len();
+            if len <= MAX_TEXTURE_BYTES - scene.text.font_bytes
+                && scene.text.renderer.cache_font(&font.face, bytes).is_ok()
+            {
+                scene.text.font_bytes += len;
+                scene.text.known_faces.insert(font.face.clone());
+                return None;
+            }
+        }
+        if let Some(path) = font.remaining.pop_front() {
+            return Some(IoRequest::Read { path });
+        }
+        scene.text.known_faces.insert(font.face.clone());
+        None
+    }
+
     pub(in crate::host::script_io) fn text_revealed(&self) -> bool {
         self.scene
             .lock()
@@ -85,6 +245,15 @@ impl SceneIo {
 }
 
 impl SceneProjection {
+    fn select_text_face(&mut self) {
+        let key = self.text.renderer.active_font_face().and_then(|face| {
+            logical_key(&crate::magic_path::resolve_path(&self.magic_paths, face)).ok()
+        });
+        if !key.is_some_and(|key| self.text.renderer.select_cached_font(&key)) {
+            self.text.renderer.select_cached_font(DEFAULT_FACE);
+        }
+    }
+
     fn apply_text(&mut self, event: &Event) -> bool {
         let renderer = &mut self.text.renderer;
         let old_layer = renderer.font_state().active_layer.clone();
@@ -187,6 +356,17 @@ impl SceneProjection {
                 }
             }
             self.compositor.set_default_message_layer(active.cloned());
+        }
+        if matches!(
+            event,
+            Event::FontSettings(_)
+                | Event::FontDefault(_)
+                | Event::FontInit
+                | Event::FontClose
+                | Event::MessageLayerSwitch { .. }
+                | Event::MessageLayerPop
+        ) {
+            self.select_text_face();
         }
         self.dirty = true;
         true
