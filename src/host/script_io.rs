@@ -2,6 +2,7 @@
 //! storage; this driver never installs a physical file loader or renderer.
 
 mod lifecycle;
+mod scene;
 mod ui;
 mod wait;
 

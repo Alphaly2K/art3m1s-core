@@ -183,7 +183,7 @@ pub fn open_project(
         if session.shutdown.is_closing_or_closed() {
             return Err(ProtocolError::State.into());
         }
-        Ok(session.open_project(ini, platform, reported_os)?)
+        Ok(session.open_queued_project(ini, platform, reported_os)?)
     })
 }
 

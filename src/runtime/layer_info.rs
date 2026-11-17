@@ -96,7 +96,7 @@ impl LayerQueryState {
                     .or_insert_with(|| dimensions(file));
                 size.map(|(width, height)| TextureInfo { width, height })
             });
-        Some(super::events::layer_info_entry(
+        Some(crate::compositor::query::layer_info_entry(
             layer,
             self.scene.clock_ms(),
             texture_info,

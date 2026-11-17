@@ -22,6 +22,7 @@ pub(crate) mod lyedit;
 #[cfg(test)]
 pub mod mock;
 pub mod props;
+pub(crate) mod query;
 pub mod reduce;
 pub mod scene;
 

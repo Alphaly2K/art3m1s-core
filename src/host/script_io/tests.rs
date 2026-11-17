@@ -1420,6 +1420,53 @@ fn timed_wait_uses_elapsed_monotonic_time_and_starts_in_its_own_frame() {
 }
 
 #[test]
+fn project_applies_compound_layer_events_before_asb_and_lua_queries() {
+    let mut session = session(1, TransportLimits::default(), 4096);
+    let mut host = MemoryHost::default();
+    host.asset("boot.iet", br#"*top
+[lyc id=1.80 width=23 height=45 color=112233]
+[lyprop id=1.80 left=15]
+[var system=get_layer_info id=1.80 name=t.info]
+[lyrename id=1.80 to=1.90]
+[calllua function=check_renamed]
+[lydel id=1.90]
+[calllua function=check_deleted]
+[caption data=done]
+[lua]
+local e=__engine
+function check_renamed()
+  assert(e:var('t.info.width')=='23' and e:var('t.info.height')=='45' and e:var('t.info.left')=='15')
+  e:tag{'var', system='get_layer_info', name='t.layers'}
+  assert(e:var('t.layers.1.id')=='1.90' and e:var('t.layers.1.width')=='23')
+end
+function check_deleted()
+  e:tag{'var', system='get_layer_info', name='t.remaining'}
+  assert(e:var('t.remaining.size')=='1')
+end
+[/lua]
+"#);
+    session
+        .open_queued_project(
+            b"[WINDOWS]\nWIDTH=640\nHEIGHT=480\nBOOT=boot.iet\n",
+            "windows",
+            None,
+        )
+        .unwrap();
+    for _ in 0..1024 {
+        if session.step().unwrap() == ScriptIoProgress::Event {
+            assert!(
+                matches!(session.pending_event(), Some(Event::Caption { data }) if data == "done")
+            );
+            return;
+        }
+        for request in requests(&mut session) {
+            session.submit_replies(&[host.complete(&request)]).unwrap();
+        }
+    }
+    panic!("scenario did not reach its final caption");
+}
+
+#[test]
 fn host_calendar_and_monotonic_clocks_remain_distinct_across_io_suspension() {
     let mut session = session(1, TransportLimits::default(), 1024);
     session
