@@ -2195,6 +2195,112 @@ fn numbered_save_restores_scene_assets_and_tween_clock_in_a_fresh_runtime() {
 }
 
 #[test]
+fn animation_frames_use_preloaded_images_and_masks_at_their_host_times() {
+    use crate::host::runtime;
+
+    let mut host = MemoryHost::default();
+    let first_pixels = [200, 0, 0, 255];
+    let second_pixels = [0, 200, 0, 255];
+    let mask_pixels = [96, 96, 96, 255];
+    host.asset("first.png", &png_bytes(1, 1, &first_pixels));
+    host.asset("second.png", &png_bytes(1, 1, &second_pixels));
+    host.asset("mask.png", &png_bytes(1, 1, &mask_pixels));
+    host.asset(
+        "boot.iet",
+        br#"*top
+[anime id=1.80 mode=init file=first time=0 loop=0]
+[anime id=1.80 mode=add file=second mask=mask time=6 left=5]
+[anime id=1.80 mode=end time=12]
+[stop]
+"#,
+    );
+    let handle = runtime::create(0, TransportLimits::default(), 4096).unwrap();
+    runtime::open_project(
+        handle,
+        b"[WINDOWS]\nWIDTH=320\nHEIGHT=200\nBOOT=boot.iet\n",
+        "windows",
+        None,
+    )
+    .unwrap();
+    let mut frame = HostFrame {
+        id: 1,
+        monotonic_ns: 0,
+        utc_unix_ms: 0,
+        utc_offset_minutes: 0,
+    };
+    let mut bytes = [0; 4096];
+    let mut assets = Vec::new();
+    for _ in 0..512 {
+        let progress = runtime::step(handle, frame).unwrap();
+        let polled = runtime::poll_events(handle, &mut bytes).unwrap();
+        if progress == ScriptIoProgress::Event {
+            break;
+        }
+        assert_eq!(progress, ScriptIoProgress::Waiting);
+        for request in decode_requests(&bytes[..polled.written_bytes]) {
+            if request.identity.service == IO_STAT
+                && let Some(key) = request.metadata["key"]
+                    .as_str()
+                    .filter(|key| key.ends_with(".png"))
+            {
+                assets.push(key.to_owned());
+            }
+            runtime::submit_replies(handle, &[host.complete(&request)]).unwrap();
+        }
+    }
+    assert_eq!(assets, ["first.png", "second.png", "mask.png"]);
+    let first = runtime::acquire_latest(handle, 0).unwrap().unwrap();
+    assert_eq!(
+        first.texture(first.sprites[0].texture).unwrap().rgba(),
+        first_pixels
+    );
+    assert_eq!(first.sprites[0].mask, None);
+    let after = first.render_frame_id;
+    drop(first);
+    frame.id = 2;
+    frame.monotonic_ns = 5_000_000;
+    assert_eq!(
+        runtime::step(handle, frame).unwrap(),
+        ScriptIoProgress::Event
+    );
+    assert!(runtime::acquire_latest(handle, after).unwrap().is_none());
+    frame.id = 3;
+    frame.monotonic_ns = 6_000_000;
+    assert_eq!(
+        runtime::step(handle, frame).unwrap(),
+        ScriptIoProgress::Event
+    );
+    let second = runtime::acquire_latest(handle, after).unwrap().unwrap();
+    let sprite = &second.sprites[0];
+    assert_eq!(sprite.transform[4], 5.0);
+    assert_eq!(
+        second.texture(sprite.texture).unwrap().rgba(),
+        second_pixels
+    );
+    assert_eq!(
+        second.texture(sprite.mask.unwrap()).unwrap().rgba(),
+        mask_pixels
+    );
+    frame.id = 4;
+    frame.monotonic_ns = 12_000_000;
+    assert_eq!(
+        runtime::step(handle, frame).unwrap(),
+        ScriptIoProgress::Event
+    );
+    assert!(
+        runtime::acquire_latest(handle, second.render_frame_id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        runtime::poll_events(handle, &mut bytes).unwrap().status,
+        PollStatus::NoData
+    );
+    drop(second);
+    runtime::destroy(handle).unwrap();
+}
+
+#[test]
 fn host_calendar_and_monotonic_clocks_remain_distinct_across_io_suspension() {
     let mut session = session(1, TransportLimits::default(), 1024);
     session

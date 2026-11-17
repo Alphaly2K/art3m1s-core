@@ -33,9 +33,12 @@ impl ScriptIoSession {
         });
         self.interpreter.set_engine_callbacks(Box::new(scene));
         self.interpreter.set_callback(move |event| match event {
-            Event::Layer(_) | Event::LayerRename { .. } | Event::LayerTweenDelete { .. } => {
+            Event::Layer(_)
+            | Event::LayerRename { .. }
+            | Event::LayerTweenDelete { .. }
+            | Event::Anime { .. } => {
                 let mut scene = reduced_scene.lock().unwrap();
-                if scene.missing_asset(&event).is_some() {
+                if scene.missing_assets(&event).next().is_some() {
                     return CallbackResult::Pause;
                 }
                 scene.apply(&event);
@@ -150,10 +153,10 @@ impl SceneProjection {
         self.dirty = true;
     }
 
-    fn missing_asset<'a>(&self, event: &'a Event) -> Option<&'a str> {
-        let file = match event {
+    fn missing_assets<'a>(&'a self, event: &'a Event) -> impl Iterator<Item = &'a str> {
+        let files = match event {
             Event::Layer(LayerEvent::Create { file, .. } | LayerEvent::Create2 { file, .. }) => {
-                file
+                [Some(file.as_str()), None]
             }
             Event::Layer(LayerEvent::SetProperties { id, properties }) => {
                 let shader = properties
@@ -161,13 +164,24 @@ impl SceneProjection {
                     .map(String::as_str)
                     .or_else(|| self.compositor.scene().get(id)?.props.shader.as_deref());
                 if shader.is_some_and(|shader| !shader.is_empty()) {
-                    return None;
+                    [None, None]
+                } else {
+                    [properties.get("mask").map(String::as_str), None]
                 }
-                properties.get("mask")?
             }
-            _ => return None,
+            Event::Anime {
+                mode, file, mask, ..
+            } if matches!(mode.as_str(), "init" | "add") => [
+                file.as_deref(),
+                mask.as_deref()
+                    .filter(|mask| Some(*mask) != file.as_deref()),
+            ],
+            _ => [None, None],
         };
-        (!file.is_empty() && !self.textures.contains_key(file)).then_some(file)
+        files
+            .into_iter()
+            .flatten()
+            .filter(|file| !file.is_empty() && !self.textures.contains_key(*file))
     }
 
     fn layer_info(&self, layer: &crate::compositor::Layer) -> HashMap<String, String> {
@@ -200,6 +214,7 @@ pub(super) struct SceneIo {
 struct PendingAsset {
     event: Event,
     read: TextureRead,
+    remaining: Option<String>,
 }
 
 pub(super) struct TextureRead {
@@ -300,18 +315,33 @@ impl SceneIo {
 
     pub(super) fn prepare_asset(&mut self, event: &Event) -> Option<IoRequest> {
         let scene = self.scene.lock().unwrap();
-        let file = scene.missing_asset(event)?;
+        let mut files = scene.missing_assets(event);
+        let file = files.next()?;
         let (read, request) = TextureRead::start(file.to_owned());
         self.pending = Some(PendingAsset {
             event: event.clone(),
             read,
+            remaining: files.next().map(str::to_owned),
         });
         Some(request)
     }
 
     pub(super) fn complete_asset(&mut self, response: IoResponse) -> Option<IoRequest> {
         let mut pending = self.pending.take().unwrap();
+        let cancelled = matches!(
+            &response,
+            IoResponse::Failed {
+                kind: IoFailure::Cancelled,
+                ..
+            }
+        );
         if let Some(request) = self.complete_texture(&mut pending.read, response) {
+            self.pending = Some(pending);
+            return Some(request);
+        }
+        if !cancelled && let Some(file) = pending.remaining.take() {
+            let (read, request) = TextureRead::start(file);
+            pending.read = read;
             self.pending = Some(pending);
             return Some(request);
         }

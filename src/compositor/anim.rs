@@ -733,7 +733,7 @@ pub(crate) fn update_anime_frames(
             } else {
                 state.loop_count as u64
             };
-            let max_elapsed = state.total_duration_ms * rounds;
+            let max_elapsed = state.total_duration_ms.saturating_mul(rounds);
             if elapsed >= max_elapsed {
                 finished.push(layer_id.clone());
                 state.total_duration_ms - 1
