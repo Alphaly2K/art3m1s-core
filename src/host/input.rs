@@ -1,7 +1,20 @@
 //! Device input normalized by the Host to Artemis keys and stage coordinates.
 
 use super::protocol::ProtocolError;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+
+pub(crate) fn parse_keyconfig(params: &HashMap<String, String>) -> Option<(i32, Vec<u32>)> {
+    let role = params.get("role")?.trim().parse::<i32>().ok()?;
+    let keys = params
+        .get("keys")
+        .map(|raw| {
+            raw.split(|c: char| c == ',' || c.is_whitespace())
+                .filter_map(|key| key.parse::<u32>().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    Some((role, keys))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostInput {
@@ -145,13 +158,14 @@ impl InputFrame {
     }
 
     pub fn has_press(&self) -> bool {
-        self.keys.keys().any(|&code| self.unclaimed_press(code))
+        self.pressed_keys().next().is_some()
     }
 
-    pub fn wants_advance(&self) -> bool {
-        [1, 13, 137]
-            .into_iter()
-            .any(|code| self.unclaimed_press(code))
+    pub fn pressed_keys(&self) -> impl Iterator<Item = u32> + '_ {
+        self.keys
+            .keys()
+            .copied()
+            .filter(|&code| self.unclaimed_press(code))
     }
 
     pub fn unclaimed_press(&self, code: u32) -> bool {

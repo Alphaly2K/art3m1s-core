@@ -1,6 +1,7 @@
 use super::CoreRuntime;
 use super::callbacks::{OVERRIDE_IS_DECIDE, OVERRIDE_IS_DOWN_EDGE};
 use super::input::enqueue_handler_tags;
+use crate::host::input::parse_keyconfig;
 use crate::save::read_history::ReadHistory;
 use asb_interpreter::Value;
 use std::collections::{HashMap, HashSet};
@@ -917,20 +918,6 @@ fn role_triggered_by_bits(role: i32, bits: u32) -> bool {
 }
 
 /// 解析 [keyconfig] 的原始参数：role=角色编号、keys=键 ID 数组（逗号/空格分隔）。
-fn parse_keyconfig(params: &HashMap<String, String>) -> Option<(i32, Vec<u32>)> {
-    let role = params.get("role")?.trim().parse::<i32>().ok()?;
-    let keys: Vec<u32> = params
-        .get("keys")
-        .map(|raw| {
-            raw.split(|c: char| c == ',' || c.is_whitespace())
-                .filter(|s| !s.is_empty())
-                .filter_map(|s| s.trim().parse::<u32>().ok())
-                .collect()
-        })
-        .unwrap_or_default();
-    Some((role, keys))
-}
-
 /// exec 命令到全局输入处理链的映射：`(事件名, key)`。
 ///
 /// - backlog：触发 `setonbacklogin` 的处理器；

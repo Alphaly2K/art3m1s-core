@@ -1472,7 +1472,7 @@ function tick(e)
     assert(e:isDownEdge(13) and e:getTouchPoint()[9].x==20)
   elseif ticks==3 then
     assert(e:isDown(13) and e:isPush(13) and not e:isDownEdge(13))
-    assert(e:isDownEdge(65) and e:getTouchPoint()[9].x==30)
+    assert(e:isDownEdge(67) and e:getTouchPoint()[9].x==30)
   elseif ticks==4 then
     assert(e:isDownEdge(13) and e:isUpEdge(13))
     assert(e:getTouchCount()==0 and e:isDown(13))
@@ -1556,7 +1556,7 @@ __engine:setEventHandler{onEnterFrame='tick'}
     assert_eq!(step(second), ScriptIoProgress::Waiting);
     let request = decode_requests(&poll()).pop().unwrap();
     assert_eq!(request.metadata["key"], "pause");
-    submit(&[touch(TouchPhase::Move, 30), key(65, true)]).unwrap();
+    submit(&[touch(TouchPhase::Move, 30), key(67, true)]).unwrap();
     assert_eq!(step(third), ScriptIoProgress::WouldBlock);
     assert_eq!(runtime::get_state(handle).unwrap().host_frame_id, Some(2));
     runtime::submit_replies(handle, &[host.complete(&request)]).unwrap();
@@ -1587,6 +1587,163 @@ __engine:setEventHandler{onEnterFrame='tick'}
         )))
     ));
     runtime::destroy(handle).unwrap();
+}
+
+#[test]
+fn skip_respects_timers_unread_text_and_a_rebound_advance_key() {
+    let (mut session, epoch, mut host) = playback_project(
+        br#"*top
+[keyconfig role=0 keys=70]
+[exec command=skip mode=1]
+[wait time=10 input=0]
+A
+[wt0]
+[calllua function=mark]
+[wt0]
+[calllua function=mark]
+[stop]
+[lua]
+function mark() marks=(marks or 0)+1 end
+[/lua]
+"#,
+    );
+    drive_playback_boot(&mut session, &mut host);
+    let globals = session.interpreter().lua().globals();
+    let marks = || globals.get::<Option<u32>>("marks").unwrap().unwrap_or(0);
+    let mut step = |id, ms, keys: &[(u32, bool)]| {
+        submit_playback_keys(&mut session, epoch, keys);
+        assert_eq!(
+            session.step_queued_frame(playback_frame(id, ms)).unwrap(),
+            ScriptIoProgress::Event
+        );
+    };
+    step(2, 9, &[]);
+    assert_eq!(marks(), 0);
+    step(3, 10, &[]);
+    step(4, 11, &[(13, true)]);
+    assert_eq!(marks(), 0);
+    step(5, 12, &[(17, true)]);
+    step(5, 12, &[]);
+    assert_eq!(marks(), 1);
+    step(6, 13, &[(17, false)]);
+    assert_eq!(marks(), 1);
+    step(7, 14, &[(70, true)]);
+    assert_eq!(marks(), 2);
+}
+
+#[test]
+fn autoplay_waits_for_text_voice_and_delay_and_consumes_the_exit_click() {
+    use crate::host::media::PlaybackStatus;
+
+    let (mut session, epoch, mut host) = playback_project(
+        br#"*top
+[exec command=automode mode=1]
+[chgmsg id=message layered=1]
+[scetween type=in delay=100 param=alpha diff=-255]
+[voice id=line file=voice.ogg]
+AA
+[@]
+[calllua function=mark]
+[wt0]
+[calllua function=mark]
+[stop]
+[lua]
+function mark() marks=(marks or 0)+1 end
+[/lua]
+"#,
+    );
+    session.set_default_font(epoch, &test_font()).unwrap();
+    drive_playback_boot(&mut session, &mut host);
+    session
+        .interpreter
+        .set_variable("s.automodewait", asb_interpreter::Value::Int(10));
+    let globals = session.interpreter().lua().globals();
+    let marks = || globals.get::<Option<u32>>("marks").unwrap().unwrap_or(0);
+    let mut bytes = [0; 4096];
+    let polled = session.poll_events(&mut bytes);
+    let mut records = &bytes[..polled.written_bytes];
+    let voice = loop {
+        let len = u32::from_le_bytes(records[0..4].try_into().unwrap()) as usize;
+        if u16::from_le_bytes(records[6..8].try_into().unwrap()) == Domain::Media as u16 {
+            let body = serde_json::from_slice::<Value>(&records[64..len]).unwrap();
+            break body["playback_id"].as_str().unwrap().parse().unwrap();
+        }
+        records = &records[len..];
+    };
+    let step = |session: &mut ScriptIoSession, id, ms| {
+        assert_eq!(
+            session.step_queued_frame(playback_frame(id, ms)).unwrap(),
+            ScriptIoProgress::Event
+        );
+    };
+    assert!(!session.scene.as_ref().unwrap().text_revealed());
+    step(&mut session, 2, 250);
+    assert!(session.scene.as_ref().unwrap().text_revealed());
+    assert_eq!(marks(), 0);
+    session
+        .submit_playback_status(epoch, voice, PlaybackStatus::Ended)
+        .unwrap();
+    step(&mut session, 3, 251);
+    step(&mut session, 4, 260);
+    assert_eq!(marks(), 0);
+    step(&mut session, 5, 261);
+    assert_eq!(marks(), 1);
+
+    submit_playback_keys(&mut session, epoch, &[(1, true)]);
+    step(&mut session, 6, 262);
+    step(&mut session, 6, 262);
+    step(&mut session, 7, 300);
+    assert_eq!(marks(), 1);
+    submit_playback_keys(&mut session, epoch, &[(1, false), (1, true)]);
+    step(&mut session, 8, 301);
+    assert_eq!(marks(), 2);
+}
+
+fn playback_project(source: &[u8]) -> (ScriptIoSession, u64, MemoryHost) {
+    let mut session = session(1, TransportLimits::default(), 4096);
+    let epoch = session
+        .open_queued_project(
+            b"[WINDOWS]\nWIDTH=320\nHEIGHT=200\nBOOT=boot.iet\n",
+            "windows",
+            None,
+        )
+        .unwrap();
+    let mut host = MemoryHost::default();
+    host.asset("boot.iet", source);
+    (session, epoch, host)
+}
+
+fn playback_frame(id: u64, ms: u64) -> HostFrame {
+    HostFrame {
+        id,
+        monotonic_ns: ms * 1_000_000,
+        utc_unix_ms: 0,
+        utc_offset_minutes: 0,
+    }
+}
+
+fn submit_playback_keys(session: &mut ScriptIoSession, epoch: u64, keys: &[(u32, bool)]) {
+    use crate::host::input::HostInput;
+    let events: Vec<_> = keys
+        .iter()
+        .map(|&(code, down)| HostInput::Key { code, down })
+        .collect();
+    session.submit_input(epoch, &events).unwrap();
+}
+
+fn drive_playback_boot(session: &mut ScriptIoSession, host: &mut MemoryHost) {
+    for _ in 0..1024 {
+        match session.step_queued_frame(playback_frame(1, 0)).unwrap() {
+            ScriptIoProgress::Event => return,
+            ScriptIoProgress::Waiting => {
+                for request in requests(session) {
+                    session.submit_replies(&[host.complete(&request)]).unwrap();
+                }
+            }
+            progress => panic!("unexpected project progress {progress:?}"),
+        }
+    }
+    panic!("project did not reach its first wait");
 }
 
 #[test]

@@ -61,6 +61,9 @@ impl ScriptIoSession {
     ) -> Result<ScriptIoProgress, ScriptIoError> {
         let mut progress = self.step_frame(frame)?;
         loop {
+            if progress == ScriptIoProgress::Event {
+                self.stop_auto_at_stop();
+            }
             let dispatched = match progress {
                 ScriptIoProgress::Event if matches!(self.scenario_event, Some(Event::Exit)) => {
                     self.notify_exit().map(Some)
@@ -91,7 +94,11 @@ impl ScriptIoSession {
                     self.start_persistence().map(|()| None)
                 }
                 ScriptIoProgress::Event => self.dispatch_audio_event().and_then(|handled| {
-                    if handled || self.dispatch_video_event()? || self.dispatch_text_event()? {
+                    if handled
+                        || self.dispatch_video_event()?
+                        || self.dispatch_control_event()?
+                        || self.dispatch_text_event()?
+                    {
                         Ok(None)
                     } else {
                         self.dispatch_ui_event()

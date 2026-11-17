@@ -316,6 +316,15 @@ impl TextureRead {
 }
 
 impl SceneIo {
+    pub(super) fn set_control_layer_visible(&self, id: &str, visible: bool) {
+        let mut scene = self.scene.lock().unwrap();
+        scene.apply(&Event::Layer(LayerEvent::SetProperty {
+            id: id.to_owned(),
+            property: "visible".into(),
+            value: if visible { "1" } else { "0" }.into(),
+        }));
+    }
+
     pub(super) fn invalidate_texture(&self, key: &str) {
         let mut scene = self.scene.lock().unwrap();
         for key in [Some(key), key.strip_suffix(".png")].into_iter().flatten() {

@@ -2,6 +2,7 @@
 //! storage; this driver never installs a physical file loader or renderer.
 
 mod audio;
+mod control;
 mod lifecycle;
 mod persistence;
 mod scene;
@@ -260,6 +261,7 @@ pub struct ScriptIoSession {
     dialog_request: Option<RequestIdentity>,
     pub(super) shutdown: Shutdown,
     audio: audio::Audio,
+    control: control::PlaybackControl,
     video: video::Video,
     pub(super) transitions_enabled: bool,
     transition: Option<transition::Transition>,
@@ -315,6 +317,7 @@ impl ScriptIoSession {
             dialog_request: None,
             shutdown: Shutdown::default(),
             audio: Default::default(),
+            control: Default::default(),
             video: Default::default(),
             transitions_enabled: true,
             transition: None,
@@ -432,6 +435,7 @@ impl ScriptIoSession {
         self.dialog_request = None;
         self.shutdown = Shutdown::default();
         self.audio = Default::default();
+        self.control = Default::default();
         self.video = Default::default();
         self.transition = None;
         self.screenshot = Default::default();
@@ -539,6 +543,7 @@ impl ScriptIoSession {
         self.dialog_request = None;
         self.shutdown = Shutdown::default();
         self.audio = Default::default();
+        self.control = Default::default();
         self.video = Default::default();
         self.transition = None;
         self.screenshot = Default::default();
@@ -675,6 +680,7 @@ impl ScriptIoSession {
         self.save_work = None;
         self.numbered_load = None;
         self.wait_start = None;
+        self.control.reset_wait();
         self.interpreter.advance_line();
         Ok(())
     }
@@ -1012,6 +1018,9 @@ impl ScriptIoSession {
             Some(EventFilterWork::Running(_)) => unreachable!(),
             None => {}
         }
+        if let Some(frame) = self.frame {
+            self.update_control_input(frame);
+        }
         self.dispatch_scene_handlers()?;
         if self.completed {
             return Ok(ScenarioStep::Progress(ScriptIoProgress::Completed));
@@ -1082,6 +1091,9 @@ impl ScriptIoSession {
         if let Some((script, line)) = source {
             let new = self.read_history.insert(&script, line);
             self.read_history_dirty |= new;
+            if new {
+                self.stop_skip_at_unread_text();
+            }
             self.interpreter.set_variable(
                 "s.status.alreadyread",
                 asb_interpreter::Value::Int(i64::from(!new)),
@@ -1574,6 +1586,7 @@ impl ScriptIoSession {
             scene.restore_text(save.message_text);
         }
         self.audio.commit_restore(audio, &mut self.transport)?;
+        self.clear_control_modes();
         self.video.reset_playback();
         self.transition = None;
         self.screenshot = Default::default();

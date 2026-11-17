@@ -81,12 +81,15 @@ impl ScriptIoSession {
         frame: HostFrame,
     ) -> Result<Option<ScriptIoProgress>, ProtocolError> {
         if let Some(transition) = &self.transition {
+            let advance = self.scene.as_ref().is_some_and(|scene| {
+                scene.with_input(|input| self.control.wants_advance(input, frame))
+            });
             let skip = frame.id != transition.started.id
-                && !matches!(transition.input, 0 | 2)
-                && self
-                    .scene
-                    .as_ref()
-                    .is_some_and(|scene| scene.with_input(|input| input.wants_advance()));
+                && match transition.input {
+                    0 => false,
+                    2 => self.control.skipping(),
+                    _ => self.control.skipping() || advance,
+                };
             if !skip
                 && frame.monotonic_ns - transition.started.monotonic_ns < transition.duration_ns
             {

@@ -207,6 +207,17 @@ impl Audio {
         })
     }
 
+    pub(super) fn auto_ready(&self, sync: &[String], frame: HostFrame) -> bool {
+        if sync.is_empty() {
+            !self
+                .active
+                .keys()
+                .any(|channel| matches!(channel, Channel::Voice(_)))
+        } else {
+            sync.iter().all(|id| self.wait_finished(id, None, frame))
+        }
+    }
+
     pub(super) fn stop_for_shutdown(
         &mut self,
         transport: &mut SessionTransport,
