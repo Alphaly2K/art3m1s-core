@@ -11,6 +11,7 @@ pub enum IoRequest {
     Exists { path: String },
     ModifiedTime { path: String },
     Write { path: String, data: Vec<u8> },
+    DeleteSave { path: String },
 }
 
 impl UserData for IoRequest {}
@@ -44,6 +45,7 @@ pub enum IoResponse {
     Exists(bool),
     ModifiedTime(Option<i64>),
     Written,
+    Deleted,
     Failed { kind: IoFailure, message: String },
 }
 
@@ -167,7 +169,8 @@ impl IoTask {
                             },
                         ])
                     }
-                    (IoRequest::Write { .. }, IoResponse::Written) => {
+                    (IoRequest::Write { .. }, IoResponse::Written)
+                    | (IoRequest::DeleteSave { .. }, IoResponse::Deleted) => {
                         MultiValue::from_vec(vec![Value::Boolean(true), Value::Boolean(true)])
                     }
                     _ => {
@@ -314,6 +317,22 @@ pub fn install(interpreter: &Interpreter) -> Result<()> {
         lua.create_function(|_, path: String| Ok(IoRequest::Exists { path }))?,
     )?;
     helpers.set(
+        "delete_save",
+        lua.create_function(|_, path: String| Ok(IoRequest::DeleteSave { path }))?,
+    )?;
+    let delete_context = interpreter.engine_context().clone();
+    helpers.set(
+        "warn_delete",
+        lua.create_function(move |_, (path, error): (String, String)| {
+            delete_context.lock().unwrap().callbacks.debug(
+                0,
+                &format!("save delete failed for {path}: {error}"),
+                false,
+            );
+            Ok(())
+        })?,
+    )?;
+    helpers.set(
         "write",
         lua.create_function(|_, (path, data): (String, mlua::String)| {
             Ok(IoRequest::Write {
@@ -384,6 +403,10 @@ pub fn install(interpreter: &Interpreter) -> Result<()> {
         "__art3m1s_io_file_query",
         functions.get::<mlua::Function>("file_query")?,
     )?;
+    lua.set_named_registry_value(
+        "__art3m1s_io_delete_save",
+        functions.get::<mlua::Function>("delete_save")?,
+    )?;
     let flush: mlua::Function = functions.get("flush")?;
     let close: mlua::Function = functions.get("close")?;
     file_methods.set("flush", flush)?;
@@ -392,6 +415,15 @@ pub fn install(interpreter: &Interpreter) -> Result<()> {
         .set("io", functions.get::<mlua::Table>("io")?)?;
     lua.set_named_registry_value("__art3m1s_io_continuation", true)?;
     Ok(())
+}
+
+pub(crate) fn delete_save_task(lua: &Lua, path: &str) -> Result<IoTask> {
+    let function = lua.named_registry_value("__art3m1s_io_delete_save")?;
+    let args = MultiValue::from_vec(vec![
+        Value::String(lua.create_string(path)?),
+        Value::Boolean(true),
+    ]);
+    IoTask::from_function(lua, function, args)
 }
 
 pub fn file_query_task(

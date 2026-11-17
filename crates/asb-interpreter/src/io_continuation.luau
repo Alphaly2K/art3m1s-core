@@ -8,6 +8,14 @@ end
 local function write(path, data)
     return yield(h.write(path, data))
 end
+local function delete_save(path, log_failure)
+    if type(path) ~= 'string' or path == '' then return nil, 'missing delete target', 'denied' end
+    local ok, message, kind = yield(h.delete_save(path))
+    if not ok then
+        if log_failure then h.warn_delete(path, message) end
+        return nil, message, kind
+    end
+end
 local function flush(file)
     local path, data = h.snapshot(file)
     if path then
@@ -100,7 +108,7 @@ local function file_query(self, params, resolved)
 end
 return {
     io = io, flush = flush, close = close,
-    file_query = file_query,
+    file_query = file_query, delete_save = delete_save,
     tag = function(self, params, ...)
         if type(params) == "table" and params[1] == "var" then
             local s = params.system
@@ -111,6 +119,9 @@ return {
         return h.tag(self, params, ...)
     end,
     file = function(self, path)
+        if type(path) == 'table' and path.command == 'delete' then
+            return delete_save(path.target)
+        end
         if type(path) ~= "string" then error("resumable e:file requires a path", 2) end
         local data = read(path)
         return data

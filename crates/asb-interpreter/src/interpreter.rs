@@ -2109,6 +2109,26 @@ impl Interpreter {
             }
         }
 
+        if self.resumable_io
+            && instruction.tag == "file"
+            && instruction.get("command") == Some("delete")
+        {
+            let path = {
+                let variables = self.variables.lock().unwrap();
+                ExpressionEvaluator::new(&variables)
+                    .resolve_param_str(instruction.get("target").unwrap_or_default())?
+            };
+            if path.is_empty() {
+                return Ok(TagResult::Continue);
+            }
+            let mut task = crate::io_continuation::delete_save_task(&self.lua, &path)?;
+            if task.step(None)? == crate::io_continuation::IoProgress::Waiting {
+                self.io_task = Some(task);
+                return Ok(TagResult::HostIoPending);
+            }
+            return Ok(TagResult::Continue);
+        }
+
         // calllua 会同步执行 Lua 函数，而该函数可能回调 e:var（再次锁 variables）。
         // 若在持有 variables 锁期间执行它会自锁死，故像 __lua_block 一样特判：
         // 不持 variables 锁、直接调用。CallLuaHandler 本身也未使用 ctx.variables。

@@ -24,6 +24,10 @@ pub const IO_WRITE_ATOMIC: MessageKind = MessageKind {
     domain: Domain::Io,
     kind: 4,
 };
+pub const IO_DELETE: MessageKind = MessageKind {
+    domain: Domain::Io,
+    kind: 5,
+};
 
 #[derive(Debug)]
 pub enum ScriptIoError {
@@ -111,6 +115,9 @@ enum Operation {
         key: String,
         data: Vec<u8>,
     },
+    Delete {
+        key: String,
+    },
 }
 
 enum StatPurpose {
@@ -128,6 +135,7 @@ enum Completion {
     },
     Read,
     Written,
+    Deleted,
     Failed(IoFailure, String),
 }
 
@@ -661,7 +669,8 @@ impl ScriptIoSession {
             IoRequest::Read { path }
             | IoRequest::Exists { path }
             | IoRequest::ModifiedTime { path }
-            | IoRequest::Write { path, .. } => path,
+            | IoRequest::Write { path, .. }
+            | IoRequest::DeleteSave { path } => path,
         };
         let normalized = logical_key(path)?;
         let (namespace, key) = match normalized.strip_prefix(&format!("{}/", self.save_prefix)) {
@@ -690,6 +699,7 @@ impl ScriptIoSession {
             IoRequest::Write { .. } => Err(ProtocolError::Argument(
                 "writes require the logical save prefix",
             )),
+            IoRequest::DeleteSave { .. } => Ok(Operation::Delete { key }),
         }
     }
 
@@ -701,6 +711,8 @@ impl ScriptIoSession {
                     "offset":data.len().to_string(),"length":(size-data.len()).min(self.limits().blob_bytes).to_string()}).to_string(), vec![]),
             Operation::Write { key, data } => (IO_WRITE_ATOMIC,
                 json!({"namespace":"save","key":key}).to_string(), data.clone()),
+            Operation::Delete { key } => (IO_DELETE,
+                json!({"namespace":"save","key":key}).to_string(), vec![]),
         }
     }
 
@@ -781,6 +793,12 @@ impl ScriptIoSession {
                 }
                 Ok(Completion::Written)
             }
+            Operation::Delete { .. } => {
+                if !reply.body.blob().is_empty() {
+                    return Err(invalid_reply());
+                }
+                Ok(Completion::Deleted)
+            }
         }
     }
 
@@ -858,6 +876,7 @@ impl ScriptIoSession {
                 Ok(None)
             }
             (Operation::Write { .. }, Completion::Written) => Ok(Some(IoResponse::Written)),
+            (Operation::Delete { .. }, Completion::Deleted) => Ok(Some(IoResponse::Deleted)),
             _ => Err(invalid_reply()),
         }
     }

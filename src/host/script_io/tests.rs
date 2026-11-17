@@ -121,6 +121,15 @@ impl MemoryHost {
                     .insert(file_key, (revision, request.blob.clone()));
                 reply(request, json!({"status":"ok"}), vec![])
             }
+            IO_DELETE => {
+                assert_eq!(file_key.0, "save");
+                let status = if self.files.remove(&file_key).is_some() {
+                    "ok"
+                } else {
+                    "not_found"
+                };
+                reply(request, json!({"status":status}), vec![])
+            }
             _ => panic!("unexpected service"),
         }
     }
@@ -147,6 +156,81 @@ impl MemoryHost {
         }
         panic!("IO script did not finish");
     }
+}
+
+#[test]
+fn save_deletion_waits_for_confirmation_and_keeps_assets_separate() {
+    let mut session = session(1, TransportLimits::default(), 1024);
+    session
+        .open_scenario(
+            br#"
+*main
+[var name=t.target data=first]
+[file command=delete target=$t.target]
+[calllua function=remove]
+[caption data=after]
+[lua]
+function remove(e)
+    attempts=(attempts or 0)+1
+    local _,message,kind=e:file{command='delete',target='save/SECOND'}
+    assert(message=='read only' and kind=='denied')
+    local _,message,kind=e:file{command='delete',target='../outside'}
+    assert(type(message)=='string' and kind=='denied')
+    local _,message,kind=e:file{command='delete',target='save/SECOND'}
+    assert(message==nil and kind==nil)
+end
+[/lua]
+"#,
+            "delete",
+            "main",
+        )
+        .unwrap();
+    let mut host = MemoryHost::default();
+    host.asset("first", b"asset");
+    for key in ["first", "second"] {
+        host.files.insert(("save".into(), key.into()), (1, vec![1]));
+    }
+
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
+    let first = requests(&mut session).pop().unwrap();
+    assert_eq!(first.identity.service, IO_DELETE);
+    assert_eq!(first.metadata, json!({"namespace":"save","key":"first"}));
+    let globals = session.interpreter().lua().globals();
+    assert_eq!(globals.get::<Option<i32>>("attempts").unwrap(), None);
+    let malformed = reply(&first, json!({"status":"ok"}), vec![1]);
+    assert!(matches!(
+        session.submit_replies(&[malformed]),
+        Err(ProtocolError::Argument(_))
+    ));
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
+    assert!(requests(&mut session).is_empty());
+    let ack = host.complete(&first);
+    session.submit_replies(&[ack.clone()]).unwrap();
+    assert_eq!(globals.get::<Option<i32>>("attempts").unwrap(), None);
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
+    assert_eq!(session.submit_replies(&[ack]), Err(ProtocolError::Stale));
+
+    let second = requests(&mut session).pop().unwrap();
+    assert_eq!(second.identity.service, IO_DELETE);
+    assert_eq!(second.metadata, json!({"namespace":"save","key":"second"}));
+    session
+        .submit_replies(&[reply(
+            &second,
+            json!({"status":"denied","message":"read only"}),
+            vec![],
+        )])
+        .unwrap();
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
+    let retry = requests(&mut session);
+    assert_eq!(retry.len(), 1);
+    assert_eq!(retry[0].metadata, second.metadata);
+    assert_ne!(retry[0].identity, second.identity);
+    session.submit_replies(&[host.complete(&retry[0])]).unwrap();
+    host.run(&mut session);
+    assert_eq!(host.captions, ["after"]);
+    assert_eq!(globals.get::<i32>("attempts").unwrap(), 1);
+    assert_eq!(host.files.len(), 1);
+    assert!(host.files.contains_key(&("asset".into(), "first".into())));
 }
 
 #[test]

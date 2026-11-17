@@ -224,10 +224,10 @@ body，由 flags/kind 唯一标识。JSON 中的 u64/i64 使用十进制字符�
 | `io.delete` | save key | 明确 deleted/not_found/denied/io_error |
 | `io.cancel` | 原 request ID | 取消尽力而为；之后到达的旧完成消息仍按 STALE 处理 |
 
-### stat/read 与单 blob 原子写入 payload
+### stat、read、单 blob 原子写入与 delete payload
 
 这些控制消息均使用 JSON object metadata，二进制数据只放 blob。IO domain=3，
-stat/read/write_atomic 的 kind 分别为 1/2/4。结果使用原请求的 service kind；
+stat/read/write_atomic/delete 的 kind 分别为 1/2/4/5。结果使用原请求的 service kind；
 request ID、epoch 和 runtime 均由信封/提交描述符携带。
 
 | 消息 | metadata | blob |
@@ -238,6 +238,8 @@ request ID、epoch 和 runtime 均由信封/提交描述符携带。
 | read 成功 | `status: "ok"`、revision、`eof: bool` | 读取的原始字节 |
 | write_atomic 请求 | `namespace: "save"`、key | 整个待提交文件 |
 | write_atomic 成功 | `status: "ok"` | 空 |
+| delete 请求 | `namespace: "save"`、key | 空 |
+| delete 成功 | `status: "ok"`（Host 已确认删除） | 空 |
 | 任何失败 | status 为 `not_found`/`denied`/`io_error`/`cancelled`/`unsupported`，可选 `message: string` | 空 |
 
 size、revision、offset、length 均为规范十进制 u64 字符串，不使用 JSON number。
@@ -249,7 +251,8 @@ modified_utc_ms 为规范十进制 i64 字符串，表示 UTC Unix 毫秒；缺�
 
 单 blob 写入以 `(runtime, epoch, request_id)` 作为事务身份；Host 原子持久化后确认。
 超出 blob 预算时不受理；多 blob 事务需要另行定义分块/提交 schema，不能将部分成功表示为
-文件写入完成。chunk 驱动只实现上述 stat/read/单 blob 写入组合，完整服务能力由 facade 协商。
+文件写入完成。删除只适用于 save 文件，目标不存在返回 not_found；完成前脚本不能继续。
+完整服务能力由 facade 协商。
 
 namespace 至少区分 asset 与 save；逻辑 key 使用 `/`，拒绝绝对路径、驱动器、NUL 和 `..`。
 Artemis 的大小写兼容查找、归档覆盖顺序、别名和 savepath 需要独立 conformance 样例；

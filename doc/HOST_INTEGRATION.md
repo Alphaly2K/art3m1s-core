@@ -90,6 +90,9 @@ Host 循环调用 `step()`、`poll_events()` 和 `submit_replies()`。只有 `st
 短读且要求前进，空文件不发 read。累计大小受 `max_file_bytes` 限制。写入使用单 blob
 原子请求，受传输 blob 预算限制；成功确认后才清除 dirty 状态，失败保留文件供脚本重试。
 `io.open` 失败返回 nil/error，flush/close 失败产生可由 `pcall` 捕获的 Lua 错误。
+`e:file{command='delete', target=key}` 与 `[file command=delete target=...]` 均等待 Host 确认。
+目标只在 save 命名空间解析，可省略配置的 save 前缀。Lua 调用成功返回 nil，失败返回
+`nil, message, kind`；场景标签报告失败后继续。copy/move 尚未接入可靠 IO。
 
 资源 key 使用 UTF-8、`/` 和 ASCII 小写，拒绝绝对路径、驱动器、NUL 和 `..`。
 `config.savepath` 为逻辑 save 前缀，默认 `save`；此前缀下的路径映射到 save namespace
@@ -148,7 +151,7 @@ IO 等待期间，新帧返回 `WouldBlock` 且不受理；提交结果后以相
 使用种子的低 32 位。新场景 VM 使用相同配置重新初始化，chunk 替换保留当前 VM 状态。
 变量快照恢复保留当前实例的时钟、随机状态及匿名消息层 ID 序列，不从存档恢复环境服务。
 
-IO domain 的 kind=1 为 stat、2 为 read、4 为 write_atomic，结果保留请求的 service kind。
+IO domain 的 kind=1 为 stat、2 为 read、4 为 write_atomic、5 为 delete，结果保留请求的 service kind。
 具体 payload 见 [IO 契约](HOST_ABI_V2.md#6-iohost-实现core-保留语义)。底层
 `asb_interpreter::io_continuation` 可独立使用：在新解释器加载源码前 `install()`，编译
 `IoTask`，以 `step(Some(response))` 从当前 IO 点继续；重复等待不重新执行脚本。
