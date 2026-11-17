@@ -135,6 +135,10 @@ Loading 完成必须有事件和状态转换；`open_project` 返回 OK 只表�
 - 收到退出请求后 Host 提交 graceful shutdown。core 发出必要的最终存档/媒体停止请求；
   Host 执行并回填，直至 Closed 后 destroy。Faulted 可强制销毁，仍须先释放所有帧。
   强制退出可以放弃未确认存档，不能把它记录为成功持久化。
+- Rust 运行时的 `submit_shutdown(handle, epoch)` 在 Running 阶段受理。游戏暂停在退出点；
+  尚有服务结果待处理时先完成它并推进 `step`。受理后状态进入 Closing，不再运行场景，按顺序
+  确认全局数据、系统设置和已变化的已读记录。`runtime_closed` 排入队列后才进入 Closed，期间
+  拒绝重载。Host 在销毁前拉取关闭结果。
 - 所有 debug、字体、窗口状态、文本表、surface/资源 CPU 缓存和诊断计数归 runtime。
   进程级库初始化日志单独交给 SDK 诊断，不能偷偷路由到最近运行的游戏。
 
@@ -181,6 +185,10 @@ WOULD_BLOCK 且不受理。Host 先回填并恢复原帧，再提交新帧；结
 Runtime domain=1、kind=1 为 `session_changed`，request_id=0，metadata=`{}`，blob 为空。
 Runtime kind=2 为 `project_ready`，字段同上；BOOT 与加载期 Lua 完成后交付。记录排入
 可靠队列时状态由 Loading 转为 Running，且排在首条场景输出之前。
+Runtime kind=3 为 `exit_requested`，字段同 `session_changed`。
+Runtime kind=4 为 `runtime_closed`，request_id=0、blob 为空；metadata 为
+`{"save_status":"written"}` 或 `{"save_status":"failed","reason":"…","files_written":1}`。
+`files_written` 是本次关闭期间已经收到持久化确认的文件数。
 服务请求只使用 IO/UI/media/render domain；其余 service kind 和 payload 由各自 schema 定义。
 高频 input/render 可以使用独立版本化二进制
 body，由 flags/kind 唯一标识。JSON 中的 u64/i64 使用十进制字符串，避免宿主 Number 精度丢失。

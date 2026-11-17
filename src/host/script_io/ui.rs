@@ -10,27 +10,8 @@ pub const UI_DIALOG: MessageKind = MessageKind {
 };
 
 impl ScriptIoSession {
-    pub(in crate::host) fn step_queued_frame(
-        &mut self,
-        frame: HostFrame,
-    ) -> Result<ScriptIoProgress, ScriptIoError> {
-        let mut progress = self.step_frame(frame)?;
-        while progress == ScriptIoProgress::Event {
-            match self.dispatch_ui_event() {
-                Ok(Some(progress)) => return Ok(progress),
-                Ok(None) => progress = self.step()?,
-                Err(ProtocolError::WouldBlock) => return Ok(ScriptIoProgress::WouldBlock),
-                Err(error) => {
-                    self.mark_faulted();
-                    return Err(error.into());
-                }
-            }
-        }
-        Ok(progress)
-    }
-
     // None means this event was consumed and the interpreter can continue.
-    fn dispatch_ui_event(&mut self) -> Result<Option<ScriptIoProgress>, ProtocolError> {
+    pub(super) fn dispatch_ui_event(&mut self) -> Result<Option<ScriptIoProgress>, ProtocolError> {
         match self.scenario_event.as_ref() {
             Some(Event::Caption { data }) => {
                 let body = MessageBody::new(json!({"text": data}).to_string(), vec![])?;

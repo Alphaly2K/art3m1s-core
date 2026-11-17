@@ -1,8 +1,11 @@
 //! Luau execution over the Host IO request transport. The Host owns all
 //! storage; this driver never installs a physical file loader or renderer.
 
+mod lifecycle;
 mod ui;
 
+use lifecycle::Shutdown;
+pub use lifecycle::{RUNTIME_CLOSED, RUNTIME_EXIT_REQUESTED};
 pub use ui::{UI_CAPTION, UI_DIALOG};
 
 use super::protocol::*;
@@ -223,6 +226,7 @@ pub struct ScriptIoSession {
     boot_restore: Option<BootRestore>,
     project_loading: bool,
     dialog_request: Option<RequestIdentity>,
+    pub(super) shutdown: Shutdown,
     read_history: ReadHistory,
     read_history_dirty: bool,
 }
@@ -265,6 +269,7 @@ impl ScriptIoSession {
             boot_restore: None,
             project_loading: false,
             dialog_request: None,
+            shutdown: Shutdown::default(),
             read_history: ReadHistory::default(),
             read_history_dirty: false,
         })
@@ -286,6 +291,10 @@ impl ScriptIoSession {
         let transport = self.transport.state();
         let phase = if self.faulted {
             RuntimePhase::Faulted
+        } else if matches!(self.shutdown, Shutdown::Closed) {
+            RuntimePhase::Closed
+        } else if self.shutdown.is_closing_or_closed() {
+            RuntimePhase::Closing
         } else if transport.epoch == 0 {
             RuntimePhase::Created
         } else if self.project_loading {
@@ -363,6 +372,7 @@ impl ScriptIoSession {
         self.boot_restore = None;
         self.project_loading = false;
         self.dialog_request = None;
+        self.shutdown = Shutdown::default();
         Ok(epoch)
     }
 
@@ -462,6 +472,7 @@ impl ScriptIoSession {
         self.boot_restore = None;
         self.project_loading = false;
         self.dialog_request = None;
+        self.shutdown = Shutdown::default();
         self.read_history = ReadHistory::default();
         self.read_history_dirty = false;
         Ok(epoch)
@@ -651,7 +662,13 @@ impl ScriptIoSession {
         if self.faulted || self.mode == ExecutionMode::Idle {
             return Err(ProtocolError::State.into());
         }
-        if self.completed {
+        if matches!(self.shutdown, Shutdown::Closed) {
+            return Ok(ScriptIoProgress::Completed);
+        }
+        if matches!(self.shutdown, Shutdown::Reporting(_)) {
+            return Ok(ScriptIoProgress::SaveReady);
+        }
+        if self.completed && !self.shutdown.is_closing_or_closed() {
             return Ok(ScriptIoProgress::Completed);
         }
         if self.scenario_event.is_some()
@@ -687,14 +704,21 @@ impl ScriptIoSession {
         if !(-1440..=1440).contains(&frame.utc_offset_minutes) {
             return Err(ProtocolError::Argument("invalid Host UTC offset").into());
         }
-        if self.completed {
+        if matches!(self.shutdown, Shutdown::Closed)
+            || (self.completed && !self.shutdown.is_closing_or_closed())
+        {
             return Ok(ScriptIoProgress::Completed);
         }
         let new_frame = self.frame.is_none_or(|previous| frame.id != previous.id);
         if new_frame
             && (self.operation.is_some()
                 || self.cancelled
-                || self.save_work.is_some()
+                || self.save_work.as_ref().is_some_and(|work| {
+                    !matches!(
+                        (&self.shutdown, work),
+                        (Shutdown::Saving, SaveWork::Queued { .. })
+                    )
+                })
                 || self.numbered_load.is_some()
                 || matches!(self.event_filter, Some(EventFilterWork::Ready(_))))
         {
@@ -708,10 +732,11 @@ impl ScriptIoSession {
         self.frame = Some(frame);
         if new_frame {
             self.interpreter.begin_frame();
-            self.frame_handler_due = !matches!(
-                self.scenario_event,
-                Some(Event::ShowDialog { .. } | Event::YesNo { .. })
-            );
+            self.frame_handler_due = matches!(self.shutdown, Shutdown::Open)
+                && !matches!(
+                    self.scenario_event,
+                    Some(Event::ShowDialog { .. } | Event::YesNo { .. } | Event::Exit)
+                );
         }
         self.step()
     }

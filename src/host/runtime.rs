@@ -30,6 +30,8 @@ pub enum RuntimePhase {
     Created,
     Loading,
     Running,
+    Closing,
+    Closed,
     Faulted,
 }
 
@@ -178,8 +180,16 @@ pub fn open_project(
     reported_os: Option<&str>,
 ) -> Result<u64, RuntimeError> {
     with_session(handle, |session| {
+        if session.shutdown.is_closing_or_closed() {
+            return Err(ProtocolError::State.into());
+        }
         Ok(session.open_project(ini, platform, reported_os)?)
     })
+}
+
+/// Begin a graceful close at a point with no outstanding scene services.
+pub fn submit_shutdown(handle: RuntimeHandle, epoch: u64) -> Result<(), RuntimeError> {
+    with_session(handle, |session| Ok(session.submit_shutdown(epoch)?))
 }
 
 pub fn step(handle: RuntimeHandle, frame: HostFrame) -> Result<ScriptIoProgress, RuntimeError> {

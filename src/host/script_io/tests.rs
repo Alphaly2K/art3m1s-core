@@ -1208,6 +1208,130 @@ fn runtime_delivers_ui_once_and_resumes_dialog_only_after_valid_reply() {
 }
 
 #[test]
+fn shutdown_waits_for_confirmations_and_reports_partial_persistence() {
+    use crate::host::runtime::{self, RuntimeError, RuntimePhase};
+
+    let ini = b"[WINDOWS]\nWIDTH=640\nHEIGHT=480\nBOOT=boot.iet\n";
+    let frame = HostFrame {
+        id: 1,
+        monotonic_ns: 0,
+        utc_unix_ms: 0,
+        utc_offset_minutes: 0,
+    };
+    for fail_final_write in [false, true] {
+        let handle = runtime::create(0, TransportLimits::default(), 4096).unwrap();
+        let mut host = MemoryHost::default();
+        host.asset(
+            "boot.iet",
+            b"*top\n[var name=g.saved data=hello]\n[exit]\n[caption data=unreachable]\n",
+        );
+        let epoch = runtime::open_project(handle, ini, "windows", None).unwrap();
+        let poll = || {
+            let mut bytes = vec![0; 4096];
+            let result = runtime::poll_events(handle, &mut bytes).unwrap();
+            bytes.truncate(result.written_bytes);
+            bytes
+        };
+
+        for _ in 0..128 {
+            match runtime::step(handle, frame).unwrap() {
+                ScriptIoProgress::Waiting => {
+                    let request = decode_requests(&poll()).pop().unwrap();
+                    runtime::submit_replies(handle, &[host.complete(&request)]).unwrap();
+                }
+                ScriptIoProgress::Event => break,
+                progress => panic!("unexpected startup progress {progress:?}"),
+            }
+        }
+        assert!(runtime::get_state(handle).unwrap().exit_requested);
+        let bytes = poll();
+        let ready_size = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+        assert_eq!(
+            u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            PROJECT_READY.kind
+        );
+        let exit = &bytes[ready_size..];
+        assert_eq!(exit.len(), HEADER_BYTES + 8 + 2);
+        assert_eq!(
+            u32::from_le_bytes(exit[8..12].try_into().unwrap()),
+            RUNTIME_EXIT_REQUESTED.kind
+        );
+        assert_eq!(
+            runtime::step(handle, frame).unwrap(),
+            ScriptIoProgress::Event
+        );
+        assert!(poll().is_empty());
+        assert!(matches!(
+            runtime::submit_shutdown(handle, epoch - 1),
+            Err(RuntimeError::Session(ScriptIoError::Protocol(
+                ProtocolError::Stale
+            )))
+        ));
+        runtime::submit_shutdown(handle, epoch).unwrap();
+        assert_eq!(
+            runtime::get_state(handle).unwrap().phase,
+            RuntimePhase::Closing
+        );
+        assert!(poll().is_empty());
+        assert!(matches!(
+            runtime::open_project(handle, ini, "windows", None),
+            Err(RuntimeError::Session(ScriptIoError::Protocol(
+                ProtocolError::State
+            )))
+        ));
+
+        for key in ["saveg.dat", "system.dat"] {
+            assert_eq!(
+                runtime::step(handle, frame).unwrap(),
+                ScriptIoProgress::Waiting
+            );
+            let request = decode_requests(&poll()).pop().unwrap();
+            assert_eq!(request.identity.service, IO_WRITE_ATOMIC);
+            assert_eq!(request.metadata, json!({"namespace":"save","key":key}));
+            assert!(runtime::get_state(handle).unwrap().waiting_for_io);
+            let response = if fail_final_write && key == "system.dat" {
+                reply(&request, json!({"status":"denied"}), vec![])
+            } else {
+                host.complete(&request)
+            };
+            runtime::submit_replies(handle, &[response]).unwrap();
+            assert_eq!(
+                runtime::get_state(handle).unwrap().phase,
+                RuntimePhase::Closing
+            );
+        }
+        assert_eq!(
+            runtime::step(handle, frame).unwrap(),
+            ScriptIoProgress::Completed
+        );
+        let bytes = poll();
+        assert_eq!(
+            u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            RUNTIME_CLOSED.kind
+        );
+        let saved: Value = serde_json::from_slice(&bytes[64..]).unwrap();
+        if fail_final_write {
+            assert_eq!(
+                saved,
+                json!({"save_status":"failed","reason":"denied","files_written":1})
+            );
+        } else {
+            assert_eq!(saved, json!({"save_status":"written"}));
+        }
+        assert_eq!(
+            runtime::get_state(handle).unwrap().phase,
+            RuntimePhase::Closed
+        );
+        assert_eq!(
+            runtime::step(handle, frame).unwrap(),
+            ScriptIoProgress::Completed
+        );
+        assert!(poll().is_empty());
+        runtime::destroy(handle).unwrap();
+    }
+}
+
+#[test]
 fn host_calendar_and_monotonic_clocks_remain_distinct_across_io_suspension() {
     let mut session = session(1, TransportLimits::default(), 1024);
     session

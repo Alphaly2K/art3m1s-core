@@ -129,6 +129,10 @@ Rust 的 `ExecutionResult`/`TagResult` 新增 `HostIoPending`，穷举匹配需�
 对话框只接受 `poll_events` 已交付的请求身份。`submit_replies` 只入队，脚本在下次 `step`
 处理结果。直接使用 `ScriptIoSession` 时，场景事件仍由调用方通过 `pending_event()` 处理。
 
+收到 `exit_requested` 后，调用 `submit_shutdown(handle, epoch)`。继续 `step`、拉取写入请求
+并回传结果，直至收到 `runtime_closed` 和其中的存档结果。Host 也可主动请求关闭；仍有 IO 或
+对话框结果待处理时需先完成这些请求。`destroy` 可以直接释放句柄并放弃未确认的写入。
+
 独立解释器启用 resumable IO 后，未安装同步加载器时，start/boot/restore_position 可能
 受理一个尚待 Host 完成的加载，调用方随后处理 HostIoPending。显式安装的同步内存加载器
 仍可使用；ScriptIoSession 始终通过请求传输读取。
