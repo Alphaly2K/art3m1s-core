@@ -4,6 +4,7 @@ use super::callbacks::{
 };
 use super::{CoreRuntime, InlineEventFrame};
 use crate::compositor::Compositor;
+use crate::script_handler::{event_dispatch_layers, layer_filter_params};
 use std::collections::{HashMap, HashSet};
 
 impl CoreRuntime {
@@ -747,41 +748,6 @@ fn has_drag_handler(compositor: &Compositor, layer_id: &str) -> bool {
                 .is_some_and(|handler| handler.enabled)
         })
         .unwrap_or(false)
-}
-
-/// Artemis dispatches an overlapping pointer event to the top handler first.
-/// That handler's `penetration=1` allows dispatch to continue to the next
-/// lower handler; the chain stops at the first non-penetrating handler.
-/// A penetrating chain runs from bottom to top.
-fn event_dispatch_layers(
-    compositor: &Compositor,
-    hit_layers: &[String],
-    event_type: &str,
-) -> Vec<String> {
-    // hit_test_all includes layers that are interactive for *some* pointer
-    // event. A full-screen drag/rollover mask may therefore be above a button
-    // while having no click handler of its own. Build the chain only from
-    // enabled handlers for this event, then let each upper handler decide
-    // whether dispatch may continue below it. The lyevent documentation says
-    // `penetration=1` executes handlers on layers *below that handler*; it is
-    // not an opt-in bit belonging to the lower layer.
-    let handlers = hit_layers
-        .iter()
-        .filter_map(|id| {
-            let handler = compositor.scene().get(id)?.event_handlers.get(event_type)?;
-            handler.enabled.then(|| (id.clone(), handler.penetration))
-        })
-        .collect::<Vec<_>>();
-
-    let mut layers = Vec::new();
-    for (id, penetration) in handlers {
-        layers.push(id);
-        if !penetration {
-            break;
-        }
-    }
-    layers.reverse();
-    layers
 }
 
 #[cfg(test)]
@@ -1596,37 +1562,10 @@ fn enqueue_layer_handler(
     if !h.enabled {
         return HandlerDispatch::default();
     }
-    let fallback_filter_params;
-    let filter_params = if h.filter_params.is_empty() {
-        fallback_filter_params = {
-            let mut params = h.params.clone();
-            params.insert("id".to_string(), layer_id.to_string());
-            params.insert("type".to_string(), event_type.to_string());
-            if let Some(value) = &h.file {
-                params.insert("file".to_string(), value.clone());
-            }
-            if let Some(value) = &h.label {
-                params.insert("label".to_string(), value.clone());
-            }
-            if let Some(value) = &h.handler {
-                params.insert("handler".to_string(), value.clone());
-            }
-            if h.call {
-                params.insert("call".to_string(), "1".to_string());
-            }
-            if h.penetration {
-                params.insert("penetration".to_string(), "1".to_string());
-            }
-            params
-        };
-        &fallback_filter_params
-    } else {
-        &h.filter_params
-    };
     dispatch_handler(
         interpreter,
         "lyevent",
-        filter_params,
+        &layer_filter_params(h, layer_id, event_type),
         h.handler.as_deref(),
         h.file.as_deref(),
         h.label.as_deref(),

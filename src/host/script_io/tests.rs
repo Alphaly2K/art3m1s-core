@@ -2282,6 +2282,125 @@ fn transitions_keep_both_scenes_and_obey_time_and_input_policy() {
 }
 
 #[test]
+fn pointer_filters_resume_once_and_only_unclaimed_clicks_advance_the_story() {
+    use crate::host::input::HostInput;
+    use asb_interpreter::WaitReason;
+
+    let mut session = session(1, TransportLimits::default(), 4096);
+    let mut host = MemoryHost::default();
+    host.asset("gate", b"");
+    host.asset("button.png", &png_bytes(2, 1, &[0, 0, 0, 0, 0, 0, 0, 255]));
+    host.asset(
+        "boot.iet",
+        br#"*top
+[lyc id=1.10 width=2 height=1 color=ffffff]
+[lyc id=1.20 file=button]
+[lyprop id=1.20 clickablethreshold=128]
+[lyevent id=1.10 type=click handler=calllua function=bottom]
+[lyevent id=1.20 type=click penetration=1 handler=calllua function=top]
+[lyevent id=1.20 type=rollover handler=calllua function=enter]
+[lyevent id=1.20 type=rollout handler=calllua function=leave]
+[wt0]
+[calllua function=advanced]
+[stop]
+[lua]
+local function emit(s) trace=(trace or '')..s end
+function bottom() emit('b') end
+function top() emit('t') end
+function enter() emit('+') end
+function leave() emit('-') end
+function advanced() emit('a') end
+__engine:setEventFilter(function(e,name,p)
+    assert(name=='lyevent' and p.click==nil)
+    if p.type=='click' and p.id=='1.20' then
+        attempts=(attempts or 0)+1
+        assert(e:file('gate')=='')
+    elseif p.type=='click' and reject_bottom then
+        return 2
+    end
+    return 0
+end)
+[/lua]
+"#,
+    );
+    let epoch = session
+        .open_queued_project(
+            b"[WINDOWS]\nWIDTH=320\nHEIGHT=200\nBOOT=boot.iet\n",
+            "windows",
+            None,
+        )
+        .unwrap();
+    let frame = |id| HostFrame {
+        id,
+        monotonic_ns: id * 1_000_000,
+        utc_unix_ms: 0,
+        utc_offset_minutes: 0,
+    };
+    let waiting_for_click = |session: &ScriptIoSession| {
+        matches!(
+            session.pending_event(),
+            Some(Event::Wait {
+                reason: WaitReason::Generic0
+            })
+        )
+    };
+    for _ in 0..1024 {
+        if session.step_queued_frame(frame(1)).unwrap() == ScriptIoProgress::Event {
+            break;
+        }
+        for request in requests(&mut session) {
+            session.submit_replies(&[host.complete(&request)]).unwrap();
+        }
+    }
+    assert!(waiting_for_click(&session));
+    let globals = session.interpreter().lua().globals();
+    let key = |down| HostInput::Key { code: 1, down };
+    session
+        .submit_input(epoch, &[HostInput::Pointer { x: 1, y: 0 }, key(true)])
+        .unwrap();
+    assert_eq!(
+        session.step_queued_frame(frame(2)).unwrap(),
+        ScriptIoProgress::Waiting
+    );
+    let request = requests(&mut session).pop().unwrap();
+    assert_eq!(request.metadata["key"], "gate");
+    assert_eq!(
+        session.step_queued_frame(frame(3)).unwrap(),
+        ScriptIoProgress::WouldBlock
+    );
+    session.submit_replies(&[host.complete(&request)]).unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            session.step_queued_frame(frame(2)).unwrap(),
+            ScriptIoProgress::Event
+        );
+        assert!(waiting_for_click(&session));
+    }
+    assert_eq!(globals.get::<String>("trace").unwrap(), "+bt");
+    assert_eq!(globals.get::<u32>("attempts").unwrap(), 1);
+
+    globals.set("reject_bottom", true).unwrap();
+    session
+        .submit_input(
+            epoch,
+            &[HostInput::Pointer { x: 0, y: 0 }, key(false), key(true)],
+        )
+        .unwrap();
+    assert_eq!(
+        session.step_queued_frame(frame(3)).unwrap(),
+        ScriptIoProgress::Event
+    );
+    assert_eq!(globals.get::<String>("trace").unwrap(), "+bt-a");
+    assert_eq!(globals.get::<u32>("attempts").unwrap(), 1);
+    assert!(matches!(
+        session.pending_event(),
+        Some(Event::Wait {
+            reason: WaitReason::Stop { .. }
+        })
+    ));
+}
+
+#[test]
 fn compound_events_resume_in_order_without_reexecuting_the_tag() {
     use asb_interpreter::event::LayerEvent;
 

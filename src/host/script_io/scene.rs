@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 
 mod edit;
 mod frames;
+mod pointer;
 mod text;
 pub(super) use text::FontRead;
 
@@ -36,10 +37,12 @@ impl ScriptIoSession {
             clock_origin_ns: None,
             clock_base_ms: 0,
             tween_handlers: Vec::new(),
+            pointer: Default::default(),
         });
         self.interpreter.set_engine_callbacks(Box::new(scene));
         self.interpreter.set_callback(move |event| match event {
             Event::Layer(_)
+            | Event::LayerEventHandler { .. }
             | Event::LayerRename { .. }
             | Event::LayerEdit { .. }
             | Event::LayerTweenDelete { .. }
@@ -88,10 +91,9 @@ impl ScriptIoSession {
             && matches!(self.scenario_event, None | Some(Event::Wait { .. }))
             && (!self.audio.ready_handlers.is_empty()
                 || !self.video.ready_handlers.is_empty()
-                || self
-                    .scene
-                    .as_ref()
-                    .is_some_and(|scene| !scene.tween_handlers.is_empty()))
+                || self.scene.as_ref().is_some_and(|scene| {
+                    !scene.tween_handlers.is_empty() || !scene.pointer.tags.is_empty()
+                }))
     }
 
     pub(super) fn dispatch_scene_handlers(&mut self) -> Result<(), ScriptIoError> {
@@ -100,23 +102,19 @@ impl ScriptIoSession {
         }
         let mut tags = std::mem::take(&mut self.audio.ready_handlers);
         tags.append(&mut self.video.ready_handlers);
-        tags.extend(
-            self.scene
-                .as_mut()
-                .unwrap()
-                .tween_handlers
-                .drain(..)
-                .flat_map(|h| {
-                    crate::script_handler::handler_tags(
-                        h.handler.as_deref(),
-                        h.file.as_deref(),
-                        h.label.as_deref(),
-                        h.call,
-                        &h.extra_params,
-                        &[],
-                    )
-                }),
-        );
+        if let Some(scene) = self.scene.as_mut() {
+            tags.append(&mut scene.pointer.tags);
+            tags.extend(scene.tween_handlers.drain(..).flat_map(|h| {
+                crate::script_handler::handler_tags(
+                    h.handler.as_deref(),
+                    h.file.as_deref(),
+                    h.label.as_deref(),
+                    h.call,
+                    &h.extra_params,
+                    &[],
+                )
+            }));
+        }
         if !tags.is_empty() {
             if let Some(event) = self.scenario_event.take() {
                 self.interpreter
@@ -244,6 +242,7 @@ pub(super) struct SceneIo {
     clock_origin_ns: Option<u64>,
     clock_base_ms: u64,
     tween_handlers: Vec<TweenHandler>,
+    pointer: pointer::PointerDispatch,
 }
 
 struct PendingAsset {
@@ -420,6 +419,7 @@ impl SceneIo {
         scene.pending_video_frames.clear();
         scene.edited.clear();
         self.tween_handlers.clear();
+        self.pointer = Default::default();
         scene.dirty = true;
     }
 

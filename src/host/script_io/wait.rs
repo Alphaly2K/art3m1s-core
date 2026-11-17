@@ -58,7 +58,7 @@ impl ScriptIoSession {
                     button
                         .trim()
                         .parse::<u32>()
-                        .is_ok_and(|code| input.is_pressed(code))
+                        .is_ok_and(|code| input.unclaimed_press(code))
                 }),
                 _ => false,
             })

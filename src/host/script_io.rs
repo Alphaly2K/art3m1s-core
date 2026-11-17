@@ -185,6 +185,7 @@ enum NumberedLoadWork {
 enum ScenarioStep {
     Request(IoRequest),
     Progress(ScriptIoProgress),
+    Continue,
 }
 
 enum Operation {
@@ -714,6 +715,15 @@ impl ScriptIoSession {
         Ok(())
     }
 
+    fn pointer_ready(&self) -> bool {
+        matches!(self.shutdown, Shutdown::Open)
+            && matches!(self.scenario_event, None | Some(Event::Wait { .. }))
+            && self
+                .scene
+                .as_ref()
+                .is_some_and(scene::SceneIo::pointer_ready)
+    }
+
     pub fn step(&mut self) -> Result<ScriptIoProgress, ScriptIoError> {
         if self.faulted || self.mode == ExecutionMode::Idle {
             return Err(ProtocolError::State.into());
@@ -724,8 +734,8 @@ impl ScriptIoSession {
         if matches!(self.shutdown, Shutdown::Reporting(_)) {
             return Ok(ScriptIoProgress::SaveReady);
         }
-        let dispatch_tweens = self.scene_handlers_ready();
-        if self.completed && !self.shutdown.is_closing_or_closed() && !dispatch_tweens {
+        let dispatch_scene = self.scene_handlers_ready() || self.pointer_ready();
+        if self.completed && !self.shutdown.is_closing_or_closed() && !dispatch_scene {
             return Ok(ScriptIoProgress::Completed);
         }
         if self.scenario_event.is_some()
@@ -734,7 +744,7 @@ impl ScriptIoSession {
             && self.event_filter.is_none()
             && self.save_work.is_none()
             && self.numbered_load.is_none()
-            && !dispatch_tweens
+            && !dispatch_scene
         {
             return Ok(ScriptIoProgress::Event);
         }
@@ -792,7 +802,7 @@ impl ScriptIoSession {
             self.audio.advance(frame);
             if let Some(scene) = self.scene.as_mut() {
                 self.video.advance(scene);
-                scene.with_input(|input| input.advance(frame.monotonic_ns));
+                scene.advance_input(frame.monotonic_ns);
                 scene.advance_clock(frame.monotonic_ns);
             }
             self.interpreter.begin_frame();
@@ -864,6 +874,7 @@ impl ScriptIoSession {
                 ExecutionMode::Scenario => match self.step_scenario(response.take())? {
                     ScenarioStep::Request(request) => request,
                     ScenarioStep::Progress(progress) => return Ok(progress),
+                    ScenarioStep::Continue => continue,
                 },
                 ExecutionMode::Idle => return Err(ProtocolError::State.into()),
             };
@@ -951,6 +962,12 @@ impl ScriptIoSession {
         }
         if self.interpreter.pending_host_io().is_some() {
             return self.interpreter_request();
+        }
+        if self.event_filter.is_none() && self.pointer_ready() {
+            self.event_filter = self
+                .scene
+                .as_mut()
+                .and_then(scene::SceneIo::next_pointer_filter);
         }
         match self.event_filter.take() {
             Some(EventFilterWork::Queued(name, params)) => {
@@ -1577,6 +1594,13 @@ impl ScriptIoSession {
         &mut self,
         decision: EventFilterDecision,
     ) -> Result<ScenarioStep, ScriptIoError> {
+        if self
+            .scene
+            .as_mut()
+            .is_some_and(|scene| scene.finish_pointer_filter(decision))
+        {
+            return Ok(ScenarioStep::Continue);
+        }
         self.event_filter = Some(EventFilterWork::Ready(decision));
         Ok(ScenarioStep::Progress(ScriptIoProgress::EventFilterReady))
     }

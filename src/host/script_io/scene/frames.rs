@@ -53,6 +53,20 @@ impl ScriptIoSession {
 }
 
 impl SceneProjection {
+    pub(super) fn hit_layers(&mut self, x: i32, y: i32) -> Vec<String> {
+        let mut textures = CpuTextureView {
+            assets: &self.textures,
+            video: &self.video_frames,
+            edited: &self.edited,
+            atlases: &mut self.text.atlases,
+            atlas_revision: &mut self.text.atlas_revision,
+            revisions: HashMap::new(),
+            table: Vec::new(),
+        };
+        self.compositor
+            .hit_test_all(x as f32, y as f32, &mut textures)
+    }
+
     fn build_frame(
         &mut self,
         session_epoch: u64,
@@ -217,6 +231,15 @@ impl TextureProvider for CpuTextureView<'_> {
             return Some(self.record(texture.clone()));
         }
         Some(self.record(self.assets.get(name)?.clone()?))
+    }
+
+    fn pixel_alpha(&self, id: TextureId, x: u32, y: u32) -> Option<u8> {
+        let texture = self.table.get(id.0 as usize)?;
+        if x >= texture.width || y >= texture.height {
+            return None;
+        }
+        let pixel = (y as usize * texture.width as usize + x as usize) * 4;
+        texture.rgba().get(pixel + 3).copied()
     }
 
     fn upload_rgba(

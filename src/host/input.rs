@@ -40,6 +40,8 @@ pub(in crate::host) struct InputFrame {
     keys: BTreeMap<u32, KeyState>,
     pub pointer: (i32, i32),
     pub touches: Vec<(u32, i32, i32)>,
+    pub pointer_present: bool,
+    pub click_claimed: bool,
 }
 
 #[derive(Default)]
@@ -69,6 +71,7 @@ impl InputFrame {
 
     pub fn advance(&mut self, now_ns: u64) {
         self.now_ns = now_ns;
+        self.click_claimed = false;
         self.keys.retain(|_, key| {
             key.pressed = false;
             key.released = false;
@@ -90,7 +93,10 @@ impl InputFrame {
                         key.released = true;
                     }
                 }
-                HostInput::Pointer { x, y } => self.pointer = (x, y),
+                HostInput::Pointer { x, y } => {
+                    self.pointer = (x, y);
+                    self.pointer_present = true;
+                }
                 HostInput::Touch { id, phase, x, y } => {
                     let index = self.touches.iter().position(|point| point.0 == id);
                     match (phase, index) {
@@ -109,6 +115,7 @@ impl InputFrame {
                 HostInput::FocusLost => {
                     self.keys.clear();
                     self.touches.clear();
+                    self.pointer_present = false;
                 }
             }
         }
@@ -138,10 +145,16 @@ impl InputFrame {
     }
 
     pub fn has_press(&self) -> bool {
-        self.keys.values().any(|key| key.pressed)
+        self.keys.keys().any(|&code| self.unclaimed_press(code))
     }
 
     pub fn wants_advance(&self) -> bool {
-        [1, 13, 137].into_iter().any(|code| self.is_pressed(code))
+        [1, 13, 137]
+            .into_iter()
+            .any(|code| self.unclaimed_press(code))
+    }
+
+    pub fn unclaimed_press(&self, code: u32) -> bool {
+        (code != 1 || !self.click_claimed) && self.is_pressed(code)
     }
 }

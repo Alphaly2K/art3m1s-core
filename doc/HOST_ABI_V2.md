@@ -171,6 +171,11 @@ Rust 句柄入口的 `submit_input(handle, epoch, events)` 原子受理输入，
 触点。失焦清空按键和触点，保留指针位置。待应用的输入最多 4096 条。按住重复由逻辑时钟
 驱动，`isPush` 从按下起满 500 毫秒后在后续帧返回 true，等待只消费新的按下边沿。
 
+Core 在指针移动或左键边沿时用舞台坐标判断 `[lyevent]` 的 `rollover`、`rollout` 和 `click`，
+使用图层变换、可见性及 `clickablethreshold`。失焦撤销当前悬停，直到 Host 提交新指针坐标。
+Core 根据 `penetration` 从上往下选择处理器，选中的处理器按从下往上执行。Luau 事件过滤器可
+通过可靠 IO 暂停并恢复本帧；过滤器返回已处理，或默认处理器成功排队时，本次左键不再推进故事。
+
 ## 5. 消息、可靠性与能力协商
 
 `submit` 原子受理一个批次并复制其 metadata/blob；返回后 Host 可释放输入。语义校验、
