@@ -6,6 +6,31 @@ pub const RUNTIME_PERSISTENCE_RESULT: MessageKind = MessageKind {
 };
 
 impl ScriptIoSession {
+    pub(super) fn capture_gameplay_wait(&mut self) {
+        let Some(script) = self.interpreter.current_script() else {
+            return;
+        };
+        let call_stack: Vec<_> = self
+            .interpreter
+            .call_stack()
+            .iter()
+            .map(crate::save::CallFrameSnapshot::from)
+            .collect();
+        if self.gameplay_checkpoint.as_ref().is_some_and(|checkpoint| {
+            checkpoint.is_ancestor_of(script, &call_stack)
+                && call_stack[checkpoint.call_stack.len()].return_line == checkpoint.line
+        }) {
+            return;
+        }
+        self.gameplay_checkpoint = Some(crate::save::GameplayCheckpoint {
+            script: script.to_string(),
+            line: self.interpreter.position_after_event(),
+            call_stack,
+            variables: self.interpreter.variables().local_snapshot(),
+            waiting_for_input: true,
+        });
+    }
+
     pub(super) fn has_persistence_event(&self) -> bool {
         matches!(
             self.scenario_event,

@@ -275,7 +275,7 @@ impl CoreRuntime {
         // Otherwise the checkpoint captures the helper's PC and suspends it.
         let waiting = match data.waiting_for_input {
             Some(value) => value,
-            None => saved_position_resumes_input_wait(&self.interpreter),
+            None => crate::save::saved_position_resumes_input_wait(&self.interpreter),
         };
         if waiting {
             self.interpreter.hold_queued_input_wait();
@@ -531,41 +531,6 @@ impl CoreRuntime {
 /// 文档：type 0..2 与 trans 标签 type 同值（0=瞬切、1=交叉淡化、2=规则图转场，
 /// load 无 rule 参数故 2 退化为淡化）；缺省不执行转场。时长/输入用 trans 的
 /// 缺省值（time 缺省由合成器决定，input=1 允许输入跳过）。
-fn saved_position_resumes_input_wait(interpreter: &asb_interpreter::Interpreter) -> bool {
-    let Some(name) = interpreter.current_script() else {
-        return false;
-    };
-    let Some(script) = interpreter.get_script(name) else {
-        return false;
-    };
-    let line = interpreter.current_line();
-    if instruction_is_input_wait(script.get_instruction(line)) {
-        return true;
-    }
-    if line == 0 {
-        return false;
-    }
-    instruction_is_input_wait(script.get_instruction(line - 1))
-}
-
-fn instruction_is_input_wait(instruction: Option<&asb_interpreter::Instruction>) -> bool {
-    let Some(instruction) = instruction else {
-        return false;
-    };
-    match instruction.tag.as_str() {
-        "@" | "wt" | "s" | "clickwait" => true,
-        "wait" => {
-            let timed = instruction.get("time").is_some();
-            let input = instruction.get("input");
-            if timed && input == Some("0") {
-                return false;
-            }
-            input != Some("0")
-        }
-        _ => false,
-    }
-}
-
 fn load_transition_event(trans_type: Option<i32>) -> Option<asb_interpreter::Event> {
     let trans_type = trans_type?;
     if !(0..=2).contains(&trans_type) {
@@ -692,8 +657,8 @@ mod tests {
     use super::{
         ScreenshotBuffer, encode_png_rgba, load_transition_event, persistent_system_snapshot,
         qualify_save_path, resize_screenshot_rgba, sanitize_savepath,
-        saved_position_resumes_input_wait,
     };
+    use crate::save::saved_position_resumes_input_wait;
     use crate::save::system::is_persistent_system_variable;
     use asb_interpreter::{Interpreter, InterpreterConfig};
 

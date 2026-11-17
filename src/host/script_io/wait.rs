@@ -48,6 +48,9 @@ impl ScriptIoSession {
             reason,
             WaitReason::Generic | WaitReason::Generic0 | WaitReason::KeyWait { .. }
         );
+        if interactive && self.wait_start.is_none() {
+            self.capture_gameplay_wait();
+        }
         let auto = interactive && self.auto_ready(frame);
         let skipping = self.control.skipping()
             && matches!(

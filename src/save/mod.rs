@@ -319,6 +319,31 @@ fn local_variable_snapshot(interpreter: &asb_interpreter::Interpreter) -> Variab
     interpreter.variables().local_snapshot()
 }
 
+pub(crate) fn saved_position_resumes_input_wait(
+    interpreter: &asb_interpreter::Interpreter,
+) -> bool {
+    let Some(script) = interpreter
+        .current_script()
+        .and_then(|name| interpreter.get_script(name))
+    else {
+        return false;
+    };
+    let line = interpreter.current_line();
+    [Some(line), line.checked_sub(1)]
+        .into_iter()
+        .flatten()
+        .any(|line| {
+            let Some(instruction) = script.get_instruction(line) else {
+                return false;
+            };
+            match instruction.tag.as_str() {
+                "@" | "wt" | "wt0" | "s" | "clickwait" | "exkey" => true,
+                "wait" => instruction.get("input") != Some("0"),
+                _ => false,
+            }
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

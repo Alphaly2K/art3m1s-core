@@ -2093,6 +2093,86 @@ function close() trace..=';close' end
 }
 
 #[test]
+fn numbered_save_from_a_menu_reloads_the_story_wait_with_the_save_hook_values() {
+    let (mut saver, epoch, mut host) = playback_project(
+        br#"*top
+[var name=story_state data=7]
+[rclick allow=1 file=menu.iet]
+[wt0]
+[calllua function=continued]
+[stop]
+[lua]
+function continued() advanced=true end
+function capture(e,p)
+    assert(p.file=='slot')
+    e:enqueueTag{'var',name='memsave.marker',data='saved'}
+end
+__engine:setEventHandler{onSave='capture'}
+[/lua]
+"#,
+    );
+    host.asset(
+        "menu.iet",
+        b"*top\n[var name=story_state data=99]\n[wt0]\n[save file=slot]\n[stop]\n",
+    );
+    host.asset("load.iet", b"*top\n[load file=slot]\n[stop]\n");
+    drive_playback_boot(&mut saver, &mut host);
+    let drive = |session: &mut ScriptIoSession, host: &mut MemoryHost, frame| {
+        for _ in 0..2048 {
+            if session.step_queued_frame(frame).unwrap() == ScriptIoProgress::Event {
+                return;
+            }
+            for request in requests(session) {
+                session.submit_replies(&[host.complete(&request)]).unwrap();
+            }
+        }
+        panic!("project did not reach its next wait");
+    };
+    submit_playback_keys(&mut saver, epoch, &[(2, true)]);
+    drive(&mut saver, &mut host, playback_frame(2, 1));
+    assert_eq!(saver.interpreter().current_script(), Some("menu.iet"));
+    submit_playback_keys(&mut saver, epoch, &[(13, true)]);
+    drive(&mut saver, &mut host, playback_frame(3, 2));
+    let save: crate::save::SaveData =
+        serde_json::from_slice(&host.files[&("save".into(), "slot".into())].1).unwrap();
+    assert_eq!(save.current_script, "boot.iet");
+    assert_eq!(save.waiting_for_input, Some(true));
+    assert!(save.call_stack.is_empty());
+    assert_eq!(
+        save.variables.get("story_state"),
+        Some(&asb_interpreter::Value::Int(7))
+    );
+    assert_eq!(
+        save.variables.get("memsave.marker"),
+        Some(&asb_interpreter::Value::String("saved".into()))
+    );
+
+    for waiting_for_input in [Some(true), None] {
+        let mut fixture = save.clone();
+        fixture.waiting_for_input = waiting_for_input;
+        host.files.insert(
+            ("save".into(), "slot".into()),
+            (1, serde_json::to_vec(&fixture).unwrap()),
+        );
+        let mut loader = session(2, TransportLimits::default(), 4096);
+        let epoch = loader
+            .open_queued_project(
+                b"[WINDOWS]\nWIDTH=320\nHEIGHT=200\nBOOT=load.iet\n",
+                "windows",
+                None,
+            )
+            .unwrap();
+        drive(&mut loader, &mut host, playback_frame(1, 0));
+        let globals = loader.interpreter().lua().globals();
+        assert_eq!(loader.interpreter().current_script(), Some("boot.iet"));
+        assert!(!globals.get::<bool>("advanced").unwrap());
+        submit_playback_keys(&mut loader, epoch, &[(13, true)]);
+        drive(&mut loader, &mut host, playback_frame(2, 1));
+        assert!(globals.get::<bool>("advanced").unwrap());
+    }
+}
+
+#[test]
 fn audio_feedback_uses_playback_identity_and_resumes_its_wait_after_callback_io() {
     use crate::host::{
         media::PlaybackStatus,

@@ -255,6 +255,7 @@ pub struct ScriptIoSession {
     wait_start: Option<(u64, u64)>,
     event_filter: Option<EventFilterWork>,
     save_work: Option<SaveWork>,
+    gameplay_checkpoint: Option<crate::save::GameplayCheckpoint>,
     numbered_load: Option<NumberedLoadWork>,
     boot_restore: Option<BootRestore>,
     project_loading: bool,
@@ -311,6 +312,7 @@ impl ScriptIoSession {
             wait_start: None,
             event_filter: None,
             save_work: None,
+            gameplay_checkpoint: None,
             numbered_load: None,
             boot_restore: None,
             project_loading: false,
@@ -429,6 +431,7 @@ impl ScriptIoSession {
         self.wait_start = None;
         self.event_filter = None;
         self.save_work = None;
+        self.gameplay_checkpoint = None;
         self.numbered_load = None;
         self.boot_restore = None;
         self.project_loading = false;
@@ -537,6 +540,7 @@ impl ScriptIoSession {
         self.wait_start = None;
         self.event_filter = None;
         self.save_work = None;
+        self.gameplay_checkpoint = None;
         self.numbered_load = None;
         self.boot_restore = None;
         self.project_loading = false;
@@ -1251,6 +1255,12 @@ impl ScriptIoSession {
         let mut save = crate::save::SaveData::from_interpreter(&self.interpreter);
         save.current_line = self.interpreter.position_after_event();
         save.waiting_for_input = Some(false);
+        if let Some(checkpoint) = &self.gameplay_checkpoint
+            && checkpoint.is_ancestor_of(&save.current_script, &save.call_stack)
+            && save.call_stack[checkpoint.call_stack.len()].return_line == checkpoint.line
+        {
+            save = save.with_gameplay_checkpoint(checkpoint);
+        }
         if let Some(scene) = &self.scene {
             if let Some(capture) = &self.screenshot.captured {
                 save.scene = Some(capture.scene.clone());
@@ -1588,7 +1598,10 @@ impl ScriptIoSession {
         let mut variables = self.interpreter.variables();
         variables.restore_local_snapshot(&save.variables);
         self.interpreter.restore_variables(variables);
-        if save.waiting_for_input == Some(true) {
+        if save
+            .waiting_for_input
+            .unwrap_or_else(|| crate::save::saved_position_resumes_input_wait(&self.interpreter))
+        {
             self.interpreter.hold_queued_input_wait();
         }
         if let Some(scene) = &mut self.scene {
@@ -1596,6 +1609,7 @@ impl ScriptIoSession {
             scene.restore_text(save.message_text);
         }
         self.audio.commit_restore(audio, &mut self.transport)?;
+        self.gameplay_checkpoint = None;
         self.clear_control_modes();
         self.video.reset_playback();
         self.transition = None;
