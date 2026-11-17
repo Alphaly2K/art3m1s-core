@@ -1,0 +1,32 @@
+[package]
+name = "art3m1s-artemis-core"
+version = "0.4.0"
+edition = "2024"
+license = "MPL-2.0"
+publish = false
+
+[lib]
+name = "art3m1s_core"
+path = "../../src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = ["host-abi-v2"]
+host-abi-v2 = []
+
+[dependencies]
+asb-interpreter = { path = "../asb-interpreter" }
+art3m1s-emote = { path = "../art3m1s-emote" }
+art3m1s-log = { path = "../art3m1s-log" }
+art3m1s-render = { path = "../art3m1s-render" }
+ab_glyph = "0.2"
+encoding_rs = "0.8"
+glam = "0.30"
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(feature, values("legacy", "gl-backend", "metal-backend", "vulkan-backend", "ffmpeg", "rfvp-engine", "krkr-engine", "siglus-engine"))',
+] }

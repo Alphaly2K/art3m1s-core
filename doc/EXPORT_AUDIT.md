@@ -6,7 +6,8 @@
 以 GOAL.md 和当前源码为准，不覆盖这份原始清单。
 
 当前已验证的 macOS 动态导出：默认构建仍为 `art3m1s_get_api_v1` 和 9 个 `pfs_*`；纯 Core
-v2 预览只导出 `art3m1s_get_api_v2`。可用 `bash scripts/test-host-v2.sh` 重跑预览检查。
+v2 预览只导出 `art3m1s_get_api_v2`。独立构建和跨平台检查命令见
+[Host 接入指南](HOST_INTEGRATION.md#artemis-v2-c-预览)。
 
 ## 1. 结论与范围
 

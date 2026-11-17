@@ -9,7 +9,7 @@ case "$(uname -s)" in
 esac
 
 build_dir="${ART3M1S_V2_TARGET_DIR:-target/host-v2}"
-cargo build --locked --lib --no-default-features --features host-abi-v2 --target-dir "$build_dir" "$@"
+cargo build --locked --lib --manifest-path crates/artemis-core/Cargo.toml --target-dir "$build_dir" "$@"
 lib_dir="$(cd "$build_dir/debug" && pwd)"
 library="$lib_dir/libart3m1s_core.$extension"
 if [[ "$extension" == dylib ]]; then

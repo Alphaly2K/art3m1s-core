@@ -28,5 +28,20 @@ jobs:
       run: cargo build --verbose
     - name: Run tests
       run: ./scripts/test-all.sh
-    - name: Check standalone Artemis v2 ABI
+
+  artemis-v2:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v4
+    - name: Check standalone Artemis v2 ABI on Unix
+      if: runner.os != 'Windows'
       run: bash scripts/test-host-v2.sh
+    - name: Check standalone Artemis v2 ABI on Windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: ./scripts/test-host-v2.ps1
+    - name: Test standalone Artemis Core
+      run: cargo test --locked --lib --manifest-path crates/artemis-core/Cargo.toml --target-dir target/host-v2

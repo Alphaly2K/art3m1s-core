@@ -1,4 +1,4 @@
-/* Preview interface. Build the library with --no-default-features --features host-abi-v2.
+/* Preview interface. Build with --manifest-path crates/artemis-core/Cargo.toml.
  * See ../HOST_ABI_V2.md for the protocol. The default legacy build exposes v1.
  * Native structs use the target C ABI; queued records use explicit LE encoding.
  */

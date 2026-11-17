@@ -14,7 +14,8 @@ Artemis 解释器在所有平台统一使用 Luau。现有 v1 C 函数表保持�
 
 ### Artemis v2 C 预览
 
-使用 `cargo build --no-default-features --features host-abi-v2` 编译纯 Core 动态库。加载库后
+使用 `cargo build --locked --manifest-path crates/artemis-core/Cargo.toml` 编译纯 Core 动态库。
+独立清单无需检出其他引擎。加载库后
 通过 [C 头文件](abi/art3m1s_core_v2.draft.h) 中的 `art3m1s_get_api_v2` 查询 Runtime 和 Frame 表。
 创建 runtime 的线程负责所有调用；工作线程把结果交回该线程。Host 循环推进逻辑、处理请求并
 借用帧，绘制完释放令牌。只绘制精灵的 Host 可提交 `ART_RENDERER_CAP_SPRITE`；支持旧场景
@@ -27,11 +28,17 @@ Artemis 解释器在所有平台统一使用 Luau。现有 v1 C 函数表保持�
 支持 Artemis HLSL 子集的 Host 声明 `ART_RENDERER_CAP_HLSL`，根据帧包交付的源码版本
 和绑定编译绘制。使用 `SpriteRenderer` 时，可用 `clear_cached_shaders()` 释放已注册的程序。
 
-[内存 Host 示例](../tools/host-smoke/artemis_v2.c) 不依赖窗口或游戏素材。在 macOS 或 Linux
-从仓库根目录运行下列命令，会独立构建预览库、检查导出并运行示例：
+[内存 Host 示例](../tools/host-smoke/artemis_v2.c) 不依赖窗口或游戏素材。以下命令构建预览库、
+检查导出并运行示例。macOS 或 Linux 使用：
 
 ```sh
 bash scripts/test-host-v2.sh
+```
+
+Windows 使用装有 MSVC x64 工具的 PowerShell：
+
+```powershell
+./scripts/test-host-v2.ps1
 ```
 
 macOS Host 可单独运行离屏像素探针。它需要可访问的 Metal 设备，不需要窗口或游戏素材：
@@ -268,14 +275,14 @@ Host 只依赖引擎总抽象，不应直接依赖某个 adapter 的内部类型
 
 | 引擎 | 查询入口 | 当前状态 |
 |---|---|---|
-| Artemis / Art3m1s | `art3m1s_get_api_v1` | 完整生产路径；`Art3m1sApiV1` |
+| Artemis / Art3m1s | `art3m1s_get_api_v1` / `art3m1s_get_api_v2` | v1 为生产路径；v2 为独立预览 |
 | RFVP | `art3m1s_rfvp_get_api_v1` | 独立 adapter；默认 feature `rfvp-engine` |
 | KRKR / Kirikiri | `art3m1s_krkr_get_api_v1` | 早期 adapter；仅在使用 `krkr-engine` 且 native shim 可用时存在 |
 | Siglus | `art3m1s_siglus_get_api_v1` | 早期 adapter；`--features siglus-engine`，macOS Host 已接入；Kira 只混音，Host 通过独立 PCM ABI 输出声音；视频/对话框仍待迁移 |
 
-四个函数表不共享 runtime、资源、事件或 surface 对象。Artemis 的新宿主应只查询
-`Art3m1sApiV1`，不再逐个解析迁移期的平铺符号；RFVP、KRKR 和 Siglus 必须走各自入口。媒体解码
-可由 runtime 的 FFmpeg session 承担；真实音频输出和最终 present 仍由 Host 所有。
+各入口不共享 runtime、资源、事件或 surface 对象。Artemis Host 根据构建产物查询对应版本的
+函数表；RFVP、KRKR 和 Siglus 使用各自入口。媒体解码可由 v1 runtime 的 FFmpeg session 承担；
+v2 通过 Host 媒体协议解码。真实音频输出和最终 present 由 Host 所有。
 游戏自己的 save/load/config/backlog 通常由脚本绘制，不需要 Host 重写。
 
 跨边界规则：

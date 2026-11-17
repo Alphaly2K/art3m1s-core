@@ -96,6 +96,9 @@ cargo build --manifest-path crates/art3m1s-krkr/Cargo.toml \
 
 ## 宿主接入
 
+Artemis v2 预览提供独立的纯 Core 动态库，宿主负责资源和存档 IO、GPU 绘制和呈现。
+构建与调用方式见 [Host v2 接入指南](doc/HOST_INTEGRATION.md#artemis-v2-c-预览)。
+
 线程、生命周期、帧循环、资源边界和 KRKR 接入约定见
 [doc/HOST_INTEGRATION.md](doc/HOST_INTEGRATION.md)；三个入口的完整 C ABI 声明与协议见
 [doc/FFI_REFERENCE.md](doc/FFI_REFERENCE.md)。

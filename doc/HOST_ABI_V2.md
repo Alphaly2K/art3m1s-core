@@ -1,7 +1,7 @@
 # Artemis Host ABI v2：接口契约（草案）
 
-状态：v2 C 接口可通过 `--no-default-features --features host-abi-v2` 构建预览版。
-默认动态库继续使用 v1。导出审计见 [EXPORT_AUDIT.md](EXPORT_AUDIT.md)，预览头文件见
+状态：v2 C 预览使用 `cargo build --locked --manifest-path crates/artemis-core/Cargo.toml`。
+仓库根目录的默认构建继续提供 v1。导出审计见 [EXPORT_AUDIT.md](EXPORT_AUDIT.md)，预览头文件见
 [abi/art3m1s_core_v2.draft.h](abi/art3m1s_core_v2.draft.h)。
 
 ## 1. 范围与设计决策
