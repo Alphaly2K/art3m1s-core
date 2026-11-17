@@ -144,6 +144,80 @@ end
 }
 
 #[test]
+fn a_pending_external_read_keeps_its_call_frame_and_rejects_wrong_completion_types() {
+    let mut i = Interpreter::default();
+    i.enable_resumable_io().unwrap();
+    i.load_script(
+        "parent",
+        "*main\n[call file=child label=entry]\n[var name=after data=1]",
+    )
+    .unwrap();
+    i.start("parent", "main").unwrap();
+    assert!(matches!(i.run().unwrap(), ExecutionResult::HostIoPending));
+    let pc = i.current_line();
+    assert!(matches!(i.run().unwrap(), ExecutionResult::HostIoPending));
+    assert_eq!(i.current_line(), pc);
+    assert!(i.resume_host_io(IoResponse::Written).is_err());
+    assert_eq!(
+        i.pending_host_io(),
+        Some(&IoRequest::Read {
+            path: "child".into()
+        })
+    );
+    assert!(i.load_script("child", "*entry\n[return]").is_err());
+    i.resume_host_io(IoResponse::Read(b"*entry\n[return]".to_vec()))
+        .unwrap();
+    assert!(matches!(i.run().unwrap(), ExecutionResult::Completed));
+    assert_eq!(i.get_variable("after").and_then(|v| v.as_int()), Some(1));
+}
+
+#[test]
+fn stack_overrides_and_position_restore_load_missing_scripts_without_running_old_queues() {
+    let mut i = Interpreter::default();
+    i.enable_resumable_io().unwrap();
+    i.load_script("parent", "*main\n[calllua function=replace]\n[var name=old data=1]\n[lua]\nfunction replace(e) e:setScriptStack{{file='child',index=0}} end\n[/lua]")
+        .unwrap();
+    i.start("parent", "main").unwrap();
+    assert!(matches!(i.run().unwrap(), ExecutionResult::HostIoPending));
+    assert_eq!(
+        i.pending_host_io(),
+        Some(&IoRequest::Read {
+            path: "child".into()
+        })
+    );
+    i.restore_position(
+        "new",
+        0,
+        vec![crate::CallFrame {
+            script: "restored-parent".into(),
+            return_line: 0,
+        }],
+    )
+    .unwrap();
+    assert_eq!(
+        i.pending_host_io(),
+        Some(&IoRequest::Read { path: "new".into() })
+    );
+    i.resume_host_io(IoResponse::Read(
+        b"[var name=new data=1]\n[return]".to_vec(),
+    ))
+    .unwrap();
+    assert!(matches!(i.run().unwrap(), ExecutionResult::HostIoPending));
+    assert_eq!(
+        i.pending_host_io(),
+        Some(&IoRequest::Read {
+            path: "restored-parent".into()
+        })
+    );
+    i.resume_host_io(IoResponse::Read(b"[var name=restored data=1]".to_vec()))
+        .unwrap();
+    assert!(matches!(i.run().unwrap(), ExecutionResult::Completed));
+    assert!(i.get_variable("old").is_none());
+    assert_eq!(i.get_variable("new").and_then(|v| v.as_int()), Some(1));
+    assert_eq!(i.get_variable("restored").and_then(|v| v.as_int()), Some(1));
+}
+
+#[test]
 fn a_queued_filter_finishes_its_continuation_before_restoring_an_older_stop() {
     let mut i = Interpreter::default();
     i.enable_resumable_io().unwrap();

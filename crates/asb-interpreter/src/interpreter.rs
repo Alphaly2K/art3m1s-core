@@ -224,6 +224,19 @@ struct PendingLuaFilter {
     decision: Option<LuaTagFilterDecision>,
 }
 
+enum HostResourceAction {
+    EnterLabel(String),
+    KeepPosition,
+    RegisterMacros,
+    Boot,
+    BootMacros(String),
+}
+
+struct PendingHostResource {
+    request: crate::io_continuation::IoRequest,
+    action: HostResourceAction,
+}
+
 fn lua_filter_consumes(value: &mlua::Value) -> bool {
     match value {
         mlua::Value::Nil => false,
@@ -324,6 +337,7 @@ pub struct Interpreter {
     loading_lua: VecDeque<(String, usize, String)>,
     loading_lua_key: Option<(String, usize)>,
     io_filter: Option<PendingLuaFilter>,
+    io_resource: Option<PendingHostResource>,
 }
 
 fn json_to_lua_value(lua: &Lua, value: serde_json::Value) -> mlua::Result<mlua::Value> {
@@ -589,6 +603,7 @@ impl Interpreter {
             loading_lua: VecDeque::new(),
             loading_lua_key: None,
             io_filter: None,
+            io_resource: None,
         }
     }
 
@@ -607,6 +622,9 @@ impl Interpreter {
     }
 
     pub fn pending_host_io(&self) -> Option<&crate::io_continuation::IoRequest> {
+        if let Some(resource) = &self.io_resource {
+            return Some(&resource.request);
+        }
         self.io_task
             .as_ref()
             .and_then(|task| task.pending_request())
@@ -616,6 +634,9 @@ impl Interpreter {
         &mut self,
         response: crate::io_continuation::IoResponse,
     ) -> Result<crate::io_continuation::IoProgress> {
+        if self.io_resource.is_some() {
+            return self.resume_host_resource(response);
+        }
         let task = self.io_task.as_mut().ok_or_else(|| Error::RuntimeError {
             line: self.current_line,
             message: "no Lua IO continuation is waiting".into(),
@@ -646,16 +667,97 @@ impl Interpreter {
         self.loading_lua.clear();
         self.loading_lua_key = None;
         self.io_filter = None;
+        self.io_resource = None;
     }
 
     fn check_io_idle(&self) -> Result<()> {
-        if self.io_task.is_some() || self.io_filter.is_some() {
+        if self.io_task.is_some() || self.io_filter.is_some() || self.io_resource.is_some() {
             return Err(Error::RuntimeError {
                 line: self.current_line,
                 message: "cannot replace script state while Host IO is pending".into(),
             });
         }
         Ok(())
+    }
+
+    fn uses_host_resources(&self) -> bool {
+        self.resumable_io && self.file_loader.is_none() && self.script_loader.is_none()
+    }
+
+    fn request_host_resource(&mut self, file: &str, action: HostResourceAction) -> Result<()> {
+        self.check_io_idle()?;
+        self.io_resource = Some(PendingHostResource {
+            request: crate::io_continuation::IoRequest::Read { path: file.into() },
+            action,
+        });
+        Ok(())
+    }
+
+    fn resume_host_resource(
+        &mut self,
+        response: crate::io_continuation::IoResponse,
+    ) -> Result<crate::io_continuation::IoProgress> {
+        use crate::io_continuation::{IoProgress, IoRequest, IoResponse};
+        if !matches!(response, IoResponse::Read(_) | IoResponse::Failed { .. }) {
+            return Err(Error::RuntimeError {
+                line: self.current_line,
+                message: "Host resource completion must contain file bytes or a failure".into(),
+            });
+        }
+        let resource = self.io_resource.take().unwrap();
+        let IoRequest::Read { path } = resource.request else {
+            unreachable!()
+        };
+        let boot_script = match &resource.action {
+            HostResourceAction::BootMacros(script) => Some(script.clone()),
+            _ => None,
+        };
+        let optional =
+            matches!(resource.action, HostResourceAction::RegisterMacros) || boot_script.is_some();
+        let result = match response {
+            IoResponse::Read(data) => match resource.action {
+                HostResourceAction::RegisterMacros | HostResourceAction::BootMacros(_) => {
+                    self.load_macro_bytes(&path, &data).map(|_| ())
+                }
+                action => {
+                    self.load_file(&path, &data)?;
+                    match action {
+                        HostResourceAction::EnterLabel(label) => {
+                            self.enter_loaded_script(&path, &label)?
+                        }
+                        HostResourceAction::Boot => self.finish_boot(&path)?,
+                        _ => {}
+                    }
+                    Ok(())
+                }
+            },
+            IoResponse::Failed { kind, message } => Err(Error::RuntimeError {
+                line: self.current_line,
+                message: format!("Host resource {path}: {}: {message}", kind.as_str()),
+            }),
+            _ => unreachable!(),
+        };
+        if optional {
+            if let Err(error) = result
+                && boot_script.is_none()
+            {
+                self.engine_ctx.lock().unwrap().callbacks.debug(
+                    0,
+                    &format!("macroadd 加载失败 {path}: {error}"),
+                    false,
+                );
+            }
+        } else {
+            result?;
+        }
+        if let Some(script) = boot_script {
+            self.position_boot(&script)?;
+        }
+        Ok(if self.pending_host_io().is_some() {
+            IoProgress::Waiting
+        } else {
+            IoProgress::Completed
+        })
     }
 
     fn drive_loading_lua(&mut self) -> Result<bool> {
@@ -882,6 +984,11 @@ impl Interpreter {
     /// 设置起始标签并开始执行
     pub fn start(&mut self, script: &str, label: &str) -> Result<()> {
         self.check_io_idle()?;
+        if !self.scripts.contains_key(script) && self.uses_host_resources() {
+            self.set_start_position(script, 0);
+            return self
+                .request_host_resource(script, HostResourceAction::EnterLabel(label.into()));
+        }
         // 确保脚本已加载
         if !self.scripts.contains_key(script) {
             self.load_external_script(script)?;
@@ -897,6 +1004,11 @@ impl Interpreter {
             .get_label_line(label)
             .ok_or_else(|| Error::LabelNotFound(label.to_string()))?;
 
+        self.set_start_position(script, line);
+        Ok(())
+    }
+
+    fn set_start_position(&mut self, script: &str, line: usize) {
         self.current_script = Some(script.to_string());
         self.current_line = line;
         self.call_stack.clear();
@@ -908,8 +1020,6 @@ impl Interpreter {
         self.variables.lock().unwrap().retain_macro_scopes(0);
         // 显式定位属于「顺序到达」，清掉可能残留的跳转到达标记。
         self.arrived_by_jump = false;
-
-        Ok(())
     }
 
     /// Reset the script execution boundary for `[reset]`.
@@ -952,7 +1062,7 @@ impl Interpreter {
 
     /// 执行到下一个等待点（迭代版本，避免栈溢出）
     pub fn step(&mut self) -> Result<ExecutionResult> {
-        if self.io_task.is_some() {
+        if self.pending_host_io().is_some() {
             return Ok(ExecutionResult::HostIoPending);
         }
         // 进入执行即视为旧等待已结束：清掉 getScriptWaitReason 的数据源，
@@ -967,6 +1077,9 @@ impl Interpreter {
 
     fn step_inner(&mut self) -> Result<ExecutionResult> {
         loop {
+            if self.request_missing_position()? {
+                return Ok(ExecutionResult::HostIoPending);
+            }
             if self.drive_loading_lua()? {
                 return Ok(ExecutionResult::HostIoPending);
             }
@@ -1143,7 +1256,9 @@ impl Interpreter {
                     continue;
                 }
                 TagResult::JumpExternal { file, label } => {
-                    self.jump_to_external_script(&file, &label)?;
+                    if self.jump_to_external_script(&file, &label)? {
+                        return Ok(ExecutionResult::HostIoPending);
+                    }
                     continue;
                 }
                 TagResult::Call {
@@ -1161,17 +1276,9 @@ impl Interpreter {
                     // 跳转到目标
                     if let Some(target_file) = file {
                         // 跨脚本调用
-                        self.load_external_script(&target_file)?;
-                        let target_script = self
-                            .scripts
-                            .get(&target_file)
-                            .ok_or_else(|| Error::ScriptNotFound(target_file.clone()))?;
-                        let target_line = target_script
-                            .get_label_line(&label)
-                            .ok_or_else(|| Error::LabelNotFound(label.clone()))?;
-
-                        self.current_script = Some(target_file.clone());
-                        self.current_line = target_line;
+                        if self.jump_to_external_script(&target_file, &label)? {
+                            return Ok(ExecutionResult::HostIoPending);
+                        }
                         continue;
                     } else {
                         // 同脚本调用
@@ -1262,7 +1369,9 @@ impl Interpreter {
                             continue;
                         }
                         TagResult::JumpExternal { file, label } => {
-                            self.jump_to_external_script(&file, &label)?;
+                            if self.jump_to_external_script(&file, &label)? {
+                                return Ok(ExecutionResult::HostIoPending);
+                            }
                             continue;
                         }
                         TagResult::Wait(event) => {
@@ -1334,16 +1443,9 @@ impl Interpreter {
                                         return_line,
                                     });
                                     if let Some(target_file) = file {
-                                        self.load_external_script(&target_file)?;
-                                        let target_script =
-                                            self.scripts.get(&target_file).ok_or_else(|| {
-                                                Error::ScriptNotFound(target_file.clone())
-                                            })?;
-                                        let target_line = target_script
-                                            .get_label_line(&label)
-                                            .ok_or_else(|| Error::LabelNotFound(label.clone()))?;
-                                        self.current_script = Some(target_file);
-                                        self.current_line = target_line;
+                                        if self.jump_to_external_script(&target_file, &label)? {
+                                            return Ok(ExecutionResult::HostIoPending);
+                                        }
                                     } else {
                                         let script_name =
                                             self.current_script.clone().unwrap_or_default();
@@ -1384,7 +1486,7 @@ impl Interpreter {
     /// 下次 `run()` 重入 `step` 可继续处理。返回 `Some(result)` 表示需立即从 `step`
     /// 返回（暂停或中止），`None` 表示队列已清空、可继续正常执行。
     fn flush_tag_queue(&mut self) -> Result<Option<ExecutionResult>> {
-        if self.io_task.is_some() {
+        if self.pending_host_io().is_some() {
             return Ok(Some(ExecutionResult::HostIoPending));
         }
         if self
@@ -1395,6 +1497,9 @@ impl Interpreter {
             return Ok(None);
         }
         loop {
+            if self.request_missing_position()? {
+                return Ok(Some(ExecutionResult::HostIoPending));
+            }
             if !self.loading_lua.is_empty() {
                 return Ok(None);
             }
@@ -1407,6 +1512,12 @@ impl Interpreter {
                 self.io_filter.as_ref().unwrap().instruction.clone()
             } else {
                 self.apply_pending_stack_override()?;
+                if self.pending_host_io().is_some() {
+                    return Ok(Some(ExecutionResult::HostIoPending));
+                }
+                if !self.loading_lua.is_empty() {
+                    return Ok(None);
+                }
                 let queued = {
                     let mut ctx = self.engine_ctx.lock().unwrap();
                     if ctx.tag_queue.is_empty() {
@@ -1510,7 +1621,9 @@ impl Interpreter {
                 TagResult::JumpExternal { file, label } => {
                     self.last_flush_saw_jump = true;
                     self.prune_queued_wait_checkpoints_for_jump();
-                    self.jump_to_external_script(&file, &label)?;
+                    if self.jump_to_external_script(&file, &label)? {
+                        return Ok(Some(ExecutionResult::HostIoPending));
+                    }
                     continue;
                 }
                 TagResult::Call {
@@ -1557,15 +1670,9 @@ impl Interpreter {
                         deferred,
                     });
                     if let Some(target_file) = file {
-                        self.load_external_script(&target_file)?;
-                        let target_line = self
-                            .scripts
-                            .get(&target_file)
-                            .ok_or_else(|| Error::ScriptNotFound(target_file.clone()))?
-                            .get_label_line(&label)
-                            .ok_or_else(|| Error::LabelNotFound(label.clone()))?;
-                        self.current_script = Some(target_file);
-                        self.current_line = target_line;
+                        if self.jump_to_external_script(&target_file, &label)? {
+                            return Ok(Some(ExecutionResult::HostIoPending));
+                        }
                     } else {
                         let line = self
                             .scripts
@@ -1716,12 +1823,10 @@ impl Interpreter {
             .lock()
             .unwrap()
             .retain_macro_scopes(self.call_stack.len());
-        if !self.scripts.contains_key(top_file) {
-            self.load_external_script(top_file)?;
-        }
         self.current_script = Some(top_file.clone());
         self.current_line = *top_index;
         self.arrived_by_jump = false;
+        self.ensure_position_script(top_file)?;
         Ok(())
     }
 
@@ -1773,6 +1878,10 @@ impl Interpreter {
         } else {
             return Err(Error::ScriptNotFound(file.to_string()));
         };
+        self.load_macro_bytes(file, &data)
+    }
+
+    fn load_macro_bytes(&mut self, file: &str, data: &[u8]) -> Result<usize> {
         let compiled = data.starts_with(b"ASB\0");
         let script = if compiled {
             if !self.scripts.contains_key(file) {
@@ -2001,6 +2110,10 @@ impl Interpreter {
             };
             if !file.is_empty() {
                 if instruction.tag == "macroadd" {
+                    if self.uses_host_resources() {
+                        self.request_host_resource(&file, HostResourceAction::RegisterMacros)?;
+                        return Ok(TagResult::HostIoPending);
+                    }
                     if let Err(e) = self.load_macro_file(&file) {
                         let ctx = self.engine_ctx.lock().unwrap();
                         ctx.callbacks
@@ -2186,8 +2299,17 @@ impl Interpreter {
         }
     }
 
-    fn jump_to_external_script(&mut self, file: &str, label: &str) -> Result<()> {
+    fn jump_to_external_script(&mut self, file: &str, label: &str) -> Result<bool> {
+        if !self.scripts.contains_key(file) && self.uses_host_resources() {
+            self.request_host_resource(file, HostResourceAction::EnterLabel(label.into()))?;
+            return Ok(true);
+        }
         self.load_external_script(file)?;
+        self.enter_loaded_script(file, label)?;
+        Ok(false)
+    }
+
+    fn enter_loaded_script(&mut self, file: &str, label: &str) -> Result<()> {
         let target_line = self
             .scripts
             .get(file)
@@ -2197,6 +2319,25 @@ impl Interpreter {
         self.current_script = Some(file.to_string());
         self.current_line = target_line;
         Ok(())
+    }
+
+    fn ensure_position_script(&mut self, file: &str) -> Result<()> {
+        if !self.scripts.contains_key(file) && self.uses_host_resources() {
+            self.request_host_resource(file, HostResourceAction::KeepPosition)
+        } else {
+            self.load_external_script(file)
+        }
+    }
+
+    fn request_missing_position(&mut self) -> Result<bool> {
+        if self.uses_host_resources()
+            && let Some(file) = self.current_script.clone()
+            && !self.scripts.contains_key(&file)
+        {
+            self.request_host_resource(&file, HostResourceAction::KeepPosition)?;
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     /// 通过 `e:setTagFilter(table)` 注册的表分发标签。
@@ -2631,14 +2772,31 @@ impl Interpreter {
     ///
     /// 使用方解析 system.ini 后，直接将 BOOT 对应的脚本路径传入此方法即可。
     pub fn boot(&mut self, script: &str) -> Result<()> {
+        self.check_io_idle()?;
+        if !self.scripts.contains_key(script) && self.uses_host_resources() {
+            self.set_start_position(script, 0);
+            return self.request_host_resource(script, HostResourceAction::Boot);
+        }
         self.load_external_script(script)?;
+        self.finish_boot(script)
+    }
 
+    fn finish_boot(&mut self, script: &str) -> Result<()> {
         // 默认宏定义文件（docs/spec/macro.md：宏写在 macro.iet；其他文件用
         // macroadd 标签追加）。项目没有该文件属正常情况，静默忽略。
         if !self.macro_files.contains_key("macro.iet") {
+            if self.uses_host_resources() {
+                return self.request_host_resource(
+                    "macro.iet",
+                    HostResourceAction::BootMacros(script.into()),
+                );
+            }
             let _ = self.load_macro_file("macro.iet");
         }
+        self.position_boot(script)
+    }
 
+    fn position_boot(&mut self, script: &str) -> Result<()> {
         let script_obj = self.scripts.get(script).unwrap();
         let start_label = if script_obj.get_label_line("main").is_some() {
             "main"
@@ -2648,14 +2806,7 @@ impl Interpreter {
             "_start"
         } else {
             // 从文件开头
-            self.current_script = Some(script.to_string());
-            self.current_line = 0;
-            self.call_stack.clear();
-            self.queued_call_barriers.clear();
-            self.queued_wait_checkpoints.clear();
-            self.active_queued_wait = None;
-            self.variables.lock().unwrap().retain_macro_scopes(0);
-            self.arrived_by_jump = false;
+            self.set_start_position(script, 0);
             return Ok(());
         };
 
@@ -2702,7 +2853,7 @@ impl Interpreter {
             .retain_macro_scopes(self.call_stack.len());
         self.arrived_by_jump = false;
         // 重新加载目标脚本并定位到当前行
-        self.load_external_script(script)?;
+        self.ensure_position_script(script)?;
         Ok(())
     }
 

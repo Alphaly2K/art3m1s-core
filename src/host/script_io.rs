@@ -188,6 +188,21 @@ impl ScriptIoSession {
         interpreter.set_callback(|_| CallbackResult::Pause);
         interpreter.load_file(name, source)?;
         interpreter.start(name, label)?;
+        self.replace_scenario(interpreter)
+    }
+
+    /// Start a fresh VM by reading BOOT and the optional default macro file
+    /// through Host IO. Parsing and loading errors are reported by `step`.
+    pub fn open_boot(&mut self, name: &str) -> Result<u64, ScriptIoError> {
+        logical_key(name)?;
+        let mut interpreter = Interpreter::new(self.interpreter.config().clone());
+        interpreter.enable_resumable_io()?;
+        interpreter.set_callback(|_| CallbackResult::Pause);
+        interpreter.boot(name)?;
+        self.replace_scenario(interpreter)
+    }
+
+    fn replace_scenario(&mut self, interpreter: Interpreter) -> Result<u64, ScriptIoError> {
         let epoch = self.transport.begin_session()?;
         self.interpreter = interpreter;
         self.task = None;

@@ -8,6 +8,20 @@
 
 ## 当前阶段
 
+已接入外部场景资源与 BOOT 的 Host 读取：
+
+- 内联、动态展开、排队 call/jump 保存已解析的目标和调用栈，不重跑过滤器或入栈。
+- macroadd 与默认宏支持 Host 交付的文本/ASB；可选文件失败继续，必需场景失败终止会话。
+- start/boot、栈重写和位置恢复按需读取缺失脚本，恢复后的 return 也可读取缺失的父脚本。
+- ScriptIoSession 新增 open_boot，Host 可只交付逻辑入口名；替换使旧 VM/请求失效。
+
+新增 5 项必要回归，使用内存 Host 和构造的 ASB 字节，覆盖队列屏障、过滤器不重放、
+宏/场景失败差异、取消、BOOT 入口选择、栈恢复及错误结果类型。完整解释器 258 项与
+core/Host 379 项通过，共 637 项通过、2 项既有测试跳过；全 feature 编译与格式检查通过。
+新增测试无需本机素材或图形设备。下一步继续剩余 Lua/事件入口与 Host frame、时钟注入。
+
+## 已完成：tag filter 与文件查询
+
 已完成可恢复 tag filter 和文件查询：
 
 - 过滤器保留原指令、来源和返回值，恢复后先完成原标签，再抽干过滤器生成的命令。
@@ -17,7 +31,7 @@
 - restore_position 与 reset 释放旧任务和过滤器状态，阻止旧调用现场继续改写场景。
 
 验证使用内存 Host，包含 IEEE CRC32 参考输入、负时间戳、空文件、save namespace、过滤输出
-顺序、旧等待和位置恢复。仍待完成外部场景资源 miss、其余 Lua 入口及 Host frame/时钟调度。
+顺序、旧等待和位置恢复。其余 Lua 入口及 Host frame/时钟调度仍待完成。
 本批新增 6 项必要回归；完整解释器 256 项及 core/Host 376 项通过，共 632 项通过、
 2 项既有测试跳过。全 feature 编译和格式检查通过；未改绘制算法，不运行图形硬件回归。
 
@@ -93,7 +107,7 @@ continuation/确认/边界回归，无硬件或专有输入依赖。
 
 ## 下一阶段
 
-继续接入外部场景/macro 资源的按需读取及其余 Lua/事件入口，落实同 Host frame 内 IO resume
+继续接入其余 Lua/事件入口，落实同 Host frame 内 IO resume
 不重复输入/onEnterFrame 的调度契约，并注入 Host 时钟。
 P1 的代际句柄 facade 和时钟注入仍待实现，纯核心依赖拆分与 Host renderer SDK
 按后续阶段推进。

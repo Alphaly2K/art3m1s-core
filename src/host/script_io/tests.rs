@@ -146,6 +146,165 @@ impl MemoryHost {
 }
 
 #[test]
+fn external_calls_macros_and_jumps_resume_without_replaying_filters_or_callers() {
+    let mut session = session(1, TransportLimits::default(), 1024);
+    let mut host = MemoryHost::default();
+    host.asset("defs", b"*hello\n[caption data=macro]\n[return]\n");
+    host.asset(
+        "child",
+        b"*entry\n[caption data=child]\n[return]\n[lua]\nloads=(loads or 0)+1; assert(__engine:file('init')=='ok')\n[/lua]",
+    );
+    host.asset("finish", b"*entry\n[caption data=done]\n");
+    host.asset("init", b"ok");
+    host.asset("probe", b"ok");
+    session
+        .open_scenario(
+            br#"
+*main
+[macroadd file=defs]
+[hello]
+[calllua function=queue]
+[tag data="call,file,child,label,entry"]
+[call file=child label=entry]
+[jump file=finish label=entry]
+[caption data=unreachable]
+[lua]
+function queue(e)
+    queues=(queues or 0)+1
+    e:enqueueTag{'call',file='child',label='entry'}
+    e:enqueueTag{'caption',data='queued-after'}
+end
+__engine:setTagFilter{call=function(e,p)
+    filters=(filters or 0)+1
+    assert(e:file('probe')=='ok')
+    return 0
+end}
+[/lua]
+"#,
+            "main",
+            "main",
+        )
+        .unwrap();
+    host.run(&mut session);
+    assert_eq!(
+        host.captions,
+        ["macro", "child", "queued-after", "child", "child", "done"]
+    );
+    let globals = session.interpreter().lua().globals();
+    assert_eq!(globals.get::<i32>("loads").unwrap(), 1);
+    assert_eq!(globals.get::<i32>("queues").unwrap(), 1);
+    assert_eq!(globals.get::<i32>("filters").unwrap(), 2);
+    assert_eq!(
+        host.reads
+            .iter()
+            .filter(|(key, offset)| key == "child" && *offset == 0)
+            .count(),
+        1
+    );
+    assert_eq!(session.state().pending_requests, 0);
+}
+
+#[test]
+fn optional_macro_misses_continue_but_required_scene_failures_stop_the_session() {
+    for cancel in [false, true] {
+        let mut session = session(1, TransportLimits::default(), 1024);
+        session.open_scenario(
+            b"*main\n[macroadd file=optional]\n[caption data=continued]\n[call file=required label=entry]\n[caption data=unreachable]",
+            "main", "main",
+        ).unwrap();
+        let mut host = MemoryHost::default();
+        assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
+        let request = requests(&mut session).pop().unwrap();
+        assert_eq!(request.metadata["key"], "optional");
+        session.submit_replies(&[host.complete(&request)]).unwrap();
+        assert_eq!(session.step().unwrap(), ScriptIoProgress::Event);
+        assert!(
+            matches!(session.pending_event(), Some(Event::Caption { data }) if data == "continued")
+        );
+        session.resume_scenario().unwrap();
+        assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
+        let request = requests(&mut session).pop().unwrap();
+        assert_eq!(request.metadata["key"], "required");
+        if cancel {
+            session.cancel_pending().unwrap();
+            assert!(session.submit_replies(&[host.complete(&request)]).is_err());
+        } else {
+            session.submit_replies(&[host.complete(&request)]).unwrap();
+        }
+        let error = session.step().unwrap_err().to_string();
+        assert!(error.contains(if cancel { "cancelled" } else { "not_found" }));
+        assert!(session.step().is_err());
+        assert!(session.pending_event().is_none());
+    }
+}
+
+#[test]
+fn boot_reads_its_entry_and_optional_text_or_binary_macros_through_the_host() {
+    let mut binary_macro = b"ASB\0\0".to_vec();
+    binary_macro.extend_from_slice(&3u32.to_le_bytes());
+    for (kind, tag, params) in [
+        (1u32, "hello", vec![]),
+        (0, "caption", vec![("data", "macro")]),
+        (0, "return", vec![]),
+    ] {
+        binary_macro.extend_from_slice(&kind.to_le_bytes());
+        let put_string = |bytes: &mut Vec<u8>, text: &str| {
+            bytes.extend_from_slice(&(text.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(text.as_bytes());
+            bytes.push(0);
+        };
+        put_string(&mut binary_macro, tag);
+        if kind == 0 {
+            binary_macro.extend_from_slice(&0u32.to_le_bytes());
+            binary_macro.extend_from_slice(&(params.len() as u32).to_le_bytes());
+            for (key, value) in params {
+                put_string(&mut binary_macro, key);
+                put_string(&mut binary_macro, value);
+            }
+        }
+    }
+    for (source, macros) in [
+        (
+            "*main\n[hello]\n[caption data=boot]",
+            Some(binary_macro.as_slice()),
+        ),
+        (
+            "*start\n[hello]\n[caption data=boot]",
+            Some(b"*hello\n[caption data=macro]\n[return]".as_slice()),
+        ),
+        ("*_start\n[caption data=boot]", None),
+        ("[caption data=boot]", None),
+    ] {
+        let mut session = session(1, TransportLimits::default(), 1024);
+        let mut host = MemoryHost::default();
+        host.asset("boot", source.as_bytes());
+        if let Some(bytes) = macros {
+            host.asset("macro.iet", bytes);
+        }
+        session.open_boot("boot").unwrap();
+        let before = session.state();
+        assert!(session.open_boot("../invalid").is_err());
+        assert_eq!(session.state(), before);
+        host.run(&mut session);
+        assert_eq!(
+            host.captions,
+            if macros.is_some() {
+                vec!["macro", "boot"]
+            } else {
+                vec!["boot"]
+            }
+        );
+        assert_eq!(
+            host.reads
+                .iter()
+                .filter(|(key, offset)| key == "boot" && *offset == 0)
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
 fn loading_blocks_inline_calls_and_queued_calls_resume_in_scenario_order() {
     let mut session = session(1, TransportLimits::default(), 1024);
     let mut host = MemoryHost::default();

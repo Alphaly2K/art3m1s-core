@@ -102,10 +102,20 @@ Host 提交原始场景字节和编码配置，完整帧调度由调用方管理
 `ScriptIoProgress::Event` 表示 `pending_event()` 可读取一个普通场景事件，Host 处理/等待后
 调用 `resume_scenario()` 释放该等待。等待 IO 时 PC 由 continuation 管理，Host 不额外加一。
 替换场景使旧 VM 和 IO 失效；解析或起点标签校验失败则保留旧场景。Lua 执行错误在 step 报告。
-tag filter 支持相同挂起路径，保留通过/拦截、动态展开和排队顺序。外部场景文件 miss
-尚未由此驱动请求，完整游戏接入须覆盖这些入口和帧调度。
+tag filter 支持相同挂起路径，保留通过/拦截、动态展开和排队顺序。跨文件 call/jump、
+macroadd 及栈定位遇到未加载脚本时，通过相同的 Host 读取协议暂停和恢复。场景及其标签
+缺失会使会话报错；可选宏文件读取失败沿用继续执行的行为。
 Rust 的 `ExecutionResult`/`TagResult` 新增 `HostIoPending`，穷举匹配需处理该分支；
 未启用 resumable IO 的解释器不产生它，v1 C 函数表与同步路径保持原语义。
+
+`open_boot(name)` 创建新 VM，按逻辑名称请求 BOOT 和可选的 `macro.iet`，支持文本与
+ASB；按 main/start/_start/文件开头选择入口。该调用不读取文件，加载与解析错误在 step
+报告。替换会话会使旧请求失效，非法逻辑名称保留旧会话。完整游戏接入还需帧、输入及
+事件处理器的调度；当前驱动不自行推进它们。
+
+独立解释器启用 resumable IO 后，未安装同步加载器时，start/boot/restore_position 可能
+受理一个尚待 Host 完成的加载，调用方随后处理 HostIoPending。显式安装的同步内存加载器
+仍可使用；ScriptIoSession 始终通过请求传输读取。
 
 场景及 Lua `e:tag` 的 `file_exists`/`file_exist`、`file_crc`、`file_update_time` 均等待
 Host 结果再更新变量，支持原有 CRC 大小写/前缀、日期 format/noexist 和 writelocal。
