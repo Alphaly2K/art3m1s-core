@@ -33,6 +33,9 @@ pub enum HostInput {
         y: i32,
     },
     FocusLost,
+    WindowButton {
+        button: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +68,7 @@ pub(in crate::host) struct InputFrame {
     pub touches: Vec<(u32, i32, i32)>,
     pub pointer_present: bool,
     pub focus_lost: bool,
+    pub window_buttons: Vec<u32>,
 }
 
 #[derive(Default)]
@@ -85,6 +89,12 @@ impl InputFrame {
         {
             return Err(ProtocolError::Argument("invalid Artemis key code"));
         }
+        if events
+            .iter()
+            .any(|event| matches!(event, HostInput::WindowButton { button } if *button > 2))
+        {
+            return Err(ProtocolError::Argument("invalid Artemis window button"));
+        }
         if self.pending.len() + events.len() > MAX_PENDING_INPUTS {
             return Err(ProtocolError::WouldBlock);
         }
@@ -99,6 +109,7 @@ impl InputFrame {
         self.effective.clear();
         self.claimed.clear();
         self.focus_lost = false;
+        self.window_buttons.clear();
         self.keys.retain(|_, key| {
             key.pressed = false;
             key.released = false;
@@ -145,6 +156,7 @@ impl InputFrame {
                     self.pointer_present = false;
                     self.focus_lost = true;
                 }
+                HostInput::WindowButton { button } => self.window_buttons.push(button),
             }
         }
     }

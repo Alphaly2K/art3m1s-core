@@ -464,6 +464,8 @@ const int ART_UI_DIALOG = 2;
 
 const int ART_UI_WINDOW_ACTION = 3;
 
+const int ART_UI_AVOID = 4;
+
 const int ART_IO_STAT = 1;
 
 const int ART_IO_READ = 2;
@@ -483,6 +485,8 @@ const int ART_INPUT_POINTER = 2;
 const int ART_INPUT_TOUCH = 3;
 
 const int ART_INPUT_FOCUS_LOST = 4;
+
+const int ART_INPUT_WINDOW_BUTTON = 5;
 
 const int ART_MEDIA_AUDIO_COMMAND = 1;
 

@@ -215,6 +215,7 @@ C 预览版 `ArtMessage.schema_version=1`、`flags=0`。一个批次可包含一
 | Input (2) | 2 | 舞台坐标 `x`、`y` |
 | Input (2) | 3 | `id`、`phase`（`down`、`move`、`up`）、`x`、`y` |
 | Input (2) | 4 | `{}`，失焦 |
+| Input (2) | 5 | `button`：0 关闭，1 最大化，2 最小化 |
 | Runtime (1) | 16 | `{}`，请求正常关闭 |
 | Runtime (1) | 17 | `{}`，blob 为默认字体 |
 | Media (5) | 16 | `playback_id`、`status`（`started`、`ended`、`failed`、`cancelled`） |
@@ -265,6 +266,11 @@ UI domain=4 的记录不携带 blob：
 | 1 `ui.caption` | 可靠通知，`{"text":"…"}` | 无回复 |
 | 2 `ui.dialog` | 请求，`title`、`message` 为字符串，`allow_cancel` 为布尔值，`initial_text` 为字符串或 null，`max_characters` 为十进制字符串或 null | `{"status":"ok","accepted":true,"text":"…"}`；`text` 可省略。`cancelled`、`denied`、`unsupported`、`io_error` 按取消完成 |
 | 3 `ui.window_action` | 可靠通知，`command` 为 `fullscreen`（切换全屏）或 `minimize` | 无回复 |
+| 4 `ui.avoid` | 可靠通知，`visible`、`mute` 为布尔值；开启时包括 asset 命名空间下的逻辑 `asset` 和 `windowbutton` | 无回复 |
+
+Host 按同一条 `ui.avoid` 记录更新遮罩和静音；解除静音时沿用原音量。`windowbutton=0` 忽略
+窗口按钮，`1` 使用平台默认动作，`2` 把按钮提交给 Core。Core 先交付退出回避通知，再派发
+`setonwindowbutton`。会话重载或关闭后，Host 清除遮罩和会话静音状态。
 
 `initial_text=null` 表示无输入框。Core 在 `step` 应用结果，接受时按约定字符上限写入
 输入变量，取消时保留旧输入内容。Host 重载时按 `session_changed` 取消旧对话框。

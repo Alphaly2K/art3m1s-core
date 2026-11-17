@@ -88,13 +88,15 @@ impl SceneIo {
         event: &str,
         key: &str,
         params: &[(&str, &str)],
-    ) {
+    ) -> bool {
         let scene = self.scene.lock().unwrap();
         if let Some(handler) = scene.compositor.get_input_handler(event, key) {
             self.pointer
                 .pending
                 .push_back(InputDispatch::global(handler, event, None, params));
+            return true;
         }
+        false
     }
 
     pub(in crate::host::script_io) fn queue_menu(&mut self, file: &str, leaving: bool) {

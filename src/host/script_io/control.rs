@@ -13,6 +13,8 @@ const AUTO_OUT_NOCLICK: i32 = 11;
 const SKIP_IN: i32 = 12;
 const SKIP_OUT: i32 = 13;
 const CONTROL_SKIP: i32 = 14;
+const AVOID_IN: i32 = 15;
+const AVOID_OUT: i32 = 16;
 
 pub(super) struct PlaybackControl {
     keys: HashMap<i32, Vec<u32>>,
@@ -31,6 +33,10 @@ pub(super) struct PlaybackControl {
     hidden_layers: Option<Vec<(String, Option<bool>)>>,
     right_click_allowed: bool,
     right_click_file: Option<String>,
+    avoid_asset: Option<String>,
+    avoid_windowbutton: i32,
+    avoid: bool,
+    avoid_dirty: bool,
     check_read: bool,
     ready_since: Option<u64>,
     input_frame: Option<u64>,
@@ -65,6 +71,10 @@ impl Default for PlaybackControl {
             hidden_layers: None,
             right_click_allowed: false,
             right_click_file: None,
+            avoid_asset: None,
+            avoid_windowbutton: 0,
+            avoid: false,
+            avoid_dirty: false,
             check_read: true,
             ready_since: None,
             input_frame: None,
@@ -74,6 +84,10 @@ impl Default for PlaybackControl {
 }
 
 impl PlaybackControl {
+    pub(super) fn avoid_pending(&self) -> bool {
+        self.avoid_dirty
+    }
+
     fn keys(&self, role: i32) -> &[u32] {
         self.keys.get(&role).map_or(&[], Vec::as_slice)
     }
@@ -100,6 +114,56 @@ impl PlaybackControl {
 }
 
 impl ScriptIoSession {
+    fn set_avoid(&mut self, active: bool) {
+        let active = active && self.control.avoid_asset.is_some();
+        if self.control.avoid != active {
+            self.control.avoid = active;
+            self.control.avoid_dirty = true;
+        }
+    }
+
+    pub(super) fn deliver_avoid_state(&mut self) -> Result<bool, ProtocolError> {
+        if !self.control.avoid_dirty {
+            return Ok(true);
+        }
+        let data = if self.control.avoid {
+            json!({"visible":true, "mute":true, "asset":self.control.avoid_asset, "windowbutton":self.control.avoid_windowbutton})
+        } else {
+            json!({"visible":false, "mute":false})
+        };
+        match self
+            .transport
+            .notify(UI_AVOID, MessageBody::new(data.to_string(), vec![])?)
+        {
+            Err(ProtocolError::WouldBlock) => return Ok(false),
+            result => result?,
+        }
+        self.control.avoid_dirty = false;
+        Ok(true)
+    }
+
+    fn dispatch_window_buttons(&mut self, buttons: Vec<u32>) {
+        for button in buttons {
+            if self.control.avoid {
+                if self.control.avoid_windowbutton != 2 {
+                    continue;
+                }
+                self.set_avoid(false);
+            }
+            self.interpreter.set_variable(
+                "s.status.windowbutton",
+                asb_interpreter::Value::Int(i64::from(button)),
+            );
+            if let Some(scene) = self.scene.as_mut() {
+                let key = button.to_string();
+                let params = [("button", key.as_str()), ("type", "windowbutton")];
+                if !scene.queue_global_handler("windowbutton", &key, &params) {
+                    scene.queue_global_handler("windowbutton", "", &params);
+                }
+            }
+        }
+    }
+
     fn set_hide(&mut self, hide: bool) {
         let Some(scene) = &self.scene else {
             return;
@@ -153,6 +217,7 @@ impl ScriptIoSession {
             return;
         };
         let keys = [1, 2, 27];
+        let buttons = scene.with_input(|input| std::mem::take(&mut input.window_buttons));
         let pressed = scene
             .with_input(|input| keys.map(|key| input.frame_bits(key) & OVERRIDE_IS_DOWN_EDGE != 0));
         let restore = self.control.hidden_layers.is_some() && pressed.into_iter().any(|down| down);
@@ -169,6 +234,7 @@ impl ScriptIoSession {
                 }
             });
         }
+        self.dispatch_window_buttons(buttons);
     }
 
     fn queue_mode_handler(&mut self, event: &str) {
@@ -245,6 +311,7 @@ impl ScriptIoSession {
         self.control.held_skip = false;
         self.control.auto = false;
         self.control.hidden_layers = None;
+        self.set_avoid(false);
         self.control.reset_wait();
         self.publish_control_state();
     }
@@ -314,6 +381,12 @@ impl ScriptIoSession {
             } else if skip_out {
                 self.set_command_skip(false);
             }
+            let avoid_out = self.control.keys(AVOID_OUT).contains(&key);
+            if self.control.keys(AVOID_IN).contains(&key) {
+                self.set_avoid(!avoid_out || !self.control.avoid);
+            } else if avoid_out {
+                self.set_avoid(false);
+            }
         }
         if self.control.auto && self.control.stop_on_click && stop_click {
             self.control.blocked_click = Some(frame.id);
@@ -345,6 +418,15 @@ impl ScriptIoSession {
                 self.control.right_click_allowed = allow;
                 if file.as_ref().is_some_and(|file| !file.is_empty()) {
                     self.control.right_click_file = file;
+                }
+            }
+            Some(Event::AvoidConfig { file, windowbutton }) => {
+                self.control.avoid_asset =
+                    file.and_then(|file| self.scene.as_ref()?.resolve_media_asset(&file).ok());
+                self.control.avoid_windowbutton = windowbutton.clamp(0, 2);
+                if self.control.avoid {
+                    self.set_avoid(self.control.avoid_asset.is_some());
+                    self.control.avoid_dirty = true;
                 }
             }
             Some(Event::SkipConfig { allow, skip_unread }) => {

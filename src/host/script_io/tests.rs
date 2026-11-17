@@ -2259,6 +2259,101 @@ fn numbered_load_blends_the_previous_frame_without_blocking_the_restored_script(
 }
 
 #[test]
+fn avoid_state_survives_backpressure_and_window_buttons_restore_it_before_callbacks() {
+    use crate::host::input::HostInput;
+
+    let mut limits = TransportLimits::default();
+    limits.control.records = 1;
+    let mut session = session(1, limits, 4096);
+    let epoch = session
+        .open_queued_project(
+            b"[WINDOWS]\nWIDTH=320\nHEIGHT=200\nBOOT=boot.iet\n",
+            "windows",
+            None,
+        )
+        .unwrap();
+    let mut host = MemoryHost::default();
+    host.asset(
+        "boot.iet",
+        br#"*top
+[avoid file=cover.png windowbutton=2]
+[keyconfig role=15 keys=70]
+[setonwindowbutton button=0 handler=calllua function=pressed]
+[wt0]
+[stop]
+[lua]
+function pressed(e,p)
+    assert(p.type=='windowbutton' and p.button=='0')
+    called=(called or 0)+1
+end
+[/lua]
+"#,
+    );
+    let start = playback_frame(1, 0);
+    for _ in 0..1024 {
+        let progress = session.step_queued_frame(start).unwrap();
+        for request in requests(&mut session) {
+            session.submit_replies(&[host.complete(&request)]).unwrap();
+        }
+        if progress == ScriptIoProgress::Event {
+            break;
+        }
+    }
+    let poll = |session: &mut ScriptIoSession, kind: MessageKind| {
+        let mut bytes = [0; 4096];
+        let result = session.poll_events(&mut bytes);
+        assert_eq!(
+            u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize,
+            result.written_bytes
+        );
+        assert_eq!(
+            u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            kind.kind
+        );
+        serde_json::from_slice::<Value>(&bytes[64..result.written_bytes]).unwrap()
+    };
+    let occupy_queue = |session: &mut ScriptIoSession| {
+        session
+            .transport
+            .notify(
+                UI_CAPTION,
+                MessageBody::new(r#"{"text":"busy"}"#.into(), vec![]).unwrap(),
+            )
+            .unwrap()
+    };
+    let step = |session: &mut ScriptIoSession, id| {
+        session.step_queued_frame(playback_frame(id, id)).unwrap()
+    };
+    occupy_queue(&mut session);
+    submit_playback_keys(&mut session, epoch, &[(70, true)]);
+    assert_eq!(step(&mut session, 2), ScriptIoProgress::WouldBlock);
+    assert_eq!(step(&mut session, 3), ScriptIoProgress::WouldBlock);
+    assert_eq!(poll(&mut session, UI_CAPTION), json!({"text":"busy"}));
+    assert_eq!(step(&mut session, 2), ScriptIoProgress::Event);
+    assert_eq!(
+        poll(&mut session, UI_AVOID),
+        json!({"visible":true,"mute":true,"asset":"cover.png","windowbutton":2})
+    );
+
+    let globals = session.interpreter().lua().globals();
+    occupy_queue(&mut session);
+    session
+        .submit_input(epoch, &[HostInput::WindowButton { button: 0 }])
+        .unwrap();
+    assert_eq!(step(&mut session, 3), ScriptIoProgress::WouldBlock);
+    assert!(globals.get::<Option<i32>>("called").unwrap().is_none());
+    poll(&mut session, UI_CAPTION);
+    assert_eq!(step(&mut session, 3), ScriptIoProgress::Event);
+    assert_eq!(
+        poll(&mut session, UI_AVOID),
+        json!({"visible":false,"mute":false})
+    );
+    assert_eq!(globals.get::<i32>("called").unwrap(), 1);
+    assert_eq!(step(&mut session, 3), ScriptIoProgress::Event);
+    assert_eq!(globals.get::<i32>("called").unwrap(), 1);
+}
+
+#[test]
 fn audio_feedback_uses_playback_identity_and_resumes_its_wait_after_callback_io() {
     use crate::host::{
         media::PlaybackStatus,

@@ -17,7 +17,7 @@ use lifecycle::Shutdown;
 pub use lifecycle::{RUNTIME_CLOSED, RUNTIME_EXIT_REQUESTED};
 pub use persistence::RUNTIME_PERSISTENCE_RESULT;
 pub use screenshot::{RENDER_CAPTURE, RENDER_SAVE_CAPTURE};
-pub use ui::{UI_CAPTION, UI_DIALOG, UI_WINDOW_ACTION};
+pub use ui::{UI_AVOID, UI_CAPTION, UI_DIALOG, UI_WINDOW_ACTION};
 pub use video::MEDIA_VIDEO_COMMAND;
 
 use super::protocol::*;
@@ -763,7 +763,8 @@ impl ScriptIoSession {
         if matches!(self.shutdown, Shutdown::Reporting(_)) {
             return Ok(ScriptIoProgress::SaveReady);
         }
-        let dispatch_scene = self.scene_handlers_ready() || self.pointer_ready();
+        let dispatch_scene =
+            self.scene_handlers_ready() || self.pointer_ready() || self.control.avoid_pending();
         if self.completed && !self.shutdown.is_closing_or_closed() && !dispatch_scene {
             return Ok(ScriptIoProgress::Completed);
         }
@@ -809,6 +810,7 @@ impl ScriptIoSession {
         let new_frame = self.frame.is_none_or(|previous| frame.id != previous.id);
         if new_frame
             && (self.operation.is_some()
+                || self.control.avoid_pending()
                 || self.cancelled
                 || (self.scene.is_some()
                     && self.screenshots_enabled
@@ -1015,6 +1017,9 @@ impl ScriptIoSession {
                 .as_mut()
                 .and_then(scene::SceneIo::next_pointer_filter);
         }
+        if !self.deliver_avoid_state()? {
+            return Ok(ScenarioStep::Progress(ScriptIoProgress::WouldBlock));
+        }
         match self.event_filter.take() {
             Some(EventFilterWork::Queued(name, params)) => {
                 return match self.interpreter.host_event_filter_task(&name, &params) {
@@ -1032,6 +1037,9 @@ impl ScriptIoSession {
         }
         if let Some(frame) = self.frame {
             self.update_control_input(frame);
+        }
+        if !self.deliver_avoid_state()? {
+            return Ok(ScenarioStep::Progress(ScriptIoProgress::WouldBlock));
         }
         if self.pointer_ready() {
             return Ok(ScenarioStep::Continue);

@@ -12,6 +12,10 @@ pub const UI_WINDOW_ACTION: MessageKind = MessageKind {
     domain: Domain::Ui,
     kind: 3,
 };
+pub const UI_AVOID: MessageKind = MessageKind {
+    domain: Domain::Ui,
+    kind: 4,
+};
 
 impl ScriptIoSession {
     // None means this event was consumed and the interpreter can continue.
