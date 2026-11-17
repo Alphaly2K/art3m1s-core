@@ -230,6 +230,7 @@ pub struct ScriptIoSession {
     project_loading: bool,
     dialog_request: Option<RequestIdentity>,
     pub(super) shutdown: Shutdown,
+    scene: Option<scene::SceneIo>,
     read_history: ReadHistory,
     read_history_dirty: bool,
 }
@@ -274,6 +275,7 @@ impl ScriptIoSession {
             project_loading: false,
             dialog_request: None,
             shutdown: Shutdown::default(),
+            scene: None,
             read_history: ReadHistory::default(),
             read_history_dirty: false,
         })
@@ -378,6 +380,7 @@ impl ScriptIoSession {
         self.project_loading = false;
         self.dialog_request = None;
         self.shutdown = Shutdown::default();
+        self.scene = None;
         Ok(epoch)
     }
 
@@ -479,6 +482,7 @@ impl ScriptIoSession {
         self.project_loading = false;
         self.dialog_request = None;
         self.shutdown = Shutdown::default();
+        self.scene = None;
         self.read_history = ReadHistory::default();
         self.read_history_dirty = false;
         Ok(epoch)
@@ -820,6 +824,16 @@ impl ScriptIoSession {
         &mut self,
         mut response: Option<IoResponse>,
     ) -> Result<ScenarioStep, ScriptIoError> {
+        if let Some(scene) = self.scene.as_mut()
+            && scene.asset_pending()
+        {
+            if let Some(request) =
+                scene.complete_asset(response.take().ok_or(ProtocolError::State)?)
+            {
+                return Ok(ScenarioStep::Request(request));
+            }
+            self.interpreter.advance_line();
+        }
         if let Some(stage) = self.boot_restore.take()
             && let Some(request) = self.step_boot_restore(stage, response.take())?
         {
@@ -892,6 +906,11 @@ impl ScriptIoSession {
         match self.interpreter.step()? {
             ExecutionResult::HostIoPending => self.interpreter_request(),
             ExecutionResult::Wait(event) => {
+                if let Some(scene) = self.scene.as_mut()
+                    && let Some(request) = scene.prepare_asset(&event)
+                {
+                    return Ok(ScenarioStep::Request(request));
+                }
                 if matches!(event, Event::ScenarioText { .. }) {
                     self.record_read_history();
                 }

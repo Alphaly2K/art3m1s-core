@@ -1510,6 +1510,69 @@ end
 }
 
 #[test]
+fn host_supplies_texture_dimensions_before_layer_creation_and_lua_queries() {
+    let mut session = session(1, TransportLimits::default(), 4096);
+    let mut host = MemoryHost::default();
+    let mut png = Vec::new();
+    image::ImageEncoder::write_image(
+        image::codecs::png::PngEncoder::new(&mut png),
+        &[255; 3 * 2 * 4],
+        3,
+        2,
+        image::ExtendedColorType::Rgba8,
+    )
+    .unwrap();
+    host.asset("tiles/hero", &png);
+    host.asset(
+        "boot.iet",
+        br#"*top
+[lyc id=1.80 file=tiles/hero mask=tiles/mask]
+[var system=get_layer_info id=1.80 name=t.info]
+[lyc id=1.90 file=tiles/hero]
+[calllua function=check]
+[caption data=ready]
+[lua]
+function check()
+  local e=__engine
+  assert(e:var('t.info.width')=='3' and e:var('t.info.height')=='2')
+  assert(e:var('t.info.mask')=='tiles/mask')
+  e:tag{'var', system='get_layer_info', id='1.90', name='t.second'}
+  assert(e:var('t.second.width')=='3' and e:var('t.second.height')=='2')
+end
+[/lua]
+"#,
+    );
+    session
+        .open_queued_project(
+            b"[WINDOWS]\nWIDTH=640\nHEIGHT=480\nBOOT=boot.iet\n",
+            "windows",
+            None,
+        )
+        .unwrap();
+    let mut candidates = Vec::new();
+    for _ in 0..1024 {
+        match session.step().unwrap() {
+            ScriptIoProgress::Event => {
+                assert!(
+                    matches!(session.pending_event(), Some(Event::Caption { data }) if data == "ready")
+                );
+                assert_eq!(candidates, ["tiles/hero.png", "tiles/hero"]);
+                return;
+            }
+            progress => assert_eq!(progress, ScriptIoProgress::Waiting),
+        }
+        for request in requests(&mut session) {
+            let key = request.metadata["key"].as_str().unwrap();
+            if key.starts_with("tiles/") && request.identity.service == IO_STAT {
+                candidates.push(key.to_owned());
+            }
+            session.submit_replies(&[host.complete(&request)]).unwrap();
+        }
+    }
+    panic!("scenario did not reach its final caption");
+}
+
+#[test]
 fn host_calendar_and_monotonic_clocks_remain_distinct_across_io_suspension() {
     let mut session = session(1, TransportLimits::default(), 1024);
     session
