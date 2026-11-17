@@ -8,6 +8,20 @@
 
 ## 当前阶段
 
+已接入加载期 Lua 与 calllua 的可恢复场景调度：
+
+- 解释器显式启用 resumable IO；加载期 Lua 块与内联/排队 calllua 均保存真实 continuation。
+- IO 等待单独返回 HostIoPending，不当作普通等待推进 PC；嵌套参数表跨暂停保留。
+- 跨文件加载的 Lua 初始化先于目标标签；待执行标签队列在 Lua 完成前保持不动。
+- ScriptIoSession 的场景入口创建新 VM，以可靠 IO 传输驱动；普通事件由 Host 明确恢复。
+
+验证采用纯内存场景/加载器，覆盖 PC、队列、加载顺序、重复加载、重置、场景替换和旧结果。
+本批新增 5 项回归；完整解释器 254 项及 core/Host 372 项通过，共 626 项通过、2 项既有
+测试跳过。新增测试均不依赖外部素材/图形设备；全 feature 编译和格式检查通过。
+仍待连接可恢复 tag filter、文件 var 查询、外部场景资源 miss 与 Host frame/时钟调度。
+
+## 已完成：Luau IO chunk 接入
+
 已完成 Luau IO chunk continuation 与请求传输接入：
 
 - `IoTask` 从原 Lua 栈挂起/恢复，Lua 包装层负责 `e:file`、嵌套 include、exists 及文件确认。

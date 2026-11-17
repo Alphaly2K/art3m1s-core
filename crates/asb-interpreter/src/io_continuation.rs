@@ -58,6 +58,7 @@ pub struct IoTask {
     finished: bool,
     failed: bool,
     pending: Option<IoRequest>,
+    initial_args: MultiValue,
 }
 
 impl IoTask {
@@ -72,7 +73,51 @@ impl IoTask {
             finished: false,
             failed: false,
             pending: None,
+            initial_args: MultiValue::new(),
         })
+    }
+
+    pub fn call(
+        lua: &Lua,
+        name: &str,
+        params: &std::collections::HashMap<String, String>,
+    ) -> Result<Option<Self>> {
+        let mut value = Value::Table(lua.globals());
+        for part in name.split('.') {
+            value = match value {
+                Value::Table(table) => table.get(part)?,
+                _ => return Ok(None),
+            };
+        }
+        let Value::Function(function) = value else {
+            return Ok(None);
+        };
+        let table = if let Some(key) = params.get("__art3m1s_params_key")
+            && let Ok(mailbox) = lua.globals().get::<mlua::Table>("__art3m1s_enqueue_params")
+            && let Ok(table) = mailbox.get::<mlua::Table>(key.as_str())
+        {
+            mailbox.set(key.as_str(), Value::Nil)?;
+            table
+        } else {
+            lua.create_table()?
+        };
+        for (key, value) in params {
+            if key == "__art3m1s_params_key" {
+                continue;
+            }
+            table.set(key.as_str(), value.as_str())?;
+        }
+        let engine: Value = lua.globals().get("__engine")?;
+        let args = MultiValue::from_vec(vec![engine, Value::Table(table)]);
+        Ok(Some(Self {
+            lua: lua.clone(),
+            thread: lua.create_thread(function)?,
+            started: false,
+            finished: false,
+            failed: false,
+            pending: None,
+            initial_args: args,
+        }))
     }
 
     pub fn pending_request(&self) -> Option<&IoRequest> {
@@ -86,7 +131,7 @@ impl IoTask {
         }
         let args = match (self.pending.as_ref(), response) {
             (Some(_), None) => return Ok(IoProgress::Waiting),
-            (None, None) if !self.started => MultiValue::new(),
+            (None, None) if !self.started => std::mem::take(&mut self.initial_args),
             (Some(request), Some(response)) => {
                 let value = match (request, response) {
                     (_, IoResponse::Failed { kind, message }) => MultiValue::from_vec(vec![
@@ -240,6 +285,9 @@ pub fn install(interpreter: &Interpreter) -> Result<()> {
     lua.set_named_registry_value("__art3m1s_io_continuation", true)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod scenario_tests;
 
 #[cfg(test)]
 mod tests {

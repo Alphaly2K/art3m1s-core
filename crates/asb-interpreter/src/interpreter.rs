@@ -13,7 +13,7 @@ use crate::script::{Instruction, Script};
 use crate::tags::{ExecutionContext, TagRegistry, TagResult};
 use crate::variable::{Value, VariableStore};
 use mlua::Lua;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 /// Artemis 兼容：字符串算术强制转换。
@@ -182,6 +182,9 @@ impl Default for InterpreterConfig {
 pub enum ExecutionResult {
     /// 执行完成
     Completed,
+    /// A resumable interpreter is waiting for Host IO; the PC is already owned
+    /// by the continuation and must not be advanced by the Host.
+    HostIoPending,
     /// 等待用户输入
     Wait(Event),
     /// 调用外部脚本
@@ -302,6 +305,10 @@ pub struct Interpreter {
     macro_files: HashMap<String, Vec<String>>,
     /// Compiled macros retain file-local labels and absolute branch addresses.
     compiled_macro_files: HashMap<String, String>,
+    resumable_io: bool,
+    io_task: Option<crate::io_continuation::IoTask>,
+    loading_lua: VecDeque<(String, usize, String)>,
+    loading_lua_key: Option<(String, usize)>,
 }
 
 fn json_to_lua_value(lua: &Lua, value: serde_json::Value) -> mlua::Result<mlua::Value> {
@@ -562,6 +569,10 @@ impl Interpreter {
             macros: MacroRegistry::new(),
             macro_files: HashMap::new(),
             compiled_macro_files: HashMap::new(),
+            resumable_io: false,
+            io_task: None,
+            loading_lua: VecDeque::new(),
+            loading_lua_key: None,
         }
     }
 
@@ -571,6 +582,67 @@ impl Interpreter {
     /// 响应 Lua 脚本中 engine 对象（`e`）的方法调用。
     pub fn set_engine_callbacks(&mut self, callbacks: Box<dyn crate::lua_engine::EngineCallbacks>) {
         self.engine_ctx.lock().unwrap().callbacks = callbacks;
+    }
+
+    pub fn enable_resumable_io(&mut self) -> Result<()> {
+        crate::io_continuation::install(self)?;
+        self.resumable_io = true;
+        Ok(())
+    }
+
+    pub fn pending_host_io(&self) -> Option<&crate::io_continuation::IoRequest> {
+        self.io_task
+            .as_ref()
+            .and_then(|task| task.pending_request())
+    }
+
+    pub fn resume_host_io(
+        &mut self,
+        response: crate::io_continuation::IoResponse,
+    ) -> Result<crate::io_continuation::IoProgress> {
+        let task = self.io_task.as_mut().ok_or_else(|| Error::RuntimeError {
+            line: self.current_line,
+            message: "no Lua IO continuation is waiting".into(),
+        })?;
+        let progress = task.step(Some(response))?;
+        if progress == crate::io_continuation::IoProgress::Completed {
+            self.io_task = None;
+            if let Some(key) = self.loading_lua_key.take() {
+                self.executed_lua_blocks.insert(key);
+            }
+        }
+        Ok(progress)
+    }
+
+    pub fn clear_host_io(&mut self) {
+        self.io_task = None;
+        self.loading_lua.clear();
+        self.loading_lua_key = None;
+    }
+
+    fn check_io_idle(&self) -> Result<()> {
+        if self.io_task.is_some() {
+            return Err(Error::RuntimeError {
+                line: self.current_line,
+                message: "cannot replace script state while Host IO is pending".into(),
+            });
+        }
+        Ok(())
+    }
+
+    fn drive_loading_lua(&mut self) -> Result<bool> {
+        while let Some((name, index, code)) = self.loading_lua.pop_front() {
+            let mut task =
+                crate::io_continuation::IoTask::compile(&self.lua, code.as_bytes(), &name)?;
+            let key = (name, index);
+            if task.step(None)? == crate::io_continuation::IoProgress::Waiting {
+                self.io_task = Some(task);
+                self.loading_lua_key = Some(key);
+                return Ok(true);
+            }
+            self.executed_lua_blocks.insert(key);
+        }
+        Ok(false)
     }
 
     /// 获取 Lua engine 上下文
@@ -643,6 +715,7 @@ impl Interpreter {
 
     /// 加载脚本（从文本）
     pub fn load_script(&mut self, name: &str, content: &str) -> Result<()> {
+        self.check_io_idle()?;
         let script = Script::parse_with_tag_ini(name, content, Some(&self.tag_ini))?;
         self.insert_script(name.to_string(), script);
         // Artemis 语义（docs/tag/system/lua.md）：[lua] 块在**文件加载时**执行，
@@ -680,6 +753,7 @@ impl Interpreter {
     ///
     /// 同名脚本重新加载视为全新文件：先清除旧的已执行标记再逐块执行。
     fn run_lua_blocks_at_load(&mut self, name: &str) -> Result<()> {
+        self.loading_lua.retain(|(script, _, _)| script != name);
         self.executed_lua_blocks
             .retain(|(script, _)| script != name);
 
@@ -695,6 +769,10 @@ impl Interpreter {
         };
 
         for (idx, code) in blocks {
+            if self.resumable_io {
+                self.loading_lua.push_back((name.to_string(), idx, code));
+                continue;
+            }
             self.lua
                 .load(&code)
                 .set_name(name)
@@ -707,6 +785,7 @@ impl Interpreter {
 
     /// 加载脚本（从 ASB 二进制数据）
     pub fn load_asb(&mut self, name: &str, data: &[u8]) -> Result<()> {
+        self.check_io_idle()?;
         let script = Script::parse_asb(name, data, self.config.encoding)?;
         self.insert_script(name.to_string(), script);
         self.run_lua_blocks_at_load(name)
@@ -774,6 +853,7 @@ impl Interpreter {
 
     /// 设置起始标签并开始执行
     pub fn start(&mut self, script: &str, label: &str) -> Result<()> {
+        self.check_io_idle()?;
         // 确保脚本已加载
         if !self.scripts.contains_key(script) {
             self.load_external_script(script)?;
@@ -812,6 +892,7 @@ impl Interpreter {
     /// may consume state written immediately before `[reset]`. The old program
     /// counter, call/queue state and wait metadata must not cross the boundary.
     pub fn reset_execution_state(&mut self) {
+        self.clear_host_io();
         self.current_script = None;
         self.current_line = 0;
         self.call_stack.clear();
@@ -843,6 +924,9 @@ impl Interpreter {
 
     /// 执行到下一个等待点（迭代版本，避免栈溢出）
     pub fn step(&mut self) -> Result<ExecutionResult> {
+        if self.io_task.is_some() {
+            return Ok(ExecutionResult::HostIoPending);
+        }
         // 进入执行即视为旧等待已结束：清掉 getScriptWaitReason 的数据源，
         // 返回新的 Wait 时再写入（等待期间宿主不会调 step，信息保持可读）。
         self.engine_ctx.lock().unwrap().wait_reason_info = None;
@@ -855,6 +939,9 @@ impl Interpreter {
 
     fn step_inner(&mut self) -> Result<ExecutionResult> {
         loop {
+            if self.drive_loading_lua()? {
+                return Ok(ExecutionResult::HostIoPending);
+            }
             // A queued handler may return to a PC that is already the next
             // script instruction. Re-emit the original wait before flushing
             // deferred tags or executing that instruction.
@@ -872,6 +959,9 @@ impl Interpreter {
             // [calllua]/[lua] 产生，必须走标签管线才能发出对应事件。
             if let Some(result) = self.flush_tag_queue()? {
                 return Ok(result);
+            }
+            if !self.loading_lua.is_empty() {
+                continue;
             }
             if let Some(event) = self.queued_wait_at_current_position() {
                 self.last_wait_from_queue = true;
@@ -959,8 +1049,22 @@ impl Interpreter {
                 let key = (script_name.clone(), self.current_line);
                 if !self.executed_lua_blocks.contains(&key) {
                     let code = instruction.get("code").unwrap_or("");
-                    if let Err(e) = self.lua.load(code).exec() {
-                        return Err(Error::LuaError(e));
+                    if self.resumable_io {
+                        let mut task = crate::io_continuation::IoTask::compile(
+                            &self.lua,
+                            code.as_bytes(),
+                            &script_name,
+                        )?;
+                        if task.step(None)? == crate::io_continuation::IoProgress::Waiting {
+                            self.io_task = Some(task);
+                            self.loading_lua_key = Some(key);
+                            self.current_line += 1;
+                            return Ok(ExecutionResult::HostIoPending);
+                        }
+                    } else {
+                        if let Err(e) = self.lua.load(code).exec() {
+                            return Err(Error::LuaError(e));
+                        }
                     }
                     self.executed_lua_blocks.insert(key);
                 }
@@ -972,6 +1076,10 @@ impl Interpreter {
             let tag_result = self.execute_tag(&instruction, true)?;
 
             match tag_result {
+                TagResult::HostIoPending => {
+                    self.current_line += 1;
+                    return Ok(ExecutionResult::HostIoPending);
+                }
                 TagResult::Continue => {
                     self.current_line += 1;
                     continue;
@@ -1085,6 +1193,10 @@ impl Interpreter {
                     let inner_result = self.execute_tag(&inner_instruction, true)?;
                     // 处理内部指令的结果（不增加行号，因为外层会处理）
                     match inner_result {
+                        TagResult::HostIoPending => {
+                            self.current_line += 1;
+                            return Ok(ExecutionResult::HostIoPending);
+                        }
                         TagResult::Continue => {
                             self.current_line += 1;
                             continue;
@@ -1217,7 +1329,13 @@ impl Interpreter {
     /// 下次 `run()` 重入 `step` 可继续处理。返回 `Some(result)` 表示需立即从 `step`
     /// 返回（暂停或中止），`None` 表示队列已清空、可继续正常执行。
     fn flush_tag_queue(&mut self) -> Result<Option<ExecutionResult>> {
+        if self.io_task.is_some() {
+            return Ok(Some(ExecutionResult::HostIoPending));
+        }
         loop {
+            if !self.loading_lua.is_empty() {
+                return Ok(None);
+            }
             // e:setScriptStack 请求的调用栈重写在此落实——Lua 执行期间只能
             // 记录请求，队列抽干点是回到解释器控制流后的第一个安全时机。
             self.apply_pending_stack_override()?;
@@ -1263,6 +1381,7 @@ impl Interpreter {
             }
 
             match result {
+                TagResult::HostIoPending => return Ok(Some(ExecutionResult::HostIoPending)),
                 TagResult::Continue => continue,
                 TagResult::Emit(event) | TagResult::Wait(event) => {
                     match self.emit_event(event.clone()) {
@@ -1779,6 +1898,16 @@ impl Interpreter {
             // e:var（经共享句柄再次锁 variables），持锁会在非可重入 Mutex 上自锁死。
             // Lua 内可能调用 e:getScriptStack / e:getScriptBlock，先刷新栈镜像。
             self.sync_script_state_to_engine();
+            if self.resumable_io {
+                if let Some(mut task) =
+                    crate::io_continuation::IoTask::call(&self.lua, &function_name, &extra_params)?
+                    && task.step(None)? == crate::io_continuation::IoProgress::Waiting
+                {
+                    self.io_task = Some(task);
+                    return Ok(TagResult::HostIoPending);
+                }
+                return Ok(TagResult::Continue);
+            }
             crate::tags::call_lua_function(&self.lua, &function_name, &extra_params)?;
             return Ok(TagResult::Continue);
         }
@@ -1812,6 +1941,19 @@ impl Interpreter {
         if instruction.tag == "var"
             && let Some(system_raw) = instruction.get("system")
         {
+            if self.resumable_io {
+                let variables = self.variables.lock().unwrap();
+                let system = ExpressionEvaluator::new(&variables).resolve_param_str(system_raw)?;
+                if matches!(
+                    system.as_str(),
+                    "file_exist" | "file_exists" | "file_crc" | "file_update_time"
+                ) {
+                    return Err(Error::RuntimeError {
+                        line: current_line,
+                        message: "file var queries require a resumable query dispatcher".into(),
+                    });
+                }
+            }
             let resolved = {
                 let variables = self.variables.lock().unwrap();
                 let evaluator = ExpressionEvaluator::new(&variables);

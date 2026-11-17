@@ -39,6 +39,8 @@ use std::collections::HashMap;
 pub enum TagResult {
     /// 继续下一条指令
     Continue,
+    /// The current Lua call is suspended on a Host IO request.
+    HostIoPending,
     /// 跳转到指定行
     Jump(usize),
     /// 跨脚本跳转，不压入返回地址

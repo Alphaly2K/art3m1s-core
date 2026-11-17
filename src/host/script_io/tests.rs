@@ -70,6 +70,7 @@ fn reply(request: &Request, metadata: Value, blob: Vec<u8>) -> HostReply {
 struct MemoryHost {
     files: HashMap<(String, String), (u64, Vec<u8>)>,
     reads: Vec<(String, usize)>,
+    captions: Vec<String>,
 }
 
 impl MemoryHost {
@@ -122,8 +123,17 @@ impl MemoryHost {
     }
     fn run(&mut self, session: &mut ScriptIoSession) {
         for _ in 0..512 {
-            if session.step().unwrap() == ScriptIoProgress::Completed {
-                return;
+            match session.step().unwrap() {
+                ScriptIoProgress::Completed => return,
+                ScriptIoProgress::Event => {
+                    let Some(Event::Caption { data }) = session.pending_event() else {
+                        panic!("unexpected scenario event")
+                    };
+                    self.captions.push(data.clone());
+                    assert_eq!(session.step().unwrap(), ScriptIoProgress::Event);
+                    session.resume_scenario().unwrap();
+                }
+                _ => {}
             }
             for request in requests(session) {
                 session.submit_replies(&[self.complete(&request)]).unwrap();
@@ -131,6 +141,111 @@ impl MemoryHost {
         }
         panic!("IO script did not finish");
     }
+}
+
+#[test]
+fn loading_blocks_inline_calls_and_queued_calls_resume_in_scenario_order() {
+    let mut session = session(1, TransportLimits::default(), 1024);
+    let mut host = MemoryHost::default();
+    host.asset("init", b"ready");
+    host.asset("story", b"ok");
+    host.asset("queue", b"queued");
+    session
+        .open_scenario(
+            br#"
+*main
+[calllua function=outer]
+[caption data="end"]
+[lua]
+load_count = (load_count or 0) + 1
+local boot = __engine:file('init')
+assert(boot == 'ready')
+function outer(e)
+    call_count = (call_count or 0) + 1
+    local keep = 73
+    e:enqueueTag{'calllua', ['function']='after', params={payload={value=91}}}
+    assert(e:file('story') == 'ok' and keep == 73)
+    e:enqueueTag{'caption', data='first'}
+end
+function after(e, p)
+    queued_count = (queued_count or 0) + 1
+    assert(p.payload.value == 91)
+    local keep = p.payload
+    assert(e:file('queue') == 'queued' and keep.value == 91)
+    e:enqueueTag{'caption', data='queued'}
+end
+[/lua]
+"#,
+            "scenario",
+            "main",
+        )
+        .unwrap();
+    assert!(
+        !session
+            .interpreter()
+            .lua()
+            .globals()
+            .contains_key("load_count")
+            .unwrap()
+    );
+    host.run(&mut session);
+    for name in ["load_count", "call_count", "queued_count"] {
+        assert_eq!(
+            session
+                .interpreter()
+                .lua()
+                .globals()
+                .get::<i32>(name)
+                .unwrap(),
+            1
+        );
+    }
+    assert_eq!(host.captions, ["first", "queued", "end"]);
+    assert_eq!(session.state().pending_requests, 0);
+}
+
+#[test]
+fn scenario_replacement_is_atomic_and_stale_loading_results_cannot_touch_the_new_vm() {
+    let mut session = session(1, TransportLimits::default(), 128);
+    let old = b"[lua]\nmarker='old'; __engine:file('old')\n[/lua]\n*main\n";
+    let new = b"[lua]\nassert(marker==nil); marker='new'; __engine:file('new')\n[/lua]\n*main\n";
+    session.open_scenario(old, "old", "main").unwrap();
+    session.step().unwrap();
+    let request = requests(&mut session).pop().unwrap();
+    let before = session.state();
+    assert!(session.open_scenario(new, "new", "absent-label").is_err());
+    assert_eq!(session.state(), before);
+    assert_eq!(
+        session
+            .interpreter()
+            .lua()
+            .globals()
+            .get::<String>("marker")
+            .unwrap(),
+        "old"
+    );
+    session.open_scenario(new, "new", "main").unwrap();
+    assert_eq!(
+        session.submit_replies(&[reply(&request, json!({"status":"not_found"}), vec![])]),
+        Err(ProtocolError::Stale)
+    );
+    session.step().unwrap();
+    let current = requests(&mut session).pop().unwrap();
+    assert!(current.identity.request_id > request.identity.request_id);
+    assert!(current.identity.epoch > request.identity.epoch);
+    session
+        .submit_replies(&[reply(&current, json!({"status":"not_found"}), vec![])])
+        .unwrap();
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::Completed);
+    assert_eq!(
+        session
+            .interpreter()
+            .lua()
+            .globals()
+            .get::<String>("marker")
+            .unwrap(),
+        "new"
+    );
 }
 
 #[test]

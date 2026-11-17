@@ -1,11 +1,11 @@
-//! Luau chunk execution over the Host IO request transport. The Host owns all
+//! Luau execution over the Host IO request transport. The Host owns all
 //! storage; this driver never installs a physical file loader or renderer.
 
 use super::protocol::*;
 use asb_interpreter::io_continuation::{
     self, IoFailure, IoProgress, IoRequest, IoResponse, IoTask,
 };
-use asb_interpreter::{Interpreter, InterpreterConfig};
+use asb_interpreter::{CallbackResult, Event, ExecutionResult, Interpreter, InterpreterConfig};
 use serde_json::{Value, json};
 use std::fmt;
 
@@ -53,6 +53,14 @@ pub enum ScriptIoProgress {
     Waiting,
     WouldBlock,
     Completed,
+    Event,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExecutionMode {
+    Idle,
+    Chunk,
+    Scenario,
 }
 
 enum Operation {
@@ -85,8 +93,9 @@ enum Completion {
     Failed(IoFailure, String),
 }
 
-/// Opt-in chunk driver. Script code runs only in `step`, including after result
-/// submission. Scenario tags, frame scheduling and the C facade are separate.
+/// Script code runs only in `step`, including after result submission. Scenario
+/// events remain pending until the Host resumes them; frame scheduling and the
+/// C facade are separate.
 pub struct ScriptIoSession {
     interpreter: Interpreter,
     transport: SessionTransport,
@@ -98,6 +107,8 @@ pub struct ScriptIoSession {
     completed: bool,
     faulted: bool,
     cancelled: bool,
+    mode: ExecutionMode,
+    scenario_event: Option<Event>,
 }
 
 impl ScriptIoSession {
@@ -125,6 +136,8 @@ impl ScriptIoSession {
             completed: false,
             faulted: false,
             cancelled: false,
+            mode: ExecutionMode::Idle,
+            scenario_event: None,
         })
     }
 
@@ -143,13 +156,54 @@ impl ScriptIoSession {
     pub fn open_chunk(&mut self, source: &[u8], name: &str) -> Result<u64, ScriptIoError> {
         let task = IoTask::compile(self.interpreter.lua(), source, name)?;
         let epoch = self.transport.begin_session()?;
+        self.interpreter.clear_host_io();
         self.task = Some(task);
         self.operation = None;
         self.identity = None;
         self.completed = false;
         self.faulted = false;
         self.cancelled = false;
+        self.mode = ExecutionMode::Chunk;
+        self.scenario_event = None;
         Ok(epoch)
+    }
+
+    /// Start a fresh scenario VM from Host-supplied AST/IET/ASB bytes. Loading
+    /// Lua blocks and calllua execute through the same IO continuation driver.
+    pub fn open_scenario(
+        &mut self,
+        source: &[u8],
+        name: &str,
+        label: &str,
+    ) -> Result<u64, ScriptIoError> {
+        let mut interpreter = Interpreter::new(self.interpreter.config().clone());
+        interpreter.enable_resumable_io()?;
+        interpreter.set_callback(|_| CallbackResult::Pause);
+        interpreter.load_file(name, source)?;
+        interpreter.start(name, label)?;
+        let epoch = self.transport.begin_session()?;
+        self.interpreter = interpreter;
+        self.task = None;
+        self.operation = None;
+        self.identity = None;
+        self.completed = false;
+        self.faulted = false;
+        self.cancelled = false;
+        self.mode = ExecutionMode::Scenario;
+        self.scenario_event = None;
+        Ok(epoch)
+    }
+
+    pub fn pending_event(&self) -> Option<&Event> {
+        self.scenario_event.as_ref()
+    }
+
+    pub fn resume_scenario(&mut self) -> Result<(), ProtocolError> {
+        if self.scenario_event.take().is_none() {
+            return Err(ProtocolError::State);
+        }
+        self.interpreter.advance_line();
+        Ok(())
     }
 
     pub fn poll_events(&mut self, output: &mut [u8]) -> PollResult {
@@ -203,11 +257,14 @@ impl ScriptIoSession {
     }
 
     pub fn step(&mut self) -> Result<ScriptIoProgress, ScriptIoError> {
-        if self.faulted || self.task.is_none() {
+        if self.faulted || self.mode == ExecutionMode::Idle {
             return Err(ProtocolError::State.into());
         }
         if self.completed {
             return Ok(ScriptIoProgress::Completed);
+        }
+        if self.scenario_event.is_some() {
+            return Ok(ScriptIoProgress::Event);
         }
         let result = self.step_inner();
         if result.is_err() {
@@ -261,12 +318,38 @@ impl ScriptIoSession {
                     Err(error) => return Err(error.into()),
                 }
             }
-            let task = self.task.as_mut().unwrap();
-            if task.step(response.take())? == IoProgress::Completed {
-                self.completed = true;
-                return Ok(ScriptIoProgress::Completed);
-            }
-            let request = task.pending_request().unwrap().clone();
+            let request = match self.mode {
+                ExecutionMode::Chunk => {
+                    let task = self.task.as_mut().unwrap();
+                    if task.step(response.take())? == IoProgress::Completed {
+                        self.completed = true;
+                        return Ok(ScriptIoProgress::Completed);
+                    }
+                    task.pending_request().unwrap().clone()
+                }
+                ExecutionMode::Scenario => {
+                    if let Some(response) = response.take() {
+                        self.interpreter.resume_host_io(response)?;
+                    }
+                    match self.interpreter.step()? {
+                        ExecutionResult::HostIoPending => self
+                            .interpreter
+                            .pending_host_io()
+                            .ok_or(ProtocolError::State)?
+                            .clone(),
+                        ExecutionResult::Wait(event) => {
+                            self.scenario_event = Some(event);
+                            return Ok(ScriptIoProgress::Event);
+                        }
+                        ExecutionResult::Completed => {
+                            self.completed = true;
+                            return Ok(ScriptIoProgress::Completed);
+                        }
+                        _ => return Err(ProtocolError::State.into()),
+                    }
+                }
+                ExecutionMode::Idle => return Err(ProtocolError::State.into()),
+            };
             match self.operation_for(request) {
                 Ok(operation) => self.operation = Some(operation),
                 Err(error) => response = Some(failed(IoFailure::Denied, error.to_string())),

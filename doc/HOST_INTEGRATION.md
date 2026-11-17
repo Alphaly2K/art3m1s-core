@@ -95,7 +95,16 @@ Host 循环调用 `step()`、`poll_events()` 和 `submit_replies()`。只有 `st
 `config.savepath` 为逻辑 save 前缀，默认 `save`；此前缀下的路径映射到 save namespace
 并剥离前缀，其余路径映射到 asset。写入必须使用 save 前缀。此 chunk 接口不解析 magic path，
 不执行 ASB/AST 调度，不推进输入或 onEnterFrame；旧文件 var 查询须由可恢复场景调度器处理。
-源文件编码、场景加载和完整帧调度由调用方管理。
+Host 提交原始场景字节和编码配置，完整帧调度由调用方管理。
+
+`open_scenario(bytes, name, label)` 解析 Host 提交的 AST/IET/ASB，并在新 VM 中受理场景。
+加载期 Lua 块在 step 中执行完后，才进入标签流；内联与排队的 calllua 支持相同 IO 挂起。
+`ScriptIoProgress::Event` 表示 `pending_event()` 可读取一个普通场景事件，Host 处理/等待后
+调用 `resume_scenario()` 释放该等待。等待 IO 时 PC 由 continuation 管理，Host 不额外加一。
+替换场景使旧 VM 和 IO 失效；解析或起点标签校验失败则保留旧场景。Lua 执行错误在 step 报告。
+tag filter 和外部场景文件 miss 尚未使用该驱动的可恢复路径，完整游戏接入须由 facade 覆盖这些入口。
+Rust 的 `ExecutionResult`/`TagResult` 新增 `HostIoPending`，穷举匹配需处理该分支；
+未启用 resumable IO 的解释器不产生它，v1 C 函数表与同步路径保持原语义。
 
 IO domain 的 kind=1 为 stat、2 为 read、4 为 write_atomic，结果保留请求的 service kind。
 具体 payload 见 [IO 契约](HOST_ABI_V2.md#6-iohost-实现core-保留语义)。底层
