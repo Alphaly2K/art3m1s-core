@@ -191,11 +191,17 @@ impl SceneProjection {
                     .get("shader")
                     .map(String::as_str)
                     .or_else(|| self.compositor.scene().get(id)?.props.shader.as_deref());
-                if shader.is_some_and(|shader| !shader.is_empty()) {
-                    [None, None]
-                } else {
-                    [properties.get("mask").map(String::as_str), None]
-                }
+                let mask = shader
+                    .is_none_or(str::is_empty)
+                    .then(|| properties.get("mask").map(String::as_str))
+                    .flatten();
+                [
+                    mask,
+                    properties
+                        .get("intermediate_render_mask")
+                        .map(String::as_str)
+                        .filter(|file| Some(*file) != mask),
+                ]
             }
             Event::Anime {
                 mode, file, mask, ..

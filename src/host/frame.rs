@@ -40,9 +40,23 @@ pub struct FrameSprite {
 pub struct FrameTransition {
     /// Draw this scene into the transition source target before blending it over `sprites`.
     pub source: Box<[FrameSprite]>,
+    pub source_groups: Box<[FrameGroup]>,
     pub progress: f32,
     pub rule: Option<usize>,
     pub vague: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FrameGroup {
+    pub sprites: std::ops::Range<usize>,
+    pub mask: Option<usize>,
+    pub clip_bounds: Option<[f32; 4]>,
+    pub opacity: f32,
+    pub color_multiply: [f32; 3],
+    pub grayscale: bool,
+    pub negative: bool,
+    pub opaque: bool,
+    pub blend: SpriteBlend,
 }
 
 #[derive(Debug)]
@@ -68,6 +82,7 @@ pub struct FrameSnapshot {
     pub host_frame_id: u64,
     pub stage_size: [u32; 2],
     pub sprites: Box<[FrameSprite]>,
+    pub groups: Box<[FrameGroup]>,
     pub transition: Option<FrameTransition>,
     pub(crate) textures: Box<[Arc<FrameTexture>]>,
 }
@@ -86,6 +101,7 @@ impl FrameSnapshot {
         self.session_epoch == other.session_epoch
             && self.stage_size == other.stage_size
             && self.sprites == other.sprites
+            && self.groups == other.groups
             && self.transition == other.transition
             && self
                 .textures
@@ -129,6 +145,15 @@ impl FrameSnapshot {
                 sprite
             })
             .collect();
+        let groups = source
+            .groups
+            .iter()
+            .cloned()
+            .map(|mut group| {
+                group.mask = group.mask.map(|index| remap[index]);
+                group
+            })
+            .collect();
         let rule = rule.map(|image| {
             *by_revision.entry(image.revision).or_insert_with(|| {
                 let index = textures.len();
@@ -139,6 +164,7 @@ impl FrameSnapshot {
         self.textures = textures.into_boxed_slice();
         self.transition = Some(FrameTransition {
             source: sprites,
+            source_groups: groups,
             progress,
             rule,
             vague,

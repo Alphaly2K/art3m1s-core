@@ -2283,6 +2283,88 @@ fn transitions_keep_both_scenes_and_obey_time_and_input_policy() {
 }
 
 #[test]
+fn transition_preserves_the_old_scenes_nested_composite_groups() {
+    use crate::host::runtime;
+
+    let mut host = MemoryHost::default();
+    let mask_pixels = [255, 255, 255, 128];
+    host.asset("mask.png", &png_bytes(1, 1, &mask_pixels));
+    host.asset(
+        "boot.iet",
+        br#"*top
+[lyprop id=group intermediate_render=1 intermediate_render_mask=mask alpha=128]
+[lyprop id=group.inner intermediate_render=2 alpha=64]
+[lyc id=group.inner.image width=2 height=1 color=ffffff]
+[lyc id=group.image width=1 height=1 color=ffffff]
+[flip]
+[lydel id=group]
+[lyc id=other width=2 height=1 color=ff0000]
+[trans type=1 time=50]
+[stop]
+"#,
+    );
+    let handle = runtime::create(0, TransportLimits::default(), 4096).unwrap();
+    runtime::open_project(
+        handle,
+        b"[WINDOWS]\nWIDTH=320\nHEIGHT=200\nBOOT=boot.iet\n",
+        "windows",
+        None,
+    )
+    .unwrap();
+    let frame = HostFrame {
+        id: 1,
+        monotonic_ns: 0,
+        utc_unix_ms: 0,
+        utc_offset_minutes: 0,
+    };
+    for _ in 0..1024 {
+        if runtime::step(handle, frame).unwrap() == ScriptIoProgress::Event {
+            break;
+        }
+        let mut bytes = [0; 4096];
+        let poll = runtime::poll_events(handle, &mut bytes).unwrap();
+        for request in decode_requests(&bytes[..poll.written_bytes]) {
+            runtime::submit_replies(handle, &[host.complete(&request)]).unwrap();
+        }
+    }
+    let old = runtime::acquire_latest(handle, 0).unwrap().unwrap();
+    assert_eq!(old.groups.len(), 2);
+    assert_eq!(old.groups[0].sprites.len(), 1);
+    assert!(old.groups[0].opaque);
+    assert_eq!(old.groups[0].opacity, 64.0 / 255.0);
+    assert_eq!(old.groups[1].sprites, 0..2);
+    assert_eq!(old.groups[1].opacity, 128.0 / 255.0);
+    assert_eq!(
+        old.texture(old.groups[1].mask.unwrap()).unwrap().rgba(),
+        mask_pixels
+    );
+
+    assert_eq!(
+        runtime::step(handle, HostFrame { id: 2, ..frame }).unwrap(),
+        ScriptIoProgress::Event
+    );
+    let frame = runtime::acquire_latest(handle, old.render_frame_id)
+        .unwrap()
+        .unwrap();
+    assert!(frame.groups.is_empty());
+    let transition = frame.transition.as_ref().unwrap();
+    assert_eq!(transition.source_groups[1].sprites, 0..2);
+    let mask = transition.source_groups[1].mask.unwrap();
+    assert_eq!(frame.texture(mask).unwrap().rgba(), mask_pixels);
+    let packet = frame.packet();
+    let group = &packet[packet.len() - 56..];
+    assert_eq!(u16::from_le_bytes(group[4..6].try_into().unwrap()), 3);
+    assert_ne!(u16::from_le_bytes(group[6..8].try_into().unwrap()) & 16, 0);
+    assert_eq!(
+        u32::from_le_bytes(group[16..20].try_into().unwrap()),
+        mask as u32
+    );
+    drop(frame);
+    drop(old);
+    runtime::destroy(handle).unwrap();
+}
+
+#[test]
 fn screenshot_pins_the_gameplay_frame_and_uses_it_after_a_menu_opens() {
     use crate::host::runtime;
 

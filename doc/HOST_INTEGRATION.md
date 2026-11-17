@@ -21,6 +21,7 @@ Artemis 解释器在所有平台统一使用 Luau。现有 v1 C 函数表保持�
 捕获及转场合成的 Host 同时提交 `ART_RENDERER_CAP_TRANSITION`。
 支持存档缩略图的 Host 可声明 `ART_RENDERER_CAP_SCREENSHOT`，按捕获请求中的帧 ID 绘制并保留
 图像，再按保存请求写入 save 命名空间。
+支持子场景离屏合成的 Host 声明 `ART_RENDERER_CAP_GROUP`，按帧包的组范围、效果与遮罩合成。
 
 [内存 Host 示例](../tools/host-smoke/artemis_v2.c) 不依赖窗口或游戏素材。在 macOS 或 Linux
 从仓库根目录运行下列命令，会独立构建预览库、检查导出并运行示例：

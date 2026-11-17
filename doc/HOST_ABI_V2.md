@@ -199,7 +199,7 @@ C 预览版 `ArtMessage.schema_version=1`、`flags=0`。一个批次可包含一
 | Media (5) | 17 | `playback_id`、`frame_id`、`width`、`height`；blob 为 RGBA8 |
 
 `ArtCreateInfo` 的 Host 能力位分别为 IO=1、UI=2、Media=4。Renderer 位分别为 sprite=1、
-transition=2、screenshot=4。
+transition=2、screenshot=4、group=8。
 预览版检查未知位；Host 仍须处理收到的服务请求，缺少可选服务时返回相应失败。
 
 `poll_events` 按以下固定小端格式写入完整记录，不直接 memcpy C struct：
@@ -373,8 +373,8 @@ Rust 草案先提供 `acquire_latest(handle, after)`，可借用基础图层快�
 给出纹理表索引、原始图层 ID、仿射变换、UV、舞台裁剪、颜色、透明度和混合方式。纹理是
 紧密排列的 RGBA8，直通 alpha，首行在顶端；资源缓存键为 `(runtime, epoch, revision)`。
 同尺寸蒙版用独立纹理索引表示：采样前逐像素以 `alpha * mask_red / 255` 取整得到新 alpha。
-缺失或尺寸不符的蒙版回退为原图。此草案只覆盖图片和纯色图层；需 shader、mesh 或 stencil
-的帧不从该入口交付。Rust 借用随 `FrameLease` 释放。
+缺失或尺寸不符的蒙版回退为原图。帧支持精灵、转场和内置组效果；自定义 shader、mesh 和 stencil
+尚未接入。Rust 借用随 `FrameLease` 释放。
 
 `FrameLease::packet()` 返回 `ARFP` 草案版 1 的二进制描述；`texture(index)` 借用对应像素。
 C 草案的 `texture_rgba` 也使用帧内索引，像素和帧描述一起由同一个 token 保活。
@@ -387,6 +387,7 @@ C 草案的 `texture_rgba` 也使用帧内索引，像素和帧描述一起由�
 | 转场记录，可选，24 字节 | 记录总长度 `u32`（24）；opcode `u16`（2 = 转场）；flags `u16`（0）；旧场景精灵数 `u32`；进度 `f32`；规则纹理索引 `u32`；软边宽度 `f32` |
 | 精灵记录，104 字节前缀 | 记录总长度 `u32`；opcode `u16`（1 = 精灵）；flags `u16`；纹理索引、蒙版索引、混合方式、图层 ID 长度各 `u32`；变换 6 个 `f32`，矩形尺寸、UV 偏移、UV 缩放各 2 个 `f32`，裁剪 4 个 `f32`，opacity 1 个 `f32`，RGB 乘色 3 个 `f32` |
 | 精灵记录尾部 | 按长度读取 UTF-8 图层 ID，含在该记录总长度内，无 NUL 与填充 |
+| 合成组记录，56 字节 | 记录总长度 `u32`（56）；opcode `u16`（3 = 合成组）；flags `u16`；精灵起点、结束点、蒙版索引、混合方式各 `u32`；opacity `f32`，RGB 乘色 3 个 `f32`，裁剪 4 个 `f32` |
 
 索引从 0 开始；无蒙版用 `UINT32_MAX`。混合方式按 Alpha、Add、Screen、Multiply
 依次编号 0 至 3。flags 的低三位依次表示裁剪、灰阶和反色，其余写零。裁剪为舞台上的
@@ -395,12 +396,19 @@ Host 解析时应先校验版本、总长度、各段计数与记录边界，确
 C 预览通过帧表交付同一帧包和纹理借用。
 
 有转场时，opcode 2 是首条绘制记录，计入帧头的记录数。紧随其后的指定数量精灵属于旧场景，
-余下精灵属于新场景，两组共用本帧纹理表。Host 将两组分别用相同背景清屏后绘制，再将旧场景
+余下的精灵记录属于新场景，两组共用本帧纹理表。Host 将两组分别用相同背景清屏后绘制，再将旧场景
 合成到新场景上。规则索引为 `UINT32_MAX` 时，旧场景的 alpha 乘以 `1-progress`。
 有规则图时，以舞台归一化坐标采样规则纹理的红通道 `r`，取 `t=progress*(1+vague)-vague`，
 旧画面 alpha 乘以 `smoothstep(t, t+vague, r)`。进度由 Core 的单调时钟计算，范围为 `[0, 1]`；
 结束后仅交付新场景。缺失或解码失败的规则图使用交叉淡入。C Host 创建运行时时通过
 `ART_RENDERER_CAP_TRANSITION`（位值 `2`）启用该记录；未启用则直接切换场景。
+
+合成组记录在所有精灵记录之后。flags 的低五位依次表示裁剪、灰阶、反色、不透明组、属于转场旧
+场景，其余为零。起点包含、结束点排除，索引相对于该组所属场景的精灵数组。子组在父组之前；
+范围可以嵌套或并列。范围相同的组以后记录为外层。Host 将范围内的精灵和内层组绘制到透明
+目标，再按舞台裁剪、颜色、透明度和混合方式合成到父目标。使用蒙版时，按全舞台 UV 采样蒙版
+alpha；不透明组先将透明目标的合成 alpha 视为 1，再乘以组 opacity 和蒙版 alpha。
+C Host 通过 `ART_RENDERER_CAP_GROUP` 启用合成组记录；未启用则按精灵顺序直接绘制。
 
 Rust Host 可使用 `host::renderer::SpriteRenderer` 在已开启的目标上绘制基础帧。适配器使用
 同一帧借用的类型化视图，维护会话和资源版本对应的后端纹理。Host 控制 backend 的访问、

@@ -1,11 +1,11 @@
 //! Host-owned rendering adapter for draft Artemis sprite frames.
 
-use super::frame::{FrameLease, FrameSprite, FrameTexture, SpriteBlend};
+use super::frame::{FrameGroup, FrameLease, FrameSprite, FrameTexture, SpriteBlend};
 use super::runtime::RuntimeHandle;
 use art3m1s_render::backend::{FrameCapture, GpuBackend, RenderRegion, TextureData, TextureDesc};
 use art3m1s_render::draw::{
     BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, LayerCommandKind, ShaderEffect,
-    TextureId, TextureInfo, TextureOrigin,
+    ShaderGroup, TextureId, TextureInfo, TextureOrigin,
 };
 use art3m1s_render::types::Extent2D;
 use std::borrow::Cow;
@@ -82,12 +82,17 @@ impl<B: GpuBackend> SpriteRenderer<B> {
             Ok(texture)
         };
         let prepared = (|| {
-            let draw = prepare_draw_list(frame, &frame.sprites, &mut upload)?;
+            let draw = prepare_draw_list(frame, &frame.sprites, &frame.groups, &mut upload)?;
             let source = frame
                 .transition
                 .as_ref()
                 .map(|transition| -> Result<_, String> {
-                    let source = prepare_draw_list(frame, &transition.source, &mut upload)?;
+                    let source = prepare_draw_list(
+                        frame,
+                        &transition.source,
+                        &transition.source_groups,
+                        &mut upload,
+                    )?;
                     let shader = transition
                         .rule
                         .map(|rule| -> Result<_, String> {
@@ -245,6 +250,7 @@ fn masked_pixels<'a>(
 fn prepare_draw_list(
     frame: &FrameLease,
     sprites: &[FrameSprite],
+    groups: &[FrameGroup],
     mut texture: impl FnMut(&FrameTexture, Option<&FrameTexture>) -> Result<TextureId, String>,
 ) -> Result<DrawList, String> {
     let mut draw = DrawList::new();
@@ -291,6 +297,42 @@ fn prepare_draw_list(
                 native_emote: None,
             },
         );
+    }
+    for group in groups {
+        let mask_texture = group
+            .mask
+            .map(|index| {
+                let image = frame.texture(index).ok_or("invalid group mask texture")?;
+                texture(image, None)
+            })
+            .transpose()?;
+        let blend = match group.blend {
+            SpriteBlend::Alpha => 0.0,
+            SpriteBlend::Add => 1.0,
+            SpriteBlend::Screen => 2.0,
+            SpriteBlend::Multiply => 3.0,
+        };
+        draw.push_shader_group(ShaderGroup {
+            key: None,
+            start: group.sprites.start,
+            end: group.sprites.end,
+            effect: ShaderEffect {
+                name: art3m1s_render::GROUP_COMPOSITE_SHADER.into(),
+                uniforms: [
+                    ("alpha".into(), vec![group.opacity]),
+                    ("colorMultiply".into(), group.color_multiply.to_vec()),
+                    ("grayscale".into(), vec![u8::from(group.grayscale) as f32]),
+                    ("negative".into(), vec![u8::from(group.negative) as f32]),
+                    ("opaque".into(), vec![u8::from(group.opaque) as f32]),
+                    ("blendMode".into(), vec![blend]),
+                ]
+                .into(),
+                mask_texture,
+                user_texture: None,
+            },
+            clip_bounds: group.clip_bounds,
+            mask_range: None,
+        });
     }
     Ok(draw)
 }

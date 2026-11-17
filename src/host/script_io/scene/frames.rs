@@ -1,6 +1,6 @@
 use super::{SceneProjection, ScriptIoProgress, ScriptIoSession};
 use crate::compositor::{BlendMode, TextureId, TextureInfo, TextureProvider, build};
-use crate::host::frame::{FrameSnapshot, FrameSprite, FrameTexture, SpriteBlend};
+use crate::host::frame::{FrameGroup, FrameSnapshot, FrameSprite, FrameTexture, SpriteBlend};
 use crate::host::protocol::ProtocolError;
 use crate::render_pipeline::draw::LayerCommandKind;
 use crate::text::{TextRenderer, message_layer_scene_id};
@@ -33,7 +33,12 @@ impl ScriptIoSession {
         scene.dirty = false;
         let config = self.interpreter.config();
         let stage = [config.stage_width, config.stage_height];
-        match scene.build_frame(self.transport.state().epoch, frame.id, stage) {
+        match scene.build_frame(
+            self.transport.state().epoch,
+            frame.id,
+            stage,
+            self.groups_enabled,
+        ) {
             Some(mut snapshot) => {
                 if let Some(transition) = &self.transition {
                     snapshot.blend_from(
@@ -73,6 +78,7 @@ impl SceneProjection {
         session_epoch: u64,
         host_frame_id: u64,
         stage_size: [u32; 2],
+        groups_enabled: bool,
     ) -> Option<FrameSnapshot> {
         let mut textures = CpuTextureView {
             assets: &self.textures,
@@ -114,8 +120,59 @@ impl SceneProjection {
             Some(&mut text_for),
             Some(&files),
         );
-        if !frame.shader_groups.is_empty() || !frame.mask_commands.is_empty() {
+        if !frame.mask_commands.is_empty() {
             return None;
+        }
+        let mut groups = Vec::new();
+        for group in &frame.shader_groups {
+            let effect = &group.effect;
+            if effect.name != art3m1s_render::GROUP_COMPOSITE_SHADER
+                || effect.user_texture.is_some()
+                || group.mask_range.is_some()
+            {
+                return None;
+            }
+            if !groups_enabled {
+                continue;
+            }
+            let uniform = |name: &str| {
+                effect
+                    .uniforms
+                    .get(name)
+                    .and_then(|values| values.first())
+                    .copied()
+            };
+            let color_multiply: [f32; 3] = effect
+                .uniforms
+                .get("colorMultiply")?
+                .as_slice()
+                .try_into()
+                .ok()?;
+            let opacity = uniform("alpha")?;
+            if ![opacity]
+                .into_iter()
+                .chain(color_multiply)
+                .chain(group.clip_bounds.into_iter().flatten())
+                .all(f32::is_finite)
+            {
+                return None;
+            }
+            groups.push(FrameGroup {
+                sprites: group.start..group.end,
+                mask: effect.mask_texture.map(|texture| texture.0 as usize),
+                clip_bounds: group.clip_bounds,
+                opacity,
+                color_multiply,
+                grayscale: uniform("grayscale")? != 0.0,
+                negative: uniform("negative")? != 0.0,
+                opaque: uniform("opaque")? != 0.0,
+                blend: match uniform("blendMode")? as u32 {
+                    1 => SpriteBlend::Add,
+                    2 => SpriteBlend::Screen,
+                    3 => SpriteBlend::Multiply,
+                    _ => SpriteBlend::Alpha,
+                },
+            });
         }
         let mut sprites = Vec::with_capacity(frame.commands.len());
         for (index, command) in frame.commands.iter().enumerate() {
@@ -187,6 +244,7 @@ impl SceneProjection {
             host_frame_id,
             stage_size,
             sprites: sprites.into_boxed_slice(),
+            groups: groups.into_boxed_slice(),
             transition: None,
             textures: textures.table.into_boxed_slice(),
         })

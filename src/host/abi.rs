@@ -31,9 +31,6 @@ const MAGIC: u64 = 0x415254334D324150;
 const MAJOR: u32 = 2;
 const MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
 const HOST_CAPS: u64 = 0b111;
-const CAP_TRANSITIONS: u64 = 2;
-const CAP_SCREENSHOTS: u64 = 4;
-const RENDERER_CAPS: u64 = 1 | CAP_TRANSITIONS | CAP_SCREENSHOTS;
 
 type AbiResult = Result<i32, Failure>;
 
@@ -390,7 +387,7 @@ unsafe extern "C" fn create(info: *const CreateInfo, out: *mut u64) -> i32 {
         let info = unsafe { &*info };
         if info.flags != 0
             || info.host_service_caps & !HOST_CAPS != 0
-            || info.renderer_caps & !RENDERER_CAPS != 0
+            || info.renderer_caps & !runtime::RENDERER_CAPS != 0
         {
             return Err(Failure::new(
                 UNSUPPORTED,
@@ -401,8 +398,7 @@ unsafe extern "C" fn create(info: *const CreateInfo, out: *mut u64) -> i32 {
             info.random_seed,
             TransportLimits::default(),
             MAX_FILE_BYTES,
-            info.renderer_caps & CAP_TRANSITIONS != 0,
-            info.renderer_caps & CAP_SCREENSHOTS != 0,
+            info.renderer_caps,
         )?;
         unsafe { out.write(handle.as_raw()) };
         Ok(OK)

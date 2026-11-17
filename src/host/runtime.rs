@@ -117,29 +117,35 @@ impl Registry {
 
 static RUNTIMES: LazyLock<Mutex<Registry>> = LazyLock::new(|| Mutex::new(Registry::default()));
 
+pub(super) const CAP_SPRITES: u64 = 1;
+pub(super) const CAP_TRANSITIONS: u64 = 2;
+pub(super) const CAP_SCREENSHOTS: u64 = 4;
+pub(super) const CAP_GROUPS: u64 = 8;
+pub(super) const RENDERER_CAPS: u64 = CAP_SPRITES | CAP_TRANSITIONS | CAP_SCREENSHOTS | CAP_GROUPS;
+
 /// Create a runtime owned by the calling thread. Destroy it before that thread exits.
 pub fn create(
     random_seed: u64,
     limits: TransportLimits,
     max_file_bytes: usize,
 ) -> Result<RuntimeHandle, RuntimeError> {
-    create_with_renderer(random_seed, limits, max_file_bytes, true, true)
+    create_with_renderer(random_seed, limits, max_file_bytes, RENDERER_CAPS)
 }
 
 pub(super) fn create_with_renderer(
     random_seed: u64,
     limits: TransportLimits,
     max_file_bytes: usize,
-    transitions_enabled: bool,
-    screenshots_enabled: bool,
+    renderer_caps: u64,
 ) -> Result<RuntimeHandle, RuntimeError> {
     let handle = RUNTIMES.lock().unwrap().allocate()?;
     let session = catch_unwind(|| {
         let mut session =
             ScriptIoSession::new(handle.0, Default::default(), limits, max_file_bytes)?;
         session.set_random_seed(random_seed)?;
-        session.transitions_enabled = transitions_enabled;
-        session.screenshots_enabled = screenshots_enabled;
+        session.transitions_enabled = renderer_caps & CAP_TRANSITIONS != 0;
+        session.screenshots_enabled = renderer_caps & CAP_SCREENSHOTS != 0;
+        session.groups_enabled = renderer_caps & CAP_GROUPS != 0;
         Ok::<_, ScriptIoError>(session)
     })
     .map_err(|_| RuntimeError::Panic)??;
