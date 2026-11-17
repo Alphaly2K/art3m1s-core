@@ -131,6 +131,12 @@ return {
         if data == nil then error(message, 2) end
         return h.compile(data, path)()
     end,
+    create_emote_layer = function(self, params)
+        local id, path, width, height = h.emote_model_args(params)
+        local data, message = read(path)
+        if data == nil then error(message, 2) end
+        return h.install_emote_model(id, path, width, height, data)
+    end,
     exists = function(self, path)
         local ok, exists = yield(h.exists(path))
         return ok and exists or false

@@ -350,6 +350,39 @@ pub fn install(interpreter: &Interpreter) -> Result<()> {
         })?,
     )?;
     let ctx = interpreter.engine_context().clone();
+    let emote_support = ctx.clone();
+    helpers.set(
+        "emote_model_args",
+        lua.create_function(move |_, params: mlua::Table| {
+            let id: String = params.get("id")?;
+            let width: u32 = params.get("width")?;
+            let height: u32 = params.get("height")?;
+            let files: mlua::Table = params.get("files")?;
+            if files.raw_len() != 1 {
+                return Err(mlua::Error::external(
+                    "E-Mote requires one embedded-texture PSB",
+                ));
+            }
+            let file = files.raw_get::<String>(1)?;
+            let path = emote_support
+                .lock()
+                .unwrap()
+                .callbacks
+                .resolve_emote_model_path(&file)
+                .map_err(mlua::Error::external)?;
+            Ok((id, path, width, height))
+        })?,
+    )?;
+    let emote_context = ctx.clone();
+    helpers.set(
+        "install_emote_model",
+        lua.create_function(move |lua, (id, path, width, height, bytes): (String, String, u32, u32, mlua::String)| {
+            let next = emote_context.lock().unwrap().callbacks.create_emote_layer_from_bytes(
+                &id, &path, bytes.as_bytes().to_vec(), width, height,
+            ).map_err(mlua::Error::external)?;
+            lua.create_userdata(crate::lua_engine::EmoteLayerApi::new(emote_context.clone(), id, next))
+        })?,
+    )?;
     let probe = lua.create_userdata(
         BufferedFile::from_bytes(String::new(), "r", ctx.clone(), vec![])
             .map_err(mlua::Error::external)?,
@@ -397,6 +430,10 @@ pub fn install(interpreter: &Interpreter) -> Result<()> {
         .call(helpers)?;
     methods.set("file", functions.get::<mlua::Function>("file")?)?;
     methods.set("include", functions.get::<mlua::Function>("include")?)?;
+    methods.set(
+        "createEmoteLayer",
+        functions.get::<mlua::Function>("create_emote_layer")?,
+    )?;
     methods.set("isFileExists", functions.get::<mlua::Function>("exists")?)?;
     methods.set("tag", functions.get::<mlua::Function>("tag")?)?;
     lua.set_named_registry_value(

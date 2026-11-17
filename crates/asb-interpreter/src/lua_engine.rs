@@ -286,6 +286,23 @@ pub trait EngineCallbacks: Send + Sync {
         Err(unsupported_emote())
     }
 
+    /// Resolves a model name to a logical Host IO path.
+    fn resolve_emote_model_path(&self, _path: &str) -> crate::Result<String> {
+        Err(unsupported_emote())
+    }
+
+    /// Installs an embedded-texture PSB already loaded by the Host.
+    fn create_emote_layer_from_bytes(
+        &self,
+        _id: &str,
+        _file: &str,
+        _bytes: Vec<u8>,
+        _width: u32,
+        _height: u32,
+    ) -> crate::Result<bool> {
+        Err(unsupported_emote())
+    }
+
     /// Resolves the requested E-Mote layer and returns its actual slot selector.
     fn get_emote_layer(&self, _id: &str, _next: bool) -> Option<bool> {
         None
@@ -458,6 +475,10 @@ pub struct EmoteLayerApi {
 }
 
 impl EmoteLayerApi {
+    pub(crate) fn new(ctx: Arc<Mutex<EngineContext>>, id: String, next: bool) -> Self {
+        Self { ctx, id, next }
+    }
+
     fn command(&self, command: EmoteLayerCommand) -> LuaResult<()> {
         let ctx = self.ctx.lock().unwrap();
         ctx.callbacks
@@ -1589,6 +1610,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct EmoteProbe {
         created: Arc<Mutex<Vec<(String, Vec<String>, u32, u32)>>>,
+        loaded: Arc<Mutex<Vec<(String, String, Vec<u8>, u32, u32)>>>,
         commands: Arc<Mutex<Vec<(String, bool, EmoteLayerCommand)>>>,
     }
 
@@ -1653,6 +1675,25 @@ mod tests {
 
         fn get_emote_layer(&self, id: &str, _next: bool) -> Option<bool> {
             (id == "1.0").then_some(false)
+        }
+
+        fn resolve_emote_model_path(&self, path: &str) -> crate::Result<String> {
+            Ok(format!("image/{path}"))
+        }
+
+        fn create_emote_layer_from_bytes(
+            &self,
+            id: &str,
+            path: &str,
+            bytes: Vec<u8>,
+            width: u32,
+            height: u32,
+        ) -> crate::Result<bool> {
+            self.loaded
+                .lock()
+                .unwrap()
+                .push((id.into(), path.into(), bytes, width, height));
+            Ok(true)
         }
 
         fn command_emote_layer(
@@ -2043,6 +2084,71 @@ mod tests {
             EmoteLayerCommand::SetVariable { ref label, value, .. }
                 if label == "face_talk" && (value - 0.5).abs() < f32::EPSILON
         ));
+    }
+
+    #[test]
+    fn emote_userdata_installs_the_model_once_after_host_read() {
+        use crate::io_continuation::{IoFailure, IoProgress, IoRequest, IoResponse, IoTask};
+
+        let mut interpreter = crate::Interpreter::default();
+        let probe = EmoteProbe::default();
+        interpreter.set_engine_callbacks(Box::new(probe.clone()));
+        interpreter.enable_resumable_io().unwrap();
+        let mut task = IoTask::compile(interpreter.lua(), br#"
+            local ok = pcall(function()
+                __engine:createEmoteLayer{id='first', files={'missing.psb'}, width=4, height=8}
+            end)
+            assert(not ok)
+            attempts = (attempts or 0) + 1
+            local layer = __engine:createEmoteLayer{id='second', files={'model.psb'}, width=4, height=8}
+            layer:pass()
+        "#, "emote").unwrap();
+        assert_eq!(task.step(None).unwrap(), IoProgress::Waiting);
+        assert_eq!(
+            task.pending_request(),
+            Some(&IoRequest::Read {
+                path: "image/missing.psb".into()
+            })
+        );
+        assert_eq!(
+            task.step(Some(IoResponse::Failed {
+                kind: IoFailure::NotFound,
+                message: "missing".into()
+            }))
+            .unwrap(),
+            IoProgress::Waiting
+        );
+        assert_eq!(
+            task.pending_request(),
+            Some(&IoRequest::Read {
+                path: "image/model.psb".into()
+            })
+        );
+        assert_eq!(task.step(None).unwrap(), IoProgress::Waiting);
+        assert!(probe.loaded.lock().unwrap().is_empty());
+        assert_eq!(
+            task.step(Some(IoResponse::Read(vec![0, 1, 2]))).unwrap(),
+            IoProgress::Completed
+        );
+        assert_eq!(
+            *probe.loaded.lock().unwrap(),
+            [(
+                "second".into(),
+                "image/model.psb".into(),
+                vec![0, 1, 2],
+                4,
+                8
+            )]
+        );
+        assert_eq!(
+            *probe.commands.lock().unwrap(),
+            [("second".into(), true, EmoteLayerCommand::Pass)]
+        );
+        assert!(probe.created.lock().unwrap().is_empty());
+        assert_eq!(
+            interpreter.lua().globals().get::<u32>("attempts").unwrap(),
+            1
+        );
     }
 
     /// 记录 shell / 剪贴板 / 日志过滤回调调用的探针。
