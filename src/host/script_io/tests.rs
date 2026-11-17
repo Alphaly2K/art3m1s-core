@@ -2049,6 +2049,87 @@ fn test_font() -> Vec<u8> {
 }
 
 #[test]
+fn layer_edits_compose_preloaded_pixels_and_do_not_mutate_leased_frames() {
+    use crate::host::runtime;
+
+    let mut host = MemoryHost::default();
+    let base = [0, 50, 200, 255, 71, 24, 8, 255];
+    let overlay = [8, 30, 60, 255];
+    host.asset("base.png", &png_bytes(2, 1, &base));
+    host.asset("overlay.png", &png_bytes(1, 1, &overlay));
+    host.asset(
+        "boot.iet",
+        br#"*top
+[lyc id=layer file=base]
+[lyedit id=layer mode=negative]
+[flip]
+[lyedit id=layer mode=blend file=overlay left=1]
+[flip]
+[lyc id=layer file=base]
+[flip]
+[stop]
+"#,
+    );
+    let handle = runtime::create(0, TransportLimits::default(), 4096).unwrap();
+    runtime::open_project(
+        handle,
+        b"[WINDOWS]\nWIDTH=320\nHEIGHT=200\nBOOT=boot.iet\n",
+        "windows",
+        None,
+    )
+    .unwrap();
+    let frame = HostFrame {
+        id: 1,
+        monotonic_ns: 0,
+        utc_unix_ms: 0,
+        utc_offset_minutes: 0,
+    };
+    let drive = |host: &mut MemoryHost| {
+        for _ in 0..1024 {
+            let mut bytes = [0; 4096];
+            let progress = runtime::step(handle, frame).unwrap();
+            let polled = runtime::poll_events(handle, &mut bytes).unwrap();
+            match progress {
+                ScriptIoProgress::Event => return,
+                ScriptIoProgress::Waiting => {
+                    let request = decode_requests(&bytes[..polled.written_bytes])
+                        .pop()
+                        .unwrap();
+                    runtime::submit_replies(handle, &[host.complete(&request)]).unwrap();
+                }
+                other => panic!("unexpected layer edit progress {other:?}"),
+            }
+        }
+        panic!("layer edit fixture did not settle");
+    };
+    drive(&mut host);
+    let negative = runtime::acquire_latest(handle, 0).unwrap().unwrap();
+    let first_texture = negative.texture(negative.sprites[0].texture).unwrap();
+    let expected = [255, 205, 55, 255, 184, 231, 247, 255];
+    assert_eq!(first_texture.rgba(), expected);
+    drive(&mut host);
+    let blended = runtime::acquire_latest(handle, negative.render_frame_id)
+        .unwrap()
+        .unwrap();
+    let blended_texture = blended.texture(blended.sprites[0].texture).unwrap();
+    assert_eq!(blended_texture.rgba(), &[255, 205, 55, 255, 8, 30, 60, 255]);
+    assert_ne!(blended_texture.revision, first_texture.revision);
+    assert!(host.reads.contains(&("overlay.png".into(), 0)));
+    let previous = blended.render_frame_id;
+    drop(blended);
+    drive(&mut host);
+    let rebuilt = runtime::acquire_latest(handle, previous).unwrap().unwrap();
+    assert_eq!(
+        rebuilt.texture(rebuilt.sprites[0].texture).unwrap().rgba(),
+        base
+    );
+    assert_eq!(first_texture.rgba(), expected);
+    drop(rebuilt);
+    drop(negative);
+    runtime::destroy(handle).unwrap();
+}
+
+#[test]
 fn compound_events_resume_in_order_without_reexecuting_the_tag() {
     use asb_interpreter::event::LayerEvent;
 

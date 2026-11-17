@@ -244,13 +244,13 @@ fn blend_src_over(
     top: i32,
 ) {
     for oy in 0..oh {
-        let dy = top + oy as i32;
-        if dy < 0 || dy >= dh as i32 {
+        let dy = i64::from(top) + i64::from(oy);
+        if dy < 0 || dy >= i64::from(dh) {
             continue;
         }
         for ox in 0..ow {
-            let dx = left + ox as i32;
-            if dx < 0 || dx >= dw as i32 {
+            let dx = i64::from(left) + i64::from(ox);
+            if dx < 0 || dx >= i64::from(dw) {
                 continue;
             }
             let si = ((oy * ow + ox) * 4) as usize;

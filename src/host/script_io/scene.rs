@@ -9,6 +9,7 @@ use asb_interpreter::lua_engine::EngineCallbacks;
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 
+mod edit;
 mod frames;
 mod text;
 pub(super) use text::FontRead;
@@ -40,6 +41,7 @@ impl ScriptIoSession {
         self.interpreter.set_callback(move |event| match event {
             Event::Layer(_)
             | Event::LayerRename { .. }
+            | Event::LayerEdit { .. }
             | Event::LayerTweenDelete { .. }
             | Event::Anime { .. } => {
                 let mut scene = reduced_scene.lock().unwrap();
@@ -157,6 +159,7 @@ struct SceneProjection {
     video_frames: HashMap<String, Arc<FrameTexture>>,
     pending_video_frames: HashMap<String, Arc<FrameTexture>>,
     video_revision: u64,
+    edited: edit::LayerEdits,
     text: text::SceneText,
     dirty: bool,
     group_sync_layers: Vec<String>,
@@ -164,7 +167,18 @@ struct SceneProjection {
 
 impl SceneProjection {
     fn apply(&mut self, event: &Event) {
+        if let Event::LayerEdit { .. } = event {
+            self.dirty |= self
+                .edited
+                .apply(self.compositor.scene(), &self.textures, event);
+            return;
+        }
         self.compositor.apply_event(event);
+        if let Event::Layer(LayerEvent::Create { id, .. } | LayerEvent::Create2 { id, .. }) = event
+        {
+            self.edited.remove(id);
+        }
+        self.edited.retain_bound(self.compositor.scene());
         self.dirty = true;
     }
 
@@ -191,6 +205,7 @@ impl SceneProjection {
                 mask.as_deref()
                     .filter(|mask| Some(*mask) != file.as_deref()),
             ],
+            Event::LayerEdit { mode, file, .. } if mode == "blend" => [file.as_deref(), None],
             _ => [None, None],
         };
         files
@@ -261,6 +276,7 @@ impl SceneIo {
     pub(super) fn attach_video_layer(&self, id: &str) {
         let mut scene = self.scene.lock().unwrap();
         scene.compositor.set_layer_file(id, None);
+        scene.edited.remove(id);
         scene.video_frames.remove(id);
         scene.pending_video_frames.remove(id);
         scene.dirty = true;
@@ -391,6 +407,7 @@ impl SceneIo {
         scene.group_sync_layers.clear();
         scene.video_frames.clear();
         scene.pending_video_frames.clear();
+        scene.edited.clear();
         self.tween_handlers.clear();
         scene.dirty = true;
     }

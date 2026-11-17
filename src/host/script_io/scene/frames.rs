@@ -52,6 +52,7 @@ impl SceneProjection {
         let mut textures = CpuTextureView {
             assets: &self.textures,
             video: &self.video_frames,
+            edited: &self.edited,
             atlases: &mut self.text.atlases,
             atlas_revision: &mut self.text.atlas_revision,
             revisions: HashMap::new(),
@@ -71,19 +72,22 @@ impl SceneProjection {
             })
             .collect();
         let mut text_for = |id: &str| text_commands.remove(id).unwrap_or_default();
-        let files = (!self.video_frames.is_empty()).then(|| {
-            self.video_frames
-                .keys()
-                .map(|id| (id.clone(), crate::video::video_layer_texture_name(id)))
-                .collect()
-        });
+        let files: HashMap<_, _> = self
+            .edited
+            .files(scene)
+            .chain(
+                self.video_frames
+                    .keys()
+                    .map(|id| (id.clone(), crate::video::video_layer_texture_name(id))),
+            )
+            .collect();
         let frame = build::build_frame_with_content(
             scene,
             self.compositor.clock_ms(),
             &mut textures,
             None,
             Some(&mut text_for),
-            files.as_ref(),
+            Some(&files),
         );
         if !frame.shader_groups.is_empty() || !frame.mask_commands.is_empty() {
             return None;
@@ -98,7 +102,10 @@ impl SceneProjection {
                 return None;
             }
             let key = frame.command_key(index)?;
-            let mask = (key.kind != LayerCommandKind::Text)
+            let edited = files
+                .get(&key.layer_id)
+                .is_some_and(|file| super::edit::LayerEdits::is_edit_key(file));
+            let mask = (key.kind != LayerCommandKind::Text && !edited)
                 .then(|| {
                     scene
                         .get(&key.layer_id)
@@ -163,6 +170,7 @@ impl SceneProjection {
 struct CpuTextureView<'a> {
     assets: &'a HashMap<String, Option<Arc<FrameTexture>>>,
     video: &'a HashMap<String, Arc<FrameTexture>>,
+    edited: &'a super::edit::LayerEdits,
     atlases: &'a mut HashMap<String, Arc<FrameTexture>>,
     atlas_revision: &'a mut u64,
     revisions: HashMap<u64, TextureId>,
@@ -186,6 +194,9 @@ impl CpuTextureView<'_> {
 
 impl TextureProvider for CpuTextureView<'_> {
     fn resolve(&mut self, name: &str) -> Option<(TextureId, TextureInfo)> {
+        if let Some(texture) = self.edited.resolve(name) {
+            return Some(self.record(texture));
+        }
         if let Some(texture) = self.atlases.get(name) {
             return Some(self.record(texture.clone()));
         }
