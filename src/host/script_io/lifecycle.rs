@@ -94,6 +94,13 @@ impl ScriptIoSession {
                 ScriptIoProgress::Event if self.has_persistence_event() => {
                     self.start_persistence().map(|()| None)
                 }
+                ScriptIoProgress::Event
+                    if let (Some(scene), Some(Event::LayerDrag { id })) =
+                        (self.scene.as_mut(), self.scenario_event.as_ref()) =>
+                {
+                    scene.force_drag(id);
+                    self.resume_scenario().map(|()| None)
+                }
                 ScriptIoProgress::Event => self.dispatch_audio_event().and_then(|handled| {
                     if handled
                         || self.dispatch_video_event()?

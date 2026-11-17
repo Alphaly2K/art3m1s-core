@@ -64,6 +64,7 @@ pub(in crate::host) struct InputFrame {
     pub pointer: (i32, i32),
     pub touches: Vec<(u32, i32, i32)>,
     pub pointer_present: bool,
+    pub focus_lost: bool,
 }
 
 #[derive(Default)]
@@ -97,6 +98,7 @@ impl InputFrame {
         self.override_all = None;
         self.effective.clear();
         self.claimed.clear();
+        self.focus_lost = false;
         self.keys.retain(|_, key| {
             key.pressed = false;
             key.released = false;
@@ -141,6 +143,7 @@ impl InputFrame {
                     self.keys.clear();
                     self.touches.clear();
                     self.pointer_present = false;
+                    self.focus_lost = true;
                 }
             }
         }
@@ -231,6 +234,16 @@ impl InputFrame {
 
     pub fn is_physical_press(&self, code: u32) -> bool {
         self.keys.get(&code).is_some_and(|key| key.pressed)
+    }
+
+    pub fn is_physical_down(&self, code: u32) -> bool {
+        self.keys
+            .get(&code)
+            .is_some_and(|key| key.down_since.is_some())
+    }
+
+    pub fn is_physical_release(&self, code: u32) -> bool {
+        self.keys.get(&code).is_some_and(|key| key.released)
     }
 
     pub fn has_press(&self) -> bool {

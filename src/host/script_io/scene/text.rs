@@ -245,6 +245,54 @@ impl SceneIo {
 }
 
 impl SceneProjection {
+    pub(super) fn link_under_pointer(
+        &mut self,
+        position: Option<(i32, i32)>,
+    ) -> Option<crate::text::LinkHitArea> {
+        let renderer = &self.text.renderer;
+        let mut points = HashMap::new();
+        let mut hits = HashMap::new();
+        if let Some((x, y)) = position {
+            let point = glam::Vec2::new(x as f32, y as f32);
+            for area in renderer.link_hit_areas() {
+                let local = points.entry(area.layer_id.clone()).or_insert_with(|| {
+                    let layer = renderer.font_state().layers.get(&area.layer_id)?;
+                    if layer.text_hidden
+                        || !self.compositor.is_message_layer_visible(&area.layer_id)
+                    {
+                        return None;
+                    }
+                    let node = message_layer_scene_id(&area.layer_id, layer.layered);
+                    text_local_point(&self.compositor, &node, point)
+                });
+                if local.is_some_and(|p| area.contains(p.x, p.y)) {
+                    hits.entry((area.layer_id.clone(), area.link_index))
+                        .or_insert(area);
+                }
+            }
+        }
+        let active = renderer.font_state().active_layer.as_deref();
+        let target = hits
+            .values()
+            .filter(|area| area.file.is_some() || area.label.is_some())
+            .min_by_key(|area| {
+                (
+                    Some(area.layer_id.as_str()) != active,
+                    &area.layer_id,
+                    area.link_index,
+                )
+            })
+            .cloned();
+        for (id, layer) in &mut self.text.renderer.font_state_mut().layers {
+            for (index, link) in layer.links.iter_mut().enumerate() {
+                let hovered = hits.contains_key(&(id.clone(), index));
+                self.dirty |= link.hovered != hovered;
+                link.hovered = hovered;
+            }
+        }
+        target
+    }
+
     fn select_text_face(&mut self) {
         let key = self.text.renderer.active_font_face().and_then(|face| {
             logical_key(&crate::magic_path::resolve_path(&self.magic_paths, face)).ok()
@@ -371,4 +419,25 @@ impl SceneProjection {
         self.dirty = true;
         true
     }
+}
+
+fn text_local_point(
+    compositor: &Compositor,
+    mut id: &str,
+    point: glam::Vec2,
+) -> Option<glam::Vec2> {
+    let scene = compositor.scene();
+    let mut transform = glam::Affine2::IDENTITY;
+    loop {
+        let layer = scene.get(id)?;
+        let props = crate::compositor::build::resolved_props(layer, compositor.clock_ms());
+        transform = props.local_transform() * transform;
+        let Some((parent, _)) = id.rsplit_once('.') else {
+            break;
+        };
+        id = parent;
+    }
+    let world = scene.root_props().local_transform() * transform;
+    let local = world.inverse().transform_point2(point);
+    local.is_finite().then_some(local)
 }

@@ -7,9 +7,16 @@ pub(super) struct PointerDispatch {
     due: bool,
     position: Option<(i32, i32)>,
     hovered: Vec<String>,
+    drag: Option<Drag>,
     pending: VecDeque<InputDispatch>,
     current: Option<InputDispatch>,
     pub(super) tags: Vec<(String, HashMap<String, String>)>,
+}
+
+struct Drag {
+    id: String,
+    pointer: (i32, i32),
+    origin: (f32, f32),
 }
 
 struct InputDispatch {
@@ -17,6 +24,7 @@ struct InputDispatch {
     filter: HashMap<String, String>,
     tags: Vec<(String, HashMap<String, String>)>,
     claim: Option<u32>,
+    fallback: Vec<InputDispatch>,
 }
 
 impl InputDispatch {
@@ -38,6 +46,7 @@ impl InputDispatch {
                 params,
             ),
             claim,
+            fallback: Vec::new(),
         }
     }
 }
@@ -77,6 +86,10 @@ impl SceneIo {
         }
     }
 
+    pub(in crate::host::script_io) fn force_drag(&mut self, id: &str) {
+        self.pointer.begin_drag(&mut self.scene.lock().unwrap(), id);
+    }
+
     pub(in crate::host::script_io) fn finish_pointer_filter(
         &mut self,
         decision: EventFilterDecision,
@@ -96,14 +109,22 @@ impl SceneIo {
         if accepted && let Some(code) = dispatch.claim {
             self.with_input(|input| input.claim(code));
         }
+        if !accepted {
+            for fallback in dispatch.fallback.into_iter().rev() {
+                self.pointer.pending.push_front(fallback);
+            }
+        }
         true
     }
 }
 
 impl PointerDispatch {
     fn sample(&mut self, scene: &mut SceneProjection) {
-        self.sample_pointer(scene);
+        let link_clicked = self.sample_pointer(scene);
         for (code, bits) in scene.input.effective_keys() {
+            if code == 1 && link_clicked {
+                continue;
+            }
             let key = code.to_string();
             if let Some(handler) = scene.compositor.get_input_handler("push", &key)
                 && (bits & OVERRIDE_IS_DOWN_EDGE != 0
@@ -128,12 +149,37 @@ impl PointerDispatch {
         }
     }
 
-    fn sample_pointer(&mut self, scene: &mut SceneProjection) {
+    fn sample_pointer(&mut self, scene: &mut SceneProjection) -> bool {
         let position = scene.input.pointer_present.then_some(scene.input.pointer);
         let left = scene.input.frame_bits(1);
         let click = left & OVERRIDE_IS_DOWN_EDGE != 0;
-        if position == self.position && !click && left & OVERRIDE_IS_UP_EDGE == 0 {
-            return;
+        let moved = position != self.position;
+        let release = scene.input.focus_lost || scene.input.is_physical_release(1);
+        let link = if moved || click || scene.dirty {
+            scene.link_under_pointer(position)
+        } else {
+            None
+        };
+        if click
+            && self.drag.is_none()
+            && let Some(link) = link
+        {
+            let tags = handler_tags(
+                None,
+                link.file.as_deref(),
+                link.label.as_deref(),
+                false,
+                &HashMap::new(),
+                &[],
+            );
+            if !tags.is_empty() {
+                scene.input.claim(1);
+                self.tags.extend(tags);
+                return true;
+            }
+        }
+        if !moved && !click && left & OVERRIDE_IS_UP_EDGE == 0 && !release {
+            return false;
         }
         self.position = position;
         let hits = position.map_or_else(Vec::new, |(x, y)| scene.hit_layers(x, y));
@@ -146,33 +192,121 @@ impl PointerDispatch {
             .collect();
         left.sort_unstable();
         for id in left {
-            self.push(scene, &id, "rollout");
+            self.pending
+                .extend(Self::layer(scene, &id, "rollout", None, &[]));
         }
         for id in &hovered {
             if !self.hovered.contains(id) {
-                self.push(scene, id, "rollover");
+                self.pending
+                    .extend(Self::layer(scene, id, "rollover", None, &[]));
             }
         }
         self.hovered = hovered;
-        if click {
-            for id in event_dispatch_layers(&scene.compositor, &hits, "click") {
-                self.push(scene, &id, "click");
+        if click && self.drag.is_none() {
+            let draggable = hits
+                .first()
+                .filter(|id| scene.compositor.is_layer_draggable(id));
+            let direct_drag = draggable.is_some_and(|id| {
+                scene
+                    .compositor
+                    .scene()
+                    .get(id)
+                    .and_then(|layer| layer.event_handlers.get("drag"))
+                    .is_some_and(|handler| handler.enabled)
+                    && self.begin_drag(scene, id)
+            });
+            if !direct_drag {
+                let clicks = event_dispatch_layers(&scene.compositor, &hits, "click")
+                    .into_iter()
+                    .filter_map(|id| Self::layer(scene, &id, "click", Some(1), &[("click", "1")]));
+                if let Some(mut drag_in) = draggable.and_then(|id| {
+                    Self::layer(scene, id, "dragin", Some(1), &[("drag", "1"), ("id", id)])
+                }) {
+                    drag_in.fallback.extend(clicks);
+                    self.pending.push_back(drag_in);
+                } else {
+                    self.pending.extend(clicks);
+                }
             }
         }
+        if self.drag.is_some() && (click || release) {
+            scene.input.claim(1);
+        }
+        if let Some(drag) = &self.drag
+            && moved
+            && scene.input.is_physical_down(1)
+            && !release
+            && let Some((x, y)) = position
+        {
+            if scene
+                .compositor
+                .drag_layer_to(
+                    &drag.id,
+                    drag.origin.0,
+                    drag.origin.1,
+                    x as f32 - drag.pointer.0 as f32,
+                    y as f32 - drag.pointer.1 as f32,
+                )
+                .is_some()
+            {
+                scene.dirty = true;
+                self.pending.extend(Self::layer(
+                    scene,
+                    &drag.id,
+                    "drag",
+                    None,
+                    &[("drag", "1"), ("id", &drag.id)],
+                ));
+            } else {
+                self.drag = None;
+            }
+        }
+        if release && let Some(drag) = self.drag.take() {
+            self.pending.extend(Self::layer(
+                scene,
+                &drag.id,
+                "dragout",
+                None,
+                &[("drag", "0"), ("id", &drag.id)],
+            ));
+        }
+        false
     }
 
-    fn push(&mut self, scene: &SceneProjection, id: &str, event: &str) {
-        let Some(handler) = scene
+    fn begin_drag(&mut self, scene: &mut SceneProjection, id: &str) -> bool {
+        let Some(origin) = scene.compositor.layer_offset(id) else {
+            return false;
+        };
+        self.drag = Some(Drag {
+            id: id.into(),
+            pointer: scene.input.pointer,
+            origin,
+        });
+        scene.input.claim(1);
+        self.pending.extend(Self::layer(
+            scene,
+            id,
+            "dragin",
+            None,
+            &[("drag", "1"), ("id", id)],
+        ));
+        true
+    }
+
+    fn layer(
+        scene: &SceneProjection,
+        id: &str,
+        event: &str,
+        claim: Option<u32>,
+        params: &[(&str, &str)],
+    ) -> Option<InputDispatch> {
+        let handler = scene
             .compositor
             .scene()
             .get(id)
             .and_then(|layer| layer.event_handlers.get(event))
-            .filter(|handler| handler.enabled)
-        else {
-            return;
-        };
-        let click = event == "click";
-        self.pending.push_back(InputDispatch {
+            .filter(|handler| handler.enabled)?;
+        Some(InputDispatch {
             name: "lyevent".into(),
             filter: layer_filter_params(handler, id, event).into_owned(),
             tags: handler_tags(
@@ -181,9 +315,10 @@ impl PointerDispatch {
                 handler.label.as_deref(),
                 handler.call,
                 &handler.params,
-                if click { &[("click", "1")] } else { &[] },
+                params,
             ),
-            claim: click.then_some(1),
-        });
+            claim,
+            fallback: Vec::new(),
+        })
     }
 }

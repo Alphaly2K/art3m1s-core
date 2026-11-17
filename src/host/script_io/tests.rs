@@ -1861,6 +1861,118 @@ end)
 }
 
 #[test]
+fn forced_drag_moves_the_knob_and_releases_with_the_physical_button_masked() {
+    use crate::host::input::HostInput;
+
+    let (mut session, epoch, mut host) = playback_project(
+        br#"*top
+[lyc id=track width=5 height=5 color=ffffff]
+[lyprop id=track draggable=1]
+[lyevent id=track type=dragin label=grab call=1]
+[lyc id=knob width=5 height=5 color=ffffff]
+[lyprop id=knob left=10 top=10 dragarea="0,0,25,35"]
+[lyevent id=knob type=drag handler=calllua function=drag]
+[lyevent id=knob type=dragout handler=calllua function=release]
+[wt0]
+[calllua function=advance]
+[stop]
+*grab
+[lydrag id=knob]
+[calllua function=grab]
+[return]
+[lua]
+function grab() trace='grab'; captured=true end
+function drag(e,p) assert(p.id=='knob' and p.drag=='1'); trace..=';move' end
+function release(e,p)
+    assert(p.id=='knob' and p.drag=='0' and not e:isUpEdge(1))
+    trace..=';release'
+    captured=false
+end
+function tick(e)
+    if captured then e:overrideKey{key=1,status=0} end
+end
+function advance() trace..=';advance' end
+__engine:setEventHandler{onEnterFrame='tick'}
+[/lua]
+"#,
+    );
+    drive_playback_boot(&mut session, &mut host);
+    let globals = session.interpreter().lua().globals();
+    let key = |down| HostInput::Key { code: 1, down };
+    let point = |x, y| HostInput::Pointer { x, y };
+    let step = |session: &mut ScriptIoSession, id, inputs: &[HostInput]| {
+        session.submit_input(epoch, inputs).unwrap();
+        assert_eq!(
+            session.step_queued_frame(playback_frame(id, id)).unwrap(),
+            ScriptIoProgress::Event
+        );
+    };
+    step(&mut session, 2, &[point(2, 2), key(true)]);
+    assert_eq!(globals.get::<String>("trace").unwrap(), "grab");
+    step(&mut session, 3, &[point(50, 50)]);
+    let scene = session.scene.as_ref().unwrap().save_snapshot();
+    assert_eq!(scene.get("track").unwrap().props.offset(), (0.0, 0.0));
+    assert_eq!(scene.get("knob").unwrap().props.offset(), (25.0, 35.0));
+    step(&mut session, 4, &[key(false)]);
+    step(&mut session, 4, &[]);
+    assert_eq!(globals.get::<String>("trace").unwrap(), "grab;move;release");
+    step(&mut session, 5, &[key(true)]);
+    assert_eq!(
+        globals.get::<String>("trace").unwrap(),
+        "grab;move;release;advance"
+    );
+}
+
+#[test]
+fn text_link_clicks_follow_the_message_layer_transform_and_visibility() {
+    use crate::host::input::HostInput;
+
+    let (mut session, epoch, mut host) = playback_project(
+        br#"*top
+[chgmsg id=1.message layered=1]
+[lyprop id=1 left=80 top=60 visible=0]
+[font left=10 top=10 size=20]
+[link label=target type=1 color=ff0000]
+AA
+[/link]
+[wt0]
+[calllua function=show]
+[lyprop id=1 visible=1]
+[wt0]
+[calllua function=wrong]
+[stop]
+*target
+[calllua function=jumped]
+[stop]
+[lua]
+function show() trace='show' end
+function wrong() trace..=';wrong' end
+function jumped() trace..=';jumped' end
+[/lua]
+"#,
+    );
+    session.set_default_font(epoch, &test_font()).unwrap();
+    drive_playback_boot(&mut session, &mut host);
+    let globals = session.interpreter().lua().globals();
+    let key = |down| HostInput::Key { code: 1, down };
+    let step = |session: &mut ScriptIoSession, id, inputs: &[HostInput]| {
+        session.submit_input(epoch, inputs).unwrap();
+        assert_eq!(
+            session.step_queued_frame(playback_frame(id, id)).unwrap(),
+            ScriptIoProgress::Event
+        );
+    };
+    step(
+        &mut session,
+        2,
+        &[HostInput::Pointer { x: 92, y: 72 }, key(true)],
+    );
+    assert_eq!(globals.get::<String>("trace").unwrap(), "show");
+    step(&mut session, 3, &[key(false), key(true)]);
+    assert_eq!(globals.get::<String>("trace").unwrap(), "show;jumped");
+}
+
+#[test]
 fn audio_feedback_uses_playback_identity_and_resumes_its_wait_after_callback_io() {
     use crate::host::{
         media::PlaybackStatus,
