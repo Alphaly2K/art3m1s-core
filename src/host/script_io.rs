@@ -721,7 +721,7 @@ impl ScriptIoSession {
             return Err(ProtocolError::Argument("invalid Host UTC offset").into());
         }
         if matches!(self.shutdown, Shutdown::Closed)
-            || (self.completed && !self.shutdown.is_closing_or_closed())
+            || (self.scene.is_none() && self.completed && !self.shutdown.is_closing_or_closed())
         {
             return Ok(ScriptIoProgress::Completed);
         }
@@ -747,8 +747,12 @@ impl ScriptIoSession {
         })?;
         self.frame = Some(frame);
         if new_frame {
+            if let Some(scene) = self.scene.as_mut() {
+                scene.advance_clock(frame.monotonic_ns);
+            }
             self.interpreter.begin_frame();
-            self.frame_handler_due = matches!(self.shutdown, Shutdown::Open)
+            self.frame_handler_due = !self.completed
+                && matches!(self.shutdown, Shutdown::Open)
                 && !matches!(
                     self.scenario_event,
                     Some(Event::ShowDialog { .. } | Event::YesNo { .. } | Event::Exit)

@@ -27,10 +27,22 @@ impl ScriptIoSession {
         self.scene = Some(SceneIo {
             scene: scene.0.clone(),
             pending: None,
+            clock_origin_ns: None,
         });
         self.interpreter.set_engine_callbacks(Box::new(scene));
         self.interpreter.set_callback(move |event| match event {
-            Event::Layer(_) | Event::LayerRename { .. } => {
+            Event::Layer(_)
+            | Event::LayerRename { .. }
+            | Event::LayerTweenDelete { .. }
+            | Event::TweenSetStart
+            | Event::TweenSetEnd
+            | Event::LayerTween {
+                sync: false,
+                handler_file: None,
+                handler_label: None,
+                handler_handler: None,
+                ..
+            } => {
                 let mut scene = reduced_scene.lock().unwrap();
                 if scene.missing_asset(&event).is_some() {
                     return CallbackResult::Pause;
@@ -100,6 +112,7 @@ struct SceneCallbacks(Arc<Mutex<SceneProjection>>);
 pub(super) struct SceneIo {
     scene: Arc<Mutex<SceneProjection>>,
     pending: Option<PendingAsset>,
+    clock_origin_ns: Option<u64>,
 }
 
 struct PendingAsset {
@@ -109,6 +122,14 @@ struct PendingAsset {
 }
 
 impl SceneIo {
+    pub(super) fn advance_clock(&mut self, monotonic_ns: u64) {
+        let origin = *self.clock_origin_ns.get_or_insert(monotonic_ns);
+        let elapsed_ms = (monotonic_ns - origin) / 1_000_000;
+        let mut scene = self.scene.lock().unwrap();
+        let delta_ms = elapsed_ms - scene.compositor.clock_ms();
+        scene.dirty |= scene.compositor.advance(delta_ms);
+    }
+
     pub(super) fn asset_pending(&self) -> bool {
         self.pending.is_some()
     }

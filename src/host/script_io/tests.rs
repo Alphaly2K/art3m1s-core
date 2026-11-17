@@ -1758,6 +1758,69 @@ fn basic_frames_keep_revisioned_pixels_and_masks_alive_across_reload() {
 }
 
 #[test]
+fn sprite_tween_advances_on_host_frames_after_scenario_completion() {
+    use crate::host::runtime;
+
+    let mut host = MemoryHost::default();
+    host.asset("boot.iet", b"*top\n[lyc id=1.80 width=8 height=3 color=112233]\n[lytween id=1.80 param=left from=0 to=20 time=10 ease=linear]\n[return]\n");
+    let handle = runtime::create(0, TransportLimits::default(), 4096).unwrap();
+    let first_time = HostFrame {
+        id: 1,
+        monotonic_ns: 900_500,
+        utc_unix_ms: 0,
+        utc_offset_minutes: 0,
+    };
+    runtime::open_project(
+        handle,
+        b"[WINDOWS]\nWIDTH=320\nHEIGHT=200\nBOOT=boot.iet\n",
+        "windows",
+        None,
+    )
+    .unwrap();
+    for _ in 0..256 {
+        let progress = runtime::step(handle, first_time).unwrap();
+        let mut bytes = [0; 4096];
+        let polled = runtime::poll_events(handle, &mut bytes).unwrap();
+        if progress == ScriptIoProgress::Completed {
+            break;
+        }
+        assert_eq!(progress, ScriptIoProgress::Waiting);
+        for request in decode_requests(&bytes[..polled.written_bytes]) {
+            runtime::submit_replies(handle, &[host.complete(&request)]).unwrap();
+        }
+    }
+    let first = runtime::acquire_latest(handle, 0).unwrap().unwrap();
+    let mut after = first.render_frame_id;
+    assert_eq!(first.sprites[0].transform[4], 0.0);
+    drop(first);
+    let mut frame = HostFrame {
+        id: 2,
+        monotonic_ns: first_time.monotonic_ns + 5_000_000,
+        ..first_time
+    };
+    for expected in [10.0, 20.0] {
+        assert_eq!(
+            runtime::step(handle, frame).unwrap(),
+            ScriptIoProgress::Completed
+        );
+        let view = runtime::acquire_latest(handle, after).unwrap().unwrap();
+        assert_eq!(view.sprites[0].transform[4], expected);
+        after = view.render_frame_id;
+        drop(view);
+        assert_eq!(
+            runtime::step(handle, frame).unwrap(),
+            ScriptIoProgress::Completed
+        );
+        assert!(runtime::acquire_latest(handle, after).unwrap().is_none());
+        frame.id += 1;
+        frame.monotonic_ns += 5_000_000;
+    }
+    runtime::step(handle, frame).unwrap();
+    assert!(runtime::acquire_latest(handle, after).unwrap().is_none());
+    runtime::destroy(handle).unwrap();
+}
+
+#[test]
 fn host_calendar_and_monotonic_clocks_remain_distinct_across_io_suspension() {
     let mut session = session(1, TransportLimits::default(), 1024);
     session
