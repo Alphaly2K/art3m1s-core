@@ -1094,6 +1094,8 @@ fn runtime_delivers_ui_once_and_resumes_dialog_only_after_valid_reply() {
         br#"*top
 [var name=t.player data=original]
 [caption data=before]
+[exec command=fullscreen]
+[exec command=minimize]
 [dialog title=Name message=Input varname=t.accepted textfield=t.player textfieldsize=2]
 [caption data="$t.accepted + ':' + t.player"]
 [dialog title=Other varname=t.accepted textfield=t.player]
@@ -1144,6 +1146,17 @@ fn runtime_delivers_ui_once_and_resumes_dialog_only_after_valid_reply() {
         ScriptIoProgress::WouldBlock
     );
     assert_record(&poll(), UI_CAPTION, json!({"text":"before"}));
+    for command in ["fullscreen", "minimize"] {
+        assert_eq!(
+            runtime::step(handle, frame).unwrap(),
+            ScriptIoProgress::WouldBlock
+        );
+        assert_eq!(
+            runtime::step(handle, frame).unwrap(),
+            ScriptIoProgress::WouldBlock
+        );
+        assert_record(&poll(), UI_WINDOW_ACTION, json!({"command": command}));
+    }
     assert_eq!(
         runtime::step(handle, frame).unwrap(),
         ScriptIoProgress::Waiting

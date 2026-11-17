@@ -462,6 +462,8 @@ const int ART_UI_CAPTION = 1;
 
 const int ART_UI_DIALOG = 2;
 
+const int ART_UI_WINDOW_ACTION = 3;
+
 const int ART_IO_STAT = 1;
 
 const int ART_IO_READ = 2;

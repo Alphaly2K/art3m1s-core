@@ -17,7 +17,7 @@ use lifecycle::Shutdown;
 pub use lifecycle::{RUNTIME_CLOSED, RUNTIME_EXIT_REQUESTED};
 pub use persistence::RUNTIME_PERSISTENCE_RESULT;
 pub use screenshot::{RENDER_CAPTURE, RENDER_SAVE_CAPTURE};
-pub use ui::{UI_CAPTION, UI_DIALOG};
+pub use ui::{UI_CAPTION, UI_DIALOG, UI_WINDOW_ACTION};
 pub use video::MEDIA_VIDEO_COMMAND;
 
 use super::protocol::*;

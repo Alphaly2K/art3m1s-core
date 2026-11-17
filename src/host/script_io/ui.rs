@@ -8,6 +8,10 @@ pub const UI_DIALOG: MessageKind = MessageKind {
     domain: Domain::Ui,
     kind: 2,
 };
+pub const UI_WINDOW_ACTION: MessageKind = MessageKind {
+    domain: Domain::Ui,
+    kind: 3,
+};
 
 impl ScriptIoSession {
     // None means this event was consumed and the interpreter can continue.
@@ -16,6 +20,12 @@ impl ScriptIoSession {
             Some(Event::Caption { data }) => {
                 let body = MessageBody::new(json!({"text": data}).to_string(), vec![])?;
                 self.transport.notify(UI_CAPTION, body)?;
+            }
+            Some(Event::Exec { command, .. })
+                if matches!(command.as_str(), "fullscreen" | "minimize") =>
+            {
+                let body = MessageBody::new(json!({"command": command}).to_string(), vec![])?;
+                self.transport.notify(UI_WINDOW_ACTION, body)?;
             }
             Some(Event::ShowDialog {
                 title,

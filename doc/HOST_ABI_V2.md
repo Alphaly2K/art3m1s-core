@@ -258,12 +258,13 @@ Runtime kind=5 为 `persistence_result`，request_id=0、blob 为空。`operatio
 body，由 flags/kind 唯一标识。JSON 中的 u64/i64 使用十进制字符串，避免宿主 Number 精度丢失。
 禁止把图片/存档/HTTP body 转成 JSON 数组或 base64 作为常规传输。
 
-UI domain=4 当前实现两个草案 kind，blob 均为空：
+UI domain=4 的记录不携带 blob：
 
 | kind | 请求或通知 | 结果 |
 |---|---|---|
 | 1 `ui.caption` | 可靠通知，`{"text":"…"}` | 无回复 |
 | 2 `ui.dialog` | 请求，`title`、`message` 为字符串，`allow_cancel` 为布尔值，`initial_text` 为字符串或 null，`max_characters` 为十进制字符串或 null | `{"status":"ok","accepted":true,"text":"…"}`；`text` 可省略。`cancelled`、`denied`、`unsupported`、`io_error` 按取消完成 |
+| 3 `ui.window_action` | 可靠通知，`command` 为 `fullscreen`（切换全屏）或 `minimize` | 无回复 |
 
 `initial_text=null` 表示无输入框。Core 在 `step` 应用结果，接受时按约定字符上限写入
 输入变量，取消时保留旧输入内容。Host 重载时按 `session_changed` 取消旧对话框。
