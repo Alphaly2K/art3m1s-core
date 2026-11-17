@@ -5,6 +5,7 @@ mod audio;
 mod lifecycle;
 mod persistence;
 mod scene;
+mod transition;
 mod ui;
 mod video;
 mod wait;
@@ -257,6 +258,8 @@ pub struct ScriptIoSession {
     pub(super) shutdown: Shutdown,
     audio: audio::Audio,
     video: video::Video,
+    pub(super) transitions_enabled: bool,
+    transition: Option<transition::Transition>,
     scene: Option<scene::SceneIo>,
     pub(super) frames: super::frame::FramePublisher,
     read_history: ReadHistory,
@@ -305,6 +308,8 @@ impl ScriptIoSession {
             shutdown: Shutdown::default(),
             audio: Default::default(),
             video: Default::default(),
+            transitions_enabled: true,
+            transition: None,
             scene: None,
             frames: Default::default(),
             read_history: ReadHistory::default(),
@@ -414,6 +419,7 @@ impl ScriptIoSession {
         self.shutdown = Shutdown::default();
         self.audio = Default::default();
         self.video = Default::default();
+        self.transition = None;
         self.scene = None;
         self.frames.clear();
         Ok(epoch)
@@ -519,6 +525,7 @@ impl ScriptIoSession {
         self.shutdown = Shutdown::default();
         self.audio = Default::default();
         self.video = Default::default();
+        self.transition = None;
         self.scene = None;
         self.frames.clear();
         self.read_history = ReadHistory::default();
@@ -884,12 +891,15 @@ impl ScriptIoSession {
         if let Some(scene) = self.scene.as_mut()
             && scene.asset_pending()
         {
-            if let Some(request) =
-                scene.complete_asset(response.take().ok_or(ProtocolError::State)?)
-            {
-                return Ok(ScenarioStep::Request(request));
+            match scene.complete_asset(response.take().ok_or(ProtocolError::State)?) {
+                scene::AssetProgress::More(request) => return Ok(ScenarioStep::Request(request)),
+                scene::AssetProgress::Transition(event) => {
+                    self.scenario_event = Some(event);
+                    self.wait_start = None;
+                    return Ok(ScenarioStep::Progress(ScriptIoProgress::Event));
+                }
+                scene::AssetProgress::Applied => self.interpreter.advance_line(),
             }
-            self.interpreter.advance_line();
         }
         if let Some(stage) = self.boot_restore.take()
             && let Some(request) = self.step_boot_restore(stage, response.take())?
@@ -967,7 +977,10 @@ impl ScriptIoSession {
         match self.interpreter.step()? {
             ExecutionResult::HostIoPending => self.interpreter_request(),
             ExecutionResult::Wait(event) => {
+                let load_asset = !matches!(event, Event::Trans { .. })
+                    || (self.transitions_enabled && self.frames.latest_id().is_some());
                 if let Some(scene) = self.scene.as_mut()
+                    && load_asset
                     && let Some(request) = scene
                         .prepare_asset(&event)
                         .or_else(|| scene.prepare_event_font(&event))
@@ -1501,6 +1514,7 @@ impl ScriptIoSession {
         }
         self.audio.commit_restore(audio, &mut self.transport)?;
         self.video.reset_playback();
+        self.transition = None;
         self.wait_start = None;
         self.scenario_event = None;
         self.start_numbered_load_hook(file)

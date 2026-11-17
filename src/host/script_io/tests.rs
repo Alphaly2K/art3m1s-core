@@ -2130,6 +2130,158 @@ fn layer_edits_compose_preloaded_pixels_and_do_not_mutate_leased_frames() {
 }
 
 #[test]
+fn transitions_keep_both_scenes_and_obey_time_and_input_policy() {
+    use crate::host::{input::HostInput, runtime};
+
+    let mut host = MemoryHost::default();
+    let rule_pixels = [64, 64, 64, 255];
+    host.asset("rule.png", &png_bytes(1, 1, &rule_pixels));
+    host.asset(
+        "boot.iet",
+        br#"*top
+[lyc id=1 width=2 height=1 color=ff112233]
+[flip]
+[lyc id=1 width=2 height=1 color=ff445566]
+[trans type=1 time=10 input=0]
+[flip]
+[lyc id=1 width=2 height=1 color=ff778899]
+[trans type=2 rule=rule vague=40 time=100 input=1]
+[stop]
+"#,
+    );
+    let handle = runtime::create(0, TransportLimits::default(), 4096).unwrap();
+    let epoch = runtime::open_project(
+        handle,
+        b"[WINDOWS]\nWIDTH=320\nHEIGHT=200\nBOOT=boot.iet\n",
+        "windows",
+        None,
+    )
+    .unwrap();
+    let step = |id, millis: u64| {
+        runtime::step(
+            handle,
+            HostFrame {
+                id,
+                monotonic_ns: millis * 1_000_000,
+                utc_unix_ms: 0,
+                utc_offset_minutes: 0,
+            },
+        )
+        .unwrap()
+    };
+    for _ in 0..1024 {
+        let progress = step(1, 0);
+        let mut bytes = [0; 4096];
+        let polled = runtime::poll_events(handle, &mut bytes).unwrap();
+        if progress == ScriptIoProgress::Event {
+            break;
+        }
+        assert_eq!(progress, ScriptIoProgress::Waiting);
+        for request in decode_requests(&bytes[..polled.written_bytes]) {
+            runtime::submit_replies(handle, &[host.complete(&request)]).unwrap();
+        }
+    }
+    let old = runtime::acquire_latest(handle, 0).unwrap().unwrap();
+    let old_pixel = [0x11, 0x22, 0x33, 0xff];
+    assert_eq!(
+        old.texture(old.sprites[0].texture).unwrap().rgba(),
+        old_pixel
+    );
+    assert_eq!(step(2, 15), ScriptIoProgress::Event);
+    let start = runtime::acquire_latest(handle, old.render_frame_id)
+        .unwrap()
+        .unwrap();
+    let transition = start.transition.as_ref().unwrap();
+    assert_eq!(transition.progress, 0.0);
+    assert_eq!(transition.rule, None);
+    assert_eq!(
+        start.texture(transition.source[0].texture).unwrap().rgba(),
+        old_pixel
+    );
+    assert_eq!(
+        start.texture(start.sprites[0].texture).unwrap().rgba(),
+        &[0x44, 0x55, 0x66, 0xff]
+    );
+    let packet = start.packet();
+    let op = 56 + start.textures().len() * 24;
+    assert_eq!(
+        u32::from_le_bytes(packet[op..op + 4].try_into().unwrap()),
+        24
+    );
+    assert_eq!(
+        u16::from_le_bytes(packet[op + 4..op + 6].try_into().unwrap()),
+        2
+    );
+    assert_eq!(
+        u32::from_le_bytes(packet[op + 8..op + 12].try_into().unwrap()),
+        1
+    );
+    let previous = start.render_frame_id;
+    drop(start);
+    assert_eq!(step(2, 15), ScriptIoProgress::Event);
+    assert!(runtime::acquire_latest(handle, previous).unwrap().is_none());
+
+    let key = |down| HostInput::Key { code: 13, down };
+    runtime::submit_input(handle, epoch, &[key(true)]).unwrap();
+    assert_eq!(step(3, 20), ScriptIoProgress::Event);
+    let mid = runtime::acquire_latest(handle, previous).unwrap().unwrap();
+    assert_eq!(mid.transition.as_ref().unwrap().progress, 0.5);
+    let previous = mid.render_frame_id;
+    drop(mid);
+
+    assert_eq!(step(4, 25), ScriptIoProgress::Event);
+    let finished = runtime::acquire_latest(handle, previous).unwrap().unwrap();
+    assert!(finished.transition.is_none());
+    let previous = finished.render_frame_id;
+    drop(finished);
+    assert_eq!(step(4, 25), ScriptIoProgress::Waiting);
+    assert_eq!(step(5, 26), ScriptIoProgress::WouldBlock);
+    for _ in 0..1024 {
+        let mut bytes = [0; 4096];
+        let polled = runtime::poll_events(handle, &mut bytes).unwrap();
+        let request = decode_requests(&bytes[..polled.written_bytes])
+            .pop()
+            .unwrap();
+        assert_eq!(request.metadata["key"], "rule.png");
+        runtime::submit_replies(handle, &[host.complete(&request)]).unwrap();
+        if step(4, 25) == ScriptIoProgress::Event {
+            break;
+        }
+    }
+    let next = runtime::acquire_latest(handle, previous).unwrap().unwrap();
+    let plan = next.transition.as_ref().unwrap();
+    assert_eq!(plan.progress, 0.0);
+    assert_eq!(plan.vague, 40.0 / 255.0);
+    assert_eq!(
+        next.texture(plan.rule.unwrap()).unwrap().rgba(),
+        rule_pixels
+    );
+    let op = 56 + next.textures().len() * 24;
+    let packet = next.packet();
+    assert_eq!(
+        u32::from_le_bytes(packet[op + 16..op + 20].try_into().unwrap()),
+        plan.rule.unwrap() as u32
+    );
+    let previous = next.render_frame_id;
+    drop(next);
+    runtime::submit_input(handle, epoch, &[key(false), key(true)]).unwrap();
+    assert_eq!(step(5, 26), ScriptIoProgress::Event);
+    let skipped = runtime::acquire_latest(handle, previous).unwrap().unwrap();
+    assert!(skipped.transition.is_none());
+    assert_eq!(
+        skipped.texture(skipped.sprites[0].texture).unwrap().rgba(),
+        &[0x77, 0x88, 0x99, 0xff]
+    );
+    assert_eq!(
+        old.texture(old.sprites[0].texture).unwrap().rgba(),
+        old_pixel
+    );
+    drop(skipped);
+    drop(old);
+    runtime::destroy(handle).unwrap();
+}
+
+#[test]
 fn compound_events_resume_in_order_without_reexecuting_the_tag() {
     use asb_interpreter::event::LayerEvent;
 

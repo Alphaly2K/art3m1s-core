@@ -122,11 +122,21 @@ pub fn create(
     limits: TransportLimits,
     max_file_bytes: usize,
 ) -> Result<RuntimeHandle, RuntimeError> {
+    create_with_transition(random_seed, limits, max_file_bytes, true)
+}
+
+pub(super) fn create_with_transition(
+    random_seed: u64,
+    limits: TransportLimits,
+    max_file_bytes: usize,
+    transitions_enabled: bool,
+) -> Result<RuntimeHandle, RuntimeError> {
     let handle = RUNTIMES.lock().unwrap().allocate()?;
     let session = catch_unwind(|| {
         let mut session =
             ScriptIoSession::new(handle.0, Default::default(), limits, max_file_bytes)?;
         session.set_random_seed(random_seed)?;
+        session.transitions_enabled = transitions_enabled;
         Ok::<_, ScriptIoError>(session)
     })
     .map_err(|_| RuntimeError::Panic)??;

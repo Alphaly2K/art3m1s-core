@@ -16,7 +16,7 @@ pub enum SpriteBlend {
     Multiply,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FrameSprite {
     pub layer_id: String,
     pub texture: usize,
@@ -34,6 +34,15 @@ pub struct FrameSprite {
     pub grayscale: bool,
     pub negative: bool,
     pub blend: SpriteBlend,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct FrameTransition {
+    /// Draw this scene into the transition source target before blending it over `sprites`.
+    pub source: Box<[FrameSprite]>,
+    pub progress: f32,
+    pub rule: Option<usize>,
+    pub vague: f32,
 }
 
 #[derive(Debug)]
@@ -59,6 +68,7 @@ pub struct FrameSnapshot {
     pub host_frame_id: u64,
     pub stage_size: [u32; 2],
     pub sprites: Box<[FrameSprite]>,
+    pub transition: Option<FrameTransition>,
     pub(crate) textures: Box<[Arc<FrameTexture>]>,
 }
 
@@ -76,11 +86,63 @@ impl FrameSnapshot {
         self.session_epoch == other.session_epoch
             && self.stage_size == other.stage_size
             && self.sprites == other.sprites
+            && self.transition == other.transition
             && self
                 .textures
                 .iter()
                 .map(|texture| texture.revision)
                 .eq(other.textures.iter().map(|texture| texture.revision))
+    }
+
+    pub(crate) fn blend_from(
+        &mut self,
+        source: &Self,
+        progress: f32,
+        rule: Option<&Arc<FrameTexture>>,
+        vague: f32,
+    ) {
+        use std::collections::HashMap;
+        let mut textures = std::mem::take(&mut self.textures).into_vec();
+        let mut by_revision: HashMap<_, _> = textures
+            .iter()
+            .enumerate()
+            .map(|(index, image)| (image.revision, index))
+            .collect();
+        let remap: Vec<_> = source
+            .textures
+            .iter()
+            .map(|image| {
+                *by_revision.entry(image.revision).or_insert_with(|| {
+                    let index = textures.len();
+                    textures.push(image.clone());
+                    index
+                })
+            })
+            .collect();
+        let sprites = source
+            .sprites
+            .iter()
+            .cloned()
+            .map(|mut sprite| {
+                sprite.texture = remap[sprite.texture];
+                sprite.mask = sprite.mask.map(|index| remap[index]);
+                sprite
+            })
+            .collect();
+        let rule = rule.map(|image| {
+            *by_revision.entry(image.revision).or_insert_with(|| {
+                let index = textures.len();
+                textures.push(image.clone());
+                index
+            })
+        });
+        self.textures = textures.into_boxed_slice();
+        self.transition = Some(FrameTransition {
+            source: sprites,
+            progress,
+            rule,
+            vague,
+        });
     }
 }
 
@@ -112,7 +174,7 @@ impl Deref for FrameLease {
 
 #[derive(Debug)]
 struct PublishedFrame {
-    snapshot: FrameSnapshot,
+    snapshot: Arc<FrameSnapshot>,
     packet: Box<[u8]>,
 }
 
@@ -138,6 +200,16 @@ impl FramePublisher {
             .map(|frame| frame.snapshot.render_frame_id)
     }
 
+    pub fn latest_snapshot(&self) -> Option<Arc<FrameSnapshot>> {
+        self.latest.as_ref().map(|frame| frame.snapshot.clone())
+    }
+
+    pub fn latest_is_transition(&self) -> bool {
+        self.latest
+            .as_ref()
+            .is_some_and(|frame| frame.snapshot.transition.is_some())
+    }
+
     pub fn publish(&mut self, mut frame: FrameSnapshot) -> Result<(), ProtocolError> {
         if self
             .latest
@@ -156,7 +228,7 @@ impl FramePublisher {
         };
         self.serial = frame.render_frame_id;
         self.latest = Some(Arc::new(PublishedFrame {
-            snapshot: frame,
+            snapshot: Arc::new(frame),
             packet,
         }));
         Ok(())

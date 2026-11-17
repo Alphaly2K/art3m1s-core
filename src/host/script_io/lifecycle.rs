@@ -65,14 +65,23 @@ impl ScriptIoSession {
                     self.notify_exit().map(Some)
                 }
                 ScriptIoProgress::Event if self.has_frame_wait() => self.advance_frame_wait(frame),
+                ScriptIoProgress::Event if self.waiting_for_transition() => {
+                    self.advance_transition_wait(frame)
+                }
                 ScriptIoProgress::Event if self.sync_tween_finished() => {
                     self.resume_scenario().map(|()| None)
                 }
                 ScriptIoProgress::Event
                     if self.scene.is_some() && matches!(self.scenario_event, Some(Event::Flip)) =>
                 {
+                    self.transition = None;
                     self.resume_scenario()
                         .map(|()| Some(ScriptIoProgress::Event))
+                }
+                ScriptIoProgress::Event
+                    if matches!(self.scenario_event, Some(Event::Trans { .. })) =>
+                {
+                    self.start_transition(frame).map(Some)
                 }
                 ScriptIoProgress::Event if self.has_persistence_event() => {
                     self.start_persistence().map(|()| None)

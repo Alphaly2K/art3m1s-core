@@ -134,6 +134,7 @@ void main() {
 /// progress=1 时旧帧完全消失。
 const RULE_TRANS_FRAGMENT_BODY: &str = r#"
 in vec2 v_uv;
+in vec2 v_model_position;
 out vec4 frag_color;
 
 uniform sampler2D u_texture_fore;
@@ -145,7 +146,7 @@ uniform float vague;
 
 void main() {
     vec4 c = texture(u_texture_fore, v_uv);
-    float rule = texture(u_texture_mask, v_uv).r;
+    float rule = texture(u_texture_mask, v_model_position).r;
     float v = max(vague, 1.0 / 255.0);
     float t = progress * (1.0 + v) - v;
     float keep = smoothstep(t, t + v, rule);

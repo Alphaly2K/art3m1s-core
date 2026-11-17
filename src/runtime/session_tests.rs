@@ -224,6 +224,7 @@ fn host_sprite_renderer_reuses_uploads_and_rolls_back_failed_frames() {
             host_frame_id: 1,
             stage_size: [64, 48],
             sprites: sprites.into_boxed_slice(),
+            transition: None,
             textures: textures.into_boxed_slice(),
         };
     let original = texture(1, [40, 25, 27, 192]);

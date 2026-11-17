@@ -26,14 +26,24 @@ impl ScriptIoSession {
             return Ok(());
         };
         let mut scene = scene.scene.lock().unwrap();
-        if !scene.dirty {
+        if !scene.dirty && self.transition.is_none() && !self.frames.latest_is_transition() {
             return Ok(());
         }
         scene.dirty = false;
         let config = self.interpreter.config();
         let stage = [config.stage_width, config.stage_height];
         match scene.build_frame(self.transport.state().epoch, frame.id, stage) {
-            Some(snapshot) => self.frames.publish(snapshot),
+            Some(mut snapshot) => {
+                if let Some(transition) = &self.transition {
+                    snapshot.blend_from(
+                        &transition.source,
+                        transition.progress(frame),
+                        transition.rule.as_ref(),
+                        transition.vague,
+                    );
+                }
+                self.frames.publish(snapshot)
+            }
             None => {
                 self.frames.clear();
                 Ok(())
@@ -162,6 +172,7 @@ impl SceneProjection {
             host_frame_id,
             stage_size,
             sprites: sprites.into_boxed_slice(),
+            transition: None,
             textures: textures.table.into_boxed_slice(),
         })
     }

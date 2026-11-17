@@ -252,6 +252,12 @@ struct PendingAsset {
     remaining: Option<String>,
 }
 
+pub(super) enum AssetProgress {
+    More(IoRequest),
+    Transition(Event),
+    Applied,
+}
+
 pub(super) struct TextureRead {
     file: String,
     try_exact: bool,
@@ -273,6 +279,11 @@ impl TextureRead {
 }
 
 impl SceneIo {
+    pub(super) fn transition_rule(&self, name: &str) -> Option<Arc<FrameTexture>> {
+        let key = self.resolve_media_asset(name).ok()?;
+        self.scene.lock().unwrap().textures.get(&key)?.clone()
+    }
+
     pub(super) fn attach_video_layer(&self, id: &str) {
         let mut scene = self.scene.lock().unwrap();
         scene.compositor.set_layer_file(id, None);
@@ -436,6 +447,24 @@ impl SceneIo {
     }
 
     pub(super) fn prepare_asset(&mut self, event: &Event) -> Option<IoRequest> {
+        if let Event::Trans {
+            trans_type: 2,
+            rule: Some(rule),
+            ..
+        } = event
+        {
+            let key = self.resolve_media_asset(rule).ok()?;
+            if self.scene.lock().unwrap().textures.contains_key(&key) {
+                return None;
+            }
+            let (read, request) = TextureRead::start(key);
+            self.pending = Some(PendingAsset {
+                event: event.clone(),
+                read,
+                remaining: None,
+            });
+            return Some(request);
+        }
         let scene = self.scene.lock().unwrap();
         let mut files = scene.missing_assets(event);
         let file = files.next()?;
@@ -448,7 +477,7 @@ impl SceneIo {
         Some(request)
     }
 
-    pub(super) fn complete_asset(&mut self, response: IoResponse) -> Option<IoRequest> {
+    pub(super) fn complete_asset(&mut self, response: IoResponse) -> AssetProgress {
         let mut pending = self.pending.take().unwrap();
         let cancelled = matches!(
             &response,
@@ -459,16 +488,19 @@ impl SceneIo {
         );
         if let Some(request) = self.complete_texture(&mut pending.read, response) {
             self.pending = Some(pending);
-            return Some(request);
+            return AssetProgress::More(request);
         }
         if !cancelled && let Some(file) = pending.remaining.take() {
             let (read, request) = TextureRead::start(file);
             pending.read = read;
             self.pending = Some(pending);
-            return Some(request);
+            return AssetProgress::More(request);
+        }
+        if matches!(pending.event, Event::Trans { .. }) {
+            return AssetProgress::Transition(pending.event);
         }
         self.scene.lock().unwrap().apply(&pending.event);
-        None
+        AssetProgress::Applied
     }
 
     pub(super) fn complete_texture(

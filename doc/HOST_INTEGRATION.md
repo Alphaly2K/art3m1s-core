@@ -17,7 +17,8 @@ Artemis 解释器在所有平台统一使用 Luau。现有 v1 C 函数表保持�
 使用 `cargo build --no-default-features --features host-abi-v2` 编译纯 Core 动态库。加载库后
 通过 [C 头文件](abi/art3m1s_core_v2.draft.h) 中的 `art3m1s_get_api_v2` 查询 Runtime 和 Frame 表。
 创建 runtime 的线程负责所有调用；工作线程把结果交回该线程。Host 循环推进逻辑、处理请求并
-借用帧，绘制完释放令牌。
+借用帧，绘制完释放令牌。只绘制精灵的 Host 可提交 `ART_RENDERER_CAP_SPRITE`；支持旧场景
+捕获及转场合成的 Host 同时提交 `ART_RENDERER_CAP_TRANSITION`。
 
 [内存 Host 示例](../tools/host-smoke/artemis_v2.c) 不依赖窗口或游戏素材。在 macOS 或 Linux
 从仓库根目录运行下列命令，会独立构建预览库、检查导出并运行示例：
@@ -168,6 +169,7 @@ IO 挂起期间可继续呈现上次取得的帧。借用跨重载有效；单�
 使用项目自带 GPU 后端时，将 Host 创建的后端传给 `SpriteRenderer::new`。Host 通过
 `backend_mut()` 配置目标及舞台映射，调用 `begin_access`、`begin_frame` 并清理目标，
 然后调用 `render(&lease)`。成功后由 Host 结束帧并呈现；出错时也要结束已打开的访问和帧。
+转场的旧场景和新场景用相同的背景色；自定义背景时调用 `render_with_clear_color`。
 清理适配器缓存须在后端上下文可用时调用 `clear_cached_textures()`。
 
 句柄入口的 `step` 会自动处理 `[save]` 和编号 `[load]`。Host 按现有 IO 请求读写并回填结果，
