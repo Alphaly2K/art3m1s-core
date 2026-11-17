@@ -330,7 +330,24 @@ Rust 草案先提供 `acquire_latest(handle, after)`，可借用基础图层快�
 紧密排列的 RGBA8，直通 alpha，首行在顶端；资源缓存键为 `(runtime, epoch, revision)`。
 同尺寸蒙版用独立纹理索引表示：采样前逐像素以 `alpha * mask_red / 255` 取整得到新 alpha。
 缺失或尺寸不符的蒙版回退为原图。此草案只覆盖图片和纯色图层；需 shader、mesh 或 stencil
-的帧不从该入口交付。Rust 借用随 `FrameLease` 释放；二进制帧数据和 C 帧接口尚未发布。
+的帧不从该入口交付。Rust 借用随 `FrameLease` 释放。
+
+`FrameLease::packet()` 返回 `ARFP` 草案版 1 的二进制描述；`texture(index)` 借用对应像素。
+C 草案的 `texture_rgba` 也使用帧内索引，像素和帧描述一起由同一个 token 保活。
+帧描述最长 16 MiB；所有整数和 IEEE 754 `f32` 都用小端，无结构体填充。
+
+| 区段 | 按顺序的字段 |
+|---|---|
+| 帧头，56 字节 | `"ARFP"` [4]；schema `u16`；头长 `u16`；总字节数、纹理数、绘制记录数、保留零各 `u32`；epoch、render frame ID、Host frame ID 各 `u64`；舞台宽、高各 `u32` |
+| 纹理描述，每条 24 字节 | revision `u64`；宽、高、行字节数各 `u32`；像素格式 `u16`（1 = RGBA8，直通 alpha，首行在顶端）；保留零 `u16` |
+| 精灵记录，104 字节前缀 | 记录总长度 `u32`；opcode `u16`（1 = 精灵）；flags `u16`；纹理索引、蒙版索引、混合方式、图层 ID 长度各 `u32`；变换 6 个 `f32`，矩形尺寸、UV 偏移、UV 缩放各 2 个 `f32`，裁剪 4 个 `f32`，opacity 1 个 `f32`，RGB 乘色 3 个 `f32` |
+| 精灵记录尾部 | 按长度读取 UTF-8 图层 ID，含在该记录总长度内，无 NUL 与填充 |
+
+索引从 0 开始；无蒙版用 `UINT32_MAX`。混合方式按 Alpha、Add、Screen、Multiply
+依次编号 0 至 3。flags 的低三位依次表示裁剪、灰阶和反色，其余写零。裁剪为舞台上的
+左、上、宽、高，未设置时四项均为零。变换顺序为两列基向量、平移。
+Host 解析时应先校验版本、总长度、各段计数与记录边界，确认纹理索引和像素长度有效后再绘制。
+C 帧接口仍为草案，未发布新的动态符号。
 
 `acquire_latest(after_render_frame_id)` 返回不可变快照和 lease token；无新帧为 NO_DATA。
 快照及所有引用的 CPU 资源版本在 release 前跨 step/reload 保持有效；默认至多两个

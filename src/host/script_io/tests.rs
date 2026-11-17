@@ -1653,6 +1653,44 @@ fn basic_frames_keep_revisioned_pixels_and_masks_alive_across_reload() {
     assert_eq!(textures[solid.texture].rgba(), [17, 34, 51, 128]);
     assert_eq!(textures[sprite.texture].rgba(), pixels);
     assert_eq!(textures[sprite.mask.unwrap()].rgba(), mask_pixels);
+
+    let packet = first.packet();
+    let u16_at = |i| u16::from_le_bytes(packet[i..i + 2].try_into().unwrap());
+    let u32_at = |i| u32::from_le_bytes(packet[i..i + 4].try_into().unwrap());
+    let u64_at = |i| u64::from_le_bytes(packet[i..i + 8].try_into().unwrap());
+    assert_eq!(&packet[..4], b"ARFP");
+    assert_eq!(u16_at(4), crate::host::frame::FRAME_PACKET_VERSION);
+    assert_eq!(u16_at(6), 56);
+    assert_eq!(u32_at(8) as usize, packet.len());
+    assert_eq!(u32_at(12), 3);
+    assert_eq!(u32_at(16), 2);
+    assert_eq!(
+        (u64_at(24), u64_at(32), u64_at(40)),
+        (epoch, first.render_frame_id, 10)
+    );
+    assert_eq!((u32_at(48), u32_at(52)), (320, 200));
+    let hero_row = 56 + sprite.texture * 24;
+    assert_eq!(u64_at(hero_row), textures[sprite.texture].revision);
+    assert_eq!(
+        (
+            u32_at(hero_row + 8),
+            u32_at(hero_row + 12),
+            u32_at(hero_row + 16)
+        ),
+        (2, 1, 8)
+    );
+    assert_eq!(u16_at(hero_row + 20), 1);
+    let solid_record = 56 + 3 * 24;
+    assert_eq!(u32_at(solid_record + 12), u32::MAX);
+    assert_eq!(u32_at(solid_record), 105);
+    let hero_record = solid_record + 105;
+    assert_eq!(u16_at(hero_record + 4), 1);
+    assert_eq!(u32_at(hero_record + 8) as usize, sprite.texture);
+    assert_eq!(u32_at(hero_record + 12) as usize, sprite.mask.unwrap());
+    assert_eq!(f32::from_bits(u32_at(hero_record + 40)), 15.0);
+    assert_eq!(u32_at(hero_record + 20), 4);
+    assert_eq!(hero_record + u32_at(hero_record) as usize, packet.len());
+    assert_eq!(&packet[hero_record + 104..], b"1.80");
     assert_eq!(
         runtime::get_state(handle).unwrap().latest_render_frame_id,
         Some(first.render_frame_id)
@@ -1713,6 +1751,7 @@ fn basic_frames_keep_revisioned_pixels_and_masks_alive_across_reload() {
         updated_pixels
     );
     assert_eq!(textures[sprite.texture].rgba(), pixels);
+    assert_eq!(u64_at(24), epoch);
     drop(reloaded);
     drop(first);
     runtime::destroy(handle).unwrap();

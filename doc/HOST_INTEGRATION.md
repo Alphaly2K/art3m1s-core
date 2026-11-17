@@ -136,7 +136,8 @@ Rust 的 `ExecutionResult`/`TagResult` 新增 `HostIoPending`，穷举匹配需�
 `acquire_latest(handle, after_render_frame_id)` 借用最新基础图层帧，`None` 表示暂无更新。
 Host 从快照的纹理表读取像素，并按 `sprites` 的顺序绘制。`[flip]` 提交当前视觉状态，
 IO 挂起期间可继续呈现上次取得的帧。借用跨重载有效；单个运行时最多借用两帧，销毁前需
-归还。像素、蒙版和资源版本约定见 [帧契约](HOST_ABI_V2.md#7-画面core-帧契约与-host-renderer)。
+归还。`packet()` 可读取同一快照的二进制描述，像素继续通过纹理表借用。格式、蒙版和资源
+版本约定见 [帧契约](HOST_ABI_V2.md#7-画面core-帧契约与-host-renderer)。
 
 独立解释器启用 resumable IO 后，未安装同步加载器时，start/boot/restore_position 可能
 受理一个尚待 Host 完成的加载，调用方随后处理 HostIoPending。显式安装的同步内存加载器

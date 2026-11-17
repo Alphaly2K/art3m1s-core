@@ -54,6 +54,12 @@ typedef uint64_t ArtFrameToken;
 #define ART_UI_CAPTION UINT32_C(1)
 #define ART_UI_DIALOG UINT32_C(2)
 
+/* Draft ARFP packet; see HOST_ABI_V2.md for the little-endian format. */
+#define ART_FRAME_SCHEMA_VERSION UINT16_C(1)
+#define ART_FRAME_FORMAT_RGBA8_STRAIGHT_TOP UINT16_C(1)
+#define ART_FRAME_OP_SPRITE UINT16_C(1)
+#define ART_FRAME_NO_TEXTURE UINT32_MAX
+
 typedef struct ArtBytes {
     const uint8_t *data;
     uint64_t size;
@@ -168,6 +174,9 @@ typedef struct ArtFrameApiV2 {
     ArtStatus (*acquire_latest)(ArtRuntimeHandle, uint64_t after_render_frame_id,
                                 ArtFrameView *out);
     ArtStatus (*release)(ArtRuntimeHandle, ArtFrameToken);
+    /* Frame-local texture index. The returned bytes expire with the token. */
+    ArtStatus (*texture_rgba)(ArtRuntimeHandle, ArtFrameToken, uint32_t index,
+                              ArtBytes *out_pixels);
 } ArtFrameApiV2;
 
 typedef struct ArtRootApiV2 {

@@ -4,6 +4,9 @@ use super::protocol::ProtocolError;
 use std::ops::Deref;
 use std::sync::Arc;
 
+mod packet;
+pub use packet::FRAME_PACKET_VERSION;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpriteBlend {
     Alpha,
@@ -59,6 +62,10 @@ pub struct FrameSnapshot {
 }
 
 impl FrameSnapshot {
+    pub fn texture(&self, index: usize) -> Option<&FrameTexture> {
+        self.textures.get(index).map(Arc::as_ref)
+    }
+
     /// Texture indices in this frame refer to this table.
     pub fn textures(&self) -> impl ExactSizeIterator<Item = &FrameTexture> {
         self.textures.iter().map(Arc::as_ref)
@@ -78,22 +85,35 @@ impl FrameSnapshot {
 
 #[derive(Debug)]
 pub struct FrameLease {
-    frame: Arc<FrameSnapshot>,
+    frame: Arc<PublishedFrame>,
     _lease: Arc<()>,
+}
+
+impl FrameLease {
+    /// Versioned drawing commands and texture descriptors; pixel bytes are borrowed separately.
+    pub fn packet(&self) -> &[u8] {
+        &self.frame.packet
+    }
 }
 
 impl Deref for FrameLease {
     type Target = FrameSnapshot;
 
     fn deref(&self) -> &FrameSnapshot {
-        &self.frame
+        &self.frame.snapshot
     }
+}
+
+#[derive(Debug)]
+struct PublishedFrame {
+    snapshot: FrameSnapshot,
+    packet: Box<[u8]>,
 }
 
 #[derive(Default)]
 pub(crate) struct FramePublisher {
     serial: u64,
-    latest: Option<Arc<FrameSnapshot>>,
+    latest: Option<Arc<PublishedFrame>>,
     leases: Arc<()>,
 }
 
@@ -107,20 +127,32 @@ impl FramePublisher {
     }
 
     pub fn latest_id(&self) -> Option<u64> {
-        self.latest.as_ref().map(|frame| frame.render_frame_id)
+        self.latest
+            .as_ref()
+            .map(|frame| frame.snapshot.render_frame_id)
     }
 
     pub fn publish(&mut self, mut frame: FrameSnapshot) -> Result<(), ProtocolError> {
         if self
             .latest
             .as_ref()
-            .is_some_and(|last| last.same_content(&frame))
+            .is_some_and(|last| last.snapshot.same_content(&frame))
         {
             return Ok(());
         }
-        self.serial = self.serial.checked_add(1).ok_or(ProtocolError::Limit)?;
-        frame.render_frame_id = self.serial;
-        self.latest = Some(Arc::new(frame));
+        frame.render_frame_id = self.serial.checked_add(1).ok_or(ProtocolError::Limit)?;
+        let packet = match packet::encode(&frame) {
+            Ok(packet) => packet,
+            Err(error) => {
+                self.clear();
+                return Err(error);
+            }
+        };
+        self.serial = frame.render_frame_id;
+        self.latest = Some(Arc::new(PublishedFrame {
+            snapshot: frame,
+            packet,
+        }));
         Ok(())
     }
 
@@ -128,7 +160,7 @@ impl FramePublisher {
         let Some(frame) = self
             .latest
             .as_ref()
-            .filter(|frame| frame.render_frame_id > after)
+            .filter(|frame| frame.snapshot.render_frame_id > after)
         else {
             return Ok(None);
         };
