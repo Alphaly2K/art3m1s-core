@@ -1,7 +1,8 @@
 # Artemis Host ABI v2：接口契约（草案）
 
 状态：v2 C 预览使用 `cargo build --locked --manifest-path crates/artemis-core/Cargo.toml`。
-仓库根目录的默认构建继续提供 v1。导出审计见 [EXPORT_AUDIT.md](EXPORT_AUDIT.md)，预览头文件见
+独立预览发布 C 动态库；仓库根目录的构建继续用于 v1 和现有 Rust 调用者。导出审计见
+[EXPORT_AUDIT.md](EXPORT_AUDIT.md)，预览头文件见
 [abi/art3m1s_core_v2.draft.h](abi/art3m1s_core_v2.draft.h)。
 
 ## 1. 范围与设计决策

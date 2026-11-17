@@ -15,7 +15,7 @@ Artemis 解释器在所有平台统一使用 Luau。现有 v1 C 函数表保持�
 ### Artemis v2 C 预览
 
 使用 `cargo build --locked --manifest-path crates/artemis-core/Cargo.toml` 编译纯 Core 动态库。
-独立清单无需检出其他引擎。加载库后
+独立清单只产出 C 动态库，无需检出其他引擎。加载库后
 通过 [C 头文件](abi/art3m1s_core_v2.draft.h) 中的 `art3m1s_get_api_v2` 查询 Runtime 和 Frame 表。
 创建 runtime 的线程负责所有调用；工作线程把结果交回该线程。Host 循环推进逻辑、处理请求并
 借用帧，绘制完释放令牌。只绘制精灵的 Host 可提交 `ART_RENDERER_CAP_SPRITE`；支持旧场景

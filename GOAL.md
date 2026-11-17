@@ -64,7 +64,8 @@ Host 尚未切换。
 ## 已完成：独立 Artemis v2 产物
 
 `crates/artemis-core` 提供独立清单和锁文件，复用 Artemis 源码及 Luau，不解析其他引擎的路径
-依赖。根构建继续用于 v1 与可选引擎。CI 分别检查 Mach-O、ELF 和 PE 的导出及独立 C Host。
+依赖。独立清单产出 C 动态库；根构建继续用于 v1、现有 Rust 调用者与可选引擎。CI 分别检查
+Mach-O、ELF 和 PE 的导出及独立 C Host。
 
 在仅含 Artemis 源码及其依赖清单的目录中，macOS C Host 冒烟和 258 项纯 Core 测试通过；
 预览库仅导出 `art3m1s_get_api_v2`。Linux 和 Windows 的 CI 运行结果待核实。
