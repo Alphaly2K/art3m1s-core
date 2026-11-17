@@ -1,51 +1,16 @@
 use super::CoreRuntime;
 use crate::backend::{TextureData, TextureDesc};
 use crate::save::AudioSnapshot;
+use crate::save::system::{
+    SAVEG_FILE, SYSTEM_FILE, is_persistent_system_variable, persistent_system_snapshot,
+};
 use image::ImageEncoder;
 use std::collections::HashMap;
 
-/// `syssave()`（无 file 的 `[save]`）落盘的全局域文件名。
-const SAVEG_FILE: &str = "saveg.dat";
-/// `syssave()` 落盘的系统域文件名。
-const SYSTEM_FILE: &str = "system.dat";
 /// [autosave] 自动保存的存档文件名。
 const AUTOSAVE_FILE: &str = "__Autosave.dat";
 /// 已读记录（alreadyread）持久化文件名。跨会话保留，使"已读跳过"有意义。
 const AREAD_FILE: &str = "aread.dat";
-
-/// System variables that are part of the persistent user configuration.
-///
-/// Artemis exposes a single `s.*` namespace for both user-adjustable settings
-/// and values computed from the current runtime.  `iter_system()` therefore
-/// cannot be serialized wholesale: values such as `s.status.*`,
-/// `s.current_message_layer`, screen dimensions and paths describe the active
-/// session and must be re-created by the new runtime. Even writable values
-/// such as `s.http.cancel` and `s.backlog.annotation` are operation-scoped,
-/// so persistence is an explicit property rather than an inference from
-/// writability or from a particular game's script.
-///
-/// The translated copy of `system_variables` in `example/docs` predates
-/// `s.enablemaximizedwindow`; the upstream Japanese specification lists it as
-/// writable, and existing projects use it to retain the Windows maximize
-/// policy.  Keep it here even though most projects never set it.
-fn is_persistent_system_variable(name: &str) -> bool {
-    matches!(
-        name,
-        "bgmvol" | "sevol" | "videovol" | "automodewait" | "enablemaximizedwindow"
-    ) || name
-        .strip_prefix("segain.")
-        .is_some_and(|id| !id.is_empty())
-}
-
-fn persistent_system_snapshot(
-    store: &asb_interpreter::VariableStore,
-) -> HashMap<String, asb_interpreter::Value> {
-    store
-        .iter_system()
-        .filter(|(name, _)| is_persistent_system_variable(name))
-        .map(|(name, value)| (name.clone(), value.clone()))
-        .collect()
-}
 
 #[derive(Clone)]
 pub(super) struct ScreenshotBuffer {

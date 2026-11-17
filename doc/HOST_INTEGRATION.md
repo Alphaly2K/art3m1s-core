@@ -146,13 +146,14 @@ IO 等待期间，新帧返回 `WouldBlock` 且不受理；提交结果后以相
 都抑制原派发，分别表示成功和失败。未安装过滤器时继续默认派发；过滤器报错时拒绝。
 取走判定前不会推进场景。已有场景事件仍须单独确认。替换会话会清除过滤请求和判定。
 
-使用纯脚本驱动时，收到带文件名的 `Event::SaveGame` 可调用 `submit_numbered_save()`。
-`step` 运行 `onSave` 及它排队的状态更新，等待回调内的 IO，并生成解释器快照。回调可以
+使用纯脚本驱动时，收到 `Event::SaveGame` 可调用 `submit_save()`。有文件名时，`step`
+运行 `onSave` 及它排队的状态更新，等待回调内的 IO，并生成解释器快照。回调可以
 修改存档变量、执行 Lua 和请求 IO；若尝试跳转、等待或派发普通场景事件，本次保存失败。
 调用方原有的标签队列保留。快照使用现有 `SaveData` 格式，记录存档事件后的脚本位置，
-当前只包含解释器状态。画面、音频和系统存档仍使用各自的运行时集成。
-收到 `SaveReady` 后用 `take_numbered_save_result()` 取走成功或失败，再用
-`resume_scenario()` 继续。成功仅在 Host 确认 `write_atomic` 完成后产生。
+当前只包含解释器状态。无文件名时，依次写 `saveg.dat` 和 `system.dat`，不调用 `onSave`。
+收到 `SaveReady` 后用 `take_save_result()` 取走成功或失败，再用
+`resume_scenario()` 继续。每份文件单独提交，全部确认才返回成功；失败时 `files_written`
+记录已确认的文件数。启动时读取系统存档、已读记录及画面和音频快照仍由运行时集成承担。
 
 收到 `Event::LoadGame` 后可调用 `submit_numbered_load()`。Core 先读取并校验解释器快照，
 缺少目标脚本时再请求其字节。成功恢复位置后，加载期 Lua 先于 `onLoad` 运行，两者均可挂起。

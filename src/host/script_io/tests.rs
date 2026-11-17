@@ -275,7 +275,7 @@ __engine:setEventHandler{onSave='capture'}
             session.pending_event(),
             Some(Event::SaveGame { .. })
         ));
-        session.submit_numbered_save().unwrap();
+        session.submit_save().unwrap();
         assert_eq!(session.resume_scenario(), Err(ProtocolError::State));
         for key in ["before", "after"] {
             assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
@@ -298,9 +298,9 @@ __engine:setEventHandler{onSave='capture'}
             "right"
         );
         assert!(save.variables.get("memsave.bad").is_none());
-        assert_eq!(session.take_numbered_save_result(), None);
+        assert_eq!(session.take_save_result(), None);
         let (reply, outcome) = if should_write {
-            (host.complete(&request), NumberedSaveResult::Written)
+            (host.complete(&request), SaveResult::Written)
         } else {
             (
                 reply(
@@ -308,18 +308,19 @@ __engine:setEventHandler{onSave='capture'}
                     json!({"status":"denied","message":"offline"}),
                     vec![],
                 ),
-                NumberedSaveResult::Failed {
+                SaveResult::Failed {
                     kind: IoFailure::Denied,
                     message: "offline".into(),
+                    files_written: 0,
                 },
             )
         };
         session.submit_replies(&[reply]).unwrap();
-        assert_eq!(session.take_numbered_save_result(), None);
+        assert_eq!(session.take_save_result(), None);
         assert_eq!(session.step().unwrap(), ScriptIoProgress::SaveReady);
         assert_eq!(session.resume_scenario(), Err(ProtocolError::State));
-        assert_eq!(session.take_numbered_save_result(), Some(outcome));
-        assert_eq!(session.submit_numbered_save(), Err(ProtocolError::State));
+        assert_eq!(session.take_save_result(), Some(outcome));
+        assert_eq!(session.submit_save(), Err(ProtocolError::State));
         session.resume_scenario().unwrap();
         host.run(&mut session);
         assert_eq!(host.captions, ["queued", "inline"]);
@@ -337,6 +338,73 @@ __engine:setEventHandler{onSave='capture'}
             should_write
         );
     }
+}
+
+#[test]
+fn system_save_preserves_the_existing_format_and_reports_partial_commit() {
+    let mut session = session(1, TransportLimits::default(), 4096);
+    session
+        .open_scenario(
+            br#"
+*main
+[var name=g.slot data=2]
+[var name=s.bgmvol data=42]
+[var name=s.status.internal data=1]
+[save]
+[caption data=after]
+[lua]
+function on_save() error('unnamed save cannot invoke onSave') end
+__engine:setEventHandler{onSave='on_save'}
+[/lua]
+"#,
+            "system-save",
+            "main",
+        )
+        .unwrap();
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::Event);
+    assert!(matches!(session.pending_event(), Some(Event::SaveGame { file }) if file.is_empty()));
+    session.submit_save().unwrap();
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
+    let global = requests(&mut session).pop().unwrap();
+    assert_eq!(global.identity.service, IO_WRITE_ATOMIC);
+    assert_eq!(
+        global.metadata,
+        json!({"namespace":"save","key":"saveg.dat"})
+    );
+    let global_values: HashMap<String, asb_interpreter::Value> =
+        serde_json::from_slice(&global.blob).unwrap();
+    assert_eq!(global_values["slot"].as_int(), Some(2));
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
+    assert!(requests(&mut session).is_empty());
+    let mut host = MemoryHost::default();
+    session.submit_replies(&[host.complete(&global)]).unwrap();
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
+    let system = requests(&mut session).pop().unwrap();
+    assert_eq!(
+        system.metadata,
+        json!({"namespace":"save","key":"system.dat"})
+    );
+    let system_values: HashMap<String, asb_interpreter::Value> =
+        serde_json::from_slice(&system.blob).unwrap();
+    assert_eq!(system_values["bgmvol"].as_int(), Some(42));
+    assert!(!system_values.contains_key("savepath"));
+    assert!(!system_values.contains_key("status.internal"));
+    session
+        .submit_replies(&[reply(&system, json!({"status":"io_error"}), vec![])])
+        .unwrap();
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::SaveReady);
+    assert!(matches!(
+        session.take_save_result(),
+        Some(SaveResult::Failed {
+            kind: IoFailure::IoError,
+            files_written: 1,
+            ..
+        })
+    ));
+    session.resume_scenario().unwrap();
+    host.run(&mut session);
+    assert_eq!(host.captions, ["after"]);
+    assert_eq!(host.files.len(), 1);
 }
 
 #[test]
@@ -367,15 +435,15 @@ __engine:setEventHandler{onSave='capture'}
     host.asset("before", b"");
     assert_eq!(session.step().unwrap(), ScriptIoProgress::Event);
     let line = session.interpreter().current_line();
-    session.submit_numbered_save().unwrap();
+    session.submit_save().unwrap();
     assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
     let request = requests(&mut session).pop().unwrap();
     session.submit_replies(&[host.complete(&request)]).unwrap();
     assert_eq!(session.step().unwrap(), ScriptIoProgress::SaveReady);
     assert_eq!(session.interpreter().current_line(), line);
     assert!(requests(&mut session).is_empty());
-    assert!(matches!(session.take_numbered_save_result(),
-        Some(NumberedSaveResult::Failed {kind: IoFailure::IoError, message})
+    assert!(matches!(session.take_save_result(),
+        Some(SaveResult::Failed {kind: IoFailure::IoError, message, files_written: 0})
             if message.contains("onSave tag requires scenario dispatch")));
     session.resume_scenario().unwrap();
     host.run(&mut session);
