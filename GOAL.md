@@ -58,7 +58,8 @@ Core 消费 `[keyconfig]` 的前进、自动播放及快进角色。普通快进
 ## 已完成：独立 Dart 绑定
 
 固定生成器与依赖版本，由 v2 C 头文件生成 Dart 声明。独立冒烟在 macOS 加载纯 Core 动态库，
-调用 Root、Runtime 和 Frame 函数表；静态分析通过。生产 Flutter Host 尚未切换。
+用内存 Host 完成启动、分块 IO 回复、窗口和键盘输入、帧及像素借用；静态分析通过。生产 Flutter
+Host 尚未切换。
 
 ## 已完成：独立 Artemis v2 产物
 

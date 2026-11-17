@@ -588,4 +588,9 @@ SDK 产物应包含唯一 schema、可编译 C 头、生成的 Dart/Swift/C# 绑
 Flutter 的最小 Host 样例。平台 IO/render/media 适配器可以复用，但不链接进纯核心。
 不用在每种语言里手写第二份函数顺序、长度类型和 magic。
 
+独立 C Host 可用 `bash scripts/test-host-v2.sh` 或 `scripts/test-host-v2.ps1` 构建并验证。
+在 `tools/host-bindings/dart` 目录运行 `dart pub get --enforce-lockfile` 后，使用
+`dart run bin/smoke.dart <纯 Core 动态库路径>` 可验证 Dart 接入。样例用内存资源启动场景，
+提交输入并校验通知、帧数据与纹理借用。
+
 实施阶段与进度见 [GOAL.md](../GOAL.md)。
