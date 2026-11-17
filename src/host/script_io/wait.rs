@@ -28,6 +28,7 @@ impl ScriptIoSession {
                     | WaitReason::Generic
                     | WaitReason::Generic0
                     | WaitReason::KeyWait { .. }
+                    | WaitReason::Se { .. }
             })
         )
     }
@@ -61,7 +62,9 @@ impl ScriptIoSession {
         });
         let elapsed = matches!(reason, WaitReason::Timed { milliseconds, .. }
             if (frame.monotonic_ns - start_ns) / 1_000_000 >= *milliseconds);
-        if !input_satisfied && !elapsed {
+        let audio_finished = matches!(reason, WaitReason::Se { id, time }
+            if self.audio.wait_finished(id, *time, frame));
+        if !input_satisfied && !elapsed && !audio_finished {
             return Ok(Some(ScriptIoProgress::Event));
         }
         self.resume_scenario()?;

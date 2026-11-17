@@ -1,4 +1,4 @@
-//! Artemis magic path resolution for runtime asset requests.
+//! Artemis magic path resolution for logical asset requests.
 //!
 //! Scripts use paths such as `:bg/room` and populate the prefix table through
 //! `e:setMagicPath`. Runtime resolves those prefixes before asking the host to

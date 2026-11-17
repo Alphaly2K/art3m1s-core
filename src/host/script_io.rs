@@ -1,12 +1,14 @@
 //! Luau execution over the Host IO request transport. The Host owns all
 //! storage; this driver never installs a physical file loader or renderer.
 
+mod audio;
 mod lifecycle;
 mod persistence;
 mod scene;
 mod ui;
 mod wait;
 
+pub use audio::MEDIA_AUDIO_COMMAND;
 use lifecycle::Shutdown;
 pub use lifecycle::{RUNTIME_CLOSED, RUNTIME_EXIT_REQUESTED};
 pub use persistence::RUNTIME_PERSISTENCE_RESULT;
@@ -242,6 +244,7 @@ pub struct ScriptIoSession {
     project_loading: bool,
     dialog_request: Option<RequestIdentity>,
     pub(super) shutdown: Shutdown,
+    audio: audio::Audio,
     scene: Option<scene::SceneIo>,
     pub(super) frames: super::frame::FramePublisher,
     read_history: ReadHistory,
@@ -288,6 +291,7 @@ impl ScriptIoSession {
             project_loading: false,
             dialog_request: None,
             shutdown: Shutdown::default(),
+            audio: Default::default(),
             scene: None,
             frames: Default::default(),
             read_history: ReadHistory::default(),
@@ -395,6 +399,7 @@ impl ScriptIoSession {
         self.project_loading = false;
         self.dialog_request = None;
         self.shutdown = Shutdown::default();
+        self.audio = Default::default();
         self.scene = None;
         self.frames.clear();
         Ok(epoch)
@@ -498,6 +503,7 @@ impl ScriptIoSession {
         self.project_loading = false;
         self.dialog_request = None;
         self.shutdown = Shutdown::default();
+        self.audio = Default::default();
         self.scene = None;
         self.frames.clear();
         self.read_history = ReadHistory::default();
@@ -761,6 +767,7 @@ impl ScriptIoSession {
         })?;
         self.frame = Some(frame);
         if new_frame {
+            self.audio.advance(frame);
             if let Some(scene) = self.scene.as_mut() {
                 scene.with_input(|input| input.advance(frame.monotonic_ns));
                 scene.advance_clock(frame.monotonic_ns);

@@ -2,6 +2,7 @@
 
 use super::frame::FrameLease;
 use super::input::HostInput;
+use super::media::PlaybackStatus;
 use super::protocol::{HostReply, PollResult, ProtocolError, TransportLimits, TransportState};
 use super::script_io::{HostFrame, ScriptIoError, ScriptIoProgress, ScriptIoSession};
 use std::collections::HashMap;
@@ -208,6 +209,18 @@ pub fn submit_input(
     events: &[HostInput],
 ) -> Result<(), RuntimeError> {
     with_session(handle, |session| Ok(session.submit_input(epoch, events)?))
+}
+
+/// Queue playback feedback for the next newly accepted Host frame.
+pub fn submit_playback_status(
+    handle: RuntimeHandle,
+    epoch: u64,
+    playback_id: u64,
+    status: PlaybackStatus,
+) -> Result<(), RuntimeError> {
+    with_session(handle, |session| {
+        Ok(session.submit_playback_status(epoch, playback_id, status)?)
+    })
 }
 
 pub fn step(handle: RuntimeHandle, frame: HostFrame) -> Result<ScriptIoProgress, RuntimeError> {

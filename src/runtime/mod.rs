@@ -23,7 +23,7 @@ pub(crate) mod emote;
 mod events;
 mod input;
 mod layer_info;
-mod magic_path;
+use crate::magic_path;
 mod media;
 #[cfg(feature = "ffmpeg")]
 mod media_session;

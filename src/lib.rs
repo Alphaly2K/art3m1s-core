@@ -22,6 +22,7 @@ pub mod ffi;
 pub use ffi::api as ffi_api;
 pub mod host;
 pub use host::{events as host_events, files as host_files, media as host_media};
+mod magic_path;
 #[cfg(any(
     target_os = "android",
     target_os = "ios",

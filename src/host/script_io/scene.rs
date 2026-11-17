@@ -80,33 +80,35 @@ impl ScriptIoSession {
     pub(super) fn scene_handlers_ready(&self) -> bool {
         matches!(self.shutdown, Shutdown::Open)
             && matches!(self.scenario_event, None | Some(Event::Wait { .. }))
-            && self
-                .scene
-                .as_ref()
-                .is_some_and(|scene| !scene.tween_handlers.is_empty())
+            && (!self.audio.ready_handlers.is_empty()
+                || self
+                    .scene
+                    .as_ref()
+                    .is_some_and(|scene| !scene.tween_handlers.is_empty()))
     }
 
     pub(super) fn dispatch_scene_handlers(&mut self) -> Result<(), ScriptIoError> {
         if !self.scene_handlers_ready() {
             return Ok(());
         }
-        let tags: Vec<_> = self
-            .scene
-            .as_mut()
-            .unwrap()
-            .tween_handlers
-            .drain(..)
-            .flat_map(|h| {
-                crate::script_handler::handler_tags(
-                    h.handler.as_deref(),
-                    h.file.as_deref(),
-                    h.label.as_deref(),
-                    h.call,
-                    &h.extra_params,
-                    &[],
-                )
-            })
-            .collect();
+        let mut tags = std::mem::take(&mut self.audio.ready_handlers);
+        tags.extend(
+            self.scene
+                .as_mut()
+                .unwrap()
+                .tween_handlers
+                .drain(..)
+                .flat_map(|h| {
+                    crate::script_handler::handler_tags(
+                        h.handler.as_deref(),
+                        h.file.as_deref(),
+                        h.label.as_deref(),
+                        h.call,
+                        &h.extra_params,
+                        &[],
+                    )
+                }),
+        );
         if !tags.is_empty() {
             if let Some(event) = self.scenario_event.take() {
                 self.interpreter
@@ -143,6 +145,7 @@ impl ScriptIoSession {
 struct SceneProjection {
     compositor: Compositor,
     input: InputFrame,
+    magic_paths: crate::magic_path::MagicPathTable,
     textures: HashMap<String, Option<Arc<FrameTexture>>>,
     texture_bytes: usize,
     dirty: bool,
@@ -240,6 +243,11 @@ impl TextureRead {
 }
 
 impl SceneIo {
+    pub(super) fn resolve_media_asset(&self, name: &str) -> Result<String, ProtocolError> {
+        let scene = self.scene.lock().unwrap();
+        logical_key(&crate::magic_path::resolve_path(&scene.magic_paths, name))
+    }
+
     pub(super) fn with_input<R>(&self, f: impl FnOnce(&mut InputFrame) -> R) -> R {
         f(&mut self.scene.lock().unwrap().input)
     }
@@ -415,6 +423,16 @@ fn decode_texture(bytes: &[u8], available: usize) -> Option<image::RgbaImage> {
 }
 
 impl EngineCallbacks for SceneCallbacks {
+    fn set_magic_path(&self, name: &str, path: &str) {
+        let scene = self.0.lock().unwrap();
+        let mut paths = scene.magic_paths.lock().unwrap();
+        if path.is_empty() {
+            paths.remove(name);
+        } else {
+            paths.insert(name.to_owned(), path.to_owned());
+        }
+    }
+
     fn get_layer_info(&self, id: &str) -> Option<HashMap<String, String>> {
         let scene = self.0.lock().unwrap();
         let layer = scene.compositor.scene().get(id)?;

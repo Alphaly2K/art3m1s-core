@@ -10,6 +10,24 @@
 use serde::Serialize;
 use serde_json::json;
 
+pub(crate) fn ab_loop_file(file: &str) -> Option<String> {
+    let (stem, ext) = match file.rfind('.') {
+        Some(dot) if !file[dot..].contains('/') && !file[dot..].contains('\\') => {
+            (&file[..dot], &file[dot..])
+        }
+        _ => (file, ""),
+    };
+    stem.strip_suffix("_a").map(|base| format!("{base}_b{ext}"))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackStatus {
+    Started,
+    Ended,
+    Failed,
+    Cancelled,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostMediaCommandKind {
     AudioSetVolume,

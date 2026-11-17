@@ -77,7 +77,13 @@ impl ScriptIoSession {
                 ScriptIoProgress::Event if self.has_persistence_event() => {
                     self.start_persistence().map(|()| None)
                 }
-                ScriptIoProgress::Event => self.dispatch_ui_event(),
+                ScriptIoProgress::Event => self.dispatch_audio_event().and_then(|handled| {
+                    if handled {
+                        Ok(None)
+                    } else {
+                        self.dispatch_ui_event()
+                    }
+                }),
                 ScriptIoProgress::SaveReady if self.shutdown.is_closing_or_closed() => {
                     self.notify_closed().map(Some)
                 }
@@ -113,6 +119,7 @@ impl ScriptIoSession {
             self.save_work = None;
             self.shutdown = Shutdown::Reporting(result);
         }
+        self.audio.stop_for_shutdown(&mut self.transport)?;
         let Shutdown::Reporting(result) = &self.shutdown else {
             return Err(ProtocolError::State);
         };

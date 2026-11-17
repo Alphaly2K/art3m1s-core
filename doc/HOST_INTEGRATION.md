@@ -133,6 +133,10 @@ Rust 的 `ExecutionResult`/`TagResult` 新增 `HostIoPending`，穷举匹配需�
 Artemis 键码，并把屏幕坐标换算为舞台坐标。Core 在下一个受理的新帧应用输入，在 Lua
 回调及场景等待中使用该快照。IO 回填后重试同一帧时继续使用原快照。失焦时提交 `FocusLost`。
 
+音频命令通过 `poll_events` 交付，Host 根据逻辑资产 key 读取、解码和播放。用
+`submit_playback_status(handle, epoch, playback_id, status)` 回报开播及终态；`playback_id`
+以本次命令为准。命令和反馈格式见 [媒体契约](HOST_ABI_V2.md#8-媒体ui配置与诊断)。
+
 收到 `exit_requested` 后，调用 `submit_shutdown(handle, epoch)`。继续 `step`、拉取写入请求
 并回传结果，直至收到 `runtime_closed` 和其中的存档结果。Host 也可主动请求关闭；仍有 IO 或
 对话框结果待处理时需先完成这些请求。`destroy` 可以直接释放句柄并放弃未确认的写入。

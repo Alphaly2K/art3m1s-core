@@ -6,20 +6,8 @@ use crate::save::AudioSnapshot;
 use crate::video::{VideoConfig, VideoFinishHandler, video_layer_texture_name};
 use asb_interpreter::Event;
 use asb_interpreter::tags::var_handler::{SoundChannelInfo, SoundInfoSnapshot};
+use hm::ab_loop_file;
 use std::collections::HashMap;
-
-/// splay 的 A-B 循环文件名约定：file 以 `_a` 结尾（扩展名前）时，
-/// 返回把 `_a` 换成 `_b` 的循环段文件名；否则 None。
-fn ab_loop_file(file: &str) -> Option<String> {
-    // 只在最后一个路径段上找扩展名，避免把目录里的点当扩展名分隔符
-    let (stem, ext) = match file.rfind('.') {
-        Some(dot) if !file[dot..].contains('/') && !file[dot..].contains('\\') => {
-            (&file[..dot], &file[dot..])
-        }
-        _ => (file, ""),
-    };
-    stem.strip_suffix("_a").map(|base| format!("{base}_b{ext}"))
-}
 
 impl CoreRuntime {
     pub fn set_volume(&mut self, volume_type: &str, value: f32) {

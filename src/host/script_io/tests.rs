@@ -1589,6 +1589,154 @@ __engine:setEventHandler{onEnterFrame='tick'}
 }
 
 #[test]
+fn audio_feedback_uses_playback_identity_and_resumes_its_wait_after_callback_io() {
+    use crate::host::{
+        media::PlaybackStatus,
+        runtime::{self, RuntimeError},
+    };
+
+    let mut limits = TransportLimits::default();
+    limits.control.records = 1;
+    let handle = runtime::create(0, limits, 4096).unwrap();
+    let epoch = runtime::open_project(
+        handle,
+        b"[WINDOWS]\nWIDTH=640\nHEIGHT=480\nBOOT=boot.iet\n",
+        "windows",
+        None,
+    )
+    .unwrap();
+    let mut host = MemoryHost::default();
+    host.asset("empty", b"");
+    host.asset(
+        "boot.iet",
+        br#"*top
+[splay file=:bgm/theme_a.ogg loop=1 gain=450]
+[setonsoundfinish id=fx label=finished call=1]
+[seplay id=fx file=old.ogg]
+[seplay id=fx file=new.ogg]
+[wait se=fx time=50]
+[caption data=timed]
+[wait se=fx]
+[caption data=ended]
+[stop]
+*finished
+[calllua function=verify]
+[caption data=callback]
+[return]
+[lua]
+__engine:setMagicPath{'bgm', 'sound'}
+function verify(e)
+  assert(not finished)
+  finished=true
+  assert(e:file('empty')=='')
+end
+[/lua]
+"#,
+    );
+    let poll = || {
+        let mut bytes = vec![0; 4096];
+        let result = runtime::poll_events(handle, &mut bytes).unwrap();
+        bytes.truncate(result.written_bytes);
+        bytes
+    };
+    let record = |kind: MessageKind| {
+        let bytes = poll();
+        assert_eq!(
+            bytes.len(),
+            u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize
+        );
+        assert_eq!(
+            u16::from_le_bytes(bytes[6..8].try_into().unwrap()),
+            kind.domain as u16
+        );
+        assert_eq!(
+            u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            kind.kind
+        );
+        serde_json::from_slice::<Value>(&bytes[64..]).unwrap()
+    };
+    let id = |body: &Value| {
+        body["playback_id"]
+            .as_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+    };
+    let step = |id, monotonic_ns| {
+        runtime::step(
+            handle,
+            HostFrame {
+                id,
+                monotonic_ns,
+                utc_unix_ms: 0,
+                utc_offset_minutes: 0,
+            },
+        )
+        .unwrap()
+    };
+    let feedback = |id, status| runtime::submit_playback_status(handle, epoch, id, status);
+    let is_stale = |error| {
+        matches!(
+            error,
+            Err(RuntimeError::Session(ScriptIoError::Protocol(
+                ProtocolError::Stale
+            )))
+        )
+    };
+
+    assert_eq!(record(SESSION_CHANGED), json!({}));
+    for _ in 0..1024 {
+        match step(1, 0) {
+            ScriptIoProgress::Waiting => {
+                let request = decode_requests(&poll()).pop().unwrap();
+                runtime::submit_replies(handle, &[host.complete(&request)]).unwrap();
+            }
+            ScriptIoProgress::WouldBlock => break,
+            progress => panic!("unexpected boot progress {progress:?}"),
+        }
+    }
+    assert_eq!(record(PROJECT_READY), json!({}));
+    assert_eq!(step(1, 0), ScriptIoProgress::WouldBlock);
+    let bgm = record(MEDIA_AUDIO_COMMAND);
+    assert_eq!(bgm["key"], "sound/theme_a.ogg");
+    assert_eq!(bgm["loop_key"], "sound/theme_b.ogg");
+    assert_eq!(bgm["gain"], 450);
+    assert_eq!(step(1, 0), ScriptIoProgress::WouldBlock);
+    let old = record(MEDIA_AUDIO_COMMAND);
+    assert_eq!(old["key"], "old.ogg");
+    assert_eq!(step(1, 0), ScriptIoProgress::Event);
+    let current = record(MEDIA_AUDIO_COMMAND);
+    assert_eq!(current["key"], "new.ogg");
+    assert_eq!(current["replaces"], old["playback_id"]);
+    assert_ne!(id(&old), id(&current));
+    assert!(is_stale(feedback(id(&old), PlaybackStatus::Ended)));
+
+    feedback(id(&current), PlaybackStatus::Started).unwrap();
+    assert!(is_stale(feedback(id(&current), PlaybackStatus::Started)));
+    assert_eq!(step(1, 0), ScriptIoProgress::Event);
+    assert_eq!(step(2, 20_000_000), ScriptIoProgress::Event);
+    assert_eq!(step(3, 69_999_999), ScriptIoProgress::Event);
+    assert!(poll().is_empty());
+    assert_eq!(step(4, 70_000_000), ScriptIoProgress::Event);
+    assert_eq!(record(UI_CAPTION), json!({"text":"timed"}));
+
+    feedback(id(&current), PlaybackStatus::Ended).unwrap();
+    assert!(is_stale(feedback(id(&current), PlaybackStatus::Ended)));
+    assert_eq!(step(4, 70_000_000), ScriptIoProgress::Event);
+    assert!(poll().is_empty());
+    assert_eq!(step(5, 71_000_000), ScriptIoProgress::Waiting);
+    let request = decode_requests(&poll()).pop().unwrap();
+    assert_eq!(request.metadata["key"], "empty");
+    runtime::submit_replies(handle, &[host.complete(&request)]).unwrap();
+    assert_eq!(step(5, 71_000_000), ScriptIoProgress::WouldBlock);
+    assert_eq!(record(UI_CAPTION), json!({"text":"callback"}));
+    assert_eq!(step(5, 71_000_000), ScriptIoProgress::Event);
+    assert_eq!(record(UI_CAPTION), json!({"text":"ended"}));
+    assert!(is_stale(feedback(id(&current), PlaybackStatus::Cancelled)));
+    runtime::destroy(handle).unwrap();
+}
+
+#[test]
 fn compound_events_resume_in_order_without_reexecuting_the_tag() {
     use asb_interpreter::event::LayerEvent;
 
