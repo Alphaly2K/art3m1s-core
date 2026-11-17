@@ -33,6 +33,7 @@ impl CoreRuntime {
     fn load_open_project_inner(&mut self, project: Project) -> Result<(), String> {
         // File existence results belong to the currently mounted project.
         self.resources().clear_overrides();
+        self.surface_cache.lock().unwrap().clear();
         let new_width = project.config().stage_width;
         let new_height = project.config().stage_height;
 
@@ -51,7 +52,12 @@ impl CoreRuntime {
         self.pending_message_text = None;
         self.clear_pending_text_translation();
         self.clear_emote_state("project reload");
-        self.install_interpreter(project.create_interpreter());
+        let interpreter = if self.allow_filesystem_fallback && !self.resources().is_mounted() {
+            project.create_interpreter()
+        } else {
+            project.create_interpreter_with_resources(Some(self.resources()))
+        };
+        self.install_interpreter(interpreter);
 
         self.wire_texture_source();
         self.load_default_font();
@@ -116,6 +122,7 @@ impl CoreRuntime {
                 magic_paths: Arc::clone(&self.magic_paths),
                 layer_info: Arc::clone(&self.layer_info),
                 resources: self.resources().clone(),
+                surface_cache: Arc::clone(&self.surface_cache),
                 volumes: Arc::clone(&self.volumes),
                 debug_skip_active: Arc::clone(&self.debug_skip_active),
                 script_status: Arc::clone(&self.script_status),

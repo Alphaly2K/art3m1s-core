@@ -4,3 +4,6 @@ pub mod events;
 pub mod files;
 pub(crate) mod logging;
 pub mod media;
+mod provider;
+
+pub use provider::ResourceProvider;

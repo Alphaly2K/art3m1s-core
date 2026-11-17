@@ -7,6 +7,46 @@
 API 文档，也不要求 Host 使用 Dart 或 libmpv。完整签名、返回值和命令字段见
 [FFI_REFERENCE.md](FFI_REFERENCE.md)。
 
+### Artemis Rust Host 接入基础
+
+Artemis 解释器在所有平台统一使用 Luau，不再选择标准 Lua 后端。现有 v1 C 函数表保持
+原布局；v2 的队列式 IO 和帧协议仍按 [迁移计划](HOST_ABI_V2.md) 实施。
+
+Rust Host 已可通过 `host::ResourceProvider` 提供逻辑资源，通过
+`CoreRuntime::with_host_backend` 提供 renderer，入口不自行选择平台 GPU：
+
+```rust,no_run
+use std::sync::Arc;
+use art3m1s_core::{
+    backend::GpuBackend,
+    host::ResourceProvider,
+    host_files::HostResources,
+    runtime::CoreRuntime,
+};
+
+fn create_runtime(
+    provider: Arc<dyn ResourceProvider>,
+    renderer: Box<dyn GpuBackend>,
+    ini: &[u8],
+) -> Result<CoreRuntime, String> {
+    let resources = HostResources::from_provider(provider);
+    let mut runtime = CoreRuntime::with_host_backend(1280, 720, resources, renderer)?;
+    runtime.load_project_bytes(ini, "WINDOWS")?;
+    Ok(runtime)
+}
+```
+
+provider 接收已解析 magic path 的逻辑 key（`/` 分隔、ASCII 小写），自行决定目录、归档、
+内存和存档沙箱。允许短读；空文件与不存在分开。写入成功表示 Host 已完成该文件的原子替换。
+注入 provider 后，挂载本机目录/PFS 和设置物理 save root 会被拒绝；clear 只清除 core
+覆盖，不解绑 provider。读取、Luau 的 `e:file`/`io.open` 和媒体 source 都使用同一个资源实例。
+未提供可用资源时，新构造入口报资源错误，不回退到工作目录。
+
+这是同步 Rust 接口，Host 方法不得重入同一个 runtime，也不应依赖正在等待 core 的 GUI
+线程；它没有注册 native→Dart 回调。renderer 执行现有 DrawList/GpuBackend 契约，窗口、
+GPU 对象和呈现由其实现管理。当前仍有 legacy 全局 Host 事件/配置和平台依赖，尚不等价于
+已完成纯核心 C ABI；无需 GPU feature 的独立构建、帧 lease 和会话队列是后续阶段。
+
 ## 1. 职责与能力边界
 
 | Core | Host |

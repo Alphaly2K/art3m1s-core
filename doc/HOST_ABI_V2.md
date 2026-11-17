@@ -351,3 +351,8 @@ v1 adapter 可以复用逐步拆出的内部逻辑，但继续暴露原语义。
 尚未完成：v2 C 查询入口与可发布 schema、全部全局配置/查询快照的会话化、Luau IO
 continuation、纯核心依赖拆分以及独立 FramePacket/Host renderer SDK。不要把本阶段的
 Rust 注入入口标记为 v2 ABI 已完成，或将 P1–P5 整体标记为通过。
+
+本批验证：`cargo check --locked --offline --all-features`、根 crate 与解释器的 fmt 检查、
+完整 `scripts/test-all.sh`（655 passed、9 ignored，含原有未跟踪测试）以及 release 构建通过。
+未执行外部商业游戏 fixture 或可选 CGL 硬件组。macOS 默认 release 动态库的 `nm -gU`
+结果为 `art3m1s_get_api_v1` 和 9 个独立 `pfs_*`，未新增平铺 runtime 符号或 v2 查询入口。

@@ -77,6 +77,8 @@ pub struct CoreRuntime {
     audio: Box<dyn AudioBackend>,
     video: Box<dyn VideoBackend>,
     resources: HostResources,
+    allow_filesystem_fallback: bool,
+    surface_cache: Arc<Mutex<callbacks::SurfaceCache>>,
     #[cfg(feature = "ffmpeg")]
     media_session: media_session::RuntimeMediaSession,
     interpreter: asb_interpreter::Interpreter,
@@ -266,6 +268,35 @@ impl CoreRuntime {
         backend: impl Into<BackendSelection>,
     ) -> Result<Self, String> {
         let gpu = crate::backend::create_backend(backend.into(), stage_width, stage_height)?;
+        let mut runtime = Self::with_host_backend(
+            stage_width,
+            stage_height,
+            crate::host_files::default_resources().clone(),
+            gpu,
+        )?;
+        runtime.allow_filesystem_fallback = true;
+        Ok(runtime)
+    }
+
+    /// Embed with explicit resources and a Host-supplied renderer.
+    ///
+    /// This entry never selects a platform backend or a default resource mount.
+    /// The renderer owns GPU execution and output. The versioned, queued C frame
+    /// protocol is developed separately; this is the synchronous Rust bridge.
+    pub fn with_host_backend(
+        stage_width: u32,
+        stage_height: u32,
+        resources: HostResources,
+        gpu: Box<dyn GpuBackend>,
+    ) -> Result<Self, String> {
+        let extent = crate::backend::Extent2D::new(stage_width, stage_height);
+        if extent.is_empty()
+            || extent.rgba8_len().is_none()
+            || stage_width > i32::MAX as u32
+            || stage_height > i32::MAX as u32
+        {
+            return Err("invalid stage dimensions".into());
+        }
         let backend_info = gpu.backend_info();
         crate::core_info!(
             "[GpuBackend] selected name={} kind={:?} stability={:?} capabilities=0x{:x} stage={}x{}",
@@ -307,7 +338,9 @@ impl CoreRuntime {
             text_translation_serial: 0,
             audio,
             video,
-            resources: crate::host_files::default_resources().clone(),
+            resources,
+            allow_filesystem_fallback: false,
+            surface_cache: Arc::default(),
             #[cfg(feature = "ffmpeg")]
             media_session,
             interpreter,
@@ -770,7 +803,6 @@ impl Drop for CoreRuntime {
     fn drop(&mut self) {
         text::clear_process_snapshots();
         media::clear_sound_info_snapshot();
-        callbacks::clear_surface_cache();
     }
 }
 

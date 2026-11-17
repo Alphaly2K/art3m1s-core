@@ -21,6 +21,7 @@ pub(super) struct FfiCallbacks {
     pub magic_paths: std::sync::Arc<magic_path::MagicPathTable>,
     pub layer_info: LayerInfoTable,
     pub resources: HostResources,
+    pub surface_cache: Arc<std::sync::Mutex<SurfaceCache>>,
     pub volumes: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, f32>>>,
     pub debug_skip_active: Arc<AtomicBool>,
     pub script_status: Arc<AtomicU8>,
@@ -565,7 +566,7 @@ impl EngineCallbacks for FfiCallbacks {
 
     fn bind_surface(&self, key: &str) {
         let resolved = magic_path::resolve_path(&self.magic_paths, key);
-        let mut cache = surface_cache().lock().unwrap();
+        let mut cache = self.surface_cache.lock().unwrap();
         surface_cache_bind(&mut cache, &resolved, || {
             self.resources.read_file(&resolved).ok()
         });
@@ -577,7 +578,7 @@ impl EngineCallbacks for FfiCallbacks {
 
     fn unbind_surface(&self, key: &str) {
         let resolved = magic_path::resolve_path(&self.magic_paths, key);
-        let mut cache = surface_cache().lock().unwrap();
+        let mut cache = self.surface_cache.lock().unwrap();
         surface_cache_unbind(&mut cache, &resolved);
     }
 
@@ -694,8 +695,7 @@ impl EngineCallbacks for FfiCallbacks {
 
 // ── surface 绑定缓存 ────────────────────────────────────────────────
 //
-// FfiCallbacks 的字段集合被 project.rs 的构造点固定，故缓存表用进程级
-// 静态量持有（单运行时进程模型下等价于运行时字段）。
+// 每个 runtime 拥有自己的缓存，callbacks 只共享该 runtime 的引用。
 
 /// 单条 surface 绑定：引用计数 + 预取的文件字节（读取失败时为 None，
 /// 但计数语义照常生效）。
@@ -707,16 +707,7 @@ pub(super) struct SurfaceEntry {
     pub bytes: Option<Vec<u8>>,
 }
 
-type SurfaceCache = HashMap<String, SurfaceEntry>;
-
-fn surface_cache() -> &'static std::sync::Mutex<SurfaceCache> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<SurfaceCache>> = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-}
-
-pub(super) fn clear_surface_cache() {
-    surface_cache().lock().unwrap().clear();
-}
+pub(super) type SurfaceCache = HashMap<String, SurfaceEntry>;
 
 /// bind：引用计数 +1；首次绑定时经 loader 预取字节。返回新的计数。
 pub(super) fn surface_cache_bind(
@@ -1105,6 +1096,7 @@ mod tests {
             magic_paths: Arc::clone(&magic_paths),
             layer_info: Arc::new(std::sync::Mutex::new(Default::default())),
             resources: crate::host_files::default_resources().clone(),
+            surface_cache: Default::default(),
             volumes: Arc::new(std::sync::Mutex::new(HashMap::new())),
             debug_skip_active: Arc::new(AtomicBool::new(false)),
             script_status: Arc::new(AtomicU8::new(0)),
@@ -1142,6 +1134,7 @@ mod tests {
                 as Arc<magic_path::MagicPathTable>,
             layer_info: Arc::new(std::sync::Mutex::new(Default::default())),
             resources: crate::host_files::default_resources().clone(),
+            surface_cache: Default::default(),
             volumes: Arc::new(std::sync::Mutex::new(HashMap::new())),
             debug_skip_active: Arc::new(AtomicBool::new(false)),
             script_status: Arc::new(AtomicU8::new(0)),
@@ -1149,6 +1142,32 @@ mod tests {
                 crate::runtime::emote::EmoteState::default(),
             )),
         }
+    }
+
+    #[test]
+    fn surface_bindings_belong_to_their_runtime() {
+        use asb_interpreter::EngineCallbacks;
+
+        let mut a = callbacks_with_input(Default::default());
+        let mut b = callbacks_with_input(Default::default());
+        a.resources = crate::host_files::HostResources::new();
+        b.resources = crate::host_files::HostResources::new();
+        a.resources.set_override("face", b"A".to_vec()).unwrap();
+        b.resources.set_override("face", b"B".to_vec()).unwrap();
+        a.bind_surface("face");
+        a.bind_surface("face");
+        b.bind_surface("face");
+        assert_eq!(a.surface_cache.lock().unwrap()["face"].refs, 2);
+        assert_eq!(b.surface_cache.lock().unwrap()["face"].refs, 1);
+        assert_eq!(
+            b.surface_cache.lock().unwrap()["face"].bytes.as_deref(),
+            Some(&b"B"[..])
+        );
+        a.unbind_surface("face");
+        drop(a);
+        assert_eq!(b.surface_cache.lock().unwrap()["face"].refs, 1);
+        b.unbind_surface("face");
+        assert!(b.surface_cache.lock().unwrap().is_empty());
     }
 
     #[test]

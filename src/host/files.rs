@@ -35,6 +35,7 @@ struct HostFiles {
 #[derive(Clone)]
 pub struct HostResources {
     files: Arc<Mutex<Option<HostFiles>>>,
+    provider: Option<Arc<dyn super::ResourceProvider>>,
 }
 
 static DEFAULT_RESOURCES: OnceLock<HostResources> = OnceLock::new();
@@ -43,14 +44,33 @@ impl HostResources {
     pub fn new() -> Self {
         Self {
             files: Arc::new(Mutex::new(None)),
+            provider: None,
+        }
+    }
+
+    /// Bind a Host-owned logical resource view. No directory is opened or indexed.
+    /// Clones share overrides and the provider, but never use DEFAULT_RESOURCES.
+    pub fn from_provider(provider: Arc<dyn super::ResourceProvider>) -> Self {
+        Self {
+            files: Arc::new(Mutex::new(Some(empty_files()))),
+            provider: Some(provider),
         }
     }
 
     pub fn clear(&self) {
+        if self.provider.is_some() {
+            // The Host owns its provider's contents and lifecycle. Clearing core
+            // overlays must not unbind it or enable a native filesystem fallback.
+            self.clear_overrides();
+            return;
+        }
         *self.files.lock().unwrap() = None;
     }
 
     pub fn is_mounted(&self) -> bool {
+        if self.provider.is_some() {
+            return true;
+        }
         self.files
             .lock()
             .unwrap()
@@ -59,6 +79,7 @@ impl HostResources {
     }
 
     pub fn set_save_dir(&self, path: Option<&Path>) -> Result<(), String> {
+        self.require_native_mount()?;
         let mut guard = self.files.lock().unwrap();
         let files = guard.get_or_insert_with(empty_files);
         files.save_dir = path.map(Path::to_path_buf);
@@ -70,6 +91,7 @@ impl HostResources {
     }
 
     pub fn mount_directory(&self, root: &Path) -> Result<(), String> {
+        self.require_native_mount()?;
         if !root.is_dir() {
             return Err(format!("not a directory: {}", root.display()));
         }
@@ -89,6 +111,7 @@ impl HostResources {
     }
 
     pub fn mount_pfs(&self, path: &Path, encoding: &str) -> Result<(), String> {
+        self.require_native_mount()?;
         let previous_save_dir = self
             .files
             .lock()
@@ -102,7 +125,11 @@ impl HostResources {
     }
 
     pub fn set_override(&self, path: &str, bytes: Vec<u8>) -> Result<(), String> {
-        let key = normalize_lookup(path).ok_or_else(|| format!("invalid override path: {path}"))?;
+        let key = if self.provider.is_some() {
+            host_key(path)?
+        } else {
+            normalize_lookup(path).ok_or_else(|| format!("invalid override path: {path}"))?
+        };
         let mut guard = self.files.lock().unwrap();
         let files = guard.get_or_insert_with(empty_files);
         files.overrides.insert(key, bytes);
@@ -116,6 +143,20 @@ impl HostResources {
     }
 
     pub fn query_size(&self, path: &str) -> Result<Option<u64>, String> {
+        if let Some(provider) = &self.provider {
+            let key = host_key(path)?;
+            if let Some(size) = self
+                .files
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|files| files.overrides.get(&key))
+                .map(|bytes| bytes.len() as u64)
+            {
+                return Ok(Some(size));
+            }
+            return provider.query_size(&key);
+        }
         let guard = self.files.lock().unwrap();
         let files = guard
             .as_ref()
@@ -127,21 +168,46 @@ impl HostResources {
         let size = self
             .query_size(path)?
             .ok_or_else(|| format!("not found: {path}"))?;
-        let mut output = vec![0u8; size as usize];
-        if output.is_empty() {
-            return Ok(output);
-        }
-        let read = self.read_range(path, 0, &mut output)?;
-        if read != output.len() {
-            return Err(format!(
-                "short read: {path} ({read} of {} bytes)",
-                output.len()
-            ));
+        let size = usize::try_from(size).map_err(|_| format!("resource too large: {path}"))?;
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(size)
+            .map_err(|error| format!("allocate resource {path}: {error}"))?;
+        output.resize(size, 0);
+        let mut read = 0;
+        while read < output.len() {
+            let count = self.read_range(path, read as u64, &mut output[read..])?;
+            if count == 0 || count > output.len() - read {
+                return Err(format!(
+                    "short/invalid read: {path} ({read} of {} bytes)",
+                    output.len()
+                ));
+            }
+            read += count;
         }
         Ok(output)
     }
 
     pub fn read_range(&self, path: &str, offset: u64, output: &mut [u8]) -> Result<usize, String> {
+        if let Some(provider) = &self.provider {
+            let key = host_key(path)?;
+            {
+                let guard = self.files.lock().unwrap();
+                if let Some(bytes) = guard.as_ref().and_then(|files| files.overrides.get(&key)) {
+                    let offset = usize::try_from(offset)
+                        .unwrap_or(usize::MAX)
+                        .min(bytes.len());
+                    let count = output.len().min(bytes.len() - offset);
+                    output[..count].copy_from_slice(&bytes[offset..offset + count]);
+                    return Ok(count);
+                }
+            }
+            let count = provider.read_range(&key, offset, output)?;
+            if count > output.len() {
+                return Err(format!("invalid host read length for {key}: {count}"));
+            }
+            return Ok(count);
+        }
         let mut guard = self.files.lock().unwrap();
         let files = guard
             .as_mut()
@@ -150,6 +216,14 @@ impl HostResources {
     }
 
     pub fn write(&self, path: &str, data: &[u8]) -> Result<(), String> {
+        if let Some(provider) = &self.provider {
+            let key = host_key(path)?;
+            provider.write(&key, data)?;
+            if let Some(files) = self.files.lock().unwrap().as_mut() {
+                files.overrides.remove(&key);
+            }
+            return Ok(());
+        }
         let mut guard = self.files.lock().unwrap();
         let files = guard
             .as_mut()
@@ -163,6 +237,14 @@ impl HostResources {
     }
 
     pub fn delete(&self, path: &str) -> Result<(), String> {
+        if let Some(provider) = &self.provider {
+            let key = host_key(path)?;
+            provider.delete(&key)?;
+            if let Some(files) = self.files.lock().unwrap().as_mut() {
+                files.overrides.remove(&key);
+            }
+            return Ok(());
+        }
         let mut guard = self.files.lock().unwrap();
         let files = guard
             .as_mut()
@@ -176,8 +258,15 @@ impl HostResources {
     }
 
     pub fn file_mtime(&self, path: &str) -> Option<[i64; 6]> {
-        let _ = path;
-        None
+        self.provider.as_ref()?.file_mtime(&host_key(path).ok()?)
+    }
+
+    fn require_native_mount(&self) -> Result<(), String> {
+        if self.provider.is_some() {
+            Err("physical mounts/save directories are owned by the injected Host provider".into())
+        } else {
+            Ok(())
+        }
     }
 
     pub fn open_media_source(&self, path: &str) -> Result<Arc<dyn MediaSource>, String> {
@@ -220,6 +309,13 @@ fn normalize_lookup(path: &str) -> Option<String> {
         parts.push(raw);
     }
     (!parts.is_empty()).then(|| parts.join("/").to_ascii_lowercase())
+}
+
+fn host_key(path: &str) -> Result<String, String> {
+    if path.starts_with(['/', '\\']) || path.contains([':', '\0']) {
+        return Err(format!("invalid logical resource path: {path}"));
+    }
+    normalize_lookup(path).ok_or_else(|| format!("invalid logical resource path: {path}"))
 }
 
 fn normalize_save_path(path: &str) -> Option<PathBuf> {
