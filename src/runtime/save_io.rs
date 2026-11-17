@@ -2,7 +2,7 @@ use super::CoreRuntime;
 use crate::backend::{TextureData, TextureDesc};
 use crate::save::AudioSnapshot;
 use crate::save::system::{
-    SAVEG_FILE, SYSTEM_FILE, is_persistent_system_variable, persistent_system_snapshot,
+    SAVEG_FILE, SYSTEM_FILE, apply_persistent_variables, persistent_system_snapshot,
 };
 use image::ImageEncoder;
 use std::collections::HashMap;
@@ -194,16 +194,8 @@ impl CoreRuntime {
                     continue;
                 }
             };
-            let prefix = if is_global { "g." } else { "s." };
             let total = map.len();
-            let mut loaded = 0;
-            for (k, v) in map {
-                if !is_global && !is_persistent_system_variable(&k) {
-                    continue;
-                }
-                loaded += 1;
-                self.interpreter.set_variable(&format!("{prefix}{k}"), v);
-            }
+            let loaded = apply_persistent_variables(&mut self.interpreter, map, is_global);
             crate::core_info!(
                 "[runtime] sysload 已读回 {} ({} 项{})",
                 path,
@@ -699,10 +691,11 @@ fn encode_png_rgba(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Stri
 #[cfg(test)]
 mod tests {
     use super::{
-        ScreenshotBuffer, encode_png_rgba, is_persistent_system_variable, load_transition_event,
-        persistent_system_snapshot, qualify_save_path, resize_screenshot_rgba, sanitize_savepath,
+        ScreenshotBuffer, encode_png_rgba, load_transition_event, persistent_system_snapshot,
+        qualify_save_path, resize_screenshot_rgba, sanitize_savepath,
         saved_position_resumes_input_wait,
     };
+    use crate::save::system::is_persistent_system_variable;
     use asb_interpreter::{Interpreter, InterpreterConfig};
 
     #[cfg(any(

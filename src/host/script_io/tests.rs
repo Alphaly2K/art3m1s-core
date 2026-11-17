@@ -756,6 +756,50 @@ fn boot_reads_its_entry_and_optional_text_or_binary_macros_through_the_host() {
 }
 
 #[test]
+fn boot_initialization_sees_persisted_variables_but_not_old_runtime_settings() {
+    let mut session = session(1, TransportLimits::default(), 1024);
+    let mut host = MemoryHost::default();
+    host.asset(
+        "boot",
+        br#"
+*main
+[caption data=boot]
+[lua]
+local e=__engine
+assert(e:var('g.profile')=='restored')
+assert(e:var('s.bgmvol')=='42')
+assert(e:var('s.savepath')=='save')
+[/lua]
+"#,
+    );
+    let globals = HashMap::from([("profile", asb_interpreter::Value::String("restored".into()))]);
+    let system = HashMap::from([
+        ("bgmvol", asb_interpreter::Value::Int(42)),
+        (
+            "savepath",
+            asb_interpreter::Value::String("old-runtime-path".into()),
+        ),
+    ]);
+    for (file, data) in [
+        ("saveg.dat", serde_json::to_vec(&globals).unwrap()),
+        ("system.dat", serde_json::to_vec(&system).unwrap()),
+    ] {
+        host.files.insert(("save".into(), file.into()), (1, data));
+    }
+    session.open_boot("boot").unwrap();
+    assert!(session.interpreter().get_variable("g.profile").is_none());
+    host.run(&mut session);
+    let order: Vec<_> = host
+        .reads
+        .iter()
+        .filter(|(_, offset)| *offset == 0)
+        .map(|(file, _)| file.as_str())
+        .collect();
+    assert_eq!(order, ["saveg.dat", "system.dat", "boot"]);
+    assert_eq!(host.captions, ["boot"]);
+}
+
+#[test]
 fn host_calendar_and_monotonic_clocks_remain_distinct_across_io_suspension() {
     let mut session = session(1, TransportLimits::default(), 1024);
     session

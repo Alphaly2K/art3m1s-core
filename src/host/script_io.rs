@@ -105,6 +105,12 @@ enum ExecutionMode {
     Scenario,
 }
 
+enum BootRestore {
+    Start,
+    Globals,
+    Settings,
+}
+
 enum EventFilterWork {
     Queued(String, HashMap<String, String>),
     Running(IoTask),
@@ -203,6 +209,7 @@ pub struct ScriptIoSession {
     event_filter: Option<EventFilterWork>,
     save_work: Option<SaveWork>,
     numbered_load: Option<NumberedLoadWork>,
+    boot_restore: Option<BootRestore>,
 }
 
 impl ScriptIoSession {
@@ -240,6 +247,7 @@ impl ScriptIoSession {
             event_filter: None,
             save_work: None,
             numbered_load: None,
+            boot_restore: None,
         })
     }
 
@@ -298,6 +306,7 @@ impl ScriptIoSession {
         self.event_filter = None;
         self.save_work = None;
         self.numbered_load = None;
+        self.boot_restore = None;
         Ok(epoch)
     }
 
@@ -315,13 +324,15 @@ impl ScriptIoSession {
         self.replace_scenario(interpreter)
     }
 
-    /// Start a fresh VM by reading BOOT and the optional default macro file
-    /// through Host IO. Parsing and loading errors are reported by `step`.
+    /// Start a fresh VM by restoring available system settings before reading
+    /// BOOT and the default macro file. Host IO progresses only in `step`.
     pub fn open_boot(&mut self, name: &str) -> Result<u64, ScriptIoError> {
         logical_key(name)?;
         let mut interpreter = self.scenario_interpreter()?;
         interpreter.boot(name)?;
-        self.replace_scenario(interpreter)
+        let epoch = self.replace_scenario(interpreter)?;
+        self.boot_restore = Some(BootRestore::Start);
+        Ok(epoch)
     }
 
     fn scenario_interpreter(&self) -> Result<Interpreter, ScriptIoError> {
@@ -349,6 +360,7 @@ impl ScriptIoSession {
         self.event_filter = None;
         self.save_work = None;
         self.numbered_load = None;
+        self.boot_restore = None;
         Ok(epoch)
     }
 
@@ -668,8 +680,13 @@ impl ScriptIoSession {
 
     fn step_scenario(
         &mut self,
-        response: Option<IoResponse>,
+        mut response: Option<IoResponse>,
     ) -> Result<ScenarioStep, ScriptIoError> {
+        if let Some(stage) = self.boot_restore.take()
+            && let Some(request) = self.step_boot_restore(stage, response.take())?
+        {
+            return Ok(ScenarioStep::Request(request));
+        }
         if let Some(work) = self.save_work.take() {
             return self.step_save(work, response);
         }
@@ -743,6 +760,53 @@ impl ScriptIoSession {
                 .ok_or(ProtocolError::State)?
                 .clone(),
         ))
+    }
+
+    fn step_boot_restore(
+        &mut self,
+        stage: BootRestore,
+        response: Option<IoResponse>,
+    ) -> Result<Option<IoRequest>, ScriptIoError> {
+        use crate::save::system::{SAVEG_FILE, SYSTEM_FILE, apply_persistent_variables};
+        let file = match stage {
+            BootRestore::Start => {
+                self.boot_restore = Some(BootRestore::Globals);
+                return Ok(Some(IoRequest::Read {
+                    path: format!("{}/{SAVEG_FILE}", self.save_prefix),
+                }));
+            }
+            BootRestore::Globals => SAVEG_FILE,
+            BootRestore::Settings => SYSTEM_FILE,
+        };
+        let result = match response {
+            Some(IoResponse::Read(data)) => serde_json::from_slice(&data)
+                .map(|values| {
+                    apply_persistent_variables(&mut self.interpreter, values, file == SAVEG_FILE)
+                })
+                .map_err(|error| error.to_string()),
+            Some(IoResponse::Failed {
+                kind: IoFailure::NotFound,
+                ..
+            }) => Ok(0),
+            Some(IoResponse::Failed { message, .. }) => Err(message),
+            _ => return Err(ProtocolError::State.into()),
+        };
+        if let Err(error) = result {
+            self.interpreter
+                .engine_context()
+                .lock()
+                .unwrap()
+                .callbacks
+                .debug(0, &format!("system restore skipped {file}: {error}"), false);
+        }
+        if file == SAVEG_FILE {
+            self.boot_restore = Some(BootRestore::Settings);
+            Ok(Some(IoRequest::Read {
+                path: format!("{}/{SYSTEM_FILE}", self.save_prefix),
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     fn step_save(

@@ -111,9 +111,10 @@ macroadd 及栈定位遇到未加载脚本时，通过相同的 Host 读取协�
 Rust 的 `ExecutionResult`/`TagResult` 新增 `HostIoPending`，穷举匹配需处理该分支；
 未启用 resumable IO 的解释器不产生它，v1 C 函数表与同步路径保持原语义。
 
-`open_boot(name)` 创建新 VM，按逻辑名称请求 BOOT 和可选的 `macro.iet`，支持文本与
-ASB；按 main/start/_start/文件开头选择入口。该调用不读取文件，加载与解析错误在 step
-报告。替换会话会使旧请求失效，非法逻辑名称保留旧会话。
+`open_boot(name)` 创建新 VM，先从 save 命名空间恢复可选的 `saveg.dat` 和 `system.dat`，
+再按逻辑名称请求 BOOT 和可选的 `macro.iet`。缺少或读不出系统文件时继续启动；只恢复可持久化
+的设置。脚本支持文本与 ASB，按 main/start/_start/文件开头选择入口。文件请求和加载在 step
+中推进。替换会话会使旧请求失效，非法逻辑名称保留旧会话。
 
 独立解释器启用 resumable IO 后，未安装同步加载器时，start/boot/restore_position 可能
 受理一个尚待 Host 完成的加载，调用方随后处理 HostIoPending。显式安装的同步内存加载器
@@ -153,7 +154,7 @@ IO 等待期间，新帧返回 `WouldBlock` 且不受理；提交结果后以相
 当前只包含解释器状态。无文件名时，依次写 `saveg.dat` 和 `system.dat`，不调用 `onSave`。
 收到 `SaveReady` 后用 `take_save_result()` 取走成功或失败，再用
 `resume_scenario()` 继续。每份文件单独提交，全部确认才返回成功；失败时 `files_written`
-记录已确认的文件数。启动时读取系统存档、已读记录及画面和音频快照仍由运行时集成承担。
+记录已确认的文件数。已读记录及画面和音频快照仍由运行时集成承担。
 
 收到 `Event::LoadGame` 后可调用 `submit_numbered_load()`。Core 先读取并校验解释器快照，
 缺少目标脚本时再请求其字节。成功恢复位置后，加载期 Lua 先于 `onLoad` 运行，两者均可挂起。
