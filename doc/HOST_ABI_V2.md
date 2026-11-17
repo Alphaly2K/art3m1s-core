@@ -1,7 +1,7 @@
 # Artemis Host ABI v2：接口契约（草案）
 
-日期：2026-11-17。状态：C ABI 和完整服务 schema 尚未发布，当前动态库继续使用 v1。
-现状证据见 [EXPORT_AUDIT.md](EXPORT_AUDIT.md)，C 接口骨架见
+状态：v2 C 接口可通过 `--no-default-features --features host-abi-v2` 构建预览版。
+默认动态库继续使用 v1。导出审计见 [EXPORT_AUDIT.md](EXPORT_AUDIT.md)，预览头文件见
 [abi/art3m1s_core_v2.draft.h](abi/art3m1s_core_v2.draft.h)。
 
 ## 1. 范围与设计决策
@@ -24,7 +24,7 @@ renderer，core 不保留原生 GPU 合成与 present 的生产路径；现有 r
 6. 先完成 IO continuation 与帧契约验证，再冻结 v2 的消息编号、capability 位和绑定。
 
 发布的 ABI 必须定义完整的消息 kind、能力位、渲染 opcode 和资源格式，并提供对应的
-Host 一致性验证。目前头文件中的这些协议部分仍待实现，尚未冻结编号。
+Host 一致性验证。预览版只承诺本页列出的已实现部分，协议编号尚待冻结。
 
 ## 2. 职责边界
 
@@ -73,9 +73,9 @@ flowchart LR
 | Runtime | `submit` | 批量提交输入、Host 状态、配置及带身份的服务结果 |
 | Runtime | `poll_events` | 批量读取完整可靠事件和可丢诊断记录 |
 | Runtime | `get_state` | 获取会话、舞台尺寸、等待、退出、积压和丢弃计数 |
-| Frame（按能力查询） | `acquire_latest` / `release` | 获取/释放不可变渲染快照，无平台对象 |
+| Frame（按能力查询） | `acquire_latest` / `release` / `texture_rgba` | 获取不可变渲染快照和像素，并释放借用 |
 
-初始合计 11 个函数指针，分布在三张表。这个数字不作为重构成功标准；消息 schema 仍是
+预览版合计 12 个函数指针，分布在三张表。消息 schema 仍是
 公开 API 的一部分。禁止用任意字符串 `invoke(method, json)` 把不受约束的私有 RPC 塞进
 `submit`；每个 domain/kind 都必须有版本、字段、失败分支和一致性测试。
 
@@ -97,6 +97,8 @@ flowchart LR
   表内 required 字段不可空；缺少整个可选接口时 query 返回 UNSUPPORTED。
 - 所有输入和输出结构的 struct_size 由 Host 在调用前设置；core 只读写协商前缀内的字段。
   失败时将普通 out 值清零，不改 Host 的 struct_size；BUFFER 的所需容量是明确例外。
+- `ArtMessage` 是固定步幅数组，每项 `struct_size` 等于 `sizeof(ArtMessage)`。`ArtBytes`
+  使用固定布局。输入、输出缓冲区与帧借用不能重叠。
 - 只承诺 C calling convention。Rust 使用独立 `api` facade，不能把 trait/vtable 或
   `Vec`/`String`/`HashMap` 直接交给 C 或按其布局序列化。
 
@@ -107,7 +109,9 @@ flowchart LR
 错误至少区分 ARGUMENT、HANDLE、THREAD、UNSUPPORTED、BUFFER、STATE、STALE、LIMIT、PANIC。
 
 BUFFER 返回所需大小且不消费队首记录。NO_DATA 表示没有新数据。WOULD_BLOCK 表示本次
-操作未被接受，可在排空队列、消费结果、完成请求或释放 lease 后重试，不表示应重复推进同一 frame。
+操作暂未完成，可在排空队列、消费结果、完成请求或释放借用后重试。`step` 返回
+WOULD_BLOCK 时仍填充状态；`out.host_frame_id` 是最近受理的帧。若等于输入 ID，以同一 ID
+和单调时间重试；若较小，先完成前一帧。
 异步服务失败（not_found/denied/io_error/cancelled 等）走对应结果消息，不冒充 ABI 调用失败。
 poll 若至少写出一条完整记录则返回 OK，并在 out 标出下一条所需空间；仅首条装不下时
 返回 BUFFER。输出参数清零不得造成已交付记录被隐藏；NO_DATA/BUFFER 都不移除未交付记录。
@@ -143,6 +147,7 @@ Loading 完成必须有事件和状态转换；`open_project` 返回 OK 只表�
   进程级库初始化日志单独交给 SDK 诊断，不能偷偷路由到最近运行的游戏。
 
 `step` 接收 Host 的 frame ID、单调时间、UTC 时间及时区，首次只锚定单调时钟。
+C 入口的帧 ID 从非零开始；状态字段中的零表示尚未受理帧。
 相同 frame ID、相同单调时间可用于 IO 回填后继续本帧，不能再次消费输入边沿、触发
 onEnterFrame 或累计动画 delta；更小 ID/时间返回 ARGUMENT。后一 Host frame 的时间差
 只累计一次。后台冻结通过 Host 明确的 pause/resume 策略处理，不任意截断 E-Mote 时间。
@@ -172,6 +177,24 @@ Rust 句柄入口的 `submit_input(handle, epoch, events)` 原子受理输入，
 容量和身份检查失败时整批不受理。受理不直接运行 Lua；只在 `step` 的确定性边界执行。
 输入、状态和结果在批内按顺序处理。初始建议上限为每批 4096 条、单条 blob 1 MiB，
 大文件必须分块，最终限制作为可查询能力冻结。
+
+C 预览版 `ArtMessage.schema_version=1`、`flags=0`。一个批次可包含一组 IO/UI 回复、一组输入，
+或单条控制消息。回复沿用原请求的 domain、kind、epoch 和 request_id。输入和控制的
+`request_id=0`，metadata 为 UTF-8 JSON object；下表未列出 blob 的消息不携带 blob。
+
+| domain | kind | metadata / blob |
+|---|---|---|
+| Input (2) | 1 | `code`、`down`（布尔） |
+| Input (2) | 2 | 舞台坐标 `x`、`y` |
+| Input (2) | 3 | `id`、`phase`（`down`、`move`、`up`）、`x`、`y` |
+| Input (2) | 4 | `{}`，失焦 |
+| Runtime (1) | 16 | `{}`，请求正常关闭 |
+| Runtime (1) | 17 | `{}`，blob 为默认字体 |
+| Media (5) | 16 | `playback_id`、`status`（`started`、`ended`、`failed`、`cancelled`） |
+| Media (5) | 17 | `playback_id`、`frame_id`、`width`、`height`；blob 为 RGBA8 |
+
+`ArtCreateInfo` 的 Host 能力位分别为 IO=1、UI=2、Media=4，renderer 位为 sprite=1。
+预览版检查未知位；Host 仍须处理收到的服务请求，缺少可选服务时返回相应失败。
 
 `poll_events` 按以下固定小端格式写入完整记录，不直接 memcpy C struct：
 
@@ -362,7 +385,7 @@ C 草案的 `texture_rgba` 也使用帧内索引，像素和帧描述一起由�
 依次编号 0 至 3。flags 的低三位依次表示裁剪、灰阶和反色，其余写零。裁剪为舞台上的
 左、上、宽、高，未设置时四项均为零。变换顺序为两列基向量、平移。
 Host 解析时应先校验版本、总长度、各段计数与记录边界，确认纹理索引和像素长度有效后再绘制。
-C 帧接口仍为草案，未发布新的动态符号。
+C 预览通过帧表交付同一帧包和纹理借用。
 
 Rust Host 可使用 `host::renderer::SpriteRenderer` 在已开启的目标上绘制基础帧。适配器使用
 同一帧借用的类型化视图，维护会话和资源版本对应的后端纹理。Host 控制 backend 的访问、

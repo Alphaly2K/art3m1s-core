@@ -9,8 +9,22 @@ API 文档，也不要求 Host 使用 Dart 或 libmpv。完整签名、返回值
 
 ### Artemis Rust Host 接入基础
 
-Artemis 解释器在所有平台统一使用 Luau，不再选择标准 Lua 后端。现有 v1 C 函数表保持
-原布局；v2 的队列式 IO 和帧协议仍按 [迁移计划](../GOAL.md) 实施。
+Artemis 解释器在所有平台统一使用 Luau。现有 v1 C 函数表保持原布局；v2 可通过预览构建
+接入，契约见 [HOST_ABI_V2.md](HOST_ABI_V2.md)。
+
+### Artemis v2 C 预览
+
+使用 `cargo build --no-default-features --features host-abi-v2` 编译纯 Core 动态库。加载库后
+通过 [C 头文件](abi/art3m1s_core_v2.draft.h) 中的 `art3m1s_get_api_v2` 查询 Runtime 和 Frame 表。
+创建 runtime 的线程负责所有调用；工作线程把结果交回该线程。Host 循环推进逻辑、处理请求并
+借用帧，绘制完释放令牌。
+
+[内存 Host 示例](../tools/host-smoke/artemis_v2.c) 不依赖窗口或游戏素材。在 macOS 或 Linux
+从仓库根目录运行下列命令，会独立构建预览库、检查导出并运行示例：
+
+```sh
+bash scripts/test-host-v2.sh
+```
 
 Rust Host 通过 `host::ResourceProvider` 提供逻辑资源，通过
 `CoreRuntime::with_host_backend` 提供 renderer，入口不自行选择平台 GPU：

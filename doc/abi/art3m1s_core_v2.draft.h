@@ -1,5 +1,5 @@
-/* Design artifact only. No C implementation or binary ABI is shipped for v2.
- * See ../HOST_ABI_V2.md. Do not use this draft to load the current library.
+/* Preview interface. Build the library with --no-default-features --features host-abi-v2.
+ * See ../HOST_ABI_V2.md for the protocol. The default legacy build exposes v1.
  * Native structs use the target C ABI; queued records use explicit LE encoding.
  */
 #ifndef ART3M1S_CORE_V2_DRAFT_H
@@ -31,6 +31,18 @@ typedef uint64_t ArtFrameToken;
 #define ART_API_MAGIC UINT64_C(0x415254334D324150)
 #define ART_INTERFACE_RUNTIME UINT32_C(1)
 #define ART_INTERFACE_FRAME UINT32_C(2)
+#define ART_ABI_V2_MAJOR UINT32_C(2)
+#define ART_SUBMIT_SCHEMA_VERSION UINT16_C(1)
+
+#define ART_HOST_CAP_IO UINT64_C(1)
+#define ART_HOST_CAP_UI UINT64_C(2)
+#define ART_HOST_CAP_MEDIA UINT64_C(4)
+#define ART_RENDERER_CAP_SPRITE UINT64_C(1)
+
+#define ART_WAIT_IO UINT32_C(1)
+#define ART_WAIT_UI UINT32_C(2)
+#define ART_WAIT_SCENARIO UINT32_C(4)
+#define ART_STEP_SCENARIO_FINISHED UINT32_C(8)
 
 #define ART_RUNTIME_CREATED UINT32_C(0)
 #define ART_RUNTIME_LOADING UINT32_C(1)
@@ -54,6 +66,20 @@ typedef uint64_t ArtFrameToken;
 #define ART_RUNTIME_PERSISTENCE_RESULT UINT32_C(5)
 #define ART_UI_CAPTION UINT32_C(1)
 #define ART_UI_DIALOG UINT32_C(2)
+#define ART_IO_STAT UINT32_C(1)
+#define ART_IO_READ UINT32_C(2)
+#define ART_IO_WRITE_ATOMIC UINT32_C(4)
+#define ART_IO_DELETE UINT32_C(5)
+#define ART_RUNTIME_SHUTDOWN UINT32_C(16)
+#define ART_RUNTIME_SET_DEFAULT_FONT UINT32_C(17)
+#define ART_INPUT_KEY UINT32_C(1)
+#define ART_INPUT_POINTER UINT32_C(2)
+#define ART_INPUT_TOUCH UINT32_C(3)
+#define ART_INPUT_FOCUS_LOST UINT32_C(4)
+#define ART_MEDIA_AUDIO_COMMAND UINT32_C(1)
+#define ART_MEDIA_VIDEO_COMMAND UINT32_C(2)
+#define ART_MEDIA_PLAYBACK_STATUS UINT32_C(16)
+#define ART_MEDIA_VIDEO_FRAME UINT32_C(17)
 
 /* Draft ARFP packet; see HOST_ABI_V2.md for the little-endian format. */
 #define ART_FRAME_SCHEMA_VERSION UINT16_C(1)
@@ -100,8 +126,8 @@ typedef struct ArtStepInfo {
     uint32_t reserved;
 } ArtStepInfo;
 
-/* Submitted messages are copied before return. No callback or retained pointer.
- * Message kinds, capability bits and render packet schema are P0 freeze gates.
+/* A fixed-stride array of ArtMessage; each struct_size must equal sizeof(ArtMessage).
+ * Input memory is copied before return. Input, output, and borrowed views must not overlap.
  */
 typedef struct ArtMessage {
     uint32_t struct_size;
@@ -191,7 +217,7 @@ typedef struct ArtRootApiV2 {
                                  uint64_t *out_required);
 } ArtRootApiV2;
 
-/* Proposed sole new Artemis dynamic symbol; old v1 remains in legacy builds. */
+/* Sole dynamic query symbol in the standalone v2 preview. */
 ArtStatus art3m1s_get_api_v2(uint32_t abi_major, uint32_t minimum_root_size,
                             const ArtRootApiV2 **out_api);
 

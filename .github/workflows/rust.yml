@@ -28,3 +28,5 @@ jobs:
       run: cargo build --verbose
     - name: Run tests
       run: ./scripts/test-all.sh
+    - name: Check standalone Artemis v2 ABI
+      run: bash scripts/test-host-v2.sh

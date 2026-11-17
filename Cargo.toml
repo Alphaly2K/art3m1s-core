@@ -46,6 +46,7 @@ ctt-astcenc = { version = "0.5", optional = true }
 
 [features]
 default = ["gl-backend"]
+host-abi-v2 = []
 legacy = ["dep:art3m1s-native-render", "dep:pfs-upk-rust", "dep:art3m1s-media", "dep:art3m1s-emote", "dep:ctt-astcenc"]
 gl-backend = ["legacy", "art3m1s-render/gl"]
 metal-backend = ["legacy", "runtime-shader", "art3m1s-render/metal"]

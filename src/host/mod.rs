@@ -1,5 +1,7 @@
 //! Native host boundary modules.
 
+#[cfg(feature = "host-abi-v2")]
+pub mod abi;
 #[cfg(feature = "legacy")]
 pub mod events;
 #[cfg(feature = "legacy")]
