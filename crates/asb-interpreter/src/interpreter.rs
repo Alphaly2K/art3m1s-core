@@ -1000,13 +1000,20 @@ impl Interpreter {
     /// - `.ast` - 文本格式（未加密）
     /// - `.asb` - 二进制格式（加密）
     pub fn load_file(&mut self, name: &str, data: &[u8]) -> Result<()> {
+        self.check_io_idle()?;
+        let script = self.parse_file(name, data)?;
+        self.insert_script(name.to_string(), script);
+        self.run_lua_blocks_at_load(name)
+    }
+
+    fn parse_file(&self, name: &str, data: &[u8]) -> Result<Script> {
         // 检查是否是 ASB 二进制格式（魔数: ASB\0）
         if data.len() >= 4 && &data[0..4] == b"ASB\x00" {
-            self.load_asb(name, data)
+            Script::parse_asb(name, data, self.config.encoding)
         } else {
             // 作为文本处理，按 system.ini 的 CHARSET 解码。
             let (text, _, _) = self.config.encoding.decode(data);
-            self.load_script(name, &text)
+            Script::parse_with_tag_ini(name, &text, Some(&self.tag_ini))
         }
     }
 
@@ -3116,6 +3123,38 @@ impl Interpreter {
         // 重新加载目标脚本并定位到当前行
         self.ensure_position_script(script)?;
         Ok(())
+    }
+
+    /// Validate the bytes and position before replacing a resumable scenario.
+    /// Load-time Lua is scheduled after the saved position has been installed.
+    pub fn restore_position_from_file(
+        &mut self,
+        name: &str,
+        data: &[u8],
+        line: usize,
+        stack: Vec<CallFrame>,
+    ) -> Result<()> {
+        self.check_io_idle()?;
+        if !self.resumable_io {
+            return Err(Error::RuntimeError {
+                line,
+                message: "restoring Host file bytes requires resumable IO".into(),
+            });
+        }
+        let script = self.parse_file(name, data)?;
+        if line > script.len()
+            || stack
+                .iter()
+                .any(|frame| frame.script == name && frame.return_line > script.len())
+        {
+            return Err(Error::RuntimeError {
+                line,
+                message: "save position is beyond the script".into(),
+            });
+        }
+        self.insert_script(name.to_string(), script);
+        self.restore_position(name, line, stack)?;
+        self.run_lua_blocks_at_load(name)
     }
 
     /// Split off `enqueueTag` commands, leaving only the current `e:tag()` prefix.

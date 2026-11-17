@@ -383,6 +383,152 @@ __engine:setEventHandler{onSave='capture'}
 }
 
 #[test]
+fn numbered_load_restores_the_target_before_running_its_resumable_hook() {
+    let mut session = session(1, TransportLimits::default(), 8192);
+    session
+        .open_scenario(
+            br#"
+*main
+[calllua function=menu]
+[caption data=old-inline]
+[lua]
+function menu(e)
+    e:enqueueTag{'load', file='slot'}
+    e:enqueueTag{'caption', data='old-queue'}
+end
+[/lua]
+"#,
+            "menu",
+            "main",
+        )
+        .unwrap();
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::Event);
+    let mut snapshot = crate::save::SaveData::from_interpreter(session.interpreter());
+    snapshot.current_script = "target".into();
+    snapshot.current_line = 0;
+    snapshot.waiting_for_input = Some(true);
+    snapshot.variables.set(
+        "memsave.status",
+        asb_interpreter::Value::String("saved".into()),
+    );
+
+    let mut host = MemoryHost::default();
+    host.asset(
+        "target",
+        br#"
+*main
+[caption data=restored]
+[return]
+[lua]
+target_init=(target_init or 0)+1
+assert(__engine:file('boot-data')=='')
+function load_slot(e,p)
+    loads=(loads or 0)+1
+    local status=e:var('memsave.status')
+    assert(p.file=='slot' and status=='saved' and e:file('hook-data')=='')
+    e:enqueueTag{'var', name='memsave.hook', data=status..'-loaded'}
+end
+__engine:setEventHandler{onLoad='load_slot'}
+[/lua]
+"#,
+    );
+    host.asset("boot-data", b"");
+    host.asset("hook-data", b"");
+    host.files.insert(
+        ("save".into(), "slot".into()),
+        (1, serde_json::to_vec(&snapshot).unwrap()),
+    );
+    session.submit_numbered_load().unwrap();
+    assert_eq!(session.resume_scenario(), Err(ProtocolError::State));
+    drive_numbered_load(&mut session, &mut host);
+    assert_eq!(session.interpreter().current_script(), Some("target"));
+    assert!(session.pending_event().is_none());
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::LoadReady);
+    let globals = session.interpreter().lua().globals();
+    assert_eq!(globals.get::<i32>("target_init").unwrap(), 1);
+    assert_eq!(globals.get::<i32>("loads").unwrap(), 1);
+    assert_eq!(
+        session.take_numbered_load_result(),
+        Some(NumberedLoadResult::Restored)
+    );
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::Event);
+    assert!(matches!(session.pending_event(), Some(Event::Wait { .. })));
+    assert_eq!(
+        session
+            .interpreter()
+            .get_variable("memsave.hook")
+            .unwrap()
+            .as_string(),
+        "saved-loaded"
+    );
+    session.resume_scenario().unwrap();
+    host.run(&mut session);
+    assert_eq!(host.captions, ["restored"]);
+}
+
+#[test]
+fn invalid_numbered_load_position_keeps_the_old_save_point_and_queue() {
+    let mut session = session(1, TransportLimits::default(), 8192);
+    session
+        .open_scenario(
+            br#"
+*main
+[calllua function=menu]
+[caption data=inline]
+[lua]
+function menu(e)
+    e:enqueueTag{'load', file='slot'}
+    e:enqueueTag{'caption', data='queued'}
+end
+[/lua]
+"#,
+            "menu",
+            "main",
+        )
+        .unwrap();
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::Event);
+    let line = session.interpreter().current_line();
+    let mut save = crate::save::SaveData::from_interpreter(session.interpreter());
+    save.current_script = "target".into();
+    save.current_line = 1000;
+    let mut host = MemoryHost::default();
+    host.asset("target", b"*main\n[lua]\ninvalid_init=true\n[/lua]");
+    host.files.insert(
+        ("save".into(), "slot".into()),
+        (1, serde_json::to_vec(&save).unwrap()),
+    );
+    session.submit_numbered_load().unwrap();
+    drive_numbered_load(&mut session, &mut host);
+    assert!(
+        matches!(session.take_numbered_load_result(), Some(NumberedLoadResult::Failed { kind: IoFailure::IoError, message }) if message.contains("beyond the script"))
+    );
+    assert_eq!(session.interpreter().current_script(), Some("menu"));
+    assert_eq!(session.interpreter().current_line(), line);
+    assert!(session.interpreter().get_script("target").is_none());
+    assert!(matches!(
+        session.pending_event(),
+        Some(Event::LoadGame { .. })
+    ));
+    session.resume_scenario().unwrap();
+    host.run(&mut session);
+    assert_eq!(host.captions, ["queued", "inline"]);
+}
+
+fn drive_numbered_load(session: &mut ScriptIoSession, host: &mut MemoryHost) {
+    for _ in 0..2048 {
+        match session.step().unwrap() {
+            ScriptIoProgress::LoadReady => return,
+            ScriptIoProgress::Waiting => {
+                let request = requests(session).pop().unwrap();
+                session.submit_replies(&[host.complete(&request)]).unwrap();
+            }
+            other => panic!("unexpected load progress: {other:?}"),
+        }
+    }
+    panic!("load did not finish");
+}
+
+#[test]
 fn external_calls_macros_and_jumps_resume_without_replaying_filters_or_callers() {
     let mut session = session(1, TransportLimits::default(), 1024);
     let mut host = MemoryHost::default();

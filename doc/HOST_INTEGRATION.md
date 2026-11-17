@@ -150,9 +150,16 @@ IO 等待期间，新帧返回 `WouldBlock` 且不受理；提交结果后以相
 `step` 运行 `onSave` 及它排队的状态更新，等待回调内的 IO，并生成解释器快照。回调可以
 修改存档变量、执行 Lua 和请求 IO；若尝试跳转、等待或派发普通场景事件，本次保存失败。
 调用方原有的标签队列保留。快照使用现有 `SaveData` 格式，记录存档事件后的脚本位置，
-当前只包含解释器状态。画面、音频、系统存档及配套的读档流程仍使用各自的运行时集成。
+当前只包含解释器状态。画面、音频和系统存档仍使用各自的运行时集成。
 收到 `SaveReady` 后用 `take_numbered_save_result()` 取走成功或失败，再用
 `resume_scenario()` 继续。成功仅在 Host 确认 `write_atomic` 完成后产生。
+
+收到 `Event::LoadGame` 后可调用 `submit_numbered_load()`。Core 先读取并校验解释器快照，
+缺少目标脚本时再请求其字节。成功恢复位置后，加载期 Lua 先于 `onLoad` 运行，两者均可挂起。
+收到 `LoadReady` 后取 `take_numbered_load_result()`：成功已替换旧场景及队列，直接继续
+`step`；读档失败则确认原事件后继续旧场景。快照显式记录的输入等待会在 `onLoad` 排队标签
+执行后恢复。恢复已生效后，Lua 初始化或 `onLoad` 的未处理错误会使会话进入故障状态。
+此入口只接受解释器快照；含画面、音频或消息文本快照的完整存档仍由原运行时处理。
 
 新会话时钟和随机种子默认为零，Host 在首次 step 前提交时间，并可在首次 open 前调用
 `set_random_seed(u64)`。e:random 与 var random 使用实例内状态；Luau math.random

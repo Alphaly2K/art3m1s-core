@@ -63,6 +63,13 @@ pub enum ScriptIoProgress {
     Event,
     EventFilterReady,
     SaveReady,
+    LoadReady,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NumberedLoadResult {
+    Restored,
+    Failed { kind: IoFailure, message: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,6 +112,15 @@ enum NumberedSaveWork {
     Hook { key: String },
     Writing,
     Finished(Option<NumberedSaveResult>),
+}
+
+enum NumberedLoadWork {
+    Queued { key: String },
+    ReadingSave,
+    ReadingTarget(Box<crate::save::SaveData>),
+    Initializing { file: String },
+    Hook,
+    Finished(Option<NumberedLoadResult>),
 }
 
 enum ScenarioStep {
@@ -175,6 +191,7 @@ pub struct ScriptIoSession {
     frame_handler_due: bool,
     event_filter: Option<EventFilterWork>,
     numbered_save: Option<NumberedSaveWork>,
+    numbered_load: Option<NumberedLoadWork>,
 }
 
 impl ScriptIoSession {
@@ -211,6 +228,7 @@ impl ScriptIoSession {
             frame_handler_due: false,
             event_filter: None,
             numbered_save: None,
+            numbered_load: None,
         })
     }
 
@@ -268,6 +286,7 @@ impl ScriptIoSession {
         self.frame_handler_due = false;
         self.event_filter = None;
         self.numbered_save = None;
+        self.numbered_load = None;
         Ok(epoch)
     }
 
@@ -318,6 +337,7 @@ impl ScriptIoSession {
         self.frame_handler_due = false;
         self.event_filter = None;
         self.numbered_save = None;
+        self.numbered_load = None;
         Ok(epoch)
     }
 
@@ -337,6 +357,7 @@ impl ScriptIoSession {
         }
         if self.event_filter.is_some()
             || self.numbered_save.is_some()
+            || self.numbered_load.is_some()
             || self.operation.is_some()
             || self.cancelled
         {
@@ -395,6 +416,33 @@ impl ScriptIoSession {
         }
     }
 
+    /// Load an interpreter snapshot for the current [load file=...] event.
+    pub fn submit_numbered_load(&mut self) -> Result<(), ProtocolError> {
+        if self.faulted || self.numbered_load.is_some() {
+            return Err(ProtocolError::State);
+        }
+        let Some(Event::LoadGame { file, .. }) = &self.scenario_event else {
+            return Err(ProtocolError::State);
+        };
+        if self.event_filter.is_some() || self.operation.is_some() || self.cancelled {
+            return Err(ProtocolError::WouldBlock);
+        }
+        let key = self.save_key(file)?;
+        self.numbered_load = Some(NumberedLoadWork::Queued { key });
+        Ok(())
+    }
+
+    pub fn take_numbered_load_result(&mut self) -> Option<NumberedLoadResult> {
+        let Some(NumberedLoadWork::Finished(result)) = &mut self.numbered_load else {
+            return None;
+        };
+        let result = result.take();
+        if result == Some(NumberedLoadResult::Restored) {
+            self.numbered_load = None;
+        }
+        result
+    }
+
     pub fn resume_scenario(&mut self) -> Result<(), ProtocolError> {
         if self.faulted
             || self.interpreter.pending_host_io().is_some()
@@ -403,6 +451,10 @@ impl ScriptIoSession {
                 .numbered_save
                 .as_ref()
                 .is_some_and(|work| !matches!(work, NumberedSaveWork::Finished(None)))
+            || self
+                .numbered_load
+                .as_ref()
+                .is_some_and(|work| !matches!(work, NumberedLoadWork::Finished(None)))
         {
             return Err(ProtocolError::State);
         }
@@ -410,6 +462,7 @@ impl ScriptIoSession {
             return Err(ProtocolError::State);
         }
         self.numbered_save = None;
+        self.numbered_load = None;
         self.interpreter.advance_line();
         Ok(())
     }
@@ -476,6 +529,7 @@ impl ScriptIoSession {
             && self.interpreter.pending_host_io().is_none()
             && self.event_filter.is_none()
             && self.numbered_save.is_none()
+            && self.numbered_load.is_none()
         {
             return Ok(ScriptIoProgress::Event);
         }
@@ -511,6 +565,7 @@ impl ScriptIoSession {
             && (self.operation.is_some()
                 || self.cancelled
                 || self.numbered_save.is_some()
+                || self.numbered_load.is_some()
                 || matches!(self.event_filter, Some(EventFilterWork::Ready(_))))
         {
             return Ok(ScriptIoProgress::WouldBlock);
@@ -605,6 +660,9 @@ impl ScriptIoSession {
     ) -> Result<ScenarioStep, ScriptIoError> {
         if let Some(work) = self.numbered_save.take() {
             return self.step_numbered_save(work, response);
+        }
+        if let Some(work) = self.numbered_load.take() {
+            return self.step_numbered_load(work, response);
         }
         if matches!(self.event_filter, Some(EventFilterWork::Running(_))) {
             let Some(EventFilterWork::Running(task)) = self.event_filter.take() else {
@@ -757,6 +815,164 @@ impl ScriptIoSession {
     fn finish_numbered_save(&mut self, result: NumberedSaveResult) -> ScenarioStep {
         self.numbered_save = Some(NumberedSaveWork::Finished(Some(result)));
         ScenarioStep::Progress(ScriptIoProgress::SaveReady)
+    }
+
+    fn step_numbered_load(
+        &mut self,
+        work: NumberedLoadWork,
+        response: Option<IoResponse>,
+    ) -> Result<ScenarioStep, ScriptIoError> {
+        match work {
+            NumberedLoadWork::Queued { key } => {
+                self.numbered_load = Some(NumberedLoadWork::ReadingSave);
+                Ok(ScenarioStep::Request(IoRequest::Read {
+                    path: format!("{}/{key}", self.save_prefix),
+                }))
+            }
+            NumberedLoadWork::ReadingSave | NumberedLoadWork::ReadingTarget(_) => {
+                let bytes = match response {
+                    Some(IoResponse::Read(bytes)) => bytes,
+                    Some(IoResponse::Failed { kind, message }) => {
+                        return Ok(self.fail_numbered_load(kind, message));
+                    }
+                    _ => return Err(ProtocolError::State.into()),
+                };
+                if let NumberedLoadWork::ReadingTarget(save) = work {
+                    return self.restore_numbered_load(*save, Some(&bytes));
+                }
+                let save: crate::save::SaveData = match serde_json::from_slice(&bytes) {
+                    Ok(save) => save,
+                    Err(error) => {
+                        return Ok(self.fail_numbered_load(IoFailure::IoError, error.to_string()));
+                    }
+                };
+                if save.version > crate::save::SAVE_FORMAT_VERSION
+                    || save.scene.is_some()
+                    || save.audio.is_some()
+                    || save.message_text.is_some()
+                {
+                    return Ok(self.fail_numbered_load(
+                        IoFailure::Unsupported,
+                        "unsupported save version or runtime snapshot",
+                    ));
+                }
+                if logical_key(&save.current_script).is_err()
+                    || save.call_stack.iter().any(|frame| {
+                        logical_key(&frame.script).is_err()
+                            || self
+                                .interpreter
+                                .get_script(&frame.script)
+                                .is_some_and(|script| frame.return_line > script.len())
+                    })
+                {
+                    return Ok(self.fail_numbered_load(
+                        IoFailure::IoError,
+                        "invalid saved script or call frame",
+                    ));
+                }
+                if let Some(script) = self.interpreter.get_script(&save.current_script) {
+                    if save.current_line > script.len() {
+                        return Ok(self.fail_numbered_load(
+                            IoFailure::IoError,
+                            "save position is beyond the script",
+                        ));
+                    }
+                    self.restore_numbered_load(save, None)
+                } else {
+                    let path = save.current_script.clone();
+                    self.numbered_load = Some(NumberedLoadWork::ReadingTarget(Box::new(save)));
+                    Ok(ScenarioStep::Request(IoRequest::Read { path }))
+                }
+            }
+            NumberedLoadWork::Initializing { file } => {
+                let _ = self
+                    .interpreter
+                    .resume_host_io(response.ok_or(ProtocolError::State)?)?;
+                self.start_numbered_load_hook(file)
+            }
+            NumberedLoadWork::Hook => {
+                if self
+                    .interpreter
+                    .resume_host_io(response.ok_or(ProtocolError::State)?)?
+                    == IoProgress::Waiting
+                {
+                    self.numbered_load = Some(NumberedLoadWork::Hook);
+                    return self.interpreter_request();
+                }
+                Ok(self.finish_numbered_load(NumberedLoadResult::Restored))
+            }
+            NumberedLoadWork::Finished(result) => {
+                let progress = if result.is_some() {
+                    ScriptIoProgress::LoadReady
+                } else {
+                    ScriptIoProgress::Event
+                };
+                self.numbered_load = Some(NumberedLoadWork::Finished(result));
+                Ok(ScenarioStep::Progress(progress))
+            }
+        }
+    }
+
+    fn restore_numbered_load(
+        &mut self,
+        save: crate::save::SaveData,
+        source: Option<&[u8]>,
+    ) -> Result<ScenarioStep, ScriptIoError> {
+        let Some(Event::LoadGame { file, .. }) = &self.scenario_event else {
+            return Err(ProtocolError::State.into());
+        };
+        let file = file.clone();
+        let stack = save.call_stack.into_iter().map(Into::into).collect();
+        let result = if let Some(source) = source {
+            self.interpreter.restore_position_from_file(
+                &save.current_script,
+                source,
+                save.current_line,
+                stack,
+            )
+        } else {
+            self.interpreter
+                .restore_position(&save.current_script, save.current_line, stack)
+        };
+        if let Err(error) = result {
+            return Ok(self.fail_numbered_load(IoFailure::IoError, error.to_string()));
+        }
+        let mut variables = self.interpreter.variables();
+        variables.restore_local_snapshot(&save.variables);
+        self.interpreter.restore_variables(variables);
+        if save.waiting_for_input == Some(true) {
+            self.interpreter.hold_queued_input_wait();
+        }
+        self.scenario_event = None;
+        self.start_numbered_load_hook(file)
+    }
+
+    fn start_numbered_load_hook(&mut self, file: String) -> Result<ScenarioStep, ScriptIoError> {
+        if self.interpreter.prepare_host_handler()? == IoProgress::Waiting {
+            self.numbered_load = Some(NumberedLoadWork::Initializing { file });
+            return self.interpreter_request();
+        }
+        if self
+            .interpreter
+            .start_host_event_handler("onLoad", &HashMap::from([("file".into(), file)]))?
+            == IoProgress::Waiting
+        {
+            self.numbered_load = Some(NumberedLoadWork::Hook);
+            return self.interpreter_request();
+        }
+        Ok(self.finish_numbered_load(NumberedLoadResult::Restored))
+    }
+
+    fn fail_numbered_load(&mut self, kind: IoFailure, message: impl Into<String>) -> ScenarioStep {
+        self.finish_numbered_load(NumberedLoadResult::Failed {
+            kind,
+            message: message.into(),
+        })
+    }
+
+    fn finish_numbered_load(&mut self, result: NumberedLoadResult) -> ScenarioStep {
+        self.numbered_load = Some(NumberedLoadWork::Finished(Some(result)));
+        ScenarioStep::Progress(ScriptIoProgress::LoadReady)
     }
 
     fn step_event_filter(
