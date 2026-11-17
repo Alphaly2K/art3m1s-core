@@ -50,6 +50,8 @@ impl ScriptIoSession {
         self.interpreter.set_callback(move |event| match event {
             Event::Layer(_)
             | Event::LayerEventHandler { .. }
+            | Event::SetEventHandler { .. }
+            | Event::DelEventHandler { .. }
             | Event::LayerRename { .. }
             | Event::LayerEdit { .. }
             | Event::LayerTweenDelete { .. }
@@ -705,7 +707,7 @@ impl EngineCallbacks for SceneCallbacks {
         self.is_decide_key(1)
     }
     fn is_decide_key(&self, code: u32) -> bool {
-        self.is_key_down_edge(code)
+        self.0.lock().unwrap().input.is_decide(code)
     }
     fn is_push(&self, code: u32) -> bool {
         self.0.lock().unwrap().input.is_push(code)
@@ -733,7 +735,12 @@ impl EngineCallbacks for SceneCallbacks {
     }
     fn file_operation(&self, _: &str, _: HashMap<String, String>) {}
     fn include(&self, _: &str) {}
-    fn override_key(&self, _: u32, _: u32) {}
+    fn override_key(&self, code: u32, status: u32) {
+        self.override_key_status(Some(code), Some(status));
+    }
+    fn override_key_status(&self, code: Option<u32>, status: Option<u32>) {
+        self.0.lock().unwrap().input.override_key(code, status);
+    }
     fn set_flick_sensitivity(&self, _: f64) {}
     fn get_script_block(&self) -> HashMap<String, String> {
         HashMap::new()

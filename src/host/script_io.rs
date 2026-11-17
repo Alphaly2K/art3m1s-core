@@ -1021,6 +1021,9 @@ impl ScriptIoSession {
         if let Some(frame) = self.frame {
             self.update_control_input(frame);
         }
+        if self.pointer_ready() {
+            return Ok(ScenarioStep::Continue);
+        }
         self.dispatch_scene_handlers()?;
         if self.completed {
             return Ok(ScenarioStep::Progress(ScriptIoProgress::Completed));

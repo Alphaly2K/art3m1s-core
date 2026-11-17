@@ -1,4 +1,5 @@
 use super::*;
+use crate::host::input::{OVERRIDE_IS_DOWN_EDGE, OVERRIDE_IS_PUSH, OVERRIDE_IS_UP_EDGE};
 use crate::script_handler::{event_dispatch_layers, handler_tags, layer_filter_params};
 
 #[derive(Default)]
@@ -6,15 +7,39 @@ pub(super) struct PointerDispatch {
     due: bool,
     position: Option<(i32, i32)>,
     hovered: Vec<String>,
-    pending: VecDeque<LayerDispatch>,
-    current: Option<LayerDispatch>,
+    pending: VecDeque<InputDispatch>,
+    current: Option<InputDispatch>,
     pub(super) tags: Vec<(String, HashMap<String, String>)>,
 }
 
-struct LayerDispatch {
+struct InputDispatch {
+    name: String,
     filter: HashMap<String, String>,
     tags: Vec<(String, HashMap<String, String>)>,
-    click: bool,
+    claim: Option<u32>,
+}
+
+impl InputDispatch {
+    fn global(
+        handler: &crate::compositor::reduce::InputHandler,
+        event: &str,
+        claim: Option<u32>,
+        params: &[(&str, &str)],
+    ) -> Self {
+        Self {
+            name: format!("seton{event}"),
+            filter: handler.filter_params.clone(),
+            tags: handler_tags(
+                handler.handler.as_deref(),
+                handler.file.as_deref(),
+                handler.label.as_deref(),
+                handler.call,
+                &handler.params,
+                params,
+            ),
+            claim,
+        }
+    }
 }
 
 impl SceneIo {
@@ -29,12 +54,27 @@ impl SceneIo {
 
     pub(in crate::host::script_io) fn next_pointer_filter(&mut self) -> Option<EventFilterWork> {
         if std::mem::take(&mut self.pointer.due) {
-            self.pointer.sample(&mut self.scene.lock().unwrap());
+            let mut scene = self.scene.lock().unwrap();
+            scene.input.freeze();
+            self.pointer.sample(&mut scene);
         }
         let mut dispatch = self.pointer.pending.pop_front()?;
+        let name = std::mem::take(&mut dispatch.name);
         let params = std::mem::take(&mut dispatch.filter);
         self.pointer.current = Some(dispatch);
-        Some(EventFilterWork::Queued("lyevent".into(), params))
+        Some(EventFilterWork::Queued(name, params))
+    }
+
+    pub(in crate::host::script_io) fn queue_mode_handler(&mut self, event: &str) {
+        let scene = self.scene.lock().unwrap();
+        if let Some(handler) = scene.compositor.get_input_handler(event, "") {
+            self.pointer.pending.push_back(InputDispatch::global(
+                handler,
+                event,
+                None,
+                &[("type", event)],
+            ));
+        }
     }
 
     pub(in crate::host::script_io) fn finish_pointer_filter(
@@ -53,8 +93,8 @@ impl SceneIo {
                 queued
             }
         };
-        if dispatch.click && accepted {
-            self.with_input(|input| input.click_claimed = true);
+        if accepted && let Some(code) = dispatch.claim {
+            self.with_input(|input| input.claim(code));
         }
         true
     }
@@ -62,9 +102,37 @@ impl SceneIo {
 
 impl PointerDispatch {
     fn sample(&mut self, scene: &mut SceneProjection) {
+        self.sample_pointer(scene);
+        for (code, bits) in scene.input.effective_keys() {
+            let key = code.to_string();
+            if let Some(handler) = scene.compositor.get_input_handler("push", &key)
+                && (bits & OVERRIDE_IS_DOWN_EDGE != 0
+                    || (bits & OVERRIDE_IS_PUSH != 0
+                        && handler
+                            .params
+                            .get("keyrepeat")
+                            .is_some_and(|repeat| repeat == "1")))
+            {
+                let event_type = if matches!(code, 1 | 2 | 4) {
+                    "click"
+                } else {
+                    "key"
+                };
+                self.pending.push_back(InputDispatch::global(
+                    handler,
+                    "push",
+                    Some(code),
+                    &[("key", &key), ("type", event_type)],
+                ));
+            }
+        }
+    }
+
+    fn sample_pointer(&mut self, scene: &mut SceneProjection) {
         let position = scene.input.pointer_present.then_some(scene.input.pointer);
-        let click = scene.input.is_pressed(1);
-        if position == self.position && !click && !scene.input.is_released(1) {
+        let left = scene.input.frame_bits(1);
+        let click = left & OVERRIDE_IS_DOWN_EDGE != 0;
+        if position == self.position && !click && left & OVERRIDE_IS_UP_EDGE == 0 {
             return;
         }
         self.position = position;
@@ -104,7 +172,8 @@ impl PointerDispatch {
             return;
         };
         let click = event == "click";
-        self.pending.push_back(LayerDispatch {
+        self.pending.push_back(InputDispatch {
+            name: "lyevent".into(),
             filter: layer_filter_params(handler, id, event).into_owned(),
             tags: handler_tags(
                 handler.handler.as_deref(),
@@ -114,7 +183,7 @@ impl PointerDispatch {
                 &handler.params,
                 if click { &[("click", "1")] } else { &[] },
             ),
-            click,
+            claim: click.then_some(1),
         });
     }
 }

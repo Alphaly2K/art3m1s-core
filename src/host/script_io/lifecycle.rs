@@ -61,8 +61,9 @@ impl ScriptIoSession {
     ) -> Result<ScriptIoProgress, ScriptIoError> {
         let mut progress = self.step_frame(frame)?;
         loop {
-            if progress == ScriptIoProgress::Event {
-                self.stop_auto_at_stop();
+            if progress == ScriptIoProgress::Event && self.stop_auto_at_stop() {
+                progress = self.step()?;
+                continue;
             }
             let dispatched = match progress {
                 ScriptIoProgress::Event if matches!(self.scenario_event, Some(Event::Exit)) => {

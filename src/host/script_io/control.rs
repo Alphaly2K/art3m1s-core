@@ -1,5 +1,5 @@
 use super::*;
-use crate::host::input::InputFrame;
+use crate::host::input::{InputFrame, OVERRIDE_IS_DOWN};
 use asb_interpreter::WaitReason;
 
 const ADVANCE: i32 = 0;
@@ -66,7 +66,7 @@ impl PlaybackControl {
             && self
                 .keys(ADVANCE)
                 .iter()
-                .any(|&code| input.unclaimed_press(code))
+                .any(|&code| input.unclaimed_decide(code))
     }
 
     pub(super) fn input_blocked(&self, frame: HostFrame) -> bool {
@@ -83,6 +83,12 @@ impl PlaybackControl {
 }
 
 impl ScriptIoSession {
+    fn queue_mode_handler(&mut self, event: &str) {
+        if let Some(scene) = self.scene.as_mut() {
+            scene.queue_mode_handler(event);
+        }
+    }
+
     fn set_auto_layer(&self, id: Option<&str>, visible: bool) {
         if let (Some(scene), Some(id)) = (&self.scene, id) {
             scene.set_control_layer_visible(id, visible);
@@ -120,6 +126,7 @@ impl ScriptIoSession {
         self.control.auto = enabled;
         self.control.reset_wait();
         self.publish_control_state();
+        self.queue_mode_handler(if enabled { "automodein" } else { "automodeout" });
     }
 
     fn set_command_skip(&mut self, enabled: bool) {
@@ -138,6 +145,11 @@ impl ScriptIoSession {
         if !enabled && let Some(scene) = &self.scene {
             scene.reveal_text();
         }
+        self.queue_mode_handler(if enabled {
+            "commandskipin"
+        } else {
+            "commandskipout"
+        });
     }
 
     pub(super) fn clear_control_modes(&mut self) {
@@ -162,19 +174,30 @@ impl ScriptIoSession {
             return;
         };
         self.control.input_frame = Some(frame.id);
-        let (held, pressed) = scene.with_input(|input| {
+        let (held, pressed, stop_click) = scene.with_input(|input| {
             (
                 self.control
                     .keys(CONTROL_SKIP)
                     .iter()
-                    .any(|&key| input.is_down(key)),
+                    .any(|&key| input.frame_bits(key) & OVERRIDE_IS_DOWN != 0),
                 input.pressed_keys().collect::<Vec<_>>(),
+                self.control
+                    .keys(ADVANCE)
+                    .iter()
+                    .any(|&key| input.unclaimed_decide(key) && input.is_physical_press(key)),
             )
         });
         if self.control.held_skip != held {
             self.control.held_skip = held;
             self.control.reset_wait();
             self.publish_control_state();
+            if self.control.skip_allowed {
+                self.queue_mode_handler(if held {
+                    "controlskipin"
+                } else {
+                    "controlskipout"
+                });
+            }
         }
         for &key in &pressed {
             if self.control.keys(AUTO_IN).contains(&key) {
@@ -191,12 +214,7 @@ impl ScriptIoSession {
                 self.set_command_skip(false);
             }
         }
-        if self.control.auto
-            && self.control.stop_on_click
-            && pressed
-                .iter()
-                .any(|key| self.control.keys(ADVANCE).contains(key))
-        {
+        if self.control.auto && self.control.stop_on_click && stop_click {
             self.control.blocked_click = Some(frame.id);
             self.set_auto(false);
         }
@@ -215,11 +233,20 @@ impl ScriptIoSession {
             Some(Event::AlreadyReadConfig { mode }) => self.control.check_read = mode != 0,
             Some(Event::SkipConfig { allow, skip_unread }) => {
                 if let Some(allow) = allow {
+                    let control_changed =
+                        allow != self.control.skip_allowed && self.control.held_skip;
                     self.control.skip_allowed = allow;
                     if !allow {
                         self.set_command_skip(false);
                     }
                     self.publish_control_state();
+                    if control_changed {
+                        self.queue_mode_handler(if allow {
+                            "controlskipin"
+                        } else {
+                            "controlskipout"
+                        });
+                    }
                 }
                 if let Some(unread) = skip_unread {
                     self.control.skip_unread = unread;
@@ -268,14 +295,16 @@ impl ScriptIoSession {
         Ok(true)
     }
 
-    pub(super) fn stop_auto_at_stop(&mut self) {
+    pub(super) fn stop_auto_at_stop(&mut self) -> bool {
         if self.control.auto
             && self.control.stop_on_stop
             && matches!(self.scenario_event,
             Some(Event::Wait { reason: WaitReason::Stop { ref reason } }) if !reason.as_deref().is_some_and(|r| r == "video" || r == "trans" || r.starts_with("tween:")))
         {
             self.set_auto(false);
+            return true;
         }
+        false
     }
 
     pub(super) fn auto_ready(&mut self, frame: HostFrame) -> bool {

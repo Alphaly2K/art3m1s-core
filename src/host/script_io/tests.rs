@@ -1747,6 +1747,120 @@ fn drive_playback_boot(session: &mut ScriptIoSession, host: &mut MemoryHost) {
 }
 
 #[test]
+fn global_push_claims_its_press_and_dummy_decide_is_not_physical_input() {
+    let (mut session, epoch, mut host) = playback_project(
+        br#"*top
+[setonpush key=13 keyrepeat=1 handler=calllua function=push]
+[keyconfig role=0 keys=13,124]
+[wt0]
+[calllua function=mark]
+[wait time=10000 input=1]
+[calllua function=mark]
+[stop]
+[lua]
+function mark() marks=(marks or 0)+1 end
+function push(e,p)
+    assert(p.key=='13' and p.type=='key')
+    pushed=(pushed or 0)+1
+end
+function tick(e)
+    if inject then
+        assert(not e:isDownEdge(124))
+        e:overrideKey{key=124,status=32}
+        assert(e:isDecide(124) and not e:isDownEdge(124))
+    end
+end
+__engine:setEventHandler{onEnterFrame='tick'}
+__engine:setEventFilter(function(e,name,p)
+    assert(name=='setonpush' and p.key=='13' and p.keyrepeat=='1')
+    filtered=(filtered or 0)+1
+    if filtered==1 then
+        assert(e:file('push-gate')=='')
+    end
+    return reject and 2 or 0
+end)
+[/lua]
+"#,
+    );
+    host.asset("push-gate", b"");
+    drive_playback_boot(&mut session, &mut host);
+    let globals = session.interpreter().lua().globals();
+    let count = |key| globals.get::<Option<u32>>(key).unwrap().unwrap_or(0);
+    let step = |session: &mut ScriptIoSession, id, ms| {
+        session.step_queued_frame(playback_frame(id, ms)).unwrap()
+    };
+    submit_playback_keys(&mut session, epoch, &[(13, true)]);
+    assert_eq!(step(&mut session, 2, 1), ScriptIoProgress::Waiting);
+    let request = requests(&mut session).pop().unwrap();
+    assert_eq!(request.metadata["key"], "push-gate");
+    assert_eq!(step(&mut session, 3, 501), ScriptIoProgress::WouldBlock);
+    session.submit_replies(&[host.complete(&request)]).unwrap();
+    for (id, ms) in [(2, 1), (2, 1), (3, 500), (4, 501), (4, 501)] {
+        assert_eq!(step(&mut session, id, ms), ScriptIoProgress::Event);
+    }
+    assert_eq!(count("filtered"), 2);
+    assert_eq!(count("pushed"), 2);
+    assert_eq!(count("marks"), 0);
+
+    globals.set("inject", true).unwrap();
+    submit_playback_keys(&mut session, epoch, &[(13, false)]);
+    assert_eq!(step(&mut session, 5, 502), ScriptIoProgress::Event);
+    assert_eq!(step(&mut session, 6, 503), ScriptIoProgress::Event);
+    assert_eq!(count("marks"), 1);
+    globals.set("inject", false).unwrap();
+    globals.set("reject", true).unwrap();
+    submit_playback_keys(&mut session, epoch, &[(13, true)]);
+    assert_eq!(step(&mut session, 7, 504), ScriptIoProgress::Event);
+    assert_eq!(count("filtered"), 3);
+    assert_eq!(count("pushed"), 2);
+    assert_eq!(count("marks"), 2);
+}
+
+#[test]
+fn autoplay_mode_callbacks_run_on_transitions_and_restore_the_stop_wait() {
+    let (mut session, _, mut host) = playback_project(
+        br#"*top
+[setonautomodein handler=calllua function=record]
+[setonautomodeout handler=calllua function=record]
+[exec command=automode mode=1]
+[exec command=automode mode=1]
+[stop]
+[lua]
+function record(e,p)
+    trace=(trace or '')..p.type..';'
+end
+__engine:setEventFilter(function(e,name,p)
+    assert(name=='setonautomodein' or name=='setonautomodeout')
+    if name=='setonautomodeout' then assert(e:file('mode-gate')=='') end
+    return 0
+end)
+[/lua]
+"#,
+    );
+    host.asset("mode-gate", b"");
+    drive_playback_boot(&mut session, &mut host);
+    let globals = session.interpreter().lua().globals();
+    assert_eq!(
+        globals.get::<String>("trace").unwrap(),
+        "automodein;automodeout;"
+    );
+    assert!(matches!(
+        session.pending_event(),
+        Some(Event::Wait {
+            reason: asb_interpreter::WaitReason::Stop { .. }
+        })
+    ));
+    assert_eq!(
+        session.step_queued_frame(playback_frame(1, 0)).unwrap(),
+        ScriptIoProgress::Event
+    );
+    assert_eq!(
+        globals.get::<String>("trace").unwrap(),
+        "automodein;automodeout;"
+    );
+}
+
+#[test]
 fn audio_feedback_uses_playback_identity_and_resumes_its_wait_after_callback_io() {
     use crate::host::{
         media::PlaybackStatus,

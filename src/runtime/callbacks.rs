@@ -29,11 +29,10 @@ pub(super) struct FfiCallbacks {
 }
 
 /// overrideKey 状态位集合（docs/lua/engine/overrideKey.txt）。
-pub(super) const OVERRIDE_IS_PUSH: u32 = 2;
-pub(super) const OVERRIDE_IS_DOWN: u32 = 4;
-pub(super) const OVERRIDE_IS_DOWN_EDGE: u32 = 8;
-pub(super) const OVERRIDE_IS_UP_EDGE: u32 = 16;
-pub(super) const OVERRIDE_IS_DECIDE: u32 = 32;
+pub(super) use crate::host::input::{
+    OVERRIDE_IS_DECIDE, OVERRIDE_IS_DOWN, OVERRIDE_IS_DOWN_EDGE, OVERRIDE_IS_PUSH,
+    OVERRIDE_IS_UP_EDGE,
+};
 
 /// isPush 的按键重复阈值：按下 0.5s 后转为持续 true（docs/lua/engine/isPush.txt）。
 const PUSH_REPEAT_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
