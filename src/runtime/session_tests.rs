@@ -29,7 +29,15 @@ impl ResourceProvider for Assets {
 
 // The session tests execute logic only. Unexpected GPU work fails immediately.
 #[derive(Default)]
-struct LogicRenderer(MockProvider);
+struct LogicRenderer(MockProvider, Option<RenderTrace>);
+
+#[derive(Default)]
+struct RenderTrace {
+    uploads: Vec<(TextureId, Vec<u8>)>,
+    retired: Vec<TextureId>,
+    draws: Vec<DrawList>,
+    fail_upload_at: Option<usize>,
+}
 
 impl TextureProvider for LogicRenderer {
     fn resolve(&mut self, name: &str) -> Option<(TextureId, TextureInfo)> {
@@ -73,15 +81,29 @@ impl GpuBackend for LogicRenderer {
         let TextureData::Rgba8(bytes) = data else {
             panic!("unexpected texture format")
         };
-        Ok(self
+        if let Some(trace) = self.1.as_mut()
+            && trace.fail_upload_at == Some(trace.uploads.len())
+        {
+            trace.fail_upload_at = None;
+            return Err("test upload failure".into());
+        }
+        let texture = self
             .upload_rgba(name, desc.extent.width, desc.extent.height, bytes)
             .unwrap()
-            .0)
+            .0;
+        if let Some(trace) = self.1.as_mut() {
+            trace.uploads.push((texture, bytes.to_vec()));
+        }
+        Ok(texture)
     }
     fn update_texture(&mut self, _: TextureId, _: TextureUpdate<'_>) -> Result<(), String> {
         panic!("unexpected GPU update")
     }
-    fn destroy_texture(&mut self, _: TextureId) {}
+    fn destroy_texture(&mut self, texture: TextureId) {
+        if let Some(trace) = self.1.as_mut() {
+            trace.retired.push(texture);
+        }
+    }
     fn create_render_target(
         &mut self,
         _: &str,
@@ -108,8 +130,13 @@ impl GpuBackend for LogicRenderer {
     fn readback(&mut self, _: FrameTarget, _: Extent2D, _: &mut [u8]) -> Result<usize, String> {
         panic!("unexpected readback")
     }
-    fn render(&mut self, _: &DrawList) -> RenderRegion {
-        panic!("unexpected render")
+    fn render(&mut self, draw: &DrawList) -> RenderRegion {
+        self.1
+            .as_mut()
+            .expect("unexpected render")
+            .draws
+            .push(draw.clone());
+        RenderRegion::Full
     }
     fn render_damage(&mut self, _: &DrawList, _: [f32; 4]) -> RenderRegion {
         panic!("unexpected render")
@@ -156,6 +183,115 @@ impl GpuBackend for LogicRenderer {
     fn take_profile_stats(&mut self) -> GpuProfileStats {
         GpuProfileStats::default()
     }
+}
+
+#[test]
+fn host_sprite_renderer_reuses_uploads_and_rolls_back_failed_frames() {
+    use crate::host::frame::{
+        FramePublisher, FrameSnapshot, FrameSprite, FrameTexture, SpriteBlend,
+    };
+    use crate::host::renderer::SpriteRenderer;
+    use crate::host::runtime::RuntimeHandle;
+    use crate::render_pipeline::draw::BlendMode;
+
+    let texture = |revision, rgba: [u8; 4]| {
+        Arc::new(FrameTexture {
+            revision,
+            width: 1,
+            height: 1,
+            rgba: Box::new(rgba),
+        })
+    };
+    let sprite = |layer_id: &str, texture, mask| FrameSprite {
+        layer_id: layer_id.to_owned(),
+        texture,
+        mask,
+        transform: [1.0, 0.0, 0.0, 1.0, 8.0, 15.0],
+        quad_size: [1.0, 1.0],
+        uv_offset: [0.0, 0.0],
+        uv_scale: [1.0, 1.0],
+        clip_bounds: Some([5.0, 5.0, 10.0, 10.0]),
+        opacity: 0.75,
+        color_multiply: [1.0, 0.9, 0.8],
+        grayscale: false,
+        negative: false,
+        blend: SpriteBlend::Add,
+    };
+    let snapshot =
+        |epoch, sprites: Vec<FrameSprite>, textures: Vec<Arc<FrameTexture>>| FrameSnapshot {
+            session_epoch: epoch,
+            render_frame_id: 0,
+            host_frame_id: 1,
+            stage_size: [64, 48],
+            sprites: sprites.into_boxed_slice(),
+            textures: textures.into_boxed_slice(),
+        };
+    let original = texture(1, [40, 25, 27, 192]);
+    let mask = texture(2, [96, 96, 96, 255]);
+    let mut frames = FramePublisher::default();
+    let runtime = RuntimeHandle::from_raw(9);
+    frames
+        .publish(snapshot(
+            1,
+            vec![sprite("1.80", 0, Some(1))],
+            vec![original.clone(), mask],
+        ))
+        .unwrap();
+    let first = frames.acquire(runtime, 0).unwrap().unwrap();
+
+    let mut renderer = SpriteRenderer::new(LogicRenderer(
+        MockProvider::default(),
+        Some(RenderTrace::default()),
+    ));
+    renderer.render(&first).unwrap();
+    renderer.render(&first).unwrap();
+    let trace = renderer.backend_mut().1.as_mut().unwrap();
+    assert_eq!(trace.uploads.len(), 1);
+    let (first_texture, pixels) = &trace.uploads[0];
+    let first_texture = *first_texture;
+    assert_eq!(pixels.as_slice(), [40, 25, 27, 72]);
+    let draw = trace.draws.last().unwrap();
+    assert_eq!(draw.command_key(0).unwrap().layer_id, "1.80");
+    assert_eq!(draw.commands[0].texture, first_texture);
+    assert_eq!(
+        draw.commands[0].transform.translation.to_array(),
+        [8.0, 15.0]
+    );
+    assert_eq!(draw.commands[0].blend, BlendMode::Add);
+    assert_eq!(draw.commands[0].clip_bounds, Some([5.0, 5.0, 10.0, 10.0]));
+    trace.fail_upload_at = Some(2);
+
+    frames
+        .publish(snapshot(
+            2,
+            vec![sprite("0", 0, None), sprite("1.80", 1, None)],
+            vec![
+                texture(1, [99, 99, 19, 255]),
+                texture(2, [255, 255, 255, 255]),
+            ],
+        ))
+        .unwrap();
+    let second = frames
+        .acquire(runtime, first.render_frame_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(renderer.render(&second).unwrap_err(), "test upload failure");
+    let trace = renderer.backend_mut().1.as_ref().unwrap();
+    assert_eq!(trace.retired, [trace.uploads[1].0]);
+    assert_eq!(trace.draws.len(), 2);
+
+    renderer.render(&first).unwrap();
+    assert_eq!(renderer.backend_mut().1.as_ref().unwrap().uploads.len(), 2);
+    renderer.render(&second).unwrap();
+    let trace = renderer.backend_mut().1.as_ref().unwrap();
+    assert_eq!(trace.uploads.len(), 4);
+    assert_eq!(trace.uploads[2].1.as_slice(), [99, 99, 19, 255]);
+    assert!(trace.retired.contains(&first_texture));
+    let draw = trace.draws.last().unwrap();
+    assert_eq!(draw.command_key(0).unwrap().layer_id, "0");
+    assert_eq!(draw.command_key(1).unwrap().layer_id, "1.80");
+    renderer.clear_cached_textures();
+    assert_eq!(renderer.backend_mut().1.as_ref().unwrap().retired.len(), 4);
 }
 
 const INI: &str = "[WINDOWS]\nWIDTH=64\nHEIGHT=64\nBOOT=boot.ast\nCHARSET=UTF-8\n";

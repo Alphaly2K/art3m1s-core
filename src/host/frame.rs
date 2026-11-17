@@ -1,6 +1,7 @@
 //! Draft CPU frame view for the Artemis Host renderer.
 
 use super::protocol::ProtocolError;
+use super::runtime::RuntimeHandle;
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -85,11 +86,16 @@ impl FrameSnapshot {
 
 #[derive(Debug)]
 pub struct FrameLease {
+    runtime: RuntimeHandle,
     frame: Arc<PublishedFrame>,
     _lease: Arc<()>,
 }
 
 impl FrameLease {
+    pub fn runtime(&self) -> RuntimeHandle {
+        self.runtime
+    }
+
     /// Versioned drawing commands and texture descriptors; pixel bytes are borrowed separately.
     pub fn packet(&self) -> &[u8] {
         &self.frame.packet
@@ -156,7 +162,11 @@ impl FramePublisher {
         Ok(())
     }
 
-    pub fn acquire(&self, after: u64) -> Result<Option<FrameLease>, ProtocolError> {
+    pub fn acquire(
+        &self,
+        runtime: RuntimeHandle,
+        after: u64,
+    ) -> Result<Option<FrameLease>, ProtocolError> {
         let Some(frame) = self
             .latest
             .as_ref()
@@ -168,6 +178,7 @@ impl FramePublisher {
             return Err(ProtocolError::WouldBlock);
         }
         Ok(Some(FrameLease {
+            runtime,
             frame: frame.clone(),
             _lease: self.leases.clone(),
         }))

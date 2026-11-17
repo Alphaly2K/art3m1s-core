@@ -349,6 +349,10 @@ C 草案的 `texture_rgba` 也使用帧内索引，像素和帧描述一起由�
 Host 解析时应先校验版本、总长度、各段计数与记录边界，确认纹理索引和像素长度有效后再绘制。
 C 帧接口仍为草案，未发布新的动态符号。
 
+Rust Host 可使用 `host::renderer::SpriteRenderer` 在已开启的目标上绘制基础帧。适配器使用
+同一帧借用的类型化视图，维护会话和资源版本对应的后端纹理。Host 控制 backend 的访问、
+目标、帧开始与结束及呈现；新设备可以用仍有效的帧借用重新上传。
+
 `acquire_latest(after_render_frame_id)` 返回不可变快照和 lease token；无新帧为 NO_DATA。
 快照及所有引用的 CPU 资源版本在 release 前跨 step/reload 保持有效；默认至多两个
 外借 lease，超过返回 WOULD_BLOCK。CPU 不可变块可以共享，不能每帧复制整个资源库。

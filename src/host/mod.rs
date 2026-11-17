@@ -7,6 +7,7 @@ pub(crate) mod logging;
 pub mod media;
 pub mod protocol;
 mod provider;
+pub mod renderer;
 pub mod runtime;
 pub mod script_io;
 mod session;

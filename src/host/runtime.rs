@@ -213,7 +213,9 @@ pub fn acquire_latest(
     handle: RuntimeHandle,
     after: u64,
 ) -> Result<Option<FrameLease>, RuntimeError> {
-    with_session(handle, |session| Ok(session.frames.acquire(after)?))
+    with_session(handle, |session| {
+        Ok(session.frames.acquire(handle, after)?)
+    })
 }
 
 pub fn poll_events(handle: RuntimeHandle, output: &mut [u8]) -> Result<PollResult, RuntimeError> {
