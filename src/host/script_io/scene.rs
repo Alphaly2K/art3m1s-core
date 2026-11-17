@@ -13,6 +13,7 @@ mod edit;
 mod emote;
 mod frames;
 mod pointer;
+mod shader;
 mod text;
 pub(super) use text::FontRead;
 
@@ -31,6 +32,7 @@ impl ScriptIoSession {
         let scene = SceneCallbacks(Arc::new(Mutex::new(SceneProjection {
             dirty: true,
             emote_enabled: self.emote_enabled,
+            shaders_enabled: self.shaders_enabled,
             ..Default::default()
         })));
         let reduced_scene = scene.0.clone();
@@ -38,6 +40,7 @@ impl ScriptIoSession {
             scene: scene.0.clone(),
             pending: None,
             pending_font: None,
+            pending_shader: None,
             clock_origin_ns: None,
             clock_base_ms: 0,
             tween_handlers: Vec::new(),
@@ -166,6 +169,8 @@ struct SceneProjection {
     text: text::SceneText,
     emote: emote::SceneEmote,
     emote_enabled: bool,
+    shaders: shader::SceneShaders,
+    shaders_enabled: bool,
     dirty: bool,
     group_sync_layers: Vec<String>,
 }
@@ -191,23 +196,40 @@ impl SceneProjection {
     fn missing_assets<'a>(&'a self, event: &'a Event) -> impl Iterator<Item = &'a str> {
         let files = match event {
             Event::Layer(LayerEvent::Create { file, .. } | LayerEvent::Create2 { file, .. }) => {
-                [Some(file.as_str()), None]
+                [Some(file.as_str()), None, None]
             }
             Event::Layer(LayerEvent::SetProperties { id, properties }) => {
                 let shader = properties
                     .get("shader")
                     .map(String::as_str)
                     .or_else(|| self.compositor.scene().get(id)?.props.shader.as_deref());
-                let mask = shader
-                    .is_none_or(str::is_empty)
-                    .then(|| properties.get("mask").map(String::as_str))
-                    .flatten();
+                let custom = shader.is_some_and(|name| !name.is_empty());
+                let layer = self.compositor.scene().get(id);
+                let binding = |name: &str| {
+                    let value = properties
+                        .get(name)
+                        .or_else(|| layer?.props.custom.get(name))?;
+                    Some(
+                        self.compositor
+                            .scene()
+                            .get(value)
+                            .and_then(|layer| layer.file.as_deref())
+                            .unwrap_or(value.as_str()),
+                    )
+                };
+                let mask = if custom {
+                    self.shaders_enabled.then(|| binding("mask")).flatten()
+                } else {
+                    properties.get("mask").map(String::as_str)
+                };
                 [
                     mask,
                     properties
                         .get("intermediate_render_mask")
-                        .map(String::as_str)
-                        .filter(|file| Some(*file) != mask),
+                        .map(String::as_str),
+                    (custom && self.shaders_enabled)
+                        .then(|| binding("textureUser"))
+                        .flatten(),
                 ]
             }
             Event::Anime {
@@ -216,9 +238,10 @@ impl SceneProjection {
                 file.as_deref(),
                 mask.as_deref()
                     .filter(|mask| Some(*mask) != file.as_deref()),
+                None,
             ],
-            Event::LayerEdit { mode, file, .. } if mode == "blend" => [file.as_deref(), None],
-            _ => [None, None],
+            Event::LayerEdit { mode, file, .. } if mode == "blend" => [file.as_deref(), None, None],
+            _ => [None, None, None],
         };
         files
             .into_iter()
@@ -253,6 +276,7 @@ pub(super) struct SceneIo {
     scene: Arc<Mutex<SceneProjection>>,
     pending: Option<PendingAsset>,
     pending_font: Option<(Event, FontRead)>,
+    pending_shader: Option<String>,
     clock_origin_ns: Option<u64>,
     clock_base_ms: u64,
     tween_handlers: Vec<TweenHandler>,
@@ -262,7 +286,7 @@ pub(super) struct SceneIo {
 struct PendingAsset {
     event: Event,
     read: TextureRead,
-    remaining: Option<String>,
+    remaining: VecDeque<String>,
 }
 
 pub(super) enum AssetProgress {
@@ -486,7 +510,7 @@ impl SceneIo {
             self.pending = Some(PendingAsset {
                 event: event.clone(),
                 read,
-                remaining: None,
+                remaining: VecDeque::new(),
             });
             return Some(request);
         }
@@ -494,10 +518,16 @@ impl SceneIo {
         let mut files = scene.missing_assets(event);
         let file = files.next()?;
         let (read, request) = TextureRead::start(file.to_owned());
+        let mut remaining = VecDeque::new();
+        for candidate in files {
+            if candidate != file && !remaining.iter().any(|queued| queued == candidate) {
+                remaining.push_back(candidate.to_owned());
+            }
+        }
         self.pending = Some(PendingAsset {
             event: event.clone(),
             read,
-            remaining: files.next().map(str::to_owned),
+            remaining,
         });
         Some(request)
     }
@@ -515,7 +545,7 @@ impl SceneIo {
             self.pending = Some(pending);
             return AssetProgress::More(request);
         }
-        if !cancelled && let Some(file) = pending.remaining.take() {
+        if !cancelled && let Some(file) = pending.remaining.pop_front() {
             let (read, request) = TextureRead::start(file);
             pending.read = read;
             self.pending = Some(pending);

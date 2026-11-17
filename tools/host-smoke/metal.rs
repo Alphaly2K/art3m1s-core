@@ -16,7 +16,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 [calllua function=create]
 [flip]
 [lydel id=group]
-[lyc id=blue width=4 height=4 color=ff0000ff]
+[lyshader id=solid file=solid.hlsl]
+[lyc id=blue width=4 height=4 color=ffffffff]
+[lyprop id=blue shader=solid shaderconstant=tint tint="0,0,1"]
 [trans type=1 time=100 input=0]
 [stop]
 [lua]
@@ -27,6 +29,13 @@ end
 [/lua]
 "#;
     let model = include_bytes!("../../src/host/script_io/fixtures/emote-red.psb");
+    let source = br#"
+float3 tint;
+float alpha;
+void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
+    result = float4(tint, alpha);
+}
+"#;
     let handle = runtime::create(0, TransportLimits::default(), 4096)?;
     runtime::open_project(
         handle,
@@ -45,64 +54,70 @@ end
             },
         )
     };
-    for turn in 0..32 {
-        match step(1, 0)? {
-            ScriptIoProgress::Event => break,
-            ScriptIoProgress::Waiting => {}
-            progress => panic!("unexpected boot progress: {progress:?}"),
-        }
-        assert!(turn < 31, "Host did not finish booting");
-        let mut bytes = [0; 4096];
-        let poll = runtime::poll_events(handle, &mut bytes)?;
-        let mut remaining = &bytes[..poll.written_bytes];
-        while !remaining.is_empty() {
-            let u32_at = |i| u32::from_le_bytes(remaining[i..i + 4].try_into().unwrap());
-            let u64_at = |i| u64::from_le_bytes(remaining[i..i + 8].try_into().unwrap());
-            let length = u32_at(0) as usize;
-            let request_id = u64_at(40);
-            if request_id != 0 {
-                assert_eq!(
-                    u16::from_le_bytes([remaining[6], remaining[7]]),
-                    Domain::Io as u16
-                );
-                let service = MessageKind {
-                    domain: Domain::Io,
-                    kind: u32_at(8),
-                };
-                let args: Value = serde_json::from_slice(&remaining[64..64 + u32_at(56) as usize])?;
-                let bytes = match args["key"].as_str() {
-                    Some("boot.iet") => Some(boot.as_slice()),
-                    Some("red.psb") => Some(model.as_slice()),
-                    _ => None,
-                };
-                let (metadata, blob) = match (service, bytes) {
-                    (IO_STAT, Some(bytes)) => (
-                        json!({"status":"ok","found":true,"size":bytes.len().to_string(),"revision":"1"}),
-                        Vec::new(),
-                    ),
-                    (IO_STAT, None) => (json!({"status":"ok","found":false}), Vec::new()),
-                    (IO_READ, Some(bytes)) => (
-                        json!({"status":"ok","revision":"1","eof":true}),
-                        bytes.to_vec(),
-                    ),
-                    _ => panic!("unexpected service: {service:?}"),
-                };
-                runtime::submit_replies(
-                    handle,
-                    &[HostReply {
-                        identity: RequestIdentity {
-                            runtime: handle.as_raw(),
-                            epoch: u64_at(24),
-                            request_id,
-                            service,
-                        },
-                        body: MessageBody::new(metadata.to_string(), blob)?,
-                    }],
-                )?;
+    let service_until_event = |id, ms| -> Result<(), Box<dyn std::error::Error>> {
+        for turn in 0..32 {
+            match step(id, ms)? {
+                ScriptIoProgress::Event => break,
+                ScriptIoProgress::Waiting => {}
+                progress => panic!("unexpected boot progress: {progress:?}"),
             }
-            remaining = &remaining[length..];
+            assert!(turn < 31, "Host did not finish booting");
+            let mut bytes = [0; 4096];
+            let poll = runtime::poll_events(handle, &mut bytes)?;
+            let mut remaining = &bytes[..poll.written_bytes];
+            while !remaining.is_empty() {
+                let u32_at = |i| u32::from_le_bytes(remaining[i..i + 4].try_into().unwrap());
+                let u64_at = |i| u64::from_le_bytes(remaining[i..i + 8].try_into().unwrap());
+                let length = u32_at(0) as usize;
+                let request_id = u64_at(40);
+                if request_id != 0 {
+                    assert_eq!(
+                        u16::from_le_bytes([remaining[6], remaining[7]]),
+                        Domain::Io as u16
+                    );
+                    let service = MessageKind {
+                        domain: Domain::Io,
+                        kind: u32_at(8),
+                    };
+                    let args: Value =
+                        serde_json::from_slice(&remaining[64..64 + u32_at(56) as usize])?;
+                    let bytes = match args["key"].as_str() {
+                        Some("boot.iet") => Some(boot.as_slice()),
+                        Some("red.psb") => Some(model.as_slice()),
+                        Some("solid.hlsl") => Some(source.as_slice()),
+                        _ => None,
+                    };
+                    let (metadata, blob) = match (service, bytes) {
+                        (IO_STAT, Some(bytes)) => (
+                            json!({"status":"ok","found":true,"size":bytes.len().to_string(),"revision":"1"}),
+                            Vec::new(),
+                        ),
+                        (IO_STAT, None) => (json!({"status":"ok","found":false}), Vec::new()),
+                        (IO_READ, Some(bytes)) => (
+                            json!({"status":"ok","revision":"1","eof":true}),
+                            bytes.to_vec(),
+                        ),
+                        _ => panic!("unexpected service: {service:?}"),
+                    };
+                    runtime::submit_replies(
+                        handle,
+                        &[HostReply {
+                            identity: RequestIdentity {
+                                runtime: handle.as_raw(),
+                                epoch: u64_at(24),
+                                request_id,
+                                service,
+                            },
+                            body: MessageBody::new(metadata.to_string(), blob)?,
+                        }],
+                    )?;
+                }
+                remaining = &remaining[length..];
+            }
         }
-    }
+        Ok(())
+    };
+    service_until_event(1, 0)?;
 
     let mut renderer = SpriteRenderer::new(MetalBackend::new(4, 4)?);
     let mut check = |frame: &FrameLease, expected: [u8; 4]| -> Result<(), String> {
@@ -135,15 +150,16 @@ end
         (3, 60, [64, 0, 128, 255]),
         (4, 110, [0, 0, 255, 255]),
     ] {
-        assert_eq!(step(id, ms)?, ScriptIoProgress::Event);
+        service_until_event(id, ms)?;
         let frame = runtime::acquire_latest(handle, 0)?.expect("transition frame");
         check(&frame, expected)?;
     }
     renderer.backend_mut().begin_access();
     renderer.clear_cached_textures();
+    renderer.clear_cached_shaders();
     renderer.backend_mut().end_access();
     runtime::destroy(handle)?;
-    println!("Artemis v2 Metal pixels passed (E-Mote, group and transition)");
+    println!("Artemis v2 Metal pixels passed (E-Mote, group, transition and HLSL)");
     Ok(())
 }
 

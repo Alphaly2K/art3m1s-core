@@ -266,6 +266,7 @@ pub struct ScriptIoSession {
     pub(super) screenshots_enabled: bool,
     pub(super) groups_enabled: bool,
     pub(super) emote_enabled: bool,
+    pub(super) shaders_enabled: bool,
     screenshot: screenshot::Screenshot,
     scene: Option<scene::SceneIo>,
     pub(super) frames: super::frame::FramePublisher,
@@ -320,6 +321,7 @@ impl ScriptIoSession {
             screenshots_enabled: true,
             groups_enabled: true,
             emote_enabled: true,
+            shaders_enabled: true,
             screenshot: Default::default(),
             scene: None,
             frames: Default::default(),
@@ -910,6 +912,12 @@ impl ScriptIoSession {
         mut response: Option<IoResponse>,
     ) -> Result<ScenarioStep, ScriptIoError> {
         if let Some(scene) = self.scene.as_mut()
+            && scene.shader_pending()
+        {
+            scene.complete_shader(response.take().ok_or(ProtocolError::State)?);
+            self.interpreter.advance_line();
+        }
+        if let Some(scene) = self.scene.as_mut()
             && scene.font_pending()
         {
             if let Some(request) =
@@ -1014,6 +1022,17 @@ impl ScriptIoSession {
         match self.interpreter.step()? {
             ExecutionResult::HostIoPending => self.interpreter_request(),
             ExecutionResult::Wait(event) => {
+                if let Event::ShaderLoad { id, file } = &event
+                    && let Some(scene) = self.scene.as_mut()
+                {
+                    if self.shaders_enabled
+                        && let Some(request) = scene.prepare_shader(id, file)
+                    {
+                        return Ok(ScenarioStep::Request(request));
+                    }
+                    self.interpreter.advance_line();
+                    return Ok(ScenarioStep::Continue);
+                }
                 let load_asset = !matches!(event, Event::Trans { .. })
                     || (self.transitions_enabled && self.frames.latest_id().is_some());
                 if let Some(scene) = self.scene.as_mut()

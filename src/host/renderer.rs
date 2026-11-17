@@ -1,6 +1,8 @@
 //! Host-owned rendering adapter for draft Artemis sprite frames.
 
-use super::frame::{FrameGroup, FrameLease, FrameSprite, FrameTexture, SpriteBlend};
+use super::frame::{
+    FrameGroup, FrameLease, FrameShaderEffect, FrameSprite, FrameTexture, SpriteBlend,
+};
 use super::runtime::RuntimeHandle;
 use art3m1s_render::backend::{FrameCapture, GpuBackend, RenderRegion, TextureData, TextureDesc};
 use art3m1s_render::draw::{
@@ -24,6 +26,7 @@ struct TextureKey {
 pub struct SpriteRenderer<B> {
     backend: B,
     textures: HashMap<TextureKey, TextureId>,
+    shaders: HashMap<(RuntimeHandle, u64, u64), Option<String>>,
 }
 
 impl<B: GpuBackend> SpriteRenderer<B> {
@@ -31,6 +34,7 @@ impl<B: GpuBackend> SpriteRenderer<B> {
         Self {
             backend,
             textures: HashMap::new(),
+            shaders: HashMap::new(),
         }
     }
 
@@ -51,6 +55,7 @@ impl<B: GpuBackend> SpriteRenderer<B> {
         frame: &FrameLease,
         clear_color: [f32; 4],
     ) -> Result<RenderRegion, String> {
+        let shaders = self.prepare_shaders(frame);
         let mut live = HashSet::new();
         let mut uploaded = Vec::new();
         let mut upload = |image: &FrameTexture, mask: Option<&FrameTexture>| {
@@ -87,6 +92,7 @@ impl<B: GpuBackend> SpriteRenderer<B> {
                 &frame.sprites,
                 &frame.groups,
                 &frame.masks,
+                &shaders,
                 &mut upload,
             )?;
             let source = frame
@@ -98,6 +104,7 @@ impl<B: GpuBackend> SpriteRenderer<B> {
                         &transition.source,
                         &transition.source_groups,
                         &transition.source_masks,
+                        &shaders,
                         &mut upload,
                     )?;
                     let shader = transition
@@ -157,6 +164,61 @@ impl<B: GpuBackend> SpriteRenderer<B> {
                 Err(error)
             }
         }
+    }
+
+    fn prepare_shaders(&mut self, frame: &FrameLease) -> HashMap<u64, String> {
+        let mut live = HashSet::new();
+        let mut names = HashMap::new();
+        let mut prepare = |effect: &FrameShaderEffect| {
+            let revision = effect.shader.revision;
+            let key = (frame.runtime(), frame.session_epoch, revision);
+            if !live.insert(key) {
+                return;
+            }
+            let name = self.shaders.entry(key).or_insert_with(|| {
+                let name = format!("artemis-hlsl-{:016x}-{}-{revision}", key.0.as_raw(), key.1);
+                match self
+                    .backend
+                    .register_hlsl_shader(&name, &effect.shader.source)
+                {
+                    Ok(_) => Some(name),
+                    Err(error) => {
+                        crate::core_warn!(
+                            "HLSL shader revision {revision} could not compile: {error}"
+                        );
+                        None
+                    }
+                }
+            });
+            if let Some(name) = name {
+                names.insert(revision, name.clone());
+            }
+        };
+        let scene = |sprites: &[FrameSprite],
+                     groups: &[FrameGroup],
+                     prepare: &mut dyn FnMut(&FrameShaderEffect)| {
+            for effect in sprites
+                .iter()
+                .filter_map(|sprite| sprite.shader.as_ref())
+                .chain(groups.iter().filter_map(|group| group.shader.as_ref()))
+            {
+                prepare(effect);
+            }
+        };
+        scene(&frame.sprites, &frame.groups, &mut prepare);
+        if let Some(old) = &frame.transition {
+            scene(&old.source, &old.source_groups, &mut prepare);
+        }
+        self.shaders.retain(|key, name| {
+            if live.contains(key) {
+                return true;
+            }
+            if let Some(name) = name {
+                self.backend.unregister_shader(name);
+            }
+            false
+        });
+        names
     }
 
     fn render_transition(
@@ -231,6 +293,13 @@ impl<B: GpuBackend> SpriteRenderer<B> {
             self.backend.destroy_texture(texture);
         }
     }
+
+    /// Release compiled programs owned by this adapter.
+    pub fn clear_cached_shaders(&mut self) {
+        for name in self.shaders.drain().filter_map(|(_, name)| name) {
+            self.backend.unregister_shader(&name);
+        }
+    }
 }
 
 fn masked_pixels<'a>(
@@ -259,6 +328,7 @@ fn prepare_draw_list(
     sprites: &[FrameSprite],
     groups: &[FrameGroup],
     masks: &[FrameSprite],
+    shaders: &HashMap<u64, String>,
     mut texture: impl FnMut(&FrameTexture, Option<&FrameTexture>) -> Result<TextureId, String>,
 ) -> Result<DrawList, String> {
     let mut draw = DrawList::new();
@@ -299,7 +369,12 @@ fn prepare_draw_list(
                 quad_size: sprite.quad_size,
             },
             clip_bounds: sprite.clip_bounds,
-            shader: None,
+            shader: sprite
+                .shader
+                .as_ref()
+                .map(|effect| resolved_effect(frame, effect, shaders, &mut texture))
+                .transpose()?
+                .flatten(),
             mesh: sprite.mesh.clone().map(|vertices| DrawMesh { vertices }),
             stencil: None,
             native_emote: sprite.emote_material.clone(),
@@ -318,6 +393,19 @@ fn prepare_draw_list(
         .map(&mut draw_sprite)
         .collect::<Result<_, _>>()?;
     for group in groups {
+        if let Some(effect) = &group.shader {
+            if let Some(effect) = resolved_effect(frame, effect, shaders, &mut texture)? {
+                draw.push_shader_group(ShaderGroup {
+                    key: None,
+                    start: group.sprites.start,
+                    end: group.sprites.end,
+                    effect,
+                    clip_bounds: group.clip_bounds,
+                    mask_range: None,
+                });
+            }
+            continue;
+        }
         if let Some(stencil) = &group.stencil {
             draw.push_shader_group(ShaderGroup {
                 key: None,
@@ -371,4 +459,23 @@ fn prepare_draw_list(
         });
     }
     Ok(draw)
+}
+
+fn resolved_effect(
+    frame: &FrameLease,
+    effect: &FrameShaderEffect,
+    shaders: &HashMap<u64, String>,
+    texture: &mut impl FnMut(&FrameTexture, Option<&FrameTexture>) -> Result<TextureId, String>,
+) -> Result<Option<ShaderEffect>, String> {
+    let Some(name) = shaders.get(&effect.shader.revision) else {
+        return Ok(None);
+    };
+    let mut resolve =
+        |index: usize| texture(frame.texture(index).ok_or("invalid shader texture")?, None);
+    Ok(Some(ShaderEffect {
+        name: name.clone(),
+        uniforms: effect.uniforms.clone(),
+        mask_texture: effect.mask.map(&mut resolve).transpose()?,
+        user_texture: effect.user.map(&mut resolve).transpose()?,
+    }))
 }

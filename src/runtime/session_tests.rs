@@ -218,6 +218,7 @@ fn host_sprite_renderer_reuses_uploads_and_rolls_back_failed_frames() {
         blend: SpriteBlend::Add,
         mesh: None,
         emote_material: None,
+        shader: None,
     };
     let snapshot =
         |epoch, sprites: Vec<FrameSprite>, textures: Vec<Arc<FrameTexture>>| FrameSnapshot {
@@ -336,6 +337,7 @@ fn host_sprite_renderer_preserves_emote_mesh_material_and_stencil() {
         blend: SpriteBlend::EmoteAdd,
         mesh: Some(vertices.clone()),
         emote_material: Some(material.clone()),
+        shader: None,
     };
     let mask = FrameSprite {
         layer_id: String::new(),
@@ -354,6 +356,7 @@ fn host_sprite_renderer_preserves_emote_mesh_material_and_stencil() {
             groups: Box::new([FrameGroup {
                 sprites: 0..1,
                 stencil: Some(0..1),
+                shader: None,
                 mask: None,
                 clip_bounds: None,
                 opacity: 1.0,

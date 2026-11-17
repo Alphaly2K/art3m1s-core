@@ -199,7 +199,7 @@ C 预览版 `ArtMessage.schema_version=1`、`flags=0`。一个批次可包含一
 | Media (5) | 17 | `playback_id`、`frame_id`、`width`、`height`；blob 为 RGBA8 |
 
 `ArtCreateInfo` 的 Host 能力位分别为 IO=1、UI=2、Media=4。Renderer 位分别为 sprite=1、
-transition=2、screenshot=4、group=8、emote=16。
+transition=2、screenshot=4、group=8、emote=16、HLSL=32。
 预览版检查未知位；Host 仍须处理收到的服务请求，缺少可选服务时返回相应失败。
 
 `poll_events` 按以下固定小端格式写入完整记录，不直接 memcpy C struct：
@@ -373,8 +373,8 @@ Rust 草案先提供 `acquire_latest(handle, after)`，可借用基础图层快�
 给出纹理表索引、原始图层 ID、仿射变换、UV、舞台裁剪、颜色、透明度和混合方式。纹理是
 紧密排列的 RGBA8，直通 alpha，首行在顶端；资源缓存键为 `(runtime, epoch, revision)`。
 同尺寸蒙版用独立纹理索引表示：采样前逐像素以 `alpha * mask_red / 255` 取整得到新 alpha。
-缺失或尺寸不符的蒙版回退为原图。帧支持精灵、转场、内置组效果和 E-Mote；自定义 shader
-尚未接入。Rust 借用随 `FrameLease` 释放。
+缺失或尺寸不符的蒙版回退为原图。帧支持精灵、转场、内置组效果、E-Mote 和 HLSL 效果。
+Rust 借用随 `FrameLease` 释放。
 
 `FrameLease::packet()` 返回 `ARFP` 草案版 1 的二进制描述；`texture(index)` 借用对应像素。
 C 草案的 `texture_rgba` 也使用帧内索引，像素和帧描述一起由同一个 token 保活。
@@ -390,6 +390,8 @@ C 草案的 `texture_rgba` 也使用帧内索引，像素和帧描述一起由�
 | 合成组记录，56 字节 | 记录总长度 `u32`（56）；opcode `u16`（3 = 合成组）；flags `u16`；精灵起点、结束点、蒙版索引、混合方式各 `u32`；opacity `f32`，RGB 乘色 3 个 `f32`，裁剪 4 个 `f32` |
 | 扩展精灵记录 | 与精灵记录共用 104 字节前缀和 UTF-8 图层 ID，opcode `u16`（4）；图层 ID 后依次为顶点数 `u32`、可选材质、顶点数据 |
 | Stencil 组记录，40 字节 | 记录总长度 `u32`（40）；opcode `u16`（5）；flags `u16`；精灵起点、结束点、遮罩起点、结束点各 `u32`；裁剪 4 个 `f32` |
+| HLSL 源码记录 | 记录总长度 `u32`；opcode `u16`（6）；flags `u16`（0）；源码 revision `u64`；原始 HLSL 字节（记录长度减 16） |
+| HLSL 效果记录 | 记录总长度 `u32`；opcode `u16`（7）；flags `u16`；源码 revision `u64`；精灵起点、结束点、蒙版索引、用户纹理索引、常量数各 `u32`；裁剪 4 个 `f32`；随后依次读取指定数量的常量 |
 
 索引从 0 开始；无蒙版用 `UINT32_MAX`。混合方式按 Alpha、Add、Screen、Multiply
 依次编号 0 至 3。flags 的低三位依次表示裁剪、灰阶和反色，其余写零。裁剪为舞台上的
@@ -427,6 +429,17 @@ flags 仅使用 `1`（有裁剪）和 `16`（属于转场旧场景）。Host 用
 C Host 声明 `ART_RENDERER_CAP_EMOTE` 后，Core 按 Host 的单调时间求值，并为一份带内嵌
 DXT5 的 PSB 提交资源读取。Host 通过帧内 CPU 图集、材质、网格和 stencil 指令绘制模型；
 不需要解析 PSB。未声明时，Luau 的模型创建调用返回错误。
+
+HLSL 源码记录在普通和遮罩精灵之后，每个源码 revision 只出现一次。随后是绑定单一精灵的
+效果记录，再按每个场景的组顺序写入组效果、合成组及 stencil 组。HLSL 效果 flags 的位值
+`1` 表示有裁剪，`2` 表示离屏组效果，`16` 表示属于转场旧场景。起点包含、结束点排除；单一
+精灵效果的区间长度为 1。缺省纹理索引使用 `UINT32_MAX`。常量依次为名称长度 `u16`、值数
+`u16`、UTF-8 名称字节和对应数量的 `f32`，没有终止符或填充。
+
+C Host 通过 `ART_RENDERER_CAP_HLSL` 启用 `[lyshader]` 读取和 HLSL 记录。Host 以
+`(runtime, epoch, shader_revision)` 缓存平台程序，按本帧效果绑定纹理和常量。源码和效果
+随帧借用；重载不会修改旧帧的源码。源码缺失或编译失败时直接绘制精灵，组内已有的其他效果
+继续执行。着色器语言的约定见 [Runtime Shader ABI](SHADER_ABI.md)。
 
 Rust Host 可使用 `host::renderer::SpriteRenderer` 在已开启的目标上绘制基础帧。适配器使用
 同一帧借用的类型化视图，维护会话和资源版本对应的后端纹理。Host 控制 backend 的访问、

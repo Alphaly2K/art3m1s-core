@@ -1,7 +1,8 @@
 # Runtime Shader ABI
 
 Art3m1s runtime effects use a backend-neutral fragment shader ABI. The host
-registers an Artemis-style HLSL source with a logical name; the core normalizes
+registers an Artemis-style HLSL source with a logical name. In v2 the core
+provides source and bindings in the frame packet. The Host renderer normalizes
 legacy names, compiles the supported fragment subset to SPIR-V, reflects its
 resources, and produces the backend artifact:
 
@@ -44,7 +45,7 @@ Legacy aliases remain available: `alpha`, `colorMultiply`, `samplerFore`,
 
 ## Registration and reload
 
-The C ABI exposes:
+The legacy native runtime exposes shader registration through:
 
 - `art3m1s_runtime_register_hlsl_shader`
 - `art3m1s_runtime_replace_hlsl_shader` (also exposed as `..._reload_hlsl_shader`)

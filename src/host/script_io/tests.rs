@@ -2283,6 +2283,100 @@ fn transitions_keep_both_scenes_and_obey_time_and_input_policy() {
 }
 
 #[test]
+fn hlsl_source_replacement_keeps_old_frames_and_prefetches_shader_bindings() {
+    let mut session = session(1, TransportLimits::default(), 4096);
+    let mut host = MemoryHost::default();
+    let first_source = b"first shader";
+    let second_source = b"second shader";
+    let mask = [255, 128, 0, 64];
+    let user = [0, 128, 255, 255];
+    host.asset("first.hlsl", first_source);
+    host.asset("second.hlsl", second_source);
+    host.asset("mask.png", &png_bytes(1, 1, &mask));
+    host.asset("user.png", &png_bytes(1, 1, &user));
+    host.asset("boot.iet", br#"*top
+[lyshader id=test file=first.hlsl]
+[lyc id=tile width=4 height=4 color=ffffff]
+[lyprop id=tile shader=test shaderconstant=tint shadertexture=textureUser tint="0.25,0.5,1" mask=mask textureUser=user]
+[flip]
+[lyshader id=test file=second.hlsl]
+[trans type=1 time=50]
+[stop]
+"#);
+    session
+        .open_queued_project(
+            b"[WINDOWS]\nWIDTH=4\nHEIGHT=4\nBOOT=boot.iet\n",
+            "windows",
+            None,
+        )
+        .unwrap();
+    let mut advance = |session: &mut ScriptIoSession, id| {
+        let frame = HostFrame {
+            id,
+            monotonic_ns: id * 1_000_000,
+            utc_unix_ms: 0,
+            utc_offset_minutes: 0,
+        };
+        for _ in 0..1536 {
+            let progress = session.step_queued_frame(frame).unwrap();
+            session.publish_frame(progress).unwrap();
+            match progress {
+                ScriptIoProgress::Event => return,
+                ScriptIoProgress::Waiting => {}
+                progress => panic!("unexpected shader progress: {progress:?}"),
+            }
+            for request in requests(session) {
+                session.submit_replies(&[host.complete(&request)]).unwrap();
+            }
+        }
+        panic!("shader scenario did not advance");
+    };
+    advance(&mut session, 1);
+    let old = session.frames.latest_snapshot().unwrap();
+    let effect = old.sprites[0].shader.as_ref().unwrap();
+    assert_eq!(&*effect.shader.source, first_source);
+    assert_eq!(effect.uniforms["tint"], [0.25, 0.5, 1.0]);
+    assert_eq!(old.texture(effect.mask.unwrap()).unwrap().rgba(), mask);
+    assert_eq!(old.texture(effect.user.unwrap()).unwrap().rgba(), user);
+    advance(&mut session, 2);
+    let frame = session
+        .frames
+        .acquire(
+            crate::host::runtime::RuntimeHandle::from_raw(1),
+            old.render_frame_id,
+        )
+        .unwrap()
+        .unwrap();
+    let new_effect = frame.sprites[0].shader.as_ref().unwrap();
+    assert_eq!(&*new_effect.shader.source, second_source);
+    let old_effect = frame.transition.as_ref().unwrap().source[0]
+        .shader
+        .as_ref()
+        .unwrap();
+    assert_eq!(old_effect.shader.revision, effect.shader.revision);
+    assert_ne!(new_effect.shader.revision, effect.shader.revision);
+    assert_eq!(
+        frame.texture(old_effect.user.unwrap()).unwrap().rgba(),
+        user
+    );
+    let packet = frame.packet();
+    let mut records = &packet[56 + frame.textures().len() * 24..];
+    let mut programs = Vec::new();
+    let mut bindings = Vec::new();
+    while !records.is_empty() {
+        let length = u32::from_le_bytes(records[..4].try_into().unwrap()) as usize;
+        match u16::from_le_bytes(records[4..6].try_into().unwrap()) {
+            6 => programs.push(&records[16..length]),
+            7 => bindings.push(records[6] & 16 != 0),
+            _ => {}
+        }
+        records = &records[length..];
+    }
+    assert_eq!(programs, [&first_source[..], &second_source[..]]);
+    assert_eq!(bindings, [true, false]);
+}
+
+#[test]
 fn emote_models_load_through_host_io_and_publish_the_cpu_atlas() {
     let mut session = session(1, TransportLimits::default(), 4096);
     let mut host = MemoryHost::default();

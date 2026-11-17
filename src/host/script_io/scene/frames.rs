@@ -1,8 +1,12 @@
 use super::{SceneProjection, ScriptIoProgress, ScriptIoSession};
 use crate::compositor::{BlendMode, TextureId, TextureInfo, TextureProvider, build};
-use crate::host::frame::{FrameGroup, FrameSnapshot, FrameSprite, FrameTexture, SpriteBlend};
+use crate::host::frame::{
+    FrameGroup, FrameShaderEffect, FrameSnapshot, FrameSprite, FrameTexture, SpriteBlend,
+};
 use crate::host::protocol::ProtocolError;
-use crate::render_pipeline::draw::{DrawCommand, LayerCommandKind};
+use crate::render_pipeline::draw::{
+    DrawCommand, LayerCommandKind, LayerShaderGroupKind, ShaderGroupKey,
+};
 use crate::text::{TextRenderer, message_layer_scene_id};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -131,6 +135,30 @@ impl SceneProjection {
         let mut groups = Vec::new();
         for group in &frame.shader_groups {
             let effect = &group.effect;
+            if matches!(
+                group.key,
+                Some(ShaderGroupKey::Layer {
+                    kind: LayerShaderGroupKind::Declared,
+                    ..
+                })
+            ) {
+                if let Some(shader) = self.shaders.effect(effect) {
+                    groups.push(FrameGroup {
+                        sprites: group.start..group.end,
+                        mask: None,
+                        clip_bounds: group.clip_bounds,
+                        opacity: 1.0,
+                        color_multiply: [1.0; 3],
+                        grayscale: false,
+                        negative: false,
+                        opaque: false,
+                        blend: SpriteBlend::Alpha,
+                        stencil: None,
+                        shader: Some(shader),
+                    });
+                }
+                continue;
+            }
             if effect.name == art3m1s_render::ALPHA_MASK_SHADER {
                 let [start, end] = group.mask_range?;
                 groups.push(FrameGroup {
@@ -144,6 +172,7 @@ impl SceneProjection {
                     opaque: false,
                     blend: SpriteBlend::Alpha,
                     stencil: Some(start..end),
+                    shader: None,
                 });
                 continue;
             }
@@ -194,6 +223,7 @@ impl SceneProjection {
                     _ => SpriteBlend::Alpha,
                 },
                 stencil: None,
+                shader: None,
             });
         }
         let mut sprites = Vec::with_capacity(frame.commands.len());
@@ -218,12 +248,16 @@ impl SceneProjection {
                         .map(|mask| textures.record(mask).0.0 as usize)
                 })
                 .flatten();
-            sprites.push(frame_sprite(command, key.layer_id.clone(), mask)?);
+            let shader = command
+                .shader
+                .as_ref()
+                .and_then(|effect| self.shaders.effect(effect));
+            sprites.push(frame_sprite(command, key.layer_id.clone(), mask, shader)?);
         }
         let masks = frame
             .mask_commands
             .iter()
-            .map(|command| frame_sprite(command, String::new(), None))
+            .map(|command| frame_sprite(command, String::new(), None, None))
             .collect::<Option<Box<[_]>>>()?;
         Some(FrameSnapshot {
             session_epoch,
@@ -243,18 +277,18 @@ fn frame_sprite(
     command: &DrawCommand,
     layer_id: String,
     mask: Option<usize>,
+    shader: Option<FrameShaderEffect>,
 ) -> Option<FrameSprite> {
     let transform = command.transform.to_cols_array();
-    if command.shader.is_some()
-        || !transform
-            .into_iter()
-            .chain(command.clip.quad_size)
-            .chain(command.clip.uv_offset)
-            .chain(command.clip.uv_scale)
-            .chain(command.clip_bounds.into_iter().flatten())
-            .chain(command.color.multiply)
-            .chain([command.opacity])
-            .all(f32::is_finite)
+    if !transform
+        .into_iter()
+        .chain(command.clip.quad_size)
+        .chain(command.clip.uv_offset)
+        .chain(command.clip.uv_scale)
+        .chain(command.clip_bounds.into_iter().flatten())
+        .chain(command.color.multiply)
+        .chain([command.opacity])
+        .all(f32::is_finite)
     {
         return None;
     }
@@ -284,6 +318,7 @@ fn frame_sprite(
         },
         mesh: command.mesh.as_ref().map(|mesh| mesh.vertices.clone()),
         emote_material: command.native_emote.clone(),
+        shader,
     })
 }
 

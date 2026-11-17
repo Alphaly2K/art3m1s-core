@@ -1,5 +1,6 @@
-use super::{FrameSnapshot, FrameSprite, SpriteBlend};
+use super::{FrameShaderEffect, FrameSnapshot, FrameSprite, SpriteBlend};
 use crate::host::protocol::ProtocolError;
+use std::collections::BTreeMap;
 
 pub const FRAME_PACKET_VERSION: u16 = 1;
 const HEADER: usize = 56;
@@ -9,6 +10,8 @@ const TRANSITION: usize = 24;
 const GROUP: usize = 56;
 const STENCIL: usize = 40;
 const EMOTE_MATERIAL: usize = 112;
+const SHADER: usize = 16;
+const EFFECT: usize = 52;
 const MAX_PACKET_BYTES: usize = 16 * 1024 * 1024;
 const NO_TEXTURE: u32 = u32::MAX;
 
@@ -25,6 +28,26 @@ pub(super) fn encode(frame: &FrameSnapshot) -> Result<Box<[u8]>, ProtocolError> 
     let source = transition.map_or(&[][..], |transition| &transition.source);
     let source_groups = transition.map_or(&[][..], |transition| &transition.source_groups);
     let source_masks = transition.map_or(&[][..], |transition| &transition.source_masks);
+    let sprite_effects = [(true, source), (false, &frame.sprites[..])]
+        .into_iter()
+        .flat_map(|(old, sprites)| {
+            sprites
+                .iter()
+                .enumerate()
+                .filter_map(move |(index, sprite)| Some((old, index, sprite.shader.as_ref()?)))
+        })
+        .collect::<Vec<_>>();
+    let shaders = sprite_effects
+        .iter()
+        .map(|(_, _, effect)| *effect)
+        .chain(
+            source_groups
+                .iter()
+                .chain(&frame.groups)
+                .filter_map(|group| group.shader.as_ref()),
+        )
+        .map(|effect| (effect.shader.revision, effect.shader.as_ref()))
+        .collect::<BTreeMap<_, _>>();
     let sprites = source
         .iter()
         .chain(&frame.sprites)
@@ -39,11 +62,25 @@ pub(super) fn encode(frame: &FrameSnapshot) -> Result<Box<[u8]>, ProtocolError> 
         .iter()
         .chain(&frame.groups)
         .try_fold(start, |size, group| {
-            size.checked_add(if group.stencil.is_some() {
+            size.checked_add(if let Some(effect) = &group.shader {
+                effect_size(effect)?
+            } else if group.stencil.is_some() {
                 STENCIL
             } else {
                 GROUP
             })
+        })
+        .and_then(|size| {
+            shaders.values().try_fold(size, |size, shader| {
+                size.checked_add(SHADER)?.checked_add(shader.source.len())
+            })
+        })
+        .and_then(|size| {
+            sprite_effects
+                .iter()
+                .try_fold(size, |size, (_, _, effect)| {
+                    size.checked_add(effect_size(effect)?)
+                })
         })
         .and_then(|size| size.checked_add(if transition.is_some() { TRANSITION } else { 0 }))
         .ok_or(ProtocolError::Limit)?;
@@ -69,6 +106,8 @@ pub(super) fn encode(frame: &FrameSnapshot) -> Result<Box<[u8]>, ProtocolError> 
             + source_masks.len()
             + frame.masks.len()
             + group_count
+            + shaders.len()
+            + sprite_effects.len()
             + usize::from(transition.is_some())) as u32,
     );
     put_u32(&mut out, 0);
@@ -175,6 +214,23 @@ pub(super) fn encode(frame: &FrameSnapshot) -> Result<Box<[u8]>, ProtocolError> 
             }
         }
     }
+    for shader in shaders.values() {
+        put_u32(&mut out, (SHADER + shader.source.len()) as u32);
+        put_u16(&mut out, 6);
+        put_u16(&mut out, 0);
+        put_u64(&mut out, shader.revision);
+        out.extend_from_slice(&shader.source);
+    }
+    for (old, index, effect) in sprite_effects {
+        write_effect(
+            &mut out,
+            frame,
+            effect,
+            index..index + 1,
+            u16::from(old) << 4,
+            None,
+        )?;
+    }
     for (is_source, len, masks, groups) in [
         (true, source.len(), source_masks.len(), source_groups),
         (
@@ -192,6 +248,19 @@ pub(super) fn encode(frame: &FrameSnapshot) -> Result<Box<[u8]>, ProtocolError> 
                     .is_some_and(|index| index >= frame.textures.len())
             {
                 return Err(ProtocolError::State);
+            }
+            if let Some(effect) = &group.shader {
+                let flags =
+                    u16::from(group.clip_bounds.is_some()) | 2 | (u16::from(is_source) << 4);
+                write_effect(
+                    &mut out,
+                    frame,
+                    effect,
+                    group.sprites.clone(),
+                    flags,
+                    group.clip_bounds,
+                )?;
+                continue;
             }
             if let Some(stencil) = &group.stencil {
                 if stencil.start >= stencil.end || stencil.end > masks {
@@ -235,6 +304,61 @@ pub(super) fn encode(frame: &FrameSnapshot) -> Result<Box<[u8]>, ProtocolError> 
     }
     debug_assert_eq!(out.len(), size);
     Ok(out.into_boxed_slice())
+}
+
+fn effect_size(effect: &FrameShaderEffect) -> Option<usize> {
+    effect
+        .uniforms
+        .iter()
+        .try_fold(EFFECT, |size, (name, values)| {
+            size.checked_add(4)?
+                .checked_add(name.len())?
+                .checked_add(values.len().checked_mul(4)?)
+        })
+}
+
+fn write_effect(
+    out: &mut Vec<u8>,
+    frame: &FrameSnapshot,
+    effect: &FrameShaderEffect,
+    range: std::ops::Range<usize>,
+    flags: u16,
+    clip: Option<[f32; 4]>,
+) -> Result<(), ProtocolError> {
+    if [effect.mask, effect.user]
+        .into_iter()
+        .flatten()
+        .any(|index| index >= frame.textures.len())
+    {
+        return Err(ProtocolError::State);
+    }
+    put_u32(out, effect_size(effect).ok_or(ProtocolError::Limit)? as u32);
+    put_u16(out, 7);
+    put_u16(out, flags);
+    put_u64(out, effect.shader.revision);
+    put_u32(out, range.start as u32);
+    put_u32(out, range.end as u32);
+    put_u32(out, effect.mask.map_or(NO_TEXTURE, |index| index as u32));
+    put_u32(out, effect.user.map_or(NO_TEXTURE, |index| index as u32));
+    put_u32(out, effect.uniforms.len() as u32);
+    for value in clip.unwrap_or_default() {
+        put_u32(out, value.to_bits());
+    }
+    for (name, values) in &effect.uniforms {
+        put_u16(
+            out,
+            name.len().try_into().map_err(|_| ProtocolError::Limit)?,
+        );
+        put_u16(
+            out,
+            values.len().try_into().map_err(|_| ProtocolError::Limit)?,
+        );
+        out.extend_from_slice(name.as_bytes());
+        for value in values {
+            put_u32(out, value.to_bits());
+        }
+    }
+    Ok(())
 }
 
 fn is_extended(sprite: &FrameSprite, pass_flags: u16) -> bool {

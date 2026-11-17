@@ -41,6 +41,7 @@ pub struct FrameSprite {
     pub blend: SpriteBlend,
     pub mesh: Option<Arc<[[f32; 4]]>>,
     pub emote_material: Option<NativeEmoteMaterial>,
+    pub shader: Option<FrameShaderEffect>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -66,6 +67,28 @@ pub struct FrameGroup {
     pub opaque: bool,
     pub blend: SpriteBlend,
     pub stencil: Option<std::ops::Range<usize>>,
+    pub shader: Option<FrameShaderEffect>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct FrameShader {
+    pub revision: u64,
+    pub source: Box<[u8]>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FrameShaderEffect {
+    pub shader: Arc<FrameShader>,
+    pub uniforms: std::collections::BTreeMap<String, Vec<f32>>,
+    pub mask: Option<usize>,
+    pub user: Option<usize>,
+}
+
+impl FrameShaderEffect {
+    fn remap(&mut self, textures: &[usize]) {
+        self.mask = self.mask.map(|index| textures[index]);
+        self.user = self.user.map(|index| textures[index]);
+    }
 }
 
 #[derive(Debug)]
@@ -149,6 +172,9 @@ impl FrameSnapshot {
         let remap_sprite = |mut sprite: FrameSprite| {
             sprite.texture = remap[sprite.texture];
             sprite.mask = sprite.mask.map(|index| remap[index]);
+            if let Some(effect) = &mut sprite.shader {
+                effect.remap(&remap);
+            }
             sprite
         };
         let sprites = source.sprites.iter().cloned().map(remap_sprite).collect();
@@ -159,6 +185,9 @@ impl FrameSnapshot {
             .cloned()
             .map(|mut group| {
                 group.mask = group.mask.map(|index| remap[index]);
+                if let Some(effect) = &mut group.shader {
+                    effect.remap(&remap);
+                }
                 group
             })
             .collect();
