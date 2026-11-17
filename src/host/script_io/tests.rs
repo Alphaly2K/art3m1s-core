@@ -2283,6 +2283,86 @@ fn transitions_keep_both_scenes_and_obey_time_and_input_policy() {
 }
 
 #[test]
+fn emote_models_load_through_host_io_and_publish_the_cpu_atlas() {
+    let mut session = session(1, TransportLimits::default(), 4096);
+    let mut host = MemoryHost::default();
+    host.asset("models/bad.psb", b"not a PSB");
+    host.asset("models/red.psb", include_bytes!("fixtures/emote-red.psb"));
+    host.asset(
+        "boot.iet",
+        br#"*top
+[calllua function=load_model]
+[stop]
+[lua]
+function load_model(e)
+    attempts = (attempts or 0) + 1
+    e:setMagicPath{'model', 'models'}
+    local ok = pcall(function()
+        e:createEmoteLayer{id='model', files={':model/bad.psb'}, width=4, height=4}
+    end)
+    assert(not ok and e:getEmoteLayer{id='model'} == nil)
+    local layer = e:createEmoteLayer{id='model', files={':model/red.psb'}, width=4, height=4}
+    layer:setCoord(-2, -2, 0, 0)
+    finished = true
+end
+[/lua]
+"#,
+    );
+    session
+        .open_queued_project(
+            b"[WINDOWS]\nWIDTH=4\nHEIGHT=4\nBOOT=boot.iet\n",
+            "windows",
+            None,
+        )
+        .unwrap();
+    let frame = HostFrame {
+        id: 1,
+        monotonic_ns: 0,
+        utc_unix_ms: 0,
+        utc_offset_minutes: 0,
+    };
+    let mut model_stats = 0;
+    for _ in 0..4096 {
+        let progress = session.step_queued_frame(frame).unwrap();
+        session.publish_frame(progress).unwrap();
+        match progress {
+            ScriptIoProgress::Event => break,
+            ScriptIoProgress::Waiting => {}
+            progress => panic!("unexpected model load progress: {progress:?}"),
+        }
+        for request in requests(&mut session) {
+            if request.identity.service == IO_STAT
+                && request.metadata["key"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("models/")
+            {
+                model_stats += 1;
+            }
+            session.submit_replies(&[host.complete(&request)]).unwrap();
+        }
+    }
+    let globals = session.interpreter().lua().globals();
+    assert!(globals.get::<bool>("finished").unwrap());
+    assert_eq!(globals.get::<u32>("attempts").unwrap(), 1);
+    assert_eq!(model_stats, 2);
+    let frame = session.frames.latest_snapshot().unwrap();
+    let sprite = &frame.sprites[0];
+    assert_eq!(frame.sprites.len(), 1);
+    assert_eq!(sprite.layer_id, "model");
+    assert_eq!(&sprite.transform[4..], &[0.0, 0.0]);
+    assert!(sprite.emote_material.is_some());
+    assert!(
+        frame
+            .texture(sprite.texture)
+            .unwrap()
+            .rgba()
+            .chunks_exact(4)
+            .all(|pixel| pixel == [255, 0, 0, 255])
+    );
+}
+
+#[test]
 fn transition_preserves_the_old_scenes_nested_composite_groups() {
     use crate::host::runtime;
 

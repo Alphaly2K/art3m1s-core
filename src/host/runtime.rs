@@ -121,7 +121,9 @@ pub(super) const CAP_SPRITES: u64 = 1;
 pub(super) const CAP_TRANSITIONS: u64 = 2;
 pub(super) const CAP_SCREENSHOTS: u64 = 4;
 pub(super) const CAP_GROUPS: u64 = 8;
-pub(super) const RENDERER_CAPS: u64 = CAP_SPRITES | CAP_TRANSITIONS | CAP_SCREENSHOTS | CAP_GROUPS;
+pub(super) const CAP_EMOTE: u64 = 16;
+pub(super) const RENDERER_CAPS: u64 =
+    CAP_SPRITES | CAP_TRANSITIONS | CAP_SCREENSHOTS | CAP_GROUPS | CAP_EMOTE;
 
 /// Create a runtime owned by the calling thread. Destroy it before that thread exits.
 pub fn create(
@@ -146,6 +148,7 @@ pub(super) fn create_with_renderer(
         session.transitions_enabled = renderer_caps & CAP_TRANSITIONS != 0;
         session.screenshots_enabled = renderer_caps & CAP_SCREENSHOTS != 0;
         session.groups_enabled = renderer_caps & CAP_GROUPS != 0;
+        session.emote_enabled = renderer_caps & CAP_EMOTE != 0;
         Ok::<_, ScriptIoError>(session)
     })
     .map_err(|_| RuntimeError::Panic)??;

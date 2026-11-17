@@ -4,8 +4,8 @@ use super::frame::{FrameGroup, FrameLease, FrameSprite, FrameTexture, SpriteBlen
 use super::runtime::RuntimeHandle;
 use art3m1s_render::backend::{FrameCapture, GpuBackend, RenderRegion, TextureData, TextureDesc};
 use art3m1s_render::draw::{
-    BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, LayerCommandKind, ShaderEffect,
-    ShaderGroup, TextureId, TextureInfo, TextureOrigin,
+    BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, DrawMesh, LayerCommandKind,
+    ShaderEffect, ShaderGroup, TextureId, TextureInfo, TextureOrigin,
 };
 use art3m1s_render::types::Extent2D;
 use std::borrow::Cow;
@@ -82,7 +82,13 @@ impl<B: GpuBackend> SpriteRenderer<B> {
             Ok(texture)
         };
         let prepared = (|| {
-            let draw = prepare_draw_list(frame, &frame.sprites, &frame.groups, &mut upload)?;
+            let draw = prepare_draw_list(
+                frame,
+                &frame.sprites,
+                &frame.groups,
+                &frame.masks,
+                &mut upload,
+            )?;
             let source = frame
                 .transition
                 .as_ref()
@@ -91,6 +97,7 @@ impl<B: GpuBackend> SpriteRenderer<B> {
                         frame,
                         &transition.source,
                         &transition.source_groups,
+                        &transition.source_masks,
                         &mut upload,
                     )?;
                     let shader = transition
@@ -251,10 +258,11 @@ fn prepare_draw_list(
     frame: &FrameLease,
     sprites: &[FrameSprite],
     groups: &[FrameGroup],
+    masks: &[FrameSprite],
     mut texture: impl FnMut(&FrameTexture, Option<&FrameTexture>) -> Result<TextureId, String>,
 ) -> Result<DrawList, String> {
     let mut draw = DrawList::new();
-    for sprite in sprites {
+    let mut draw_sprite = |sprite: &FrameSprite| -> Result<DrawCommand, String> {
         let image = frame
             .texture(sprite.texture)
             .ok_or("invalid sprite texture")?;
@@ -262,43 +270,70 @@ fn prepare_draw_list(
             .mask
             .map(|index| frame.texture(index).ok_or("invalid sprite mask"))
             .transpose()?;
+        Ok(DrawCommand {
+            texture: texture(image, mask)?,
+            size: TextureInfo {
+                width: image.width,
+                height: image.height,
+            },
+            transform: glam::Affine2::from_cols_array(&sprite.transform),
+            opacity: sprite.opacity,
+            blend: match sprite.blend {
+                SpriteBlend::Alpha => BlendMode::Alpha,
+                SpriteBlend::Add => BlendMode::Add,
+                SpriteBlend::Screen => BlendMode::Screen,
+                SpriteBlend::Multiply => BlendMode::Multiply,
+                SpriteBlend::EmoteAdd => BlendMode::NativeAdd,
+                SpriteBlend::EmoteReverseSubtract => BlendMode::NativeReverseSubtract,
+                SpriteBlend::EmoteMultiply => BlendMode::NativeMultiply,
+                SpriteBlend::EmoteScreen => BlendMode::NativeScreen,
+            },
+            color: ColorFilter {
+                multiply: sprite.color_multiply,
+                grayscale: sprite.grayscale,
+                negative: sprite.negative,
+            },
+            clip: ClipRect {
+                uv_offset: sprite.uv_offset,
+                uv_scale: sprite.uv_scale,
+                quad_size: sprite.quad_size,
+            },
+            clip_bounds: sprite.clip_bounds,
+            shader: None,
+            mesh: sprite.mesh.clone().map(|vertices| DrawMesh { vertices }),
+            stencil: None,
+            native_emote: sprite.emote_material.clone(),
+        })
+    };
+    for sprite in sprites {
         draw.push_layer(
             &sprite.layer_id,
             LayerCommandKind::Visual,
             0,
-            DrawCommand {
-                texture: texture(image, mask)?,
-                size: TextureInfo {
-                    width: image.width,
-                    height: image.height,
-                },
-                transform: glam::Affine2::from_cols_array(&sprite.transform),
-                opacity: sprite.opacity,
-                blend: match sprite.blend {
-                    SpriteBlend::Alpha => BlendMode::Alpha,
-                    SpriteBlend::Add => BlendMode::Add,
-                    SpriteBlend::Screen => BlendMode::Screen,
-                    SpriteBlend::Multiply => BlendMode::Multiply,
-                },
-                color: ColorFilter {
-                    multiply: sprite.color_multiply,
-                    grayscale: sprite.grayscale,
-                    negative: sprite.negative,
-                },
-                clip: ClipRect {
-                    uv_offset: sprite.uv_offset,
-                    uv_scale: sprite.uv_scale,
-                    quad_size: sprite.quad_size,
-                },
-                clip_bounds: sprite.clip_bounds,
-                shader: None,
-                mesh: None,
-                stencil: None,
-                native_emote: None,
-            },
+            draw_sprite(sprite)?,
         );
     }
+    draw.mask_commands = masks
+        .iter()
+        .map(&mut draw_sprite)
+        .collect::<Result<_, _>>()?;
     for group in groups {
+        if let Some(stencil) = &group.stencil {
+            draw.push_shader_group(ShaderGroup {
+                key: None,
+                start: group.sprites.start,
+                end: group.sprites.end,
+                effect: ShaderEffect {
+                    name: art3m1s_render::ALPHA_MASK_SHADER.into(),
+                    uniforms: Default::default(),
+                    mask_texture: None,
+                    user_texture: None,
+                },
+                clip_bounds: group.clip_bounds,
+                mask_range: Some([stencil.start, stencil.end]),
+            });
+            continue;
+        }
         let mask_texture = group
             .mask
             .map(|index| {
@@ -311,6 +346,7 @@ fn prepare_draw_list(
             SpriteBlend::Add => 1.0,
             SpriteBlend::Screen => 2.0,
             SpriteBlend::Multiply => 3.0,
+            _ => return Err("invalid composite blend mode".into()),
         };
         draw.push_shader_group(ShaderGroup {
             key: None,

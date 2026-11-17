@@ -1,4 +1,4 @@
-use super::{FrameSnapshot, SpriteBlend};
+use super::{FrameSnapshot, FrameSprite, SpriteBlend};
 use crate::host::protocol::ProtocolError;
 
 pub const FRAME_PACKET_VERSION: u16 = 1;
@@ -7,6 +7,8 @@ const TEXTURE: usize = 24;
 const SPRITE: usize = 104;
 const TRANSITION: usize = 24;
 const GROUP: usize = 56;
+const STENCIL: usize = 40;
+const EMOTE_MATERIAL: usize = 112;
 const MAX_PACKET_BYTES: usize = 16 * 1024 * 1024;
 const NO_TEXTURE: u32 = u32::MAX;
 
@@ -22,19 +24,33 @@ pub(super) fn encode(frame: &FrameSnapshot) -> Result<Box<[u8]>, ProtocolError> 
     let transition = frame.transition.as_ref();
     let source = transition.map_or(&[][..], |transition| &transition.source);
     let source_groups = transition.map_or(&[][..], |transition| &transition.source_groups);
-    let sprites = source.iter().chain(&frame.sprites);
+    let source_masks = transition.map_or(&[][..], |transition| &transition.source_masks);
+    let sprites = source
+        .iter()
+        .chain(&frame.sprites)
+        .map(|sprite| (sprite, 0))
+        .chain(source_masks.iter().map(|sprite| (sprite, 0x30)))
+        .chain(frame.masks.iter().map(|sprite| (sprite, 0x10)));
     let group_count = source_groups
         .len()
         .checked_add(frame.groups.len())
         .ok_or(ProtocolError::Limit)?;
-    let start = start
-        .checked_add(group_count.checked_mul(GROUP).ok_or(ProtocolError::Limit)?)
-        .and_then(|start| start.checked_add(if transition.is_some() { TRANSITION } else { 0 }))
+    let start = source_groups
+        .iter()
+        .chain(&frame.groups)
+        .try_fold(start, |size, group| {
+            size.checked_add(if group.stencil.is_some() {
+                STENCIL
+            } else {
+                GROUP
+            })
+        })
+        .and_then(|size| size.checked_add(if transition.is_some() { TRANSITION } else { 0 }))
         .ok_or(ProtocolError::Limit)?;
     let size = sprites
         .clone()
-        .try_fold(start, |size, sprite| {
-            size.checked_add(SPRITE)?.checked_add(sprite.layer_id.len())
+        .try_fold(start, |size, (sprite, flags)| {
+            size.checked_add(sprite_size(sprite, flags)?)
         })
         .filter(|&size| size <= MAX_PACKET_BYTES)
         .ok_or(ProtocolError::Limit)?;
@@ -48,8 +64,12 @@ pub(super) fn encode(frame: &FrameSnapshot) -> Result<Box<[u8]>, ProtocolError> 
     put_u32(&mut out, frame.textures.len() as u32);
     put_u32(
         &mut out,
-        (source.len() + frame.sprites.len() + group_count + usize::from(transition.is_some()))
-            as u32,
+        (source.len()
+            + frame.sprites.len()
+            + source_masks.len()
+            + frame.masks.len()
+            + group_count
+            + usize::from(transition.is_some())) as u32,
     );
     put_u32(&mut out, 0);
     put_u64(&mut out, frame.session_epoch);
@@ -82,17 +102,23 @@ pub(super) fn encode(frame: &FrameSnapshot) -> Result<Box<[u8]>, ProtocolError> 
         );
         put_u32(&mut out, transition.vague.to_bits());
     }
-    for sprite in sprites {
+    for (sprite, pass_flags) in sprites {
         if sprite.texture >= frame.textures.len()
             || sprite.mask.is_some_and(|mask| mask >= frame.textures.len())
         {
             return Err(ProtocolError::State);
         }
-        put_u32(&mut out, (SPRITE + sprite.layer_id.len()) as u32);
-        put_u16(&mut out, 1); // Sprite.
+        let extended = is_extended(sprite, pass_flags);
+        put_u32(
+            &mut out,
+            sprite_size(sprite, pass_flags).ok_or(ProtocolError::Limit)? as u32,
+        );
+        put_u16(&mut out, if extended { 4 } else { 1 });
         let flags = u16::from(sprite.clip_bounds.is_some())
             | (u16::from(sprite.grayscale) << 1)
-            | (u16::from(sprite.negative) << 2);
+            | (u16::from(sprite.negative) << 2)
+            | (u16::from(sprite.emote_material.is_some()) << 3)
+            | pass_flags;
         put_u16(&mut out, flags);
         put_u32(&mut out, sprite.texture as u32);
         put_u32(&mut out, sprite.mask.map_or(NO_TEXTURE, |mask| mask as u32));
@@ -111,10 +137,52 @@ pub(super) fn encode(frame: &FrameSnapshot) -> Result<Box<[u8]>, ProtocolError> 
             put_u32(&mut out, value.to_bits());
         }
         out.extend_from_slice(sprite.layer_id.as_bytes());
+        if extended {
+            let vertices = sprite.mesh.as_deref().unwrap_or_default();
+            if !vertices.len().is_multiple_of(3)
+                || vertices.iter().flatten().any(|value| !value.is_finite())
+            {
+                return Err(ProtocolError::State);
+            }
+            put_u32(&mut out, vertices.len() as u32);
+            if let Some(material) = &sprite.emote_material {
+                if !material
+                    .corner_colors
+                    .into_iter()
+                    .flatten()
+                    .chain(material.uv_rect)
+                    .chain(material.clip_rect)
+                    .chain(material.wipe)
+                    .all(f32::is_finite)
+                {
+                    return Err(ProtocolError::State);
+                }
+                for value in material
+                    .corner_colors
+                    .into_iter()
+                    .flatten()
+                    .chain(material.uv_rect)
+                {
+                    put_u32(&mut out, value.to_bits());
+                }
+                put_u32(&mut out, material.blend_mode);
+                for value in material.clip_rect.into_iter().chain(material.wipe) {
+                    put_u32(&mut out, value.to_bits());
+                }
+            }
+            for value in vertices.iter().flatten() {
+                put_u32(&mut out, value.to_bits());
+            }
+        }
     }
-    for (is_source, len, groups) in [
-        (true, source.len(), source_groups),
-        (false, frame.sprites.len(), &frame.groups[..]),
+    for (is_source, len, masks, groups) in [
+        (true, source.len(), source_masks.len(), source_groups),
+        (
+            false,
+            frame.sprites.len(),
+            frame.masks.len(),
+            &frame.groups[..],
+        ),
     ] {
         for group in groups {
             if group.sprites.start >= group.sprites.end
@@ -124,6 +192,25 @@ pub(super) fn encode(frame: &FrameSnapshot) -> Result<Box<[u8]>, ProtocolError> 
                     .is_some_and(|index| index >= frame.textures.len())
             {
                 return Err(ProtocolError::State);
+            }
+            if let Some(stencil) = &group.stencil {
+                if stencil.start >= stencil.end || stencil.end > masks {
+                    return Err(ProtocolError::State);
+                }
+                put_u32(&mut out, STENCIL as u32);
+                put_u16(&mut out, 5);
+                put_u16(
+                    &mut out,
+                    u16::from(group.clip_bounds.is_some()) | (u16::from(is_source) << 4),
+                );
+                put_u32(&mut out, group.sprites.start as u32);
+                put_u32(&mut out, group.sprites.end as u32);
+                put_u32(&mut out, stencil.start as u32);
+                put_u32(&mut out, stencil.end as u32);
+                for value in group.clip_bounds.unwrap_or_default() {
+                    put_u32(&mut out, value.to_bits());
+                }
+                continue;
             }
             put_u32(&mut out, GROUP as u32);
             put_u16(&mut out, 3);
@@ -150,12 +237,38 @@ pub(super) fn encode(frame: &FrameSnapshot) -> Result<Box<[u8]>, ProtocolError> 
     Ok(out.into_boxed_slice())
 }
 
+fn is_extended(sprite: &FrameSprite, pass_flags: u16) -> bool {
+    sprite.mesh.is_some() || sprite.emote_material.is_some() || pass_flags != 0
+}
+
+fn sprite_size(sprite: &FrameSprite, pass_flags: u16) -> Option<usize> {
+    let base = SPRITE.checked_add(sprite.layer_id.len())?;
+    if !is_extended(sprite, pass_flags) {
+        return Some(base);
+    }
+    let material = if sprite.emote_material.is_some() {
+        EMOTE_MATERIAL
+    } else {
+        0
+    };
+    let vertices = sprite
+        .mesh
+        .as_deref()
+        .map_or(0, <[_]>::len)
+        .checked_mul(16)?;
+    base.checked_add(4 + material)?.checked_add(vertices)
+}
+
 fn blend_id(blend: SpriteBlend) -> u32 {
     match blend {
         SpriteBlend::Alpha => 0,
         SpriteBlend::Add => 1,
         SpriteBlend::Screen => 2,
         SpriteBlend::Multiply => 3,
+        SpriteBlend::EmoteAdd => 4,
+        SpriteBlend::EmoteReverseSubtract => 5,
+        SpriteBlend::EmoteMultiply => 6,
+        SpriteBlend::EmoteScreen => 7,
     }
 }
 

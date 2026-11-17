@@ -16,7 +16,6 @@ pub mod audio;
 #[cfg(feature = "legacy")]
 pub mod backend;
 pub mod compositor;
-#[cfg(feature = "legacy")]
 mod emote_playback;
 #[cfg(feature = "legacy")]
 pub mod ffi;

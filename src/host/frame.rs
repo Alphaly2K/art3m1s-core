@@ -2,6 +2,7 @@
 
 use super::protocol::ProtocolError;
 use super::runtime::RuntimeHandle;
+use art3m1s_render::draw::NativeEmoteMaterial;
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -14,6 +15,10 @@ pub enum SpriteBlend {
     Add,
     Screen,
     Multiply,
+    EmoteAdd,
+    EmoteReverseSubtract,
+    EmoteMultiply,
+    EmoteScreen,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -34,6 +39,8 @@ pub struct FrameSprite {
     pub grayscale: bool,
     pub negative: bool,
     pub blend: SpriteBlend,
+    pub mesh: Option<Arc<[[f32; 4]]>>,
+    pub emote_material: Option<NativeEmoteMaterial>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -41,6 +48,7 @@ pub struct FrameTransition {
     /// Draw this scene into the transition source target before blending it over `sprites`.
     pub source: Box<[FrameSprite]>,
     pub source_groups: Box<[FrameGroup]>,
+    pub source_masks: Box<[FrameSprite]>,
     pub progress: f32,
     pub rule: Option<usize>,
     pub vague: f32,
@@ -57,6 +65,7 @@ pub struct FrameGroup {
     pub negative: bool,
     pub opaque: bool,
     pub blend: SpriteBlend,
+    pub stencil: Option<std::ops::Range<usize>>,
 }
 
 #[derive(Debug)]
@@ -83,6 +92,7 @@ pub struct FrameSnapshot {
     pub stage_size: [u32; 2],
     pub sprites: Box<[FrameSprite]>,
     pub groups: Box<[FrameGroup]>,
+    pub masks: Box<[FrameSprite]>,
     pub transition: Option<FrameTransition>,
     pub(crate) textures: Box<[Arc<FrameTexture>]>,
 }
@@ -102,6 +112,7 @@ impl FrameSnapshot {
             && self.stage_size == other.stage_size
             && self.sprites == other.sprites
             && self.groups == other.groups
+            && self.masks == other.masks
             && self.transition == other.transition
             && self
                 .textures
@@ -135,16 +146,13 @@ impl FrameSnapshot {
                 })
             })
             .collect();
-        let sprites = source
-            .sprites
-            .iter()
-            .cloned()
-            .map(|mut sprite| {
-                sprite.texture = remap[sprite.texture];
-                sprite.mask = sprite.mask.map(|index| remap[index]);
-                sprite
-            })
-            .collect();
+        let remap_sprite = |mut sprite: FrameSprite| {
+            sprite.texture = remap[sprite.texture];
+            sprite.mask = sprite.mask.map(|index| remap[index]);
+            sprite
+        };
+        let sprites = source.sprites.iter().cloned().map(remap_sprite).collect();
+        let masks = source.masks.iter().cloned().map(remap_sprite).collect();
         let groups = source
             .groups
             .iter()
@@ -165,6 +173,7 @@ impl FrameSnapshot {
         self.transition = Some(FrameTransition {
             source: sprites,
             source_groups: groups,
+            source_masks: masks,
             progress,
             rule,
             vague,

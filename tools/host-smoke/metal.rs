@@ -11,10 +11,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use art3m1s_render::types::Extent2D;
     use serde_json::{Value, json};
 
-    let boot = b"*top\n[lyprop id=group intermediate_render=1 alpha=128]\n\
-                 [lyc id=group.red width=4 height=4 color=ffff0000]\n[flip]\n\
-                 [lydel id=group]\n[lyc id=blue width=4 height=4 color=ff0000ff]\n\
-                 [trans type=1 time=100 input=0]\n[stop]\n";
+    let boot = br#"*top
+[lyprop id=group intermediate_render=1 alpha=128]
+[calllua function=create]
+[flip]
+[lydel id=group]
+[lyc id=blue width=4 height=4 color=ff0000ff]
+[trans type=1 time=100 input=0]
+[stop]
+[lua]
+function create(e)
+    local layer = e:createEmoteLayer{id='group.red', files={'red.psb'}, width=4, height=4}
+    layer:setCoord(-2, -2, 0, 0)
+end
+[/lua]
+"#;
+    let model = include_bytes!("../../src/host/script_io/fixtures/emote-red.psb");
     let handle = runtime::create(0, TransportLimits::default(), 4096)?;
     runtime::open_project(
         handle,
@@ -58,15 +70,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     kind: u32_at(8),
                 };
                 let args: Value = serde_json::from_slice(&remaining[64..64 + u32_at(56) as usize])?;
-                let (metadata, blob) = match service {
-                    IO_STAT if args["key"] == "boot.iet" => (
-                        json!({"status":"ok","found":true,"size":boot.len().to_string(),"revision":"1"}),
+                let bytes = match args["key"].as_str() {
+                    Some("boot.iet") => Some(boot.as_slice()),
+                    Some("red.psb") => Some(model.as_slice()),
+                    _ => None,
+                };
+                let (metadata, blob) = match (service, bytes) {
+                    (IO_STAT, Some(bytes)) => (
+                        json!({"status":"ok","found":true,"size":bytes.len().to_string(),"revision":"1"}),
                         Vec::new(),
                     ),
-                    IO_STAT => (json!({"status":"ok","found":false}), Vec::new()),
-                    IO_READ if args["key"] == "boot.iet" => (
+                    (IO_STAT, None) => (json!({"status":"ok","found":false}), Vec::new()),
+                    (IO_READ, Some(bytes)) => (
                         json!({"status":"ok","revision":"1","eof":true}),
-                        boot.to_vec(),
+                        bytes.to_vec(),
                     ),
                     _ => panic!("unexpected service: {service:?}"),
                 };
@@ -126,7 +143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     renderer.clear_cached_textures();
     renderer.backend_mut().end_access();
     runtime::destroy(handle)?;
-    println!("Artemis v2 Metal pixels passed (group and transition)");
+    println!("Artemis v2 Metal pixels passed (E-Mote, group and transition)");
     Ok(())
 }
 

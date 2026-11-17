@@ -10,6 +10,7 @@ use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 
 mod edit;
+mod emote;
 mod frames;
 mod pointer;
 mod text;
@@ -27,8 +28,11 @@ impl ScriptIoSession {
         reported_os: Option<&str>,
     ) -> Result<u64, ScriptIoError> {
         let epoch = self.open_project(ini, platform, reported_os)?;
-        let scene = SceneCallbacks::default();
-        scene.0.lock().unwrap().dirty = true;
+        let scene = SceneCallbacks(Arc::new(Mutex::new(SceneProjection {
+            dirty: true,
+            emote_enabled: self.emote_enabled,
+            ..Default::default()
+        })));
         let reduced_scene = scene.0.clone();
         self.scene = Some(SceneIo {
             scene: scene.0.clone(),
@@ -160,6 +164,8 @@ struct SceneProjection {
     video_revision: u64,
     edited: edit::LayerEdits,
     text: text::SceneText,
+    emote: emote::SceneEmote,
+    emote_enabled: bool,
     dirty: bool,
     group_sync_layers: Vec<String>,
 }
@@ -178,6 +184,7 @@ impl SceneProjection {
             self.edited.remove(id);
         }
         self.edited.retain_bound(self.compositor.scene());
+        self.emote.retain(self.compositor.scene());
         self.dirty = true;
     }
 
@@ -402,6 +409,7 @@ impl SceneIo {
         let delta_ms = elapsed_ms - scene.compositor.clock_ms();
         scene.dirty |= scene.compositor.advance(delta_ms);
         scene.dirty |= scene.text.advance(delta_ms);
+        scene.dirty |= scene.emote.advance(delta_ms);
         self.tween_handlers.extend(
             scene
                 .compositor
@@ -434,6 +442,7 @@ impl SceneIo {
         scene.video_frames.clear();
         scene.pending_video_frames.clear();
         scene.edited.clear();
+        scene.emote.clear();
         self.tween_handlers.clear();
         self.pointer = Default::default();
         scene.dirty = true;
@@ -553,7 +562,7 @@ impl SceneIo {
                 let revision = scene
                     .texture_revision
                     .checked_add(1)
-                    .filter(|id| *id < 1 << 60)?;
+                    .filter(|id| *id < emote::EMOTE_TEXTURE_BASE)?;
                 scene.texture_revision = revision;
                 scene.texture_bytes += rgba.len();
                 Some(Arc::new(FrameTexture {
@@ -584,6 +593,34 @@ fn decode_texture(bytes: &[u8], available: usize) -> Option<image::RgbaImage> {
 }
 
 impl EngineCallbacks for SceneCallbacks {
+    fn resolve_emote_model_path(&self, path: &str) -> asb_interpreter::Result<String> {
+        self.resolve_emote_path(path)
+    }
+
+    fn create_emote_layer_from_bytes(
+        &self,
+        id: &str,
+        file: &str,
+        bytes: Vec<u8>,
+        width: u32,
+        height: u32,
+    ) -> asb_interpreter::Result<bool> {
+        self.create_emote_model(id, file, bytes, [width, height])
+    }
+
+    fn get_emote_layer(&self, id: &str, next: bool) -> Option<bool> {
+        self.get_emote_model(id, next)
+    }
+
+    fn command_emote_layer(
+        &self,
+        id: &str,
+        next: bool,
+        command: asb_interpreter::EmoteLayerCommand,
+    ) -> asb_interpreter::Result<()> {
+        self.update_emote_model(id, next, command)
+    }
+
     fn set_magic_path(&self, name: &str, path: &str) {
         let scene = self.0.lock().unwrap();
         let mut paths = scene.magic_paths.lock().unwrap();

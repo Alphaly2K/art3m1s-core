@@ -216,6 +216,8 @@ fn host_sprite_renderer_reuses_uploads_and_rolls_back_failed_frames() {
         grayscale: false,
         negative: false,
         blend: SpriteBlend::Add,
+        mesh: None,
+        emote_material: None,
     };
     let snapshot =
         |epoch, sprites: Vec<FrameSprite>, textures: Vec<Arc<FrameTexture>>| FrameSnapshot {
@@ -225,6 +227,7 @@ fn host_sprite_renderer_reuses_uploads_and_rolls_back_failed_frames() {
             stage_size: [64, 48],
             sprites: sprites.into_boxed_slice(),
             groups: Box::new([]),
+            masks: Box::new([]),
             transition: None,
             textures: textures.into_boxed_slice(),
         };
@@ -294,6 +297,109 @@ fn host_sprite_renderer_reuses_uploads_and_rolls_back_failed_frames() {
     assert_eq!(draw.command_key(1).unwrap().layer_id, "1.80");
     renderer.clear_cached_textures();
     assert_eq!(renderer.backend_mut().1.as_ref().unwrap().retired.len(), 4);
+}
+
+#[test]
+fn host_sprite_renderer_preserves_emote_mesh_material_and_stencil() {
+    use crate::host::frame::{
+        FrameGroup, FramePublisher, FrameSnapshot, FrameSprite, FrameTexture, SpriteBlend,
+    };
+    use crate::host::renderer::SpriteRenderer;
+    use crate::host::runtime::RuntimeHandle;
+    use crate::render_pipeline::draw::{BlendMode, NativeEmoteMaterial};
+
+    let vertices: Arc<[[f32; 4]]> = Arc::new([
+        [0.0, 0.0, 0.0, 0.0],
+        [4.0, 0.0, 1.0, 0.0],
+        [4.0, 5.0, 1.0, 1.0],
+    ]);
+    let material = NativeEmoteMaterial {
+        corner_colors: [[0.25, 0.5, 0.75, 0.8]; 4],
+        uv_rect: [0.0, 0.0, 1.0, 1.0],
+        blend_mode: 0x11,
+        clip_rect: [0.0, 0.0, 4.0, 5.0],
+        wipe: [1.0, 0.0, 1.0],
+    };
+    let sprite = FrameSprite {
+        layer_id: "model".into(),
+        texture: 0,
+        mask: None,
+        transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        quad_size: [4.0, 5.0],
+        uv_offset: [0.0, 0.0],
+        uv_scale: [1.0, 1.0],
+        clip_bounds: None,
+        opacity: 1.0,
+        color_multiply: [1.0; 3],
+        grayscale: false,
+        negative: false,
+        blend: SpriteBlend::EmoteAdd,
+        mesh: Some(vertices.clone()),
+        emote_material: Some(material.clone()),
+    };
+    let mask = FrameSprite {
+        layer_id: String::new(),
+        blend: SpriteBlend::Alpha,
+        ..sprite.clone()
+    };
+    let mut publisher = FramePublisher::default();
+    publisher
+        .publish(FrameSnapshot {
+            session_epoch: 1,
+            render_frame_id: 0,
+            host_frame_id: 1,
+            stage_size: [4, 5],
+            sprites: Box::new([sprite]),
+            masks: Box::new([mask]),
+            groups: Box::new([FrameGroup {
+                sprites: 0..1,
+                stencil: Some(0..1),
+                mask: None,
+                clip_bounds: None,
+                opacity: 1.0,
+                color_multiply: [1.0; 3],
+                grayscale: false,
+                negative: false,
+                opaque: false,
+                blend: SpriteBlend::Alpha,
+            }]),
+            textures: Box::new([Arc::new(FrameTexture {
+                revision: 1,
+                width: 1,
+                height: 1,
+                rgba: Box::new([255; 4]),
+            })]),
+            transition: None,
+        })
+        .unwrap();
+    let frame = publisher
+        .acquire(RuntimeHandle::from_raw(9), 0)
+        .unwrap()
+        .unwrap();
+    let packet = frame.packet();
+    let u16_at = |i| u16::from_le_bytes(packet[i..i + 2].try_into().unwrap());
+    let u32_at = |i| u32::from_le_bytes(packet[i..i + 4].try_into().unwrap());
+    let draw = 56 + 24;
+    assert_eq!(u16_at(draw + 4), 4);
+    assert_eq!(u32_at(draw + 104 + 5), 3);
+    assert_eq!(u32_at(draw + 104 + 5 + 4 + 80), 0x11);
+    let mask = draw + u32_at(draw) as usize;
+    assert_eq!(u16_at(mask + 6), 0x18);
+    let group = mask + u32_at(mask) as usize;
+    assert_eq!(u16_at(group + 4), 5);
+    assert_eq!(u32_at(group + 20), 1);
+
+    let mut renderer = SpriteRenderer::new(LogicRenderer(
+        MockProvider::default(),
+        Some(RenderTrace::default()),
+    ));
+    renderer.render(&frame).unwrap();
+    let trace = renderer.backend_mut().1.as_ref().unwrap();
+    let draw = &trace.draws[0];
+    assert_eq!(draw.commands[0].blend, BlendMode::NativeAdd);
+    assert_eq!(draw.commands[0].mesh.as_ref().unwrap().vertices, vertices);
+    assert_eq!(draw.mask_commands[0].native_emote.as_ref(), Some(&material));
+    assert_eq!(draw.shader_groups[0].mask_range, Some([0, 1]));
 }
 
 const INI: &str = "[WINDOWS]\nWIDTH=64\nHEIGHT=64\nBOOT=boot.ast\nCHARSET=UTF-8\n";

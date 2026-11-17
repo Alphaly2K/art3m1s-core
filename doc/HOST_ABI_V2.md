@@ -199,7 +199,7 @@ C 预览版 `ArtMessage.schema_version=1`、`flags=0`。一个批次可包含一
 | Media (5) | 17 | `playback_id`、`frame_id`、`width`、`height`；blob 为 RGBA8 |
 
 `ArtCreateInfo` 的 Host 能力位分别为 IO=1、UI=2、Media=4。Renderer 位分别为 sprite=1、
-transition=2、screenshot=4、group=8。
+transition=2、screenshot=4、group=8、emote=16。
 预览版检查未知位；Host 仍须处理收到的服务请求，缺少可选服务时返回相应失败。
 
 `poll_events` 按以下固定小端格式写入完整记录，不直接 memcpy C struct：
@@ -373,7 +373,7 @@ Rust 草案先提供 `acquire_latest(handle, after)`，可借用基础图层快�
 给出纹理表索引、原始图层 ID、仿射变换、UV、舞台裁剪、颜色、透明度和混合方式。纹理是
 紧密排列的 RGBA8，直通 alpha，首行在顶端；资源缓存键为 `(runtime, epoch, revision)`。
 同尺寸蒙版用独立纹理索引表示：采样前逐像素以 `alpha * mask_red / 255` 取整得到新 alpha。
-缺失或尺寸不符的蒙版回退为原图。帧支持精灵、转场和内置组效果；自定义 shader、mesh 和 stencil
+缺失或尺寸不符的蒙版回退为原图。帧支持精灵、转场、内置组效果和 E-Mote；自定义 shader
 尚未接入。Rust 借用随 `FrameLease` 释放。
 
 `FrameLease::packet()` 返回 `ARFP` 草案版 1 的二进制描述；`texture(index)` 借用对应像素。
@@ -388,6 +388,8 @@ C 草案的 `texture_rgba` 也使用帧内索引，像素和帧描述一起由�
 | 精灵记录，104 字节前缀 | 记录总长度 `u32`；opcode `u16`（1 = 精灵）；flags `u16`；纹理索引、蒙版索引、混合方式、图层 ID 长度各 `u32`；变换 6 个 `f32`，矩形尺寸、UV 偏移、UV 缩放各 2 个 `f32`，裁剪 4 个 `f32`，opacity 1 个 `f32`，RGB 乘色 3 个 `f32` |
 | 精灵记录尾部 | 按长度读取 UTF-8 图层 ID，含在该记录总长度内，无 NUL 与填充 |
 | 合成组记录，56 字节 | 记录总长度 `u32`（56）；opcode `u16`（3 = 合成组）；flags `u16`；精灵起点、结束点、蒙版索引、混合方式各 `u32`；opacity `f32`，RGB 乘色 3 个 `f32`，裁剪 4 个 `f32` |
+| 扩展精灵记录 | 与精灵记录共用 104 字节前缀和 UTF-8 图层 ID，opcode `u16`（4）；图层 ID 后依次为顶点数 `u32`、可选材质、顶点数据 |
+| Stencil 组记录，40 字节 | 记录总长度 `u32`（40）；opcode `u16`（5）；flags `u16`；精灵起点、结束点、遮罩起点、结束点各 `u32`；裁剪 4 个 `f32` |
 
 索引从 0 开始；无蒙版用 `UINT32_MAX`。混合方式按 Alpha、Add、Screen、Multiply
 依次编号 0 至 3。flags 的低三位依次表示裁剪、灰阶和反色，其余写零。裁剪为舞台上的
@@ -409,6 +411,22 @@ C 预览通过帧表交付同一帧包和纹理借用。
 目标，再按舞台裁剪、颜色、透明度和混合方式合成到父目标。使用蒙版时，按全舞台 UV 采样蒙版
 alpha；不透明组先将透明目标的合成 alpha 视为 1，再乘以组 opacity 和蒙版 alpha。
 C Host 通过 `ART_RENDERER_CAP_GROUP` 启用合成组记录；未启用则按精灵顺序直接绘制。
+
+扩展精灵沿用精灵 flags 的低三位；位值 `8` 表示有材质，`16` 表示遮罩精灵，`32` 表示转场
+旧场景的遮罩精灵。普通绘制记录（opcode 1 或 4）之后是旧场景、新场景的遮罩精灵，两者分别
+编号，最后是合成组和 stencil 组。扩展精灵的混合值 4 至 7 分别为 E-Mote 加色、反向减色、
+乘色和滤色。顶点数为零时绘制四边形；非零时为三角列表，顶点为 `x,y,u,v` 四个 `f32`，
+位置使用图层局部像素，UV 相对于精灵的 UV 矩形。
+
+材质共 112 字节，依次为左上、右上、左下、右下的 RGBA 乘色（各 4 个 `f32`），图集归一化
+UV 范围（最小与最大值，各 2 个 `f32`），原始 E-Mote blend 字段 `u32`，局部裁剪范围
+（最小与最大值，各 2 个 `f32`），以及 wipe 的乘数、加数和启用值（各 `f32`）。Stencil 组
+flags 仅使用 `1`（有裁剪）和 `16`（属于转场旧场景）。Host 用两段各自的半开区间绘制内容与
+遮罩，再按遮罩 alpha 合成；子组先于父组，范围相同时后记录为外层。
+
+C Host 声明 `ART_RENDERER_CAP_EMOTE` 后，Core 按 Host 的单调时间求值，并为一份带内嵌
+DXT5 的 PSB 提交资源读取。Host 通过帧内 CPU 图集、材质、网格和 stencil 指令绘制模型；
+不需要解析 PSB。未声明时，Luau 的模型创建调用返回错误。
 
 Rust Host 可使用 `host::renderer::SpriteRenderer` 在已开启的目标上绘制基础帧。适配器使用
 同一帧借用的类型化视图，维护会话和资源版本对应的后端纹理。Host 控制 backend 的访问、

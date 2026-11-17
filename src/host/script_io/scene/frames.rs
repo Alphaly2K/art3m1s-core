@@ -2,7 +2,7 @@ use super::{SceneProjection, ScriptIoProgress, ScriptIoSession};
 use crate::compositor::{BlendMode, TextureId, TextureInfo, TextureProvider, build};
 use crate::host::frame::{FrameGroup, FrameSnapshot, FrameSprite, FrameTexture, SpriteBlend};
 use crate::host::protocol::ProtocolError;
-use crate::render_pipeline::draw::LayerCommandKind;
+use crate::render_pipeline::draw::{DrawCommand, LayerCommandKind};
 use crate::text::{TextRenderer, message_layer_scene_id};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -103,6 +103,8 @@ impl SceneProjection {
             })
             .collect();
         let mut text_for = |id: &str| text_commands.remove(id).unwrap_or_default();
+        let mut emote = self.emote.commands(|texture| textures.record(texture));
+        let mut emote_for = |id: &str| emote.remove(id).unwrap_or_default();
         let files: HashMap<_, _> = self
             .edited
             .files(scene)
@@ -112,20 +114,39 @@ impl SceneProjection {
                     .map(|id| (id.clone(), crate::video::video_layer_texture_name(id))),
             )
             .collect();
-        let frame = build::build_frame_with_content(
+        let mut frame = build::build_frame_with_content(
             scene,
             self.compositor.clock_ms(),
             &mut textures,
-            None,
+            Some(&mut emote_for),
             Some(&mut text_for),
             Some(&files),
         );
+        frame.materialize_stencil_groups(art3m1s_render::ALPHA_MASK_SHADER);
         if !frame.mask_commands.is_empty() {
-            return None;
+            frame
+                .shader_groups
+                .sort_by_key(|group| (group.end - group.start, group.mask_range.is_none()));
         }
         let mut groups = Vec::new();
         for group in &frame.shader_groups {
             let effect = &group.effect;
+            if effect.name == art3m1s_render::ALPHA_MASK_SHADER {
+                let [start, end] = group.mask_range?;
+                groups.push(FrameGroup {
+                    sprites: group.start..group.end,
+                    mask: None,
+                    clip_bounds: group.clip_bounds,
+                    opacity: 1.0,
+                    color_multiply: [1.0; 3],
+                    grayscale: false,
+                    negative: false,
+                    opaque: false,
+                    blend: SpriteBlend::Alpha,
+                    stencil: Some(start..end),
+                });
+                continue;
+            }
             if effect.name != art3m1s_render::GROUP_COMPOSITE_SHADER
                 || effect.user_texture.is_some()
                 || group.mask_range.is_some()
@@ -172,22 +193,16 @@ impl SceneProjection {
                     3 => SpriteBlend::Multiply,
                     _ => SpriteBlend::Alpha,
                 },
+                stencil: None,
             });
         }
         let mut sprites = Vec::with_capacity(frame.commands.len());
         for (index, command) in frame.commands.iter().enumerate() {
-            if command.shader.is_some()
-                || command.mesh.is_some()
-                || command.stencil.is_some()
-                || command.native_emote.is_some()
-            {
-                return None;
-            }
             let key = frame.command_key(index)?;
             let edited = files
                 .get(&key.layer_id)
                 .is_some_and(|file| super::edit::LayerEdits::is_edit_key(file));
-            let mask = (key.kind != LayerCommandKind::Text && !edited)
+            let mask = (key.kind == LayerCommandKind::Visual && !edited)
                 .then(|| {
                     scene
                         .get(&key.layer_id)
@@ -203,41 +218,13 @@ impl SceneProjection {
                         .map(|mask| textures.record(mask).0.0 as usize)
                 })
                 .flatten();
-            let transform = command.transform.to_cols_array();
-            if !transform
-                .into_iter()
-                .chain(command.clip.quad_size)
-                .chain(command.clip.uv_offset)
-                .chain(command.clip.uv_scale)
-                .chain(command.clip_bounds.into_iter().flatten())
-                .chain(command.color.multiply)
-                .chain([command.opacity])
-                .all(f32::is_finite)
-            {
-                return None;
-            }
-            sprites.push(FrameSprite {
-                layer_id: key.layer_id.clone(),
-                texture: command.texture.0 as usize,
-                mask,
-                transform,
-                quad_size: command.clip.quad_size,
-                uv_offset: command.clip.uv_offset,
-                uv_scale: command.clip.uv_scale,
-                clip_bounds: command.clip_bounds,
-                opacity: command.opacity,
-                color_multiply: command.color.multiply,
-                grayscale: command.color.grayscale,
-                negative: command.color.negative,
-                blend: match command.blend {
-                    BlendMode::Alpha => SpriteBlend::Alpha,
-                    BlendMode::Add => SpriteBlend::Add,
-                    BlendMode::Screen => SpriteBlend::Screen,
-                    BlendMode::Multiply => SpriteBlend::Multiply,
-                    _ => return None,
-                },
-            });
+            sprites.push(frame_sprite(command, key.layer_id.clone(), mask)?);
         }
+        let masks = frame
+            .mask_commands
+            .iter()
+            .map(|command| frame_sprite(command, String::new(), None))
+            .collect::<Option<Box<[_]>>>()?;
         Some(FrameSnapshot {
             session_epoch,
             render_frame_id: 0,
@@ -245,10 +232,59 @@ impl SceneProjection {
             stage_size,
             sprites: sprites.into_boxed_slice(),
             groups: groups.into_boxed_slice(),
+            masks,
             transition: None,
             textures: textures.table.into_boxed_slice(),
         })
     }
+}
+
+fn frame_sprite(
+    command: &DrawCommand,
+    layer_id: String,
+    mask: Option<usize>,
+) -> Option<FrameSprite> {
+    let transform = command.transform.to_cols_array();
+    if command.shader.is_some()
+        || !transform
+            .into_iter()
+            .chain(command.clip.quad_size)
+            .chain(command.clip.uv_offset)
+            .chain(command.clip.uv_scale)
+            .chain(command.clip_bounds.into_iter().flatten())
+            .chain(command.color.multiply)
+            .chain([command.opacity])
+            .all(f32::is_finite)
+    {
+        return None;
+    }
+    Some(FrameSprite {
+        layer_id,
+        texture: command.texture.0 as usize,
+        mask,
+        transform,
+        quad_size: command.clip.quad_size,
+        uv_offset: command.clip.uv_offset,
+        uv_scale: command.clip.uv_scale,
+        clip_bounds: command.clip_bounds,
+        opacity: command.opacity,
+        color_multiply: command.color.multiply,
+        grayscale: command.color.grayscale,
+        negative: command.color.negative,
+        blend: match command.blend {
+            BlendMode::Alpha => SpriteBlend::Alpha,
+            BlendMode::Add => SpriteBlend::Add,
+            BlendMode::Screen => SpriteBlend::Screen,
+            BlendMode::Multiply => SpriteBlend::Multiply,
+            BlendMode::NativeAdd => SpriteBlend::EmoteAdd,
+            BlendMode::NativeReverseSubtract => SpriteBlend::EmoteReverseSubtract,
+            BlendMode::NativeMultiply => SpriteBlend::EmoteMultiply,
+            BlendMode::NativeScreen => SpriteBlend::EmoteScreen,
+            _ => return None,
+        },
+        mesh: command.mesh.as_ref().map(|mesh| mesh.vertices.clone()),
+        emote_material: command.native_emote.clone(),
+    })
 }
 
 struct CpuTextureView<'a> {
