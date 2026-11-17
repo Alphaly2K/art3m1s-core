@@ -433,13 +433,7 @@ impl SessionTransport {
     }
 
     pub fn notify(&mut self, kind: MessageKind, body: MessageBody) -> Result<(), ProtocolError> {
-        self.check_kind(kind)?;
-        if kind.domain == Domain::Diagnostics || kind == SESSION_CHANGED {
-            return Err(ProtocolError::Argument("reserved notification kind"));
-        }
-        let bytes = self.limits.check_body(&body)?;
-        self.control.check_capacity(self.limits.control, bytes)?;
-        let sequence = self.next_sequence()?;
+        let (bytes, sequence) = self.notification_slot(kind, &body)?;
         self.control.push(Envelope {
             kind,
             sequence,
@@ -450,6 +444,28 @@ impl SessionTransport {
         });
         self.last_sequence = sequence;
         Ok(())
+    }
+
+    pub(super) fn check_notify(
+        &self,
+        kind: MessageKind,
+        body: &MessageBody,
+    ) -> Result<(), ProtocolError> {
+        self.notification_slot(kind, body).map(|_| ())
+    }
+
+    fn notification_slot(
+        &self,
+        kind: MessageKind,
+        body: &MessageBody,
+    ) -> Result<(usize, u64), ProtocolError> {
+        self.check_kind(kind)?;
+        if kind.domain == Domain::Diagnostics || kind == SESSION_CHANGED {
+            return Err(ProtocolError::Argument("reserved notification kind"));
+        }
+        let bytes = self.limits.check_body(body)?;
+        self.control.check_capacity(self.limits.control, bytes)?;
+        Ok((bytes, self.next_sequence()?))
     }
 
     /// Diagnostics drop the newest record when either budget is full. They

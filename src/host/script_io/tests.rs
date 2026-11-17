@@ -2385,8 +2385,11 @@ end
 }
 
 #[test]
-fn numbered_save_restores_scene_assets_and_tween_clock_in_a_fresh_runtime() {
-    use crate::host::runtime;
+fn numbered_save_restores_scene_tweens_and_audio_in_a_fresh_runtime() {
+    use crate::host::{
+        media::PlaybackStatus,
+        runtime::{self, RuntimeError},
+    };
 
     let mut host = MemoryHost::default();
     let pixels = [20, 40, 60, 190];
@@ -2396,6 +2399,10 @@ fn numbered_save_restores_scene_assets_and_tween_clock_in_a_fresh_runtime() {
     host.asset(
         "store.iet",
         br#"*top
+[splay file=theme_a.ogg loop=1 gain=420]
+[sfade gain=480 time=10]
+[span pan=-40]
+[voice id=line file=voice.ogg]
 [lyc id=1.80 file=hero mask=mask]
 [lytween id=1.80 param=left from=0 to=20 time=10 ease=linear]
 [flip]
@@ -2407,6 +2414,7 @@ fn numbered_save_restores_scene_assets_and_tween_clock_in_a_fresh_runtime() {
     host.asset(
         "load.iet",
         br#"*top
+[splay file=old.ogg]
 [lyc id=99 width=1 height=1 color=112233]
 [flip]
 [load file=slot]
@@ -2420,12 +2428,26 @@ fn numbered_save_restores_scene_assets_and_tween_clock_in_a_fresh_runtime() {
         handle
     };
     let drive = |handle, frame, host: &mut MemoryHost, cancel_mask| {
+        let mut audio = Vec::new();
         for _ in 0..8192 {
             let progress = runtime::step(handle, frame).unwrap();
             let mut bytes = [0; 8192];
             let polled = runtime::poll_events(handle, &mut bytes).unwrap();
+            let mut records = &bytes[..polled.written_bytes];
+            while !records.is_empty() {
+                let len = u32::from_le_bytes(records[0..4].try_into().unwrap()) as usize;
+                let domain = u16::from_le_bytes(records[6..8].try_into().unwrap());
+                if domain == Domain::Media as u16 {
+                    assert_eq!(
+                        u32::from_le_bytes(records[8..12].try_into().unwrap()),
+                        MEDIA_AUDIO_COMMAND.kind
+                    );
+                    audio.push(serde_json::from_slice::<Value>(&records[64..len]).unwrap());
+                }
+                records = &records[len..];
+            }
             if progress == ScriptIoProgress::Event {
-                return;
+                return audio;
             }
             assert_eq!(progress, ScriptIoProgress::Waiting);
             for request in decode_requests(&bytes[..polled.written_bytes]) {
@@ -2454,24 +2476,66 @@ fn numbered_save_restores_scene_assets_and_tween_clock_in_a_fresh_runtime() {
         ..start
     };
     drive(saver, save_time, &mut host, false);
-    assert!(host.files.contains_key(&("save".into(), "slot".into())));
+    let saved = &host.files[&("save".into(), "slot".into())].1;
+    let saved: crate::save::SaveData = serde_json::from_slice(saved).unwrap();
+    let snapshot = saved.audio.unwrap();
+    assert_eq!(snapshot.bgm.as_ref().unwrap().gain, 480);
+    assert_eq!(snapshot.bgm.as_ref().unwrap().pan, -40);
+    assert_eq!(snapshot.voice[0].id, "line");
     runtime::destroy(saver).unwrap();
 
     for cancel_mask in [true, false] {
         host.reads.clear();
         let loader = create("load.iet");
-        drive(loader, start, &mut host, false);
+        let initial = drive(loader, start, &mut host, false);
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0]["key"], "old.ogg");
+        let playback = |value: &Value| {
+            value["playback_id"]
+                .as_str()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap()
+        };
+        let old_id = playback(&initial[0]);
+        let epoch = runtime::get_state(loader).unwrap().transport.epoch;
         let original = runtime::acquire_latest(loader, 0).unwrap().unwrap();
         assert_eq!(original.sprites[0].layer_id, "99");
-        drive(loader, start, &mut host, cancel_mask);
+        let audio = drive(loader, start, &mut host, cancel_mask);
         assert!(host.reads.contains(&("hero.png".into(), 0)));
         if cancel_mask {
+            assert!(audio.is_empty());
+            runtime::submit_playback_status(loader, epoch, old_id, PlaybackStatus::Started)
+                .unwrap();
             assert!(
                 runtime::acquire_latest(loader, original.render_frame_id)
                     .unwrap()
                     .is_none()
             );
         } else {
+            assert_eq!(audio.len(), 1);
+            assert_eq!(audio[0]["op"], "restore");
+            let plays = audio[0]["plays"].as_array().unwrap();
+            assert_eq!(plays.len(), 2);
+            assert_eq!(plays[0]["key"], "theme_a.ogg");
+            assert_eq!(plays[0]["loop_key"], "theme_b.ogg");
+            assert_eq!(plays[0]["gain"], 480);
+            assert_eq!(plays[0]["pan"], -40);
+            assert_eq!(plays[1]["key"], "voice.ogg");
+            assert_ne!(playback(&plays[0]), old_id);
+            assert!(matches!(
+                runtime::submit_playback_status(loader, epoch, old_id, PlaybackStatus::Ended),
+                Err(RuntimeError::Session(ScriptIoError::Protocol(
+                    ProtocolError::Stale
+                )))
+            ));
+            runtime::submit_playback_status(
+                loader,
+                epoch,
+                playback(&plays[0]),
+                PlaybackStatus::Started,
+            )
+            .unwrap();
             assert!(host.reads.contains(&("mask.png".into(), 0)));
             let restored = runtime::acquire_latest(loader, original.render_frame_id)
                 .unwrap()

@@ -163,6 +163,10 @@ enum NumberedLoadWork {
         remaining: VecDeque<String>,
         pending: scene::TextureRead,
     },
+    ReadyToRestore {
+        save: Box<crate::save::SaveData>,
+        source: Option<Vec<u8>>,
+    },
     Initializing {
         file: String,
     },
@@ -1134,6 +1138,7 @@ impl ScriptIoSession {
         save.waiting_for_input = Some(false);
         if let Some(scene) = &self.scene {
             save.scene = Some(scene.save_snapshot());
+            save.audio = Some(self.audio.snapshot());
         }
         let data = match serde_json::to_vec(&save) {
             Ok(data) => data,
@@ -1237,8 +1242,7 @@ impl ScriptIoSession {
                     }
                 };
                 if save.version > crate::save::SAVE_FORMAT_VERSION
-                    || (save.scene.is_some() && self.scene.is_none())
-                    || save.audio.is_some()
+                    || ((save.scene.is_some() || save.audio.is_some()) && self.scene.is_none())
                     || save.message_text.is_some()
                 {
                     return Ok(self.fail_numbered_load(
@@ -1301,7 +1305,10 @@ impl ScriptIoSession {
                 if let Some(file) = remaining.pop_front() {
                     return Ok(self.read_saved_scene_texture(save, source, remaining, file));
                 }
-                self.restore_numbered_load(*save, source.as_deref())
+                self.restore_numbered_load(*save, source)
+            }
+            NumberedLoadWork::ReadyToRestore { save, source } => {
+                self.restore_numbered_load(*save, source)
             }
             NumberedLoadWork::Initializing { file } => {
                 let _ = self
@@ -1349,7 +1356,7 @@ impl ScriptIoSession {
                 return Ok(self.read_saved_scene_texture(Box::new(save), source, remaining, file));
             }
         }
-        self.restore_numbered_load(save, source.as_deref())
+        self.restore_numbered_load(save, source)
     }
 
     fn read_saved_scene_texture(
@@ -1372,14 +1379,39 @@ impl ScriptIoSession {
     fn restore_numbered_load(
         &mut self,
         save: crate::save::SaveData,
-        source: Option<&[u8]>,
+        source: Option<Vec<u8>>,
     ) -> Result<ScenarioStep, ScriptIoError> {
         let Some(Event::LoadGame { file, .. }) = &self.scenario_event else {
             return Err(ProtocolError::State.into());
         };
         let file = file.clone();
+        let audio = if let Some(scene) = &self.scene {
+            match self
+                .audio
+                .prepare_restore(scene, save.audio.as_ref(), &self.transport)
+            {
+                Ok(audio) => audio,
+                Err(ProtocolError::WouldBlock) => {
+                    self.numbered_load = Some(NumberedLoadWork::ReadyToRestore {
+                        save: Box::new(save),
+                        source,
+                    });
+                    return Ok(ScenarioStep::Progress(ScriptIoProgress::WouldBlock));
+                }
+                Err(error) => {
+                    let kind = if error == ProtocolError::Limit {
+                        IoFailure::Limit
+                    } else {
+                        IoFailure::Denied
+                    };
+                    return Ok(self.fail_numbered_load(kind, error.to_string()));
+                }
+            }
+        } else {
+            None
+        };
         let stack = save.call_stack.into_iter().map(Into::into).collect();
-        let result = if let Some(source) = source {
+        let result = if let Some(source) = source.as_deref() {
             self.interpreter.restore_position_from_file(
                 &save.current_script,
                 source,
@@ -1402,6 +1434,7 @@ impl ScriptIoSession {
         if let Some(scene) = &mut self.scene {
             scene.restore_snapshot(save.scene, self.frame);
         }
+        self.audio.commit_restore(audio, &mut self.transport)?;
         self.wait_start = None;
         self.scenario_event = None;
         self.start_numbered_load_hook(file)

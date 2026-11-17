@@ -1,5 +1,6 @@
 use super::*;
 use crate::host::media::{PlaybackStatus, ab_loop_file};
+use crate::save::{AudioChannelSnapshot, AudioSnapshot};
 use std::collections::BTreeMap;
 
 pub const MEDIA_AUDIO_COMMAND: MessageKind = MessageKind {
@@ -40,12 +41,113 @@ pub(super) struct Audio {
 
 struct Playback {
     id: u64,
+    snapshot: AudioChannelSnapshot,
     start_ns: Option<u64>,
     start_received: bool,
     terminal_received: bool,
 }
 
+pub(super) struct AudioRestore {
+    body: MessageBody,
+    active: BTreeMap<Channel, Playback>,
+    serial: u64,
+    voice_serial: u64,
+}
+
 impl Audio {
+    pub(super) fn snapshot(&self) -> AudioSnapshot {
+        let mut snapshot = AudioSnapshot::default();
+        for (channel, track) in &self.active {
+            match channel {
+                Channel::Bgm => snapshot.bgm = Some(track.snapshot.clone()),
+                Channel::Se(_) => snapshot.se.push(track.snapshot.clone()),
+                Channel::Voice(_) => snapshot.voice.push(track.snapshot.clone()),
+            }
+        }
+        snapshot
+    }
+
+    pub(super) fn prepare_restore(
+        &self,
+        scene: &scene::SceneIo,
+        snapshot: Option<&AudioSnapshot>,
+        transport: &SessionTransport,
+    ) -> Result<Option<AudioRestore>, ProtocolError> {
+        let mut active = BTreeMap::new();
+        let mut plays = Vec::new();
+        let mut serial = self.serial;
+        let mut voice_serial = self.voice_serial;
+        let tracks = snapshot.into_iter().flat_map(|audio| {
+            audio
+                .bgm
+                .iter()
+                .map(|bgm| (Channel::Bgm, bgm))
+                .chain(audio.se.iter().map(|se| (Channel::Se(se.id.clone()), se)))
+                .chain(
+                    audio
+                        .voice
+                        .iter()
+                        .map(|voice| (Channel::Voice(voice.id.clone()), voice)),
+                )
+        });
+        for (channel, track) in tracks {
+            if active.len() >= MAX_PLAYBACKS {
+                return Err(ProtocolError::Limit);
+            }
+            if active.contains_key(&channel) {
+                return Err(ProtocolError::Argument("duplicate saved audio channel"));
+            }
+            if let Channel::Voice(id) = &channel
+                && let Some(number) = id
+                    .strip_prefix("voice:")
+                    .and_then(|number| number.parse().ok())
+            {
+                voice_serial = voice_serial.max(number);
+            }
+            serial = serial.checked_add(1).ok_or(ProtocolError::Limit)?;
+            let play = Play {
+                file: &track.file,
+                loop_play: track.loop_play,
+                gain: Some(track.gain),
+                pan: Some(track.pan),
+                fade_ms: 0,
+                buffer_ms: None,
+                skippable: track.skippable,
+                crossfade: false,
+            };
+            let (record, playback) = play.build(scene, &channel, serial, None)?;
+            plays.push(record);
+            active.insert(channel, playback);
+        }
+        if plays.is_empty() && self.active.is_empty() {
+            return Ok(None);
+        }
+        let body = MessageBody::new(json!({"op":"restore","plays":plays}).to_string(), vec![])?;
+        transport.check_notify(MEDIA_AUDIO_COMMAND, &body)?;
+        Ok(Some(AudioRestore {
+            body,
+            active,
+            serial,
+            voice_serial,
+        }))
+    }
+
+    pub(super) fn commit_restore(
+        &mut self,
+        restore: Option<AudioRestore>,
+        transport: &mut SessionTransport,
+    ) -> Result<(), ProtocolError> {
+        if let Some(restore) = restore {
+            transport.notify(MEDIA_AUDIO_COMMAND, restore.body)?;
+            self.active = restore.active;
+            self.serial = restore.serial;
+            self.voice_serial = restore.voice_serial;
+        }
+        self.pending.clear();
+        self.ready_handlers.clear();
+        Ok(())
+    }
+
     fn submit(&mut self, id: u64, status: PlaybackStatus) -> Result<(), ProtocolError> {
         let track = self
             .active
@@ -330,38 +432,14 @@ impl Audio {
         spec: Play<'_>,
     ) -> Result<(), ProtocolError> {
         let id = self.serial.checked_add(1).ok_or(ProtocolError::Limit)?;
-        let replaces = self.active.get(&channel).map(|track| track.id.to_string());
+        let replaces = self.active.get(&channel).map(|track| track.id);
         if replaces.is_none() && self.active.len() >= MAX_PLAYBACKS {
             return Err(ProtocolError::Limit);
         }
-        let key = scene.resolve_media_asset(spec.file)?;
-        let loop_key = if channel == Channel::Bgm && spec.loop_play {
-            ab_loop_file(spec.file)
-                .map(|file| scene.resolve_media_asset(&file))
-                .transpose()?
-        } else {
-            None
-        };
-        let (kind, script_id) = channel.describe();
-        emit(
-            transport,
-            json!({
-                "op":"play", "playback_id":id.to_string(), "replaces":replaces,
-                "channel":kind, "id":script_id, "key":key, "loop":spec.loop_play, "loop_key":loop_key,
-                "gain":spec.gain, "pan":spec.pan, "fade_ms":spec.fade_ms.to_string(), "buffer_ms":spec.buffer_ms,
-                "skippable":spec.skippable, "crossfade":spec.crossfade,
-            }),
-        )?;
+        let (record, playback) = spec.build(scene, &channel, id, replaces)?;
+        emit(transport, record)?;
         self.serial = id;
-        self.active.insert(
-            channel,
-            Playback {
-                id,
-                start_ns: None,
-                start_received: false,
-                terminal_received: false,
-            },
-        );
+        self.active.insert(channel, playback);
         Ok(())
     }
 
@@ -390,10 +468,65 @@ impl Audio {
             transport,
             json!({"op":op,"playback_ids":ids,"value":value,"time_ms":time.to_string()}),
         )?;
-        if matches!(command, Control::Stop(0)) {
-            self.active.retain(|channel, _| !matches(channel));
+        match command {
+            Control::Stop(0) => self.active.retain(|channel, _| !matches(channel)),
+            Control::Stop(_) => {}
+            Control::Gain(value, _) | Control::Pan(value, _) => {
+                for (channel, track) in &mut self.active {
+                    if matches(channel) {
+                        if let Control::Gain(..) = command {
+                            track.snapshot.gain = value;
+                        } else {
+                            track.snapshot.pan = value;
+                        }
+                    }
+                }
+            }
         }
         Ok(())
+    }
+}
+
+impl Play<'_> {
+    fn build(
+        &self,
+        scene: &scene::SceneIo,
+        channel: &Channel,
+        id: u64,
+        replaces: Option<u64>,
+    ) -> Result<(Value, Playback), ProtocolError> {
+        let key = scene.resolve_media_asset(self.file)?;
+        let loop_key = if *channel == Channel::Bgm && self.loop_play {
+            ab_loop_file(self.file)
+                .map(|file| scene.resolve_media_asset(&file))
+                .transpose()?
+        } else {
+            None
+        };
+        let (kind, script_id) = channel.describe();
+        let record = json!({
+            "op":"play", "playback_id":id.to_string(), "replaces":replaces.map(|id| id.to_string()),
+            "channel":kind, "id":script_id, "key":key, "loop":self.loop_play, "loop_key":loop_key,
+            "gain":self.gain, "pan":self.pan, "fade_ms":self.fade_ms.to_string(), "buffer_ms":self.buffer_ms,
+            "skippable":self.skippable, "crossfade":self.crossfade,
+        });
+        Ok((
+            record,
+            Playback {
+                id,
+                snapshot: AudioChannelSnapshot {
+                    id: script_id.unwrap_or("bgm").to_owned(),
+                    file: self.file.to_owned(),
+                    loop_play: self.loop_play,
+                    gain: self.gain.unwrap_or(1000),
+                    pan: self.pan.unwrap_or(0),
+                    skippable: self.skippable,
+                },
+                start_ns: None,
+                start_received: false,
+                terminal_received: false,
+            },
+        ))
     }
 }
 
