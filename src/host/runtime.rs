@@ -1,5 +1,6 @@
 //! Artemis runtime handles for the queued Host interface.
 
+use super::frame::FrameLease;
 use super::protocol::{HostReply, PollResult, ProtocolError, TransportLimits, TransportState};
 use super::script_io::{HostFrame, ScriptIoError, ScriptIoProgress, ScriptIoSession};
 use std::collections::HashMap;
@@ -40,6 +41,7 @@ pub struct RuntimeState {
     pub phase: RuntimePhase,
     pub transport: TransportState,
     pub host_frame_id: Option<u64>,
+    pub latest_render_frame_id: Option<u64>,
     pub stage_size: Option<[u32; 2]>,
     pub waiting_for_io: bool,
     pub waiting_for_ui: bool,
@@ -138,6 +140,12 @@ pub fn create(
 
 /// Release the runtime and invalidate its handle and outstanding requests.
 pub fn destroy(handle: RuntimeHandle) -> Result<(), RuntimeError> {
+    with_session(handle, |session| {
+        if session.frames.has_leases() {
+            return Err(ProtocolError::State.into());
+        }
+        Ok(())
+    })?;
     let entry = {
         let mut registry = RUNTIMES.lock().unwrap();
         if Arc::strong_count(&registry.owned_entry(handle)?.session) != 1 {
@@ -193,7 +201,19 @@ pub fn submit_shutdown(handle: RuntimeHandle, epoch: u64) -> Result<(), RuntimeE
 }
 
 pub fn step(handle: RuntimeHandle, frame: HostFrame) -> Result<ScriptIoProgress, RuntimeError> {
-    with_session(handle, |session| Ok(session.step_queued_frame(frame)?))
+    with_session(handle, |session| {
+        let progress = session.step_queued_frame(frame)?;
+        session.publish_frame(progress)?;
+        Ok(progress)
+    })
+}
+
+/// Borrow the latest CPU frame newer than `after`, if any. Dropping the view releases it.
+pub fn acquire_latest(
+    handle: RuntimeHandle,
+    after: u64,
+) -> Result<Option<FrameLease>, RuntimeError> {
+    with_session(handle, |session| Ok(session.frames.acquire(after)?))
 }
 
 pub fn poll_events(handle: RuntimeHandle, output: &mut [u8]) -> Result<PollResult, RuntimeError> {

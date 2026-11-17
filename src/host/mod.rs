@@ -2,6 +2,7 @@
 
 pub mod events;
 pub mod files;
+pub mod frame;
 pub(crate) mod logging;
 pub mod media;
 pub mod protocol;

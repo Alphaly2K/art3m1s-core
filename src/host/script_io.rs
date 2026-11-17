@@ -231,6 +231,7 @@ pub struct ScriptIoSession {
     dialog_request: Option<RequestIdentity>,
     pub(super) shutdown: Shutdown,
     scene: Option<scene::SceneIo>,
+    pub(super) frames: super::frame::FramePublisher,
     read_history: ReadHistory,
     read_history_dirty: bool,
 }
@@ -276,6 +277,7 @@ impl ScriptIoSession {
             dialog_request: None,
             shutdown: Shutdown::default(),
             scene: None,
+            frames: Default::default(),
             read_history: ReadHistory::default(),
             read_history_dirty: false,
         })
@@ -313,6 +315,7 @@ impl ScriptIoSession {
             phase,
             transport,
             host_frame_id: self.frame.map(|frame| frame.id),
+            latest_render_frame_id: self.frames.latest_id(),
             stage_size: (transport.epoch != 0).then_some([config.stage_width, config.stage_height]),
             waiting_for_io: self.operation.is_some(),
             waiting_for_ui: matches!(self.scenario_event, Some(Event::ShowDialog { .. })),
@@ -381,6 +384,7 @@ impl ScriptIoSession {
         self.dialog_request = None;
         self.shutdown = Shutdown::default();
         self.scene = None;
+        self.frames.clear();
         Ok(epoch)
     }
 
@@ -483,6 +487,7 @@ impl ScriptIoSession {
         self.dialog_request = None;
         self.shutdown = Shutdown::default();
         self.scene = None;
+        self.frames.clear();
         self.read_history = ReadHistory::default();
         self.read_history_dirty = false;
         Ok(epoch)

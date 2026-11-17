@@ -65,6 +65,12 @@ impl ScriptIoSession {
                     self.notify_exit().map(Some)
                 }
                 ScriptIoProgress::Event if self.has_timed_wait() => self.advance_timed_wait(frame),
+                ScriptIoProgress::Event
+                    if self.scene.is_some() && matches!(self.scenario_event, Some(Event::Flip)) =>
+                {
+                    self.resume_scenario()
+                        .map(|()| Some(ScriptIoProgress::Event))
+                }
                 ScriptIoProgress::Event => self.dispatch_ui_event(),
                 ScriptIoProgress::SaveReady if self.shutdown.is_closing_or_closed() => {
                     self.notify_closed().map(Some)

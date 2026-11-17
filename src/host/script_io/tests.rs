@@ -72,6 +72,19 @@ fn reply(request: &Request, metadata: Value, blob: Vec<u8>) -> HostReply {
     }
 }
 
+fn png_bytes(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+    let mut png = Vec::new();
+    image::ImageEncoder::write_image(
+        image::codecs::png::PngEncoder::new(&mut png),
+        rgba,
+        width,
+        height,
+        image::ExtendedColorType::Rgba8,
+    )
+    .unwrap();
+    png
+}
+
 #[derive(Default)]
 struct MemoryHost {
     files: HashMap<(String, String), (u64, Vec<u8>)>,
@@ -1513,15 +1526,7 @@ end
 fn host_supplies_texture_dimensions_before_layer_creation_and_lua_queries() {
     let mut session = session(1, TransportLimits::default(), 4096);
     let mut host = MemoryHost::default();
-    let mut png = Vec::new();
-    image::ImageEncoder::write_image(
-        image::codecs::png::PngEncoder::new(&mut png),
-        &[255; 3 * 2 * 4],
-        3,
-        2,
-        image::ExtendedColorType::Rgba8,
-    )
-    .unwrap();
+    let png = png_bytes(3, 2, &[255; 3 * 2 * 4]);
     host.asset("tiles/hero", &png);
     host.asset(
         "boot.iet",
@@ -1556,7 +1561,15 @@ end
                 assert!(
                     matches!(session.pending_event(), Some(Event::Caption { data }) if data == "ready")
                 );
-                assert_eq!(candidates, ["tiles/hero.png", "tiles/hero"]);
+                assert_eq!(
+                    candidates,
+                    [
+                        "tiles/hero.png",
+                        "tiles/hero",
+                        "tiles/mask.png",
+                        "tiles/mask"
+                    ]
+                );
                 return;
             }
             progress => assert_eq!(progress, ScriptIoProgress::Waiting),
@@ -1570,6 +1583,139 @@ end
         }
     }
     panic!("scenario did not reach its final caption");
+}
+
+#[test]
+fn basic_frames_keep_revisioned_pixels_and_masks_alive_across_reload() {
+    use crate::host::{
+        frame::SpriteBlend,
+        runtime::{self, RuntimeError},
+    };
+
+    let mut host = MemoryHost::default();
+    let pixels = [17, 28, 204, 191, 1, 2, 3, 4];
+    let mask_pixels = [50, 50, 50, 255, 200, 200, 200, 255];
+    host.asset("hero.png", &png_bytes(2, 1, &pixels));
+    host.asset("mask.png", &png_bytes(2, 1, &mask_pixels));
+    host.asset(
+        "boot.iet",
+        br#"*top
+[lyc id=1.80 file=hero mask=mask]
+[lyprop id=1.80 left=15 top=9]
+[lyc id=0 width=8 height=3 color=80112233]
+[flip]
+[wait time=1 input=0]
+[lyprop id=1.80 left=24]
+[lydel id=0]
+[stop]
+"#,
+    );
+    let handle = runtime::create(0, TransportLimits::default(), 4096).unwrap();
+    let start_frame = HostFrame {
+        id: 10,
+        monotonic_ns: 0,
+        utc_unix_ms: 0,
+        utc_offset_minutes: 0,
+    };
+    let ini = b"[WINDOWS]\nWIDTH=320\nHEIGHT=200\nBOOT=boot.iet\n";
+    let epoch = runtime::open_project(handle, ini, "windows", None).unwrap();
+
+    let drive = |host: &mut MemoryHost, frame: HostFrame| {
+        for _ in 0..512 {
+            let progress = runtime::step(handle, frame).unwrap();
+            let mut bytes = [0; 4096];
+            let polled = runtime::poll_events(handle, &mut bytes).unwrap();
+            if progress == ScriptIoProgress::Event {
+                return;
+            }
+            assert_eq!(progress, ScriptIoProgress::Waiting);
+            assert!(runtime::acquire_latest(handle, 0).unwrap().is_none());
+            for request in decode_requests(&bytes[..polled.written_bytes]) {
+                runtime::submit_replies(handle, &[host.complete(&request)]).unwrap();
+            }
+        }
+        panic!("project never reached its frame boundary");
+    };
+    drive(&mut host, start_frame);
+    let first = runtime::acquire_latest(handle, 0).unwrap().unwrap();
+    assert_eq!(first.session_epoch, epoch);
+    assert_eq!(first.host_frame_id, 10);
+    assert_eq!(first.stage_size, [320, 200]);
+    assert_eq!(first.sprites.len(), 2);
+    let solid = &first.sprites[0];
+    assert_eq!(solid.layer_id, "0");
+    assert_eq!(solid.quad_size, [8.0, 3.0]);
+    let sprite = &first.sprites[1];
+    assert_eq!(sprite.layer_id, "1.80");
+    assert_eq!(sprite.blend, SpriteBlend::Alpha);
+    assert_eq!(sprite.transform, [1.0, 0.0, 0.0, 1.0, 15.0, 9.0]);
+    let textures: Vec<_> = first.textures().collect();
+    assert_eq!(textures[solid.texture].rgba(), [17, 34, 51, 128]);
+    assert_eq!(textures[sprite.texture].rgba(), pixels);
+    assert_eq!(textures[sprite.mask.unwrap()].rgba(), mask_pixels);
+    assert_eq!(
+        runtime::get_state(handle).unwrap().latest_render_frame_id,
+        Some(first.render_frame_id)
+    );
+
+    runtime::step(handle, start_frame).unwrap();
+    assert!(
+        runtime::acquire_latest(handle, first.render_frame_id)
+            .unwrap()
+            .is_none()
+    );
+    let second_time = HostFrame {
+        id: 11,
+        monotonic_ns: 1_000_000,
+        ..start_frame
+    };
+    runtime::step(handle, second_time).unwrap();
+    let second = runtime::acquire_latest(handle, first.render_frame_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.sprites.len(), 1);
+    assert_eq!(second.sprites[0].transform[4], 24.0);
+    assert!(std::ptr::eq(
+        second.textures().nth(second.sprites[0].texture).unwrap(),
+        textures[sprite.texture]
+    ));
+    assert!(matches!(
+        runtime::acquire_latest(handle, 0),
+        Err(RuntimeError::Session(ScriptIoError::Protocol(
+            ProtocolError::WouldBlock
+        )))
+    ));
+    assert!(matches!(
+        runtime::destroy(handle),
+        Err(RuntimeError::Session(ScriptIoError::Protocol(
+            ProtocolError::State
+        )))
+    ));
+
+    let updated_pixels = [0, 1, 2, 255, 10, 20, 30, 255];
+    host.asset("hero.png", &png_bytes(2, 1, &updated_pixels));
+    assert_eq!(
+        runtime::open_project(handle, ini, "windows", None).unwrap(),
+        epoch + 1
+    );
+    assert!(runtime::acquire_latest(handle, 0).unwrap().is_none());
+    drive(&mut host, start_frame);
+    let after = second.render_frame_id;
+    drop(second);
+    let reloaded = runtime::acquire_latest(handle, after).unwrap().unwrap();
+    assert_eq!(reloaded.session_epoch, epoch + 1);
+    assert_eq!(
+        reloaded
+            .textures()
+            .nth(reloaded.sprites[1].texture)
+            .unwrap()
+            .rgba(),
+        updated_pixels
+    );
+    assert_eq!(textures[sprite.texture].rgba(), pixels);
+    drop(reloaded);
+    drop(first);
+    runtime::destroy(handle).unwrap();
 }
 
 #[test]

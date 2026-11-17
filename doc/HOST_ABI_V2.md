@@ -286,9 +286,8 @@ Host 可预提交完整资源元数据索引以同步回答 exists/stat；未缓
 写入成功后才更新可见版本；缓存的 save 内容与宿主存储版本必须保持 read-your-writes。
 Host 的 unsupported/permission/error 必须能进入脚本原有失败分支，不允许无限等待。
 
-Artemis Rust 入口在图层首次引用图片时，用 IO 读取逻辑资源并解析尺寸。创建完成后脚本
-才查询该图层；尺寸在当前会话内复用。缺失或无法识别的图片仍保留逻辑图层，未指定尺寸时
-查询返回零。纹理像素、蒙版和资源版本的帧引用属于后续帧协议。
+Artemis Rust 入口在图层首次引用 PNG 或蒙版时，用 IO 读取逻辑资源并在内存解码。资产与
+尺寸按当前会话复用。缺失或不可解码的图片仍保留逻辑图层；未指定尺寸时查询返回零。
 
 **同步 Lua 是必须先解决的实现门槛：**当前同步 EngineCallbacks 需要改成可保留调用现场的
 资源依赖/continuation，或在进入该调用前完整准备它所需数据。索引预载只能解决已知查询，
@@ -325,6 +324,13 @@ core 输出 `FramePacket`，Host 管理 GPU、编译执行 shader、上传、同
 FramePacket 必须采用有版本的二进制 schema，所有偏移以 packet 起点计算、做范围/溢出检查；
 不能包含 Rust 内存地址。schema 完整定义、资源数据组织和 opcode 编号是 P0/P3 冻结项。
 Host renderer 接入以完整帧 schema 和绘制回归为验收依据。
+
+Rust 草案先提供 `acquire_latest(handle, after)`，可借用基础图层快照。`sprites` 按绘制顺序
+给出纹理表索引、原始图层 ID、仿射变换、UV、舞台裁剪、颜色、透明度和混合方式。纹理是
+紧密排列的 RGBA8，直通 alpha，首行在顶端；资源缓存键为 `(runtime, epoch, revision)`。
+同尺寸蒙版用独立纹理索引表示：采样前逐像素以 `alpha * mask_red / 255` 取整得到新 alpha。
+缺失或尺寸不符的蒙版回退为原图。此草案只覆盖图片和纯色图层；需 shader、mesh 或 stencil
+的帧不从该入口交付。Rust 借用随 `FrameLease` 释放；二进制帧数据和 C 帧接口尚未发布。
 
 `acquire_latest(after_render_frame_id)` 返回不可变快照和 lease token；无新帧为 NO_DATA。
 快照及所有引用的 CPU 资源版本在 release 前跨 step/reload 保持有效；默认至多两个
