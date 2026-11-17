@@ -317,6 +317,15 @@ __engine:setEventHandler{onSave='capture'}
         };
         session.submit_replies(&[reply]).unwrap();
         assert_eq!(session.take_save_result(), None);
+        if should_write {
+            for key in ["saveg.dat", "system.dat"] {
+                assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
+                let request = requests(&mut session).pop().unwrap();
+                assert_eq!(request.identity.service, IO_WRITE_ATOMIC);
+                assert_eq!(request.metadata["key"], key);
+                session.submit_replies(&[host.complete(&request)]).unwrap();
+            }
+        }
         assert_eq!(session.step().unwrap(), ScriptIoProgress::SaveReady);
         assert_eq!(session.resume_scenario(), Err(ProtocolError::State));
         assert_eq!(session.take_save_result(), Some(outcome));
@@ -405,6 +414,86 @@ __engine:setEventHandler{onSave='on_save'}
     host.run(&mut session);
     assert_eq!(host.captions, ["after"]);
     assert_eq!(host.files.len(), 1);
+}
+
+#[test]
+fn read_history_uses_macro_call_sites_and_retries_until_host_persists_it() {
+    let mut session = session(1, TransportLimits::default(), 4096);
+    let mut host = MemoryHost::default();
+    host.asset("boot", b"*main\nOld page\n[page]\n[save]\n[save]\n[save]\n");
+    host.asset("macro.iet", b"*page\nNew page\n[return]\n");
+    host.files.insert(
+        ("save".into(), "aread.dat".into()),
+        (1, br#"{"boot":[0,0]}"#.to_vec()),
+    );
+    session.open_boot("boot").unwrap();
+    for _ in 0..512 {
+        if session.step().unwrap() == ScriptIoProgress::Event {
+            break;
+        }
+        let request = requests(&mut session).pop().unwrap();
+        session.submit_replies(&[host.complete(&request)]).unwrap();
+    }
+    for (expected, was_read) in [("Old page", 1), ("New page", 0)] {
+        for _ in 0..2 {
+            assert_eq!(session.step().unwrap(), ScriptIoProgress::Event);
+            assert!(
+                matches!(session.pending_event(), Some(Event::ScenarioText { content, .. }) if content == expected)
+            );
+            assert_eq!(
+                session
+                    .interpreter()
+                    .get_variable("s.status.alreadyread")
+                    .unwrap()
+                    .as_int(),
+                Some(was_read)
+            );
+        }
+        session.resume_scenario().unwrap();
+    }
+    for attempt in 0..3 {
+        assert_eq!(session.step().unwrap(), ScriptIoProgress::Event);
+        session.submit_save().unwrap();
+        for key in ["saveg.dat", "system.dat"] {
+            assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
+            let request = requests(&mut session).pop().unwrap();
+            assert_eq!(request.metadata["key"], key);
+            session.submit_replies(&[host.complete(&request)]).unwrap();
+        }
+        if attempt < 2 {
+            assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
+            let request = requests(&mut session).pop().unwrap();
+            assert_eq!(request.identity.service, IO_WRITE_ATOMIC);
+            assert_eq!(
+                request.metadata,
+                json!({"namespace":"save","key":"aread.dat"})
+            );
+            let history: Value = serde_json::from_slice(&request.blob).unwrap();
+            assert_eq!(history, json!({"boot":[0,1]}));
+            let ack = if attempt == 0 {
+                reply(&request, json!({"status":"denied"}), vec![])
+            } else {
+                host.complete(&request)
+            };
+            session.submit_replies(&[ack]).unwrap();
+        }
+        assert_eq!(session.step().unwrap(), ScriptIoProgress::SaveReady);
+        assert!(requests(&mut session).is_empty());
+        assert_eq!(
+            session.take_save_result(),
+            Some(if attempt == 0 {
+                SaveResult::Failed {
+                    kind: IoFailure::Denied,
+                    message: "denied".into(),
+                    files_written: 2,
+                }
+            } else {
+                SaveResult::Written
+            })
+        );
+        session.resume_scenario().unwrap();
+    }
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::Completed);
 }
 
 #[test]

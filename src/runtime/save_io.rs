@@ -1,6 +1,7 @@
 use super::CoreRuntime;
 use crate::backend::{TextureData, TextureDesc};
 use crate::save::AudioSnapshot;
+use crate::save::read_history::AREAD_FILE;
 use crate::save::system::{
     SAVEG_FILE, SYSTEM_FILE, apply_persistent_variables, persistent_system_snapshot,
 };
@@ -9,8 +10,6 @@ use std::collections::HashMap;
 
 /// [autosave] 自动保存的存档文件名。
 const AUTOSAVE_FILE: &str = "__Autosave.dat";
-/// 已读记录（alreadyread）持久化文件名。跨会话保留，使"已读跳过"有意义。
-const AREAD_FILE: &str = "aread.dat";
 
 #[derive(Clone)]
 pub(super) struct ScreenshotBuffer {

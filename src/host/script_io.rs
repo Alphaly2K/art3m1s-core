@@ -2,6 +2,7 @@
 //! storage; this driver never installs a physical file loader or renderer.
 
 use super::protocol::*;
+use crate::save::read_history::{AREAD_FILE, ReadHistory};
 use asb_interpreter::io_continuation::{
     self, IoFailure, IoProgress, IoRequest, IoResponse, IoTask,
 };
@@ -9,7 +10,7 @@ use asb_interpreter::{
     CallbackResult, Event, ExecutionResult, HostTime, Interpreter, InterpreterConfig,
 };
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 
 pub const IO_STAT: MessageKind = MessageKind {
@@ -109,6 +110,7 @@ enum BootRestore {
     Start,
     Globals,
     Settings,
+    ReadHistory,
 }
 
 enum EventFilterWork {
@@ -125,8 +127,9 @@ enum SaveWork {
         key: String,
     },
     Writing {
-        next_system_file: Option<Vec<u8>>,
+        remaining: VecDeque<(String, Vec<u8>)>,
         files_written: u8,
+        saves_read_history: bool,
     },
     Finished(Option<SaveResult>),
 }
@@ -210,6 +213,8 @@ pub struct ScriptIoSession {
     save_work: Option<SaveWork>,
     numbered_load: Option<NumberedLoadWork>,
     boot_restore: Option<BootRestore>,
+    read_history: ReadHistory,
+    read_history_dirty: bool,
 }
 
 impl ScriptIoSession {
@@ -248,6 +253,8 @@ impl ScriptIoSession {
             save_work: None,
             numbered_load: None,
             boot_restore: None,
+            read_history: ReadHistory::default(),
+            read_history_dirty: false,
         })
     }
 
@@ -361,6 +368,8 @@ impl ScriptIoSession {
         self.save_work = None;
         self.numbered_load = None;
         self.boot_restore = None;
+        self.read_history = ReadHistory::default();
+        self.read_history_dirty = false;
         Ok(epoch)
     }
 
@@ -742,6 +751,9 @@ impl ScriptIoSession {
         match self.interpreter.step()? {
             ExecutionResult::HostIoPending => self.interpreter_request(),
             ExecutionResult::Wait(event) => {
+                if matches!(event, Event::ScenarioText { .. }) {
+                    self.record_read_history();
+                }
                 self.scenario_event = Some(event);
                 Ok(ScenarioStep::Progress(ScriptIoProgress::Event))
             }
@@ -762,6 +774,24 @@ impl ScriptIoSession {
         ))
     }
 
+    fn record_read_history(&mut self) {
+        let source = self
+            .interpreter
+            .engine_context()
+            .lock()
+            .unwrap()
+            .scenario_text_source
+            .clone();
+        if let Some((script, line)) = source {
+            let new = self.read_history.insert(&script, line);
+            self.read_history_dirty |= new;
+            self.interpreter.set_variable(
+                "s.status.alreadyread",
+                asb_interpreter::Value::Int(i64::from(!new)),
+            );
+        }
+    }
+
     fn step_boot_restore(
         &mut self,
         stage: BootRestore,
@@ -777,17 +807,21 @@ impl ScriptIoSession {
             }
             BootRestore::Globals => SAVEG_FILE,
             BootRestore::Settings => SYSTEM_FILE,
+            BootRestore::ReadHistory => AREAD_FILE,
         };
         let result = match response {
+            Some(IoResponse::Read(data)) if file == AREAD_FILE => serde_json::from_slice(&data)
+                .map(|values| self.read_history.import(values))
+                .map_err(|error| error.to_string()),
             Some(IoResponse::Read(data)) => serde_json::from_slice(&data)
                 .map(|values| {
-                    apply_persistent_variables(&mut self.interpreter, values, file == SAVEG_FILE)
+                    apply_persistent_variables(&mut self.interpreter, values, file == SAVEG_FILE);
                 })
                 .map_err(|error| error.to_string()),
             Some(IoResponse::Failed {
                 kind: IoFailure::NotFound,
                 ..
-            }) => Ok(0),
+            }) => Ok(()),
             Some(IoResponse::Failed { message, .. }) => Err(message),
             _ => return Err(ProtocolError::State.into()),
         };
@@ -799,14 +833,16 @@ impl ScriptIoSession {
                 .callbacks
                 .debug(0, &format!("system restore skipped {file}: {error}"), false);
         }
-        if file == SAVEG_FILE {
-            self.boot_restore = Some(BootRestore::Settings);
-            Ok(Some(IoRequest::Read {
-                path: format!("{}/{SYSTEM_FILE}", self.save_prefix),
-            }))
-        } else {
-            Ok(None)
-        }
+        let (next, requested) = match stage {
+            BootRestore::Globals => (BootRestore::Settings, SYSTEM_FILE),
+            BootRestore::Settings => (BootRestore::ReadHistory, AREAD_FILE),
+            BootRestore::ReadHistory => return Ok(None),
+            BootRestore::Start => unreachable!(),
+        };
+        self.boot_restore = Some(next);
+        Ok(Some(IoRequest::Read {
+            path: format!("{}/{requested}", self.save_prefix),
+        }))
     }
 
     fn step_save(
@@ -815,7 +851,7 @@ impl ScriptIoSession {
         response: Option<IoResponse>,
     ) -> Result<ScenarioStep, ScriptIoError> {
         let key = match work {
-            SaveWork::Queued { key: None } => return self.start_system_save(),
+            SaveWork::Queued { key: None } => return self.start_save_writes(None),
             SaveWork::Queued { key: Some(key) } => {
                 let Some(Event::SaveGame { file }) = &self.scenario_event else {
                     return Err(ProtocolError::State.into());
@@ -834,21 +870,25 @@ impl ScriptIoSession {
                 key
             }
             SaveWork::Writing {
-                next_system_file,
+                mut remaining,
                 files_written,
+                saves_read_history,
             } => {
                 let result = match response {
-                    Some(IoResponse::Written) if next_system_file.is_some() => {
-                        self.save_work = Some(SaveWork::Writing {
-                            next_system_file: None,
-                            files_written: 1,
-                        });
-                        return Ok(self.save_write_request(
-                            crate::save::system::SYSTEM_FILE,
-                            next_system_file.unwrap(),
-                        ));
+                    Some(IoResponse::Written) => {
+                        if let Some((key, data)) = remaining.pop_front() {
+                            self.save_work = Some(SaveWork::Writing {
+                                remaining,
+                                files_written: files_written + 1,
+                                saves_read_history,
+                            });
+                            return Ok(self.save_write_request(&key, data));
+                        }
+                        if saves_read_history {
+                            self.read_history_dirty = false;
+                        }
+                        SaveResult::Written
                     }
-                    Some(IoResponse::Written) => SaveResult::Written,
                     Some(IoResponse::Failed { kind, message }) => SaveResult::Failed {
                         kind,
                         message,
@@ -883,46 +923,51 @@ impl ScriptIoSession {
             Ok(data) => data,
             Err(error) => return self.fail_save_hook(error),
         };
-        if data.len() > self.max_file_bytes {
-            return Ok(self.finish_save(SaveResult::Failed {
-                kind: IoFailure::Limit,
-                message: "save snapshot exceeds file budget".into(),
-                files_written: 0,
-            }));
-        }
-        self.save_work = Some(SaveWork::Writing {
-            next_system_file: None,
-            files_written: 0,
-        });
-        Ok(self.save_write_request(&key, data))
+        self.start_save_writes(Some((key, data)))
     }
 
-    fn start_system_save(&mut self) -> Result<ScenarioStep, ScriptIoError> {
+    fn start_save_writes(
+        &mut self,
+        snapshot: Option<(String, Vec<u8>)>,
+    ) -> Result<ScenarioStep, ScriptIoError> {
+        use crate::save::system::{SAVEG_FILE, SYSTEM_FILE, persistent_system_snapshot};
         let store = self.interpreter.variables();
         let global: HashMap<_, _> = store.iter_global().collect();
-        let system = crate::save::system::persistent_system_snapshot(&store);
-        let serialize = || -> Result<_, serde_json::Error> {
-            Ok((serde_json::to_vec(&global)?, serde_json::to_vec(&system)?))
+        let system = persistent_system_snapshot(&store);
+        let build = || -> Result<_, serde_json::Error> {
+            let mut files = VecDeque::new();
+            files.extend(snapshot);
+            files.push_back((SAVEG_FILE.into(), serde_json::to_vec(&global)?));
+            files.push_back((SYSTEM_FILE.into(), serde_json::to_vec(&system)?));
+            if self.read_history_dirty {
+                files.push_back((
+                    AREAD_FILE.into(),
+                    serde_json::to_vec(&self.read_history.export())?,
+                ));
+            }
+            Ok(files)
         };
-        let (global, system) = match serialize() {
+        let mut files = match build() {
             Ok(files) => files,
             Err(error) => return self.fail_save_hook(error),
         };
-        if [global.len(), system.len()]
-            .into_iter()
-            .any(|size| size > self.max_file_bytes || size > self.limits().blob_bytes)
-        {
+        let byte_limit = self.max_file_bytes.min(self.limits().blob_bytes);
+        if files.iter().any(|(_, data)| data.len() > byte_limit) {
             return Ok(self.finish_save(SaveResult::Failed {
                 kind: IoFailure::Limit,
-                message: "system save exceeds file budget".into(),
+                message: "save exceeds file budget".into(),
                 files_written: 0,
             }));
         }
+        let (key, data) = files
+            .pop_front()
+            .expect("global and system saves are present");
         self.save_work = Some(SaveWork::Writing {
-            next_system_file: Some(system),
+            remaining: files,
             files_written: 0,
+            saves_read_history: self.read_history_dirty,
         });
-        Ok(self.save_write_request(crate::save::system::SAVEG_FILE, global))
+        Ok(self.save_write_request(&key, data))
     }
 
     fn save_write_request(&self, key: &str, data: Vec<u8>) -> ScenarioStep {

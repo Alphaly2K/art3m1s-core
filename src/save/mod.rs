@@ -7,6 +7,7 @@ use asb_interpreter::CallFrame;
 use asb_interpreter::variable::VariableStore;
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod read_history;
 pub(crate) mod system;
 
 /// 存档中的音频重放快照。只记录当前应播放的音频，不记录播放进度；

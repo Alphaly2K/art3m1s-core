@@ -1,6 +1,7 @@
 use super::CoreRuntime;
 use super::callbacks::{OVERRIDE_IS_DECIDE, OVERRIDE_IS_DOWN_EDGE};
 use super::input::enqueue_handler_tags;
+use crate::save::read_history::ReadHistory;
 use asb_interpreter::Value;
 use std::collections::{HashMap, HashSet};
 
@@ -50,7 +51,7 @@ pub(super) struct RuntimeControlState {
     /// `mode=0` 的文本不覆盖它；frame 末消费后清空。
     current_scenario_was_read: Option<bool>,
     /// 已读记录：脚本名 → 已读的剧情文本行集合。跨会话持久化（aread.dat）。
-    read_lines: HashMap<String, HashSet<usize>>,
+    read_lines: ReadHistory,
     auto_wait_elapsed_ms: u64,
     skip_wait_revealed: bool,
     was_skipping: bool,
@@ -134,7 +135,7 @@ impl Default for RuntimeControlState {
             automode_sync_se: Vec::new(),
             already_read_enabled: true,
             current_scenario_was_read: None,
-            read_lines: HashMap::new(),
+            read_lines: ReadHistory::default(),
             automode_layer: None,
             auto_wait_elapsed_ms: 0,
             skip_wait_revealed: false,
@@ -199,17 +200,12 @@ impl RuntimeControlState {
 
     /// 该剧情文本行是否已读。
     pub(super) fn is_read(&self, script: &str, line: usize) -> bool {
-        self.read_lines
-            .get(script)
-            .is_some_and(|lines| lines.contains(&line))
+        self.read_lines.contains(script, line)
     }
 
     /// 标记剧情文本行为已读。返回是否是新标记（用于决定是否需要持久化）。
     pub(super) fn mark_read(&mut self, script: &str, line: usize) -> bool {
-        self.read_lines
-            .entry(script.to_string())
-            .or_default()
-            .insert(line)
+        self.read_lines.insert(script, line)
     }
 
     /// 已读跳过遇未读是否应停止：已读判定开启 且 skip 配置为"不跳过未读"。
@@ -219,21 +215,12 @@ impl RuntimeControlState {
 
     /// 已读记录序列化为 `脚本 → 已读行列表`（持久化用）。
     pub(super) fn read_lines_export(&self) -> HashMap<String, Vec<usize>> {
-        self.read_lines
-            .iter()
-            .map(|(k, v)| {
-                let mut lines: Vec<usize> = v.iter().copied().collect();
-                lines.sort_unstable();
-                (k.clone(), lines)
-            })
-            .collect()
+        self.read_lines.export()
     }
 
     /// 从持久化数据恢复已读记录（合并，不清空现有）。
     pub(super) fn read_lines_import(&mut self, data: HashMap<String, Vec<usize>>) {
-        for (script, lines) in data {
-            self.read_lines.entry(script).or_default().extend(lines);
-        }
+        self.read_lines.import(data);
     }
 
     pub(super) fn reset_auto_wait(&mut self) {

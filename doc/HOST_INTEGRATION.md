@@ -111,7 +111,7 @@ macroadd 及栈定位遇到未加载脚本时，通过相同的 Host 读取协�
 Rust 的 `ExecutionResult`/`TagResult` 新增 `HostIoPending`，穷举匹配需处理该分支；
 未启用 resumable IO 的解释器不产生它，v1 C 函数表与同步路径保持原语义。
 
-`open_boot(name)` 创建新 VM，先从 save 命名空间恢复可选的 `saveg.dat` 和 `system.dat`，
+`open_boot(name)` 创建新 VM，先从 save 命名空间恢复可选的 `saveg.dat`、`system.dat` 和 `aread.dat`，
 再按逻辑名称请求 BOOT 和可选的 `macro.iet`。缺少或读不出系统文件时继续启动；只恢复可持久化
 的设置。脚本支持文本与 ASB，按 main/start/_start/文件开头选择入口。文件请求和加载在 step
 中推进。替换会话会使旧请求失效，非法逻辑名称保留旧会话。
@@ -151,10 +151,14 @@ IO 等待期间，新帧返回 `WouldBlock` 且不受理；提交结果后以相
 运行 `onSave` 及它排队的状态更新，等待回调内的 IO，并生成解释器快照。回调可以
 修改存档变量、执行 Lua 和请求 IO；若尝试跳转、等待或派发普通场景事件，本次保存失败。
 调用方原有的标签队列保留。快照使用现有 `SaveData` 格式，记录存档事件后的脚本位置，
-当前只包含解释器状态。无文件名时，依次写 `saveg.dat` 和 `system.dat`，不调用 `onSave`。
+当前只包含解释器状态。有文件名时先写编号存档，随后依次写 `saveg.dat` 和 `system.dat`；
+无文件名时直接写后两份，不调用 `onSave`。如果出现新已读位置，最后写 `aread.dat`。
 收到 `SaveReady` 后用 `take_save_result()` 取走成功或失败，再用
 `resume_scenario()` 继续。每份文件单独提交，全部确认才返回成功；失败时 `files_written`
-记录已确认的文件数。已读记录及画面和音频快照仍由运行时集成承担。
+记录已确认的文件数。`aread.dat` 失败会保留待保存的已读记录；画面和音频快照仍由运行时集成承担。
+
+首次返回一条正文事件时，`s.status.alreadyread` 表示该脚本位置在这次派发前是否已读。
+宏文本使用宏调用者的位置；重复查询同一个待确认事件不会刷新已读状态。
 
 收到 `Event::LoadGame` 后可调用 `submit_numbered_load()`。Core 先读取并校验解释器快照，
 缺少目标脚本时再请求其字节。成功恢复位置后，加载期 Lua 先于 `onLoad` 运行，两者均可挂起。
