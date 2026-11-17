@@ -831,6 +831,7 @@ impl ScriptIoSession {
         })?;
         self.frame = Some(frame);
         if new_frame {
+            self.expire_load_transition(frame);
             self.audio.advance(frame);
             if let Some(scene) = self.scene.as_mut() {
                 self.video.advance(scene);
@@ -1538,10 +1539,11 @@ impl ScriptIoSession {
         save: crate::save::SaveData,
         source: Option<Vec<u8>>,
     ) -> Result<ScenarioStep, ScriptIoError> {
-        let Some(Event::LoadGame { file, .. }) = &self.scenario_event else {
+        let Some(Event::LoadGame { file, trans_type }) = &self.scenario_event else {
             return Err(ProtocolError::State.into());
         };
         let file = file.clone();
+        let trans_type = *trans_type;
         if let Some(scene) = &self.scene
             && let Some(snapshot) = &save.message_text
             && let Some((pending, request)) = scene.prepare_saved_font(snapshot)
@@ -1612,7 +1614,7 @@ impl ScriptIoSession {
         self.gameplay_checkpoint = None;
         self.clear_control_modes();
         self.video.reset_playback();
-        self.transition = None;
+        self.begin_load_transition(trans_type);
         self.screenshot = Default::default();
         self.wait_start = None;
         self.scenario_event = None;

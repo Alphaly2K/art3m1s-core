@@ -3,13 +3,15 @@ use crate::host::frame::{FrameSnapshot, FrameTexture};
 use asb_interpreter::WaitReason;
 use std::sync::Arc;
 
+const DEFAULT_TRANSITION_MS: u64 = 1000;
+
 pub(super) struct Transition {
     pub source: Arc<FrameSnapshot>,
     pub rule: Option<Arc<FrameTexture>>,
     pub vague: f32,
     started: HostFrame,
     duration_ns: u64,
-    input: i32,
+    input: Option<i32>,
 }
 
 impl Transition {
@@ -20,6 +22,36 @@ impl Transition {
 }
 
 impl ScriptIoSession {
+    pub(super) fn begin_load_transition(&mut self, kind: Option<i32>) {
+        self.transition = if self.transitions_enabled && matches!(kind, Some(1 | 2)) {
+            self.frames
+                .latest_snapshot()
+                .zip(self.frame)
+                .map(|(source, started)| Transition {
+                    source,
+                    rule: None,
+                    vague: 32.0 / 255.0,
+                    started,
+                    duration_ns: DEFAULT_TRANSITION_MS * 1_000_000,
+                    input: None,
+                })
+        } else {
+            None
+        };
+    }
+
+    pub(super) fn expire_load_transition(&mut self, frame: HostFrame) {
+        if self.transition.as_ref().is_some_and(|transition| {
+            transition.input.is_none()
+                && frame
+                    .monotonic_ns
+                    .saturating_sub(transition.started.monotonic_ns)
+                    >= transition.duration_ns
+        }) {
+            self.transition = None;
+        }
+    }
+
     pub(super) fn start_transition(
         &mut self,
         frame: HostFrame,
@@ -34,7 +66,9 @@ impl ScriptIoSession {
         else {
             return Err(ProtocolError::State);
         };
-        let duration_ns = time.unwrap_or(1000).saturating_mul(1_000_000);
+        let duration_ns = time
+            .unwrap_or(DEFAULT_TRANSITION_MS)
+            .saturating_mul(1_000_000);
         self.transition = if self.transitions_enabled
             && self.scene.is_some()
             && matches!(trans_type, 1 | 2)
@@ -52,7 +86,7 @@ impl ScriptIoSession {
                 vague: vague.unwrap_or(32).max(1) as f32 / 255.0,
                 started: frame,
                 duration_ns,
-                input: *input,
+                input: Some(*input),
             })
         } else {
             None
@@ -85,7 +119,7 @@ impl ScriptIoSession {
                 scene.with_input(|input| self.control.wants_advance(input, frame))
             });
             let skip = frame.id != transition.started.id
-                && match transition.input {
+                && match transition.input.unwrap_or(0) {
                     0 => false,
                     2 => self.control.skipping(),
                     _ => self.control.skipping() || advance,

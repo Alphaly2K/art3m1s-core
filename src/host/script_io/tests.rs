@@ -2173,6 +2173,79 @@ __engine:setEventHandler{onSave='capture'}
 }
 
 #[test]
+fn numbered_load_blends_the_previous_frame_without_blocking_the_restored_script() {
+    let (mut producer, _, mut host) = playback_project(
+        b"*top\n[lyc id=restored width=2 height=1 color=ffffff]\n[save file=slot]\n[calllua function=mark]\n[stop]\n[lua]\nfunction mark() restored=true end\n[/lua]\n",
+    );
+    drive_playback_boot(&mut producer, &mut host);
+    host.asset("load.iet", b"*top\n[lyc id=previous width=1 height=1 color=ffffff]\n[flip]\n[load file=slot type=2]\n[stop]\n");
+    let mut loader = session(2, TransportLimits::default(), 4096);
+    loader
+        .open_queued_project(
+            b"[WINDOWS]\nWIDTH=320\nHEIGHT=200\nBOOT=load.iet\n",
+            "windows",
+            None,
+        )
+        .unwrap();
+    drive_playback_boot(&mut loader, &mut host);
+    loader.publish_frame(ScriptIoProgress::Event).unwrap();
+    let previous = loader.frames.latest_snapshot().unwrap();
+    assert_eq!(previous.sprites[0].layer_id, "previous");
+
+    let start = playback_frame(2, 10);
+    for _ in 0..2048 {
+        let progress = loader.step_queued_frame(start).unwrap();
+        if progress == ScriptIoProgress::Event {
+            loader.publish_frame(progress).unwrap();
+            break;
+        }
+        assert_eq!(progress, ScriptIoProgress::Waiting);
+        for request in requests(&mut loader) {
+            loader.submit_replies(&[host.complete(&request)]).unwrap();
+        }
+    }
+    assert!(
+        loader
+            .interpreter()
+            .lua()
+            .globals()
+            .get::<bool>("restored")
+            .unwrap()
+    );
+    let new = loader.frames.latest_snapshot().unwrap();
+    assert_eq!(new.sprites[0].layer_id, "restored");
+    let blend = new.transition.as_ref().unwrap();
+    assert_eq!(blend.source[0].layer_id, "previous");
+    assert_eq!(blend.progress, 0.0);
+    assert!(blend.rule.is_none());
+
+    let progress = loader.step_queued_frame(playback_frame(3, 510)).unwrap();
+    loader.publish_frame(progress).unwrap();
+    assert_eq!(
+        loader
+            .frames
+            .latest_snapshot()
+            .unwrap()
+            .transition
+            .as_ref()
+            .unwrap()
+            .progress,
+        0.5
+    );
+    let progress = loader.step_queued_frame(playback_frame(4, 1010)).unwrap();
+    loader.publish_frame(progress).unwrap();
+    assert!(
+        loader
+            .frames
+            .latest_snapshot()
+            .unwrap()
+            .transition
+            .is_none()
+    );
+    assert!(previous.transition.is_none());
+}
+
+#[test]
 fn audio_feedback_uses_playback_identity_and_resumes_its_wait_after_callback_io() {
     use crate::host::{
         media::PlaybackStatus,
