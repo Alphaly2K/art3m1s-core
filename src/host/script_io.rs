@@ -234,7 +234,7 @@ pub struct ScriptIoSession {
     random_seed: u64,
     frame: Option<HostFrame>,
     frame_handler_due: bool,
-    timed_wait_start: Option<(u64, u64)>,
+    wait_start: Option<(u64, u64)>,
     event_filter: Option<EventFilterWork>,
     save_work: Option<SaveWork>,
     numbered_load: Option<NumberedLoadWork>,
@@ -280,7 +280,7 @@ impl ScriptIoSession {
             random_seed: 0,
             frame: None,
             frame_handler_due: false,
-            timed_wait_start: None,
+            wait_start: None,
             event_filter: None,
             save_work: None,
             numbered_load: None,
@@ -387,7 +387,7 @@ impl ScriptIoSession {
         self.scenario_event = None;
         self.frame = None;
         self.frame_handler_due = false;
-        self.timed_wait_start = None;
+        self.wait_start = None;
         self.event_filter = None;
         self.save_work = None;
         self.numbered_load = None;
@@ -490,7 +490,7 @@ impl ScriptIoSession {
         self.scenario_event = None;
         self.frame = None;
         self.frame_handler_due = false;
-        self.timed_wait_start = None;
+        self.wait_start = None;
         self.event_filter = None;
         self.save_work = None;
         self.numbered_load = None;
@@ -628,7 +628,7 @@ impl ScriptIoSession {
         }
         self.save_work = None;
         self.numbered_load = None;
-        self.timed_wait_start = None;
+        self.wait_start = None;
         self.interpreter.advance_line();
         Ok(())
     }
@@ -762,6 +762,7 @@ impl ScriptIoSession {
         self.frame = Some(frame);
         if new_frame {
             if let Some(scene) = self.scene.as_mut() {
+                scene.with_input(|input| input.advance(frame.monotonic_ns));
                 scene.advance_clock(frame.monotonic_ns);
             }
             self.interpreter.begin_frame();
@@ -941,7 +942,7 @@ impl ScriptIoSession {
                 if matches!(event, Event::ScenarioText { .. }) {
                     self.record_read_history();
                 }
-                self.timed_wait_start = self.interpreter.current_host_wait_start();
+                self.wait_start = self.interpreter.current_host_wait_start();
                 self.scenario_event = Some(if let Some(scene) = &self.scene {
                     scene.take_scene_wait(event)
                 } else {
@@ -1394,7 +1395,7 @@ impl ScriptIoSession {
         if let Some(scene) = &mut self.scene {
             scene.restore_snapshot(save.scene, self.frame);
         }
-        self.timed_wait_start = None;
+        self.wait_start = None;
         self.scenario_event = None;
         self.start_numbered_load_hook(file)
     }

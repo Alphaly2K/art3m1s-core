@@ -1433,6 +1433,162 @@ fn timed_wait_uses_elapsed_monotonic_time_and_starts_in_its_own_frame() {
 }
 
 #[test]
+fn queued_input_preserves_edges_across_io_and_releases_only_the_current_wait() {
+    use crate::host::{
+        input::{HostInput, TouchPhase},
+        runtime::{self, RuntimeError},
+    };
+
+    let ini = b"[WINDOWS]\nWIDTH=640\nHEIGHT=480\nBOOT=boot.iet\n";
+    let handle = runtime::create(0, TransportLimits::default(), 4096).unwrap();
+    let epoch = runtime::open_project(handle, ini, "windows", None).unwrap();
+    let mut host = MemoryHost::default();
+    host.asset("pause", b"");
+    host.asset(
+        "boot.iet",
+        br#"*top
+[wt]
+[caption data=click]
+[exkey btn=13]
+[caption data=key]
+[wait time=10000 input=1]
+[caption data=input]
+[wait time=1 input=0]
+[caption data=timer]
+[lua]
+function tick(e)
+  ticks=(ticks or 0)+1
+  assert(e:getFrameNumber()==ticks)
+  local point=e:getMousePoint()
+  if ticks==1 then
+    assert(not e:isDown(13) and not e:isDownEdge(13))
+  elseif ticks==2 then
+    assert(point.x==15 and point.y==-7)
+    assert(e:isDown(13) and e:isDecide(13) and e:isPush(13))
+    assert(not e:isDecide() and not e:isUpEdge(13))
+    assert(e:getTouchCount()==1 and e:getTouchPoint()[9].x==20)
+    assert(e:file('pause')=='')
+    assert(e:isDownEdge(13) and e:getTouchPoint()[9].x==20)
+  elseif ticks==3 then
+    assert(e:isDown(13) and e:isPush(13) and not e:isDownEdge(13))
+    assert(e:isDownEdge(65) and e:getTouchPoint()[9].x==30)
+  elseif ticks==4 then
+    assert(e:isDownEdge(13) and e:isUpEdge(13))
+    assert(e:getTouchCount()==0 and e:isDown(13))
+  elseif ticks==5 then
+    assert(not e:isDown(13) and not e:isUpEdge(13) and e:isDownEdge(66))
+  end
+end
+__engine:setEventHandler{onEnterFrame='tick'}
+[/lua]
+"#,
+    );
+
+    let poll = || {
+        let mut bytes = vec![0; 4096];
+        let result = runtime::poll_events(handle, &mut bytes).unwrap();
+        bytes.truncate(result.written_bytes);
+        bytes
+    };
+    let caption = |expected: &str| {
+        let bytes = poll();
+        assert_eq!(
+            bytes.len(),
+            u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize
+        );
+        assert_eq!(
+            u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            UI_CAPTION.kind
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes[64..]).unwrap(),
+            json!({"text":expected})
+        );
+    };
+    let submit = |events: &[HostInput]| runtime::submit_input(handle, epoch, events);
+    let key = |code, down| HostInput::Key { code, down };
+    let touch = |phase, x| HostInput::Touch {
+        id: 9,
+        phase,
+        x,
+        y: 0,
+    };
+    let frame = |id, monotonic_ns| HostFrame {
+        id,
+        monotonic_ns,
+        utc_unix_ms: 0,
+        utc_offset_minutes: 0,
+    };
+    let step = |frame| runtime::step(handle, frame).unwrap();
+
+    assert!(matches!(
+        submit(&[key(13, true), key(0, true)]),
+        Err(RuntimeError::Session(ScriptIoError::Protocol(
+            ProtocolError::Argument(_)
+        )))
+    ));
+    for _ in 0..2048 {
+        match step(frame(1, 0)) {
+            ScriptIoProgress::Waiting => {
+                let request = decode_requests(&poll()).pop().unwrap();
+                runtime::submit_replies(handle, &[host.complete(&request)]).unwrap();
+            }
+            ScriptIoProgress::Event => break,
+            progress => panic!("unexpected startup progress {progress:?}"),
+        }
+    }
+    assert!(runtime::get_state(handle).unwrap().waiting_for_scenario);
+    let ready = poll();
+    assert_eq!(
+        u32::from_le_bytes(ready[8..12].try_into().unwrap()),
+        PROJECT_READY.kind
+    );
+
+    submit(&[
+        HostInput::Pointer { x: 15, y: -7 },
+        touch(TouchPhase::Down, 20),
+        key(13, true),
+    ])
+    .unwrap();
+    let second = frame(2, 10_000_000);
+    let third = frame(3, 510_000_000);
+    assert_eq!(step(second), ScriptIoProgress::Waiting);
+    let request = decode_requests(&poll()).pop().unwrap();
+    assert_eq!(request.metadata["key"], "pause");
+    submit(&[touch(TouchPhase::Move, 30), key(65, true)]).unwrap();
+    assert_eq!(step(third), ScriptIoProgress::WouldBlock);
+    assert_eq!(runtime::get_state(handle).unwrap().host_frame_id, Some(2));
+    runtime::submit_replies(handle, &[host.complete(&request)]).unwrap();
+    assert_eq!(step(second), ScriptIoProgress::Event);
+    caption("click");
+    assert_eq!(step(second), ScriptIoProgress::Event);
+    assert_eq!(step(third), ScriptIoProgress::Event);
+    assert!(poll().is_empty());
+
+    submit(&[key(13, false), key(13, true), touch(TouchPhase::Up, 40)]).unwrap();
+    assert_eq!(step(frame(4, 510_000_000)), ScriptIoProgress::Event);
+    caption("key");
+    submit(&[HostInput::FocusLost, key(66, true)]).unwrap();
+    assert_eq!(step(frame(5, 510_000_000)), ScriptIoProgress::Event);
+    caption("input");
+    submit(&[key(1, true)]).unwrap();
+    assert_eq!(step(frame(6, 510_999_999)), ScriptIoProgress::Event);
+    assert!(poll().is_empty());
+    assert_eq!(step(frame(7, 511_000_000)), ScriptIoProgress::Completed);
+    caption("timer");
+
+    let next_epoch = runtime::open_project(handle, ini, "windows", None).unwrap();
+    assert_ne!(next_epoch, epoch);
+    assert!(matches!(
+        submit(&[key(13, true)]),
+        Err(RuntimeError::Session(ScriptIoError::Protocol(
+            ProtocolError::Stale
+        )))
+    ));
+    runtime::destroy(handle).unwrap();
+}
+
+#[test]
 fn compound_events_resume_in_order_without_reexecuting_the_tag() {
     use asb_interpreter::event::LayerEvent;
 

@@ -1,6 +1,7 @@
 //! Artemis runtime handles for the queued Host interface.
 
 use super::frame::FrameLease;
+use super::input::HostInput;
 use super::protocol::{HostReply, PollResult, ProtocolError, TransportLimits, TransportState};
 use super::script_io::{HostFrame, ScriptIoError, ScriptIoProgress, ScriptIoSession};
 use std::collections::HashMap;
@@ -198,6 +199,15 @@ pub fn open_project(
 /// Begin a graceful close at a point with no outstanding scene services.
 pub fn submit_shutdown(handle: RuntimeHandle, epoch: u64) -> Result<(), RuntimeError> {
     with_session(handle, |session| Ok(session.submit_shutdown(epoch)?))
+}
+
+/// Queue an ordered batch of input for the next newly accepted Host frame.
+pub fn submit_input(
+    handle: RuntimeHandle,
+    epoch: u64,
+    events: &[HostInput],
+) -> Result<(), RuntimeError> {
+    with_session(handle, |session| Ok(session.submit_input(epoch, events)?))
 }
 
 pub fn step(handle: RuntimeHandle, frame: HostFrame) -> Result<ScriptIoProgress, RuntimeError> {

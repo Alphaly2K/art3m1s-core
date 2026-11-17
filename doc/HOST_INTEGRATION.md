@@ -129,6 +129,10 @@ Rust 的 `ExecutionResult`/`TagResult` 新增 `HostIoPending`，穷举匹配需�
 对话框只接受 `poll_events` 已交付的请求身份。`submit_replies` 只入队，脚本在下次 `step`
 处理结果。直接使用 `ScriptIoSession` 时，场景事件仍由调用方通过 `pending_event()` 处理。
 
+用 `submit_input(handle, epoch, &[HostInput])` 提交键盘、鼠标或触点输入。Host 将按钮映射到
+Artemis 键码，并把屏幕坐标换算为舞台坐标。Core 在下一个受理的新帧应用输入，在 Lua
+回调及场景等待中使用该快照。IO 回填后重试同一帧时继续使用原快照。失焦时提交 `FocusLost`。
+
 收到 `exit_requested` 后，调用 `submit_shutdown(handle, epoch)`。继续 `step`、拉取写入请求
 并回传结果，直至收到 `runtime_closed` 和其中的存档结果。Host 也可主动请求关闭；仍有 IO 或
 对话框结果待处理时需先完成这些请求。`destroy` 可以直接释放句柄并放弃未确认的写入。
@@ -170,8 +174,8 @@ date/unixtime 变量和文件日期。时区偏移范围为 -1440 到 1440 分�
 同一 ID 必须保持相同的单调时间，可以更新 UTC 和偏移；旧 ID 或回退的单调时间会被拒绝。
 IO 等待期间，新帧返回 `WouldBlock` 且不受理；提交结果后以相同帧 ID 或 `step()` 恢复。
 若开始帧驱动前已有未完成的 IO，应先用 `step()` 完成该操作。
-已有场景事件保持到 `resume_scenario()`；帧回调产生的标签在确认该事件后才派发，模态对话
-期间暂停帧回调。当前接口尚未消费 Host 输入边沿、驱动媒体或生成渲染帧。
+直接使用 `ScriptIoSession` 时，已有场景事件保持到 `resume_scenario()`。帧回调产生的标签
+在确认该事件后继续派发，模态对话期间暂停帧回调。
 
 已完成命中判断的事件可用 `submit_event_filter(tag, params)` 排队，参数使用注册标签名和原始
 字符串参数。一次只能有一个待判定事件；旧 IO 未完成时返回 `WouldBlock`，调用方保留原事件。

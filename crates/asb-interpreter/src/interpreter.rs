@@ -3217,7 +3217,7 @@ impl Interpreter {
 
     /// Park the current wait before appending Host-dispatched tags. Returning
     /// to this position re-emits the wait without executing its instruction.
-    /// `start` is the Host frame ID and monotonic nanoseconds of a timed wait.
+    /// `start` is the Host frame ID and monotonic nanoseconds when the wait began.
     pub fn park_wait_for_host_dispatch(
         &mut self,
         event: &Event,

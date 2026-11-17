@@ -2,6 +2,7 @@ use super::*;
 use crate::compositor::query::layer_info_entry;
 use crate::compositor::{Compositor, TextureInfo, TweenHandler};
 use crate::host::frame::FrameTexture;
+use crate::host::input::InputFrame;
 use asb_interpreter::event::{LayerEvent, WaitReason};
 use asb_interpreter::lua_engine::EngineCallbacks;
 use std::io::Cursor;
@@ -109,7 +110,7 @@ impl ScriptIoSession {
         if !tags.is_empty() {
             if let Some(event) = self.scenario_event.take() {
                 self.interpreter
-                    .park_wait_for_host_dispatch(&event, self.timed_wait_start.take())?;
+                    .park_wait_for_host_dispatch(&event, self.wait_start.take())?;
             }
             self.interpreter.append_queued_tags(tags);
             self.completed = false;
@@ -141,6 +142,7 @@ impl ScriptIoSession {
 #[derive(Default)]
 struct SceneProjection {
     compositor: Compositor,
+    input: InputFrame,
     textures: HashMap<String, Option<Arc<FrameTexture>>>,
     texture_bytes: usize,
     dirty: bool,
@@ -238,6 +240,10 @@ impl TextureRead {
 }
 
 impl SceneIo {
+    pub(super) fn with_input<R>(&self, f: impl FnOnce(&mut InputFrame) -> R) -> R {
+        f(&mut self.scene.lock().unwrap().input)
+    }
+
     pub(super) fn take_scene_wait(&self, event: Event) -> Event {
         let layers = match event {
             Event::LayerTween { id, sync: true, .. } => vec![id],
@@ -431,26 +437,41 @@ impl EngineCallbacks for SceneCallbacks {
     fn get_script_status(&self) -> u8 {
         0
     }
-    fn is_key_down(&self, _: u32) -> bool {
-        false
+    fn is_key_down(&self, code: u32) -> bool {
+        self.0.lock().unwrap().input.is_down(code)
     }
-    fn is_key_down_edge(&self, _: u32) -> bool {
-        false
+    fn is_key_down_edge(&self, code: u32) -> bool {
+        self.0.lock().unwrap().input.is_pressed(code)
     }
-    fn is_key_up_edge(&self, _: u32) -> bool {
-        false
+    fn is_key_up_edge(&self, code: u32) -> bool {
+        self.0.lock().unwrap().input.is_released(code)
     }
     fn is_decide(&self) -> bool {
-        false
+        self.is_decide_key(1)
+    }
+    fn is_decide_key(&self, code: u32) -> bool {
+        self.is_key_down_edge(code)
+    }
+    fn is_push(&self, code: u32) -> bool {
+        self.0.lock().unwrap().input.is_push(code)
     }
     fn get_mouse_point(&self) -> (i32, i32) {
-        (0, 0)
+        self.0.lock().unwrap().input.pointer
     }
     fn get_touch_count(&self) -> u32 {
-        0
+        self.0.lock().unwrap().input.touches.len() as u32
     }
-    fn get_touch_point(&self, _: u32) -> (i32, i32) {
-        (0, 0)
+    fn get_touch_point(&self, index: u32) -> (i32, i32) {
+        self.0
+            .lock()
+            .unwrap()
+            .input
+            .touches
+            .get(index as usize)
+            .map_or((0, 0), |&(_, x, y)| (x, y))
+    }
+    fn get_touch_points(&self) -> Vec<(u32, i32, i32)> {
+        self.0.lock().unwrap().input.touches.clone()
     }
     fn is_file_exists(&self, _: &str) -> bool {
         false
