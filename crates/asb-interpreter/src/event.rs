@@ -682,6 +682,8 @@ pub enum WaitReason {
         /// 视频图层 ID
         id: String,
     },
+    /// A Host scenario is waiting for fullscreen video to stop.
+    FullscreenVideo,
     /// 等待场景文本 Tween 完成 [wait scenario="1|2"]
     ScenarioTween {
         /// 1=等待场景文本出现的 Tween 完成，2=等待场景文本隐藏的 Tween 完成

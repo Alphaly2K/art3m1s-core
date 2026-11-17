@@ -28,6 +28,16 @@ pub enum PlaybackStatus {
     Cancelled,
 }
 
+/// A decoded layer frame, in top-down, tightly packed straight RGBA8.
+#[derive(Clone, Copy, Debug)]
+pub struct VideoFrame<'a> {
+    pub playback_id: u64,
+    pub frame_id: u64,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: &'a [u8],
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostMediaCommandKind {
     AudioSetVolume,

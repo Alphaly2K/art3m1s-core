@@ -3,6 +3,7 @@ use crate::compositor::query::layer_info_entry;
 use crate::compositor::{Compositor, TextureInfo, TweenHandler};
 use crate::host::frame::FrameTexture;
 use crate::host::input::InputFrame;
+use crate::host::media::VideoFrame;
 use asb_interpreter::event::{LayerEvent, WaitReason};
 use asb_interpreter::lua_engine::EngineCallbacks;
 use std::io::Cursor;
@@ -81,6 +82,7 @@ impl ScriptIoSession {
         matches!(self.shutdown, Shutdown::Open)
             && matches!(self.scenario_event, None | Some(Event::Wait { .. }))
             && (!self.audio.ready_handlers.is_empty()
+                || !self.video.ready_handlers.is_empty()
                 || self
                     .scene
                     .as_ref()
@@ -92,6 +94,7 @@ impl ScriptIoSession {
             return Ok(());
         }
         let mut tags = std::mem::take(&mut self.audio.ready_handlers);
+        tags.append(&mut self.video.ready_handlers);
         tags.extend(
             self.scene
                 .as_mut()
@@ -148,6 +151,9 @@ struct SceneProjection {
     magic_paths: crate::magic_path::MagicPathTable,
     textures: HashMap<String, Option<Arc<FrameTexture>>>,
     texture_bytes: usize,
+    video_frames: HashMap<String, Arc<FrameTexture>>,
+    pending_video_frames: HashMap<String, Arc<FrameTexture>>,
+    video_revision: u64,
     dirty: bool,
     group_sync_layers: Vec<String>,
 }
@@ -193,10 +199,14 @@ impl SceneProjection {
         layer_info_entry(
             layer,
             self.compositor.clock_ms(),
-            layer
-                .file
-                .as_deref()
-                .and_then(|file| self.textures.get(file)?.as_ref())
+            self.video_frames
+                .get(&layer.id)
+                .or_else(|| {
+                    layer
+                        .file
+                        .as_deref()
+                        .and_then(|file| self.textures.get(file)?.as_ref())
+                })
                 .map(|texture| TextureInfo {
                     width: texture.width,
                     height: texture.height,
@@ -243,6 +253,79 @@ impl TextureRead {
 }
 
 impl SceneIo {
+    pub(super) fn attach_video_layer(&self, id: &str) {
+        let mut scene = self.scene.lock().unwrap();
+        scene.compositor.set_layer_file(id, None);
+        scene.video_frames.remove(id);
+        scene.pending_video_frames.remove(id);
+        scene.dirty = true;
+    }
+
+    pub(super) fn clear_video_layer(&self, id: &str) {
+        let mut scene = self.scene.lock().unwrap();
+        scene.pending_video_frames.remove(id);
+        scene.dirty |= scene.video_frames.remove(id).is_some();
+    }
+
+    pub(super) fn submit_video_pixels(
+        &self,
+        id: &str,
+        frame: VideoFrame<'_>,
+    ) -> Result<(), ProtocolError> {
+        let [width, height] = [frame.width, frame.height];
+        if width == 0
+            || height == 0
+            || width > 8192
+            || height > 8192
+            || frame.rgba.len() as u64 != u64::from(width) * u64::from(height) * 4
+        {
+            return Err(ProtocolError::Argument("invalid video frame size"));
+        }
+        if frame.rgba.len() as u64 > MAX_IMAGE_BYTES {
+            return Err(ProtocolError::Limit);
+        }
+        let mut scene = self.scene.lock().unwrap();
+        let used: usize = scene
+            .video_frames
+            .values()
+            .chain(
+                scene
+                    .pending_video_frames
+                    .iter()
+                    .filter_map(|(layer, pixels)| (layer != id).then_some(pixels)),
+            )
+            .map(|texture| texture.rgba.len())
+            .sum();
+        if frame.rgba.len() > MAX_TEXTURE_BYTES - used {
+            return Err(ProtocolError::WouldBlock);
+        }
+        let revision = scene
+            .video_revision
+            .checked_add(1)
+            .filter(|id| *id < 1 << 62)
+            .ok_or(ProtocolError::Limit)?;
+        scene.video_revision = revision;
+        scene.pending_video_frames.insert(
+            id.to_owned(),
+            Arc::new(FrameTexture {
+                revision: (1 << 62) | revision,
+                width,
+                height,
+                rgba: frame.rgba.into(),
+            }),
+        );
+        Ok(())
+    }
+
+    pub(super) fn advance_video_frames(&self) {
+        let mut scene = self.scene.lock().unwrap();
+        let pending = std::mem::take(&mut scene.pending_video_frames);
+        if !pending.is_empty() {
+            scene.video_frames.extend(pending);
+            scene.dirty = true;
+        }
+    }
+
     pub(super) fn resolve_media_asset(&self, name: &str) -> Result<String, ProtocolError> {
         let scene = self.scene.lock().unwrap();
         logical_key(&crate::magic_path::resolve_path(&scene.magic_paths, name))
@@ -300,6 +383,8 @@ impl SceneIo {
         self.clock_base_ms = scene.compositor.clock_ms();
         self.clock_origin_ns = frame.map(|frame| frame.monotonic_ns);
         scene.group_sync_layers.clear();
+        scene.video_frames.clear();
+        scene.pending_video_frames.clear();
         self.tween_handlers.clear();
         scene.dirty = true;
     }

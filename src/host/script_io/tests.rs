@@ -1737,6 +1737,180 @@ end
 }
 
 #[test]
+fn host_video_layers_publish_immutable_frames_and_resume_media_waits() {
+    use crate::host::{
+        media::{PlaybackStatus, VideoFrame},
+        runtime::{self, RuntimeError},
+    };
+
+    let handle = runtime::create(0, TransportLimits::default(), 4096).unwrap();
+    let epoch = runtime::open_project(
+        handle,
+        b"[WINDOWS]\nWIDTH=640\nHEIGHT=480\nBOOT=boot.iet\n",
+        "windows",
+        None,
+    )
+    .unwrap();
+    let mut host = MemoryHost::default();
+    host.asset(
+        "boot.iet",
+        br#"*top
+[lyc id=1.80]
+[lyprop id=1.80 left=12 top=4]
+[setonvideofinish id=1.80 label=finish call=1]
+[video id=1.80 file=overlay.ogv]
+[wait video=1.80]
+[caption data=layer_done]
+[video file=ending.mp4 skip=2]
+[caption data=full_done]
+[stop]
+*finish
+[caption data=callback]
+[return]
+"#,
+    );
+    let step = |id| {
+        runtime::step(
+            handle,
+            HostFrame {
+                id,
+                monotonic_ns: id * 1_000_000,
+                utc_unix_ms: 0,
+                utc_offset_minutes: 0,
+            },
+        )
+        .unwrap()
+    };
+    let poll = || {
+        let mut bytes = vec![0; 4096];
+        let result = runtime::poll_events(handle, &mut bytes).unwrap();
+        bytes.truncate(result.written_bytes);
+        bytes
+    };
+    let drain = |mut bytes: &[u8]| {
+        let mut commands = Vec::new();
+        while !bytes.is_empty() {
+            let len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+            let domain = u16::from_le_bytes(bytes[6..8].try_into().unwrap());
+            let kind = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+            if domain == Domain::Media as u16 || domain == Domain::Ui as u16 {
+                commands.push((
+                    kind,
+                    serde_json::from_slice::<Value>(&bytes[64..len]).unwrap(),
+                ));
+            }
+            bytes = &bytes[len..];
+        }
+        commands
+    };
+    let mut commands = Vec::new();
+    for _ in 0..1024 {
+        let progress = step(1);
+        let bytes = poll();
+        commands.extend(drain(&bytes));
+        if progress == ScriptIoProgress::Event {
+            break;
+        }
+        assert_eq!(progress, ScriptIoProgress::Waiting);
+        let request = decode_requests(&bytes).pop().unwrap();
+        runtime::submit_replies(handle, &[host.complete(&request)]).unwrap();
+    }
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].0, MEDIA_VIDEO_COMMAND.kind);
+    assert_eq!(commands[0].1["key"], "overlay.ogv");
+    assert_eq!(commands[0].1["layer"], "1.80");
+    let playback = |body: &Value| {
+        body["playback_id"]
+            .as_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+    };
+    let layer = playback(&commands[0].1);
+    let submit = |frame_id, rgba: &[u8]| {
+        runtime::submit_video_frame(
+            handle,
+            epoch,
+            VideoFrame {
+                playback_id: layer,
+                frame_id,
+                width: 1,
+                height: 1,
+                rgba,
+            },
+        )
+    };
+    let stale = |value| {
+        matches!(
+            value,
+            Err(RuntimeError::Session(ScriptIoError::Protocol(
+                ProtocolError::Stale
+            )))
+        )
+    };
+    let first_pixel = [1, 2, 3, 255];
+    let next_pixel = [4, 5, 6, 180];
+    assert!(matches!(
+        submit(1, &[0; 3]),
+        Err(RuntimeError::Session(ScriptIoError::Protocol(
+            ProtocolError::Argument(_)
+        )))
+    ));
+    submit(1, &first_pixel).unwrap();
+    assert_eq!(step(1), ScriptIoProgress::Event);
+    let blank = runtime::acquire_latest(handle, 0).unwrap().unwrap();
+    assert!(blank.sprites.is_empty());
+    drop(blank);
+    assert_eq!(step(2), ScriptIoProgress::Event);
+    let first = runtime::acquire_latest(handle, 0).unwrap().unwrap();
+    assert_eq!(first.sprites[0].layer_id, "1.80");
+    assert_eq!(first.sprites[0].transform[4..], [12.0, 4.0]);
+    assert!(stale(submit(1, &next_pixel)));
+    submit(2, &first_pixel).unwrap();
+    submit(3, &next_pixel).unwrap();
+    assert_eq!(step(3), ScriptIoProgress::Event);
+    let next = runtime::acquire_latest(handle, first.render_frame_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        next.texture(next.sprites[0].texture).unwrap().rgba(),
+        next_pixel
+    );
+    assert_eq!(
+        first.texture(first.sprites[0].texture).unwrap().rgba(),
+        first_pixel
+    );
+    let previous = next.render_frame_id;
+    drop(next);
+    assert!(poll().is_empty());
+
+    runtime::submit_playback_status(handle, epoch, layer, PlaybackStatus::Ended).unwrap();
+    assert!(stale(submit(4, &next_pixel)));
+    assert_eq!(step(4), ScriptIoProgress::Event);
+    let records = drain(&poll());
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0], (UI_CAPTION.kind, json!({"text":"callback"})));
+    assert_eq!(records[1], (UI_CAPTION.kind, json!({"text":"layer_done"})));
+    assert_eq!(records[2].0, MEDIA_VIDEO_COMMAND.kind);
+    assert_eq!(records[2].1["layer"], Value::Null);
+    assert_eq!(records[2].1["skip"], 2);
+    let blank = runtime::acquire_latest(handle, previous).unwrap().unwrap();
+    assert!(blank.sprites.is_empty());
+    drop(blank);
+    drop(first);
+    let fullscreen = playback(&records[2].1);
+    runtime::submit_playback_status(handle, epoch, fullscreen, PlaybackStatus::Cancelled).unwrap();
+    assert_eq!(step(4), ScriptIoProgress::Event);
+    assert!(poll().is_empty());
+    assert_eq!(step(5), ScriptIoProgress::Event);
+    assert_eq!(
+        drain(&poll()),
+        [(UI_CAPTION.kind, json!({"text":"full_done"}))]
+    );
+    runtime::destroy(handle).unwrap();
+}
+
+#[test]
 fn compound_events_resume_in_order_without_reexecuting_the_tag() {
     use asb_interpreter::event::LayerEvent;
 

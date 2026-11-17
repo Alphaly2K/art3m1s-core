@@ -22,6 +22,7 @@
 pub mod engine;
 pub mod state;
 
+pub(crate) use engine::VIDEO_LAYER_TEXTURE_PREFIX;
 pub use engine::{
     VideoBackend, VideoConfig, VideoFinishEvent, VideoFinishHandler, VideoState,
     is_video_layer_texture_name, video_layer_texture_name,

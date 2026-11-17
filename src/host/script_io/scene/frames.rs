@@ -49,11 +49,25 @@ impl SceneProjection {
     ) -> Option<FrameSnapshot> {
         let mut textures = CpuTextureView {
             assets: &self.textures,
+            video: &self.video_frames,
             revisions: HashMap::new(),
             table: Vec::new(),
         };
         let scene = self.compositor.scene();
-        let frame = build::build_frame(scene, self.compositor.clock_ms(), &mut textures, None);
+        let files = (!self.video_frames.is_empty()).then(|| {
+            self.video_frames
+                .keys()
+                .map(|id| (id.clone(), crate::video::video_layer_texture_name(id)))
+                .collect()
+        });
+        let frame = build::build_frame_with_content(
+            scene,
+            self.compositor.clock_ms(),
+            &mut textures,
+            None,
+            None,
+            files.as_ref(),
+        );
         if !frame.shader_groups.is_empty() || !frame.mask_commands.is_empty() {
             return None;
         }
@@ -69,7 +83,10 @@ impl SceneProjection {
             let key = frame.command_key(index)?;
             let mask = scene
                 .get(&key.layer_id)
-                .filter(|layer| layer.file.as_deref().is_some_and(|file| !file.is_empty()))
+                .filter(|layer| {
+                    self.video_frames.contains_key(&key.layer_id)
+                        || layer.file.as_deref().is_some_and(|file| !file.is_empty())
+                })
                 .and_then(|layer| layer.mask.as_deref())
                 .and_then(|mask| textures.assets.get(mask)?.clone())
                 .filter(|mask| {
@@ -124,6 +141,7 @@ impl SceneProjection {
 
 struct CpuTextureView<'a> {
     assets: &'a HashMap<String, Option<Arc<FrameTexture>>>,
+    video: &'a HashMap<String, Arc<FrameTexture>>,
     revisions: HashMap<u64, TextureId>,
     table: Vec<Arc<FrameTexture>>,
 }
@@ -145,6 +163,11 @@ impl CpuTextureView<'_> {
 
 impl TextureProvider for CpuTextureView<'_> {
     fn resolve(&mut self, name: &str) -> Option<(TextureId, TextureInfo)> {
+        if let Some(id) = name.strip_prefix(crate::video::VIDEO_LAYER_TEXTURE_PREFIX)
+            && let Some(texture) = self.video.get(id)
+        {
+            return Some(self.record(texture.clone()));
+        }
         Some(self.record(self.assets.get(name)?.clone()?))
     }
 

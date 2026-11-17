@@ -71,6 +71,7 @@ impl Audio {
         &self,
         scene: &scene::SceneIo,
         snapshot: Option<&AudioSnapshot>,
+        stop_video: bool,
         transport: &SessionTransport,
     ) -> Result<Option<AudioRestore>, ProtocolError> {
         let mut active = BTreeMap::new();
@@ -104,7 +105,7 @@ impl Audio {
             {
                 voice_serial = voice_serial.max(number);
             }
-            serial = serial.checked_add(1).ok_or(ProtocolError::Limit)?;
+            serial = next_audio_id(serial)?;
             let play = Play {
                 file: &track.file,
                 loop_play: track.loop_play,
@@ -119,10 +120,13 @@ impl Audio {
             plays.push(record);
             active.insert(channel, playback);
         }
-        if plays.is_empty() && self.active.is_empty() {
+        if plays.is_empty() && self.active.is_empty() && !stop_video {
             return Ok(None);
         }
-        let body = MessageBody::new(json!({"op":"restore","plays":plays}).to_string(), vec![])?;
+        let body = MessageBody::new(
+            json!({"op":"restore","plays":plays,"stop_video":stop_video}).to_string(),
+            vec![],
+        )?;
         transport.check_notify(MEDIA_AUDIO_COMMAND, &body)?;
         Ok(Some(AudioRestore {
             body,
@@ -223,13 +227,22 @@ impl ScriptIoSession {
         id: u64,
         status: PlaybackStatus,
     ) -> Result<(), ProtocolError> {
+        self.check_playback_epoch(epoch)?;
+        if id & video::VIDEO_ID_BIT != 0 {
+            self.video.submit_status(id, status)
+        } else {
+            self.audio.submit(id, status)
+        }
+    }
+
+    pub(super) fn check_playback_epoch(&self, epoch: u64) -> Result<(), ProtocolError> {
         if epoch != self.transport.state().epoch {
             return Err(ProtocolError::Stale);
         }
         if self.faulted || self.shutdown.is_closing_or_closed() || self.scene.is_none() {
             return Err(ProtocolError::State);
         }
-        self.audio.submit(id, status)
+        Ok(())
     }
 
     pub(super) fn dispatch_audio_event(&mut self) -> Result<bool, ProtocolError> {
@@ -431,7 +444,7 @@ impl Audio {
         channel: Channel,
         spec: Play<'_>,
     ) -> Result<(), ProtocolError> {
-        let id = self.serial.checked_add(1).ok_or(ProtocolError::Limit)?;
+        let id = next_audio_id(self.serial)?;
         let replaces = self.active.get(&channel).map(|track| track.id);
         if replaces.is_none() && self.active.len() >= MAX_PLAYBACKS {
             return Err(ProtocolError::Limit);
@@ -535,4 +548,11 @@ fn emit(transport: &mut SessionTransport, metadata: Value) -> Result<(), Protoco
         MEDIA_AUDIO_COMMAND,
         MessageBody::new(metadata.to_string(), vec![])?,
     )
+}
+
+fn next_audio_id(serial: u64) -> Result<u64, ProtocolError> {
+    serial
+        .checked_add(1)
+        .filter(|id| *id < video::VIDEO_ID_BIT)
+        .ok_or(ProtocolError::Limit)
 }

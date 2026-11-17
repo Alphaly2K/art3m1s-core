@@ -136,6 +136,8 @@ Artemis 键码，并把屏幕坐标换算为舞台坐标。Core 在下一个受�
 音频命令通过 `poll_events` 交付，Host 根据逻辑资产 key 读取、解码和播放。用
 `submit_playback_status(handle, epoch, playback_id, status)` 回报开播及终态；`playback_id`
 以本次命令为准。命令和反馈格式见 [媒体契约](HOST_ABI_V2.md#8-媒体ui配置与诊断)。
+全屏视频由 Host 呈现。图层视频由 Host 解码后调用 `submit_video_frame`，Core 将其放进场景帧，
+由同一 Host renderer 绘制。视频终态也通过 `submit_playback_status` 提交。
 
 收到 `exit_requested` 后，调用 `submit_shutdown(handle, epoch)`。继续 `step`、拉取写入请求
 并回传结果，直至收到 `runtime_closed` 和其中的存档结果。Host 也可主动请求关闭；仍有 IO 或

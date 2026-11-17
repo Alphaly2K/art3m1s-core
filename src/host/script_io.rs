@@ -6,6 +6,7 @@ mod lifecycle;
 mod persistence;
 mod scene;
 mod ui;
+mod video;
 mod wait;
 
 pub use audio::MEDIA_AUDIO_COMMAND;
@@ -13,6 +14,7 @@ use lifecycle::Shutdown;
 pub use lifecycle::{RUNTIME_CLOSED, RUNTIME_EXIT_REQUESTED};
 pub use persistence::RUNTIME_PERSISTENCE_RESULT;
 pub use ui::{UI_CAPTION, UI_DIALOG};
+pub use video::MEDIA_VIDEO_COMMAND;
 
 use super::protocol::*;
 use crate::save::read_history::{AREAD_FILE, ReadHistory};
@@ -249,6 +251,7 @@ pub struct ScriptIoSession {
     dialog_request: Option<RequestIdentity>,
     pub(super) shutdown: Shutdown,
     audio: audio::Audio,
+    video: video::Video,
     scene: Option<scene::SceneIo>,
     pub(super) frames: super::frame::FramePublisher,
     read_history: ReadHistory,
@@ -296,6 +299,7 @@ impl ScriptIoSession {
             dialog_request: None,
             shutdown: Shutdown::default(),
             audio: Default::default(),
+            video: Default::default(),
             scene: None,
             frames: Default::default(),
             read_history: ReadHistory::default(),
@@ -404,6 +408,7 @@ impl ScriptIoSession {
         self.dialog_request = None;
         self.shutdown = Shutdown::default();
         self.audio = Default::default();
+        self.video = Default::default();
         self.scene = None;
         self.frames.clear();
         Ok(epoch)
@@ -508,6 +513,7 @@ impl ScriptIoSession {
         self.dialog_request = None;
         self.shutdown = Shutdown::default();
         self.audio = Default::default();
+        self.video = Default::default();
         self.scene = None;
         self.frames.clear();
         self.read_history = ReadHistory::default();
@@ -773,6 +779,7 @@ impl ScriptIoSession {
         if new_frame {
             self.audio.advance(frame);
             if let Some(scene) = self.scene.as_mut() {
+                self.video.advance(scene);
                 scene.with_input(|input| input.advance(frame.monotonic_ns));
                 scene.advance_clock(frame.monotonic_ns);
             }
@@ -1386,10 +1393,12 @@ impl ScriptIoSession {
         };
         let file = file.clone();
         let audio = if let Some(scene) = &self.scene {
-            match self
-                .audio
-                .prepare_restore(scene, save.audio.as_ref(), &self.transport)
-            {
+            match self.audio.prepare_restore(
+                scene,
+                save.audio.as_ref(),
+                self.video.is_active(),
+                &self.transport,
+            ) {
                 Ok(audio) => audio,
                 Err(ProtocolError::WouldBlock) => {
                     self.numbered_load = Some(NumberedLoadWork::ReadyToRestore {
@@ -1435,6 +1444,7 @@ impl ScriptIoSession {
             scene.restore_snapshot(save.scene, self.frame);
         }
         self.audio.commit_restore(audio, &mut self.transport)?;
+        self.video.reset_playback();
         self.wait_start = None;
         self.scenario_event = None;
         self.start_numbered_load_hook(file)

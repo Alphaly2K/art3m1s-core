@@ -29,6 +29,8 @@ impl ScriptIoSession {
                     | WaitReason::Generic0
                     | WaitReason::KeyWait { .. }
                     | WaitReason::Se { .. }
+                    | WaitReason::VideoLayer { .. }
+                    | WaitReason::FullscreenVideo
             })
         )
     }
@@ -64,7 +66,12 @@ impl ScriptIoSession {
             if (frame.monotonic_ns - start_ns) / 1_000_000 >= *milliseconds);
         let audio_finished = matches!(reason, WaitReason::Se { id, time }
             if self.audio.wait_finished(id, *time, frame));
-        if !input_satisfied && !elapsed && !audio_finished {
+        let video_finished = match reason {
+            WaitReason::VideoLayer { id } => self.video.finished(Some(id)),
+            WaitReason::FullscreenVideo => self.video.finished(None),
+            _ => false,
+        };
+        if !input_satisfied && !elapsed && !audio_finished && !video_finished {
             return Ok(Some(ScriptIoProgress::Event));
         }
         self.resume_scenario()?;

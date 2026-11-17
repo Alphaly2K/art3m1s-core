@@ -400,7 +400,7 @@ Rust 句柄当前输出 Media domain=5、kind=1 的可靠音频命令，blob 为
 | `play` | `playback_id`、`replaces`（旧播放 ID 或 null）、`channel`（`bgm`、`se`、`voice`）、`id`（脚本通道，BGM 为 null）、资产 `key`、`loop`、可选 A/B 循环 `loop_key`、`gain`、`pan`、`fade_ms`、`buffer_ms`、`skippable`、`crossfade`。`loop_key`、`gain`、`pan`、`buffer_ms` 未指定时为 null。 |
 | `stop` / `gain` / `pan` | `playback_ids`、渐变 `time_ms`、`value`（`stop` 为 null） |
 | `stop_all` | `fade_ms` |
-| `restore` | `plays`：一组完整的 `play` metadata。Host 停止当前会话的音频，再从起点开始播放列表中的新 ID。空列表表示静音。 |
+| `restore` | `plays`：一组完整的 `play` metadata。Host 停止当前会话的音频，再从起点开始播放列表中的新 ID。空列表表示静音。`stop_video` 为 true 时同时停止当前视频。 |
 
 `playback_id`、`replaces`、`playback_ids` 的元素及 u64 时间均使用十进制字符串。Host 按事件
 顺序处理命令，从资产命名空间读取并播放。完成引导段后按非空 `loop_key` 循环；交叉淡入时
@@ -410,6 +410,16 @@ Rust 句柄当前输出 Media domain=5、kind=1 的可靠音频命令，blob 为
 播放状态回报返回 `Stale`；带淡出的停止在 Host 回报终态后结束。重载时 Host 应停止旧 epoch。
 编号读档成功时，Core 在 `onLoad` 前将音频恢复命令排入可靠队列。存档保存曲目、循环、增益和
 声像；不保存设备播放位置。读取没有音频快照的旧存档按静音恢复。
+
+Media kind=2 交付视频命令。`op=play` 带有十进制字符串 `playback_id`、可空旧播放 ID
+`replaces`、可空图层 ID `layer`、资产 `key`、布尔 `loop`、整数 `skip` 和可空 `delay_margin_ms`。
+`layer=null` 由 Host 全屏呈现；`skip` 的 0、1、2 分别表示禁止跳过、可点击跳过和仅通过菜单
+跳过。`op=stop_all` 停止当前会话的视频。视频沿用音频的开播和终态回报，编号读档停止旧视频。
+
+图层视频使用 `submit_video_frame` 提交连续的 `frame_id`、尺寸和紧密排列的自上而下 RGBA8
+像素。Core 复制像素；同一播放只接受递增的帧 ID，下一受理逻辑帧只使用最新的一份。过期帧
+和终态后的帧返回 `Stale`。单张帧最多 64 MiB，当前和待用数据合计最多 128 MiB；已借出的
+帧有自己的有效期。图层视频随场景帧绘制；旧借用不因新画面或播放完成而改变。
 
 HTTP/dialog/翻译各有请求 kind 和结果 schema。HTTP 保留 headers/data/file_data 的
 现有多值顺序语义，响应必须匹配请求 ID；取消、失败、超时均完成一次。翻译继续允许非阻塞
