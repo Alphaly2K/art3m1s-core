@@ -58,6 +58,15 @@ pub enum ScriptIoProgress {
     Event,
 }
 
+/// Time supplied by the Host for one logical scenario frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HostFrame {
+    pub id: u64,
+    pub monotonic_ns: u64,
+    pub utc_unix_ms: i64,
+    pub utc_offset_minutes: i32,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ExecutionMode {
     Idle,
@@ -103,8 +112,8 @@ enum Completion {
 }
 
 /// Script code runs only in `step`, including after result submission. Scenario
-/// events remain pending until the Host resumes them; frame scheduling and the
-/// C facade are separate.
+/// events remain pending until the Host resumes them. `step_frame` also drives
+/// the script's per-frame handler.
 pub struct ScriptIoSession {
     interpreter: Interpreter,
     transport: SessionTransport,
@@ -120,6 +129,8 @@ pub struct ScriptIoSession {
     scenario_event: Option<Event>,
     host_time: HostTime,
     random_seed: u64,
+    frame: Option<HostFrame>,
+    frame_handler_due: bool,
 }
 
 impl ScriptIoSession {
@@ -152,6 +163,8 @@ impl ScriptIoSession {
             scenario_event: None,
             host_time: HostTime::default(),
             random_seed: 0,
+            frame: None,
+            frame_handler_due: false,
         })
     }
 
@@ -177,9 +190,15 @@ impl ScriptIoSession {
         Ok(())
     }
 
-    /// Update script-visible time without running Lua. Frame ordering belongs
-    /// to the frame driver; a calendar correction may move UTC backwards.
+    /// Update script-visible time without running Lua in unframed mode.
     pub fn set_host_time(&mut self, time: HostTime) -> Result<(), ScriptIoError> {
+        if self.frame.is_some() {
+            return Err(ProtocolError::State.into());
+        }
+        self.update_host_time(time)
+    }
+
+    fn update_host_time(&mut self, time: HostTime) -> Result<(), ScriptIoError> {
         self.interpreter.set_host_time(time)?;
         self.host_time = time;
         Ok(())
@@ -199,6 +218,8 @@ impl ScriptIoSession {
         self.cancelled = false;
         self.mode = ExecutionMode::Chunk;
         self.scenario_event = None;
+        self.frame = None;
+        self.frame_handler_due = false;
         Ok(epoch)
     }
 
@@ -245,6 +266,8 @@ impl ScriptIoSession {
         self.cancelled = false;
         self.mode = ExecutionMode::Scenario;
         self.scenario_event = None;
+        self.frame = None;
+        self.frame_handler_due = false;
         Ok(epoch)
     }
 
@@ -253,6 +276,9 @@ impl ScriptIoSession {
     }
 
     pub fn resume_scenario(&mut self) -> Result<(), ProtocolError> {
+        if self.faulted || self.interpreter.pending_host_io().is_some() {
+            return Err(ProtocolError::State);
+        }
         if self.scenario_event.take().is_none() {
             return Err(ProtocolError::State);
         }
@@ -317,7 +343,10 @@ impl ScriptIoSession {
         if self.completed {
             return Ok(ScriptIoProgress::Completed);
         }
-        if self.scenario_event.is_some() {
+        if self.scenario_event.is_some()
+            && !self.frame_handler_due
+            && self.interpreter.pending_host_io().is_none()
+        {
             return Ok(ScriptIoProgress::Event);
         }
         let result = self.step_inner();
@@ -325,6 +354,46 @@ impl ScriptIoSession {
             self.faulted = true;
         }
         result
+    }
+
+    /// An accepted frame runs onEnterFrame once. Retry the same ID and
+    /// monotonic timestamp to resume IO, or use `step()` to keep its clock.
+    /// A newer frame cannot replace a frame still suspended on IO.
+    pub fn step_frame(&mut self, frame: HostFrame) -> Result<ScriptIoProgress, ScriptIoError> {
+        if self.faulted || self.mode != ExecutionMode::Scenario {
+            return Err(ProtocolError::State.into());
+        }
+        if self.frame.is_some_and(|previous| {
+            frame.id < previous.id
+                || frame.monotonic_ns < previous.monotonic_ns
+                || (frame.id == previous.id && frame.monotonic_ns != previous.monotonic_ns)
+        }) {
+            return Err(ProtocolError::Argument("invalid Host frame order or timestamp").into());
+        }
+        if !(-1440..=1440).contains(&frame.utc_offset_minutes) {
+            return Err(ProtocolError::Argument("invalid Host UTC offset").into());
+        }
+        if self.completed {
+            return Ok(ScriptIoProgress::Completed);
+        }
+        let new_frame = self.frame.is_none_or(|previous| frame.id != previous.id);
+        if new_frame && (self.operation.is_some() || self.cancelled) {
+            return Ok(ScriptIoProgress::WouldBlock);
+        }
+        self.update_host_time(HostTime {
+            monotonic_ms: frame.monotonic_ns / 1_000_000,
+            utc_unix_ms: frame.utc_unix_ms,
+            utc_offset_minutes: frame.utc_offset_minutes,
+        })?;
+        self.frame = Some(frame);
+        if new_frame {
+            self.interpreter.begin_frame();
+            self.frame_handler_due = !matches!(
+                self.scenario_event,
+                Some(Event::ShowDialog { .. } | Event::YesNo { .. })
+            );
+        }
+        self.step()
     }
 
     fn step_inner(&mut self) -> Result<ScriptIoProgress, ScriptIoError> {
@@ -386,7 +455,7 @@ impl ScriptIoSession {
                     if let Some(response) = response.take() {
                         self.interpreter.resume_host_io(response)?;
                     }
-                    match self.interpreter.step()? {
+                    match self.step_scenario()? {
                         ExecutionResult::HostIoPending => self
                             .interpreter
                             .pending_host_io()
@@ -410,6 +479,29 @@ impl ScriptIoSession {
                 Err(error) => response = Some(failed(IoFailure::Denied, error.to_string())),
             }
         }
+    }
+
+    fn step_scenario(&mut self) -> Result<ExecutionResult, ScriptIoError> {
+        if self.frame_handler_due {
+            if self.interpreter.prepare_host_handler()? == IoProgress::Waiting {
+                return Ok(ExecutionResult::HostIoPending);
+            }
+            self.frame_handler_due = false;
+            if self
+                .interpreter
+                .start_host_event_handler("onEnterFrame", &Default::default())?
+                == IoProgress::Waiting
+            {
+                return Ok(ExecutionResult::HostIoPending);
+            }
+        }
+        if self.interpreter.pending_host_io().is_some() {
+            return Ok(ExecutionResult::HostIoPending);
+        }
+        if let Some(event) = &self.scenario_event {
+            return Ok(ExecutionResult::Wait(event.clone()));
+        }
+        Ok(self.interpreter.step()?)
     }
 
     fn operation_for(&self, request: IoRequest) -> Result<Operation, ProtocolError> {

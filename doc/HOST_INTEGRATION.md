@@ -110,8 +110,7 @@ Rust 的 `ExecutionResult`/`TagResult` 新增 `HostIoPending`，穷举匹配需�
 
 `open_boot(name)` 创建新 VM，按逻辑名称请求 BOOT 和可选的 `macro.iet`，支持文本与
 ASB；按 main/start/_start/文件开头选择入口。该调用不读取文件，加载与解析错误在 step
-报告。替换会话会使旧请求失效，非法逻辑名称保留旧会话。完整游戏接入还需帧、输入及
-事件处理器的调度；当前驱动不自行推进它们。
+报告。替换会话会使旧请求失效，非法逻辑名称保留旧会话。
 
 独立解释器启用 resumable IO 后，未安装同步加载器时，start/boot/restore_position 可能
 受理一个尚待 Host 完成的加载，调用方随后处理 HostIoPending。显式安装的同步内存加载器
@@ -123,11 +122,19 @@ save=1 使用配置的逻辑 save 前缀；`.exe` 存在性检查保留引擎的
 修改时间由 stat 的可选 `modified_utc_ms` 提供，以规范十进制 i64 字符串传输，日期
 分量使用 Host 提交的时区偏移；未提供时间时使用 noexist，不查询系统文件或本机时区。
 
-`set_host_time(HostTime { monotonic_ms, utc_unix_ms, utc_offset_minutes })` 仅更新时钟快照，
+未使用帧驱动时，`set_host_time(HostTime { monotonic_ms, utc_unix_ms, utc_offset_minutes })` 仅更新时钟快照，
 不执行 Lua。单调时间用于 e:now/os.clock 和等待截止时间；日历时间用于 os.time/date、
 date/unixtime 变量和文件日期。时区偏移范围为 -1440 到 1440 分钟；os.date 的 `!` 前缀
 始终使用 UTC，os.time(table) 按当前 Host 偏移解释本地时间。UTC 可回拨，Host 应保持
-单调时间不回退；帧 ID 和时间顺序由帧驱动校验。
+单调时间不回退。
+
+场景可用 `step_frame(HostFrame { id, monotonic_ns, utc_unix_ms, utc_offset_minutes })` 推进。
+每个新 ID 递增一次脚本帧号；加载期 Lua 先完成，随后执行至多一次 `onEnterFrame`。
+同一 ID 必须保持相同的单调时间，可以更新 UTC 和偏移；旧 ID 或回退的单调时间会被拒绝。
+IO 等待期间，新帧返回 `WouldBlock` 且不受理；提交结果后以相同帧 ID 或 `step()` 恢复。
+若开始帧驱动前已有未完成的 IO，应先用 `step()` 完成该操作。
+已有场景事件保持到 `resume_scenario()`；帧回调产生的标签在确认该事件后才派发，模态对话
+期间暂停帧回调。当前接口尚未消费 Host 输入边沿、驱动媒体或生成渲染帧。
 
 新会话时钟和随机种子默认为零，Host 在首次 step 前提交时间，并可在首次 open 前调用
 `set_random_seed(u64)`。e:random 与 var random 使用实例内状态；Luau math.random

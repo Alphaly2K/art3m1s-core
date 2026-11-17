@@ -2502,6 +2502,51 @@ impl Interpreter {
         ctx.frame_number = ctx.frame_number.saturating_add(1);
     }
 
+    /// Finish load-time Lua before dispatching a Host event. This never
+    /// drains tags or executes scenario instructions.
+    pub fn prepare_host_handler(&mut self) -> Result<crate::io_continuation::IoProgress> {
+        use crate::io_continuation::IoProgress;
+        if self.pending_host_io().is_some() || self.drive_loading_lua()? {
+            Ok(IoProgress::Waiting)
+        } else {
+            Ok(IoProgress::Completed)
+        }
+    }
+
+    /// Dispatch a registered handler without advancing the scenario. Resume
+    /// a waiting handler with `resume_host_io` before starting another one.
+    pub fn start_host_event_handler(
+        &mut self,
+        event: &str,
+        params: &HashMap<String, String>,
+    ) -> Result<crate::io_continuation::IoProgress> {
+        use crate::io_continuation::{IoProgress, IoTask};
+        self.check_io_idle()?;
+        if !self.resumable_io || !self.loading_lua.is_empty() {
+            return Err(Error::RuntimeError {
+                line: self.current_line,
+                message: "Host event handler requires an initialized resumable interpreter".into(),
+            });
+        }
+        let handler = self
+            .engine_ctx
+            .lock()
+            .unwrap()
+            .event_handlers
+            .get(event)
+            .cloned();
+        if let Some(handler) = handler {
+            self.sync_script_state_to_engine();
+            if let Some(mut task) = IoTask::call(&self.lua, &handler, params)?
+                && task.step(None)? == IoProgress::Waiting
+            {
+                self.io_task = Some(task);
+                return Ok(IoProgress::Waiting);
+            }
+        }
+        Ok(IoProgress::Completed)
+    }
+
     /// 触发注册在 `onEnterFrame` 上的每帧回调（Artemis 约定 `e:setEventHandler{
     /// onEnterFrame="vsync"}`）。宿主应在每帧驱动一次。
     ///

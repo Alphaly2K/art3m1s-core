@@ -481,6 +481,119 @@ end
 }
 
 #[test]
+fn frame_retries_resume_loading_and_handler_io_without_replaying_the_tick() {
+    let mut session = session(1, TransportLimits::default(), 1024);
+    session
+        .open_scenario(
+            br#"
+*main
+[caption data=scene]
+[return]
+[lua]
+local e=__engine
+assert(e:file('init')=='')
+function tick(e)
+    ticks=(ticks or 0)+1
+    local n, t = e:getFrameNumber(), e:now()
+    e:enqueueTag{'caption', data='tick-'..n}
+    assert(e:file('frame-'..n)=='')
+    assert(e:getFrameNumber()==n and e:now()==t)
+    observed_utc = os.time()
+end
+e:setEventHandler{onEnterFrame='tick'}
+[/lua]
+"#,
+            "framed",
+            "main",
+        )
+        .unwrap();
+    let frame = HostFrame {
+        id: 10,
+        monotonic_ns: 9_000_001,
+        utc_unix_ms: 1000,
+        utc_offset_minutes: 0,
+    };
+    let next = HostFrame {
+        id: 11,
+        monotonic_ns: 12_000_000,
+        utc_unix_ms: -1,
+        ..frame
+    };
+    let globals = session.interpreter().lua().globals();
+    let mut host = MemoryHost::default();
+    for name in ["init", "frame-1", "frame-2"] {
+        host.asset(name, b"");
+    }
+    assert_eq!(
+        session.step_frame(frame).unwrap(),
+        ScriptIoProgress::Waiting
+    );
+    let init = requests(&mut session).pop().unwrap();
+    assert_eq!(init.metadata["key"], "init");
+    assert_eq!(
+        session.step_frame(next).unwrap(),
+        ScriptIoProgress::WouldBlock
+    );
+    assert_eq!(
+        session.step_frame(frame).unwrap(),
+        ScriptIoProgress::Waiting
+    );
+    assert!(requests(&mut session).is_empty());
+    session.submit_replies(&[host.complete(&init)]).unwrap();
+    assert_eq!(globals.get::<Option<i32>>("ticks").unwrap(), None);
+    assert_eq!(
+        session.step_frame(frame).unwrap(),
+        ScriptIoProgress::Waiting
+    );
+    let request = requests(&mut session).pop().unwrap();
+    assert_eq!(request.metadata["key"], "frame-1");
+    assert_eq!(globals.get::<i32>("ticks").unwrap(), 1);
+    assert!(matches!(
+        session.step_frame(HostFrame {
+            monotonic_ns: frame.monotonic_ns + 1,
+            ..frame
+        }),
+        Err(ScriptIoError::Protocol(ProtocolError::Argument(_)))
+    ));
+    assert_eq!(
+        session.step_frame(next).unwrap(),
+        ScriptIoProgress::WouldBlock
+    );
+    session.submit_replies(&[host.complete(&request)]).unwrap();
+    assert_eq!(globals.get::<Option<i32>>("observed_utc").unwrap(), None);
+    assert_eq!(
+        session
+            .step_frame(HostFrame {
+                utc_unix_ms: 3000,
+                ..frame
+            })
+            .unwrap(),
+        ScriptIoProgress::Event
+    );
+    assert_eq!(globals.get::<i32>("observed_utc").unwrap(), 3);
+    assert!(matches!(session.pending_event(), Some(Event::Caption { data }) if data == "tick-1"));
+    session.resume_scenario().unwrap();
+    assert_eq!(session.step_frame(frame).unwrap(), ScriptIoProgress::Event);
+    assert!(matches!(session.pending_event(), Some(Event::Caption { data }) if data == "scene"));
+    assert_eq!(session.step_frame(next).unwrap(), ScriptIoProgress::Waiting);
+    assert_eq!(session.resume_scenario(), Err(ProtocolError::State));
+    let request = requests(&mut session).pop().unwrap();
+    assert_eq!(request.metadata["key"], "frame-2");
+    assert!(matches!(
+        session.step_frame(frame),
+        Err(ScriptIoError::Protocol(ProtocolError::Argument(_)))
+    ));
+    session.submit_replies(&[host.complete(&request)]).unwrap();
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::Event);
+    assert_eq!(globals.get::<i32>("observed_utc").unwrap(), -1);
+    assert!(matches!(session.pending_event(), Some(Event::Caption { data }) if data == "scene"));
+    session.resume_scenario().unwrap();
+    host.run(&mut session);
+    assert_eq!(host.captions, ["tick-2"]);
+    assert_eq!(globals.get::<i32>("ticks").unwrap(), 2);
+}
+
+#[test]
 fn scenario_replacement_is_atomic_and_stale_loading_results_cannot_touch_the_new_vm() {
     let mut session = session(1, TransportLimits::default(), 128);
     let old = b"[lua]\nmarker='old'; __engine:file('old')\n[/lua]\n*main\n";
