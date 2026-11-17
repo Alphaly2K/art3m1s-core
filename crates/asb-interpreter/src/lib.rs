@@ -9,7 +9,7 @@
 //! - 标签系统和参数解析
 //! - 变量系统（普通变量、全局变量、临时变量、系统变量）
 //! - 表达式求值（算术、逻辑、比较运算）
-//! - Lua 脚本集成（通过 `mlua`）
+//! - Luau 脚本执行与 Artemis Lua 兼容层（通过 `mlua`）
 //! - 可扩展的标签处理器系统
 //! - 事件回调机制
 //! - 存档/读档支持
@@ -51,18 +51,11 @@ pub mod event;
 pub mod expression;
 pub mod interpreter;
 pub mod lua_engine;
-#[cfg(feature = "backend-luau")]
 pub mod luau_polyfill;
 pub mod r#macro;
 pub mod script;
 pub mod tags;
 pub mod variable;
-
-#[cfg(all(feature = "backend-lua51", feature = "backend-luau"))]
-compile_error!("features `backend-lua51` and `backend-luau` are mutually exclusive");
-
-#[cfg(not(any(feature = "backend-lua51", feature = "backend-luau")))]
-compile_error!("select one Lua backend feature: `backend-lua51` or `backend-luau`");
 
 // 重新导出主要类型
 pub use error::{Error, Result};

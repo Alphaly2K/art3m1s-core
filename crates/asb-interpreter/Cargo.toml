@@ -4,13 +4,10 @@ version = "0.2.0"
 license = "MPL-2.0"
 edition = "2024"
 
-[features]
-default = ["backend-lua51"]
-backend-lua51 = ["mlua/lua51"]
-backend-luau = ["mlua/luau"]
-
 [dependencies]
-mlua = { version = "0.10", default-features = false, features = ["send", "serialize", "vendored"] }
+# Luau builds its bundled source automatically. `vendored` would additionally
+# pull in the unused standard Lua and LuaJIT source packages.
+mlua = { version = "0.10", default-features = false, features = ["luau", "send", "serialize"] }
 asb-decrypt = { git = "https://github.com/Alphaly2K/asb-decrypt" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

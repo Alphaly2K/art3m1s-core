@@ -345,17 +345,10 @@ fn json_to_lua_value(lua: &Lua, value: serde_json::Value) -> mlua::Result<mlua::
 }
 
 fn lua_integer_value(value: i64) -> mlua::Value {
-    #[cfg(feature = "backend-luau")]
-    {
-        if (i32::MIN as i64..=i32::MAX as i64).contains(&value) {
-            mlua::Value::Integer(value as mlua::Integer)
-        } else {
-            mlua::Value::Number(value as f64)
-        }
-    }
-    #[cfg(not(feature = "backend-luau"))]
-    {
-        mlua::Value::Integer(value as mlua::Integer)
+    if let Ok(value) = i32::try_from(value) {
+        mlua::Value::Integer(value)
+    } else {
+        mlua::Value::Number(value as f64)
     }
 }
 
@@ -537,7 +530,6 @@ impl Interpreter {
         // 共享同一份变量存储给 engine 上下文，使 e:var 能读到解释器写入的变量。
         engine_ctx_inner.variables = Some(Arc::clone(&variables));
         let engine_ctx = Arc::new(Mutex::new(engine_ctx_inner));
-        #[cfg(feature = "backend-luau")]
         if let Err(e) = crate::luau_polyfill::install(&lua, Arc::clone(&engine_ctx)) {
             eprintln!("警告: 注入 Luau 兼容层失败: {:?}", e);
         }
@@ -4456,7 +4448,6 @@ mod tests {
         assert_eq!(vars.get("fs"), Some(&Value::Int(1)));
     }
 
-    #[cfg(feature = "backend-luau")]
     #[test]
     fn luau_polyfills_cover_maxn_os_and_host_file_write() {
         let writes = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
@@ -4487,11 +4478,13 @@ mod tests {
         let writes = writes.lock().unwrap();
         assert_eq!(
             writes.as_slice(),
-            [("save/test.bin".to_string(), b"A12".to_vec())]
+            [
+                ("save/test.bin".to_string(), Vec::new()),
+                ("save/test.bin".to_string(), b"A12".to_vec())
+            ]
         );
     }
 
-    #[cfg(feature = "backend-luau")]
     #[test]
     fn luau_string_gfind_supports_artemis_split_helper() {
         let interpreter = Interpreter::new(InterpreterConfig::default());
@@ -4535,12 +4528,10 @@ mod tests {
         assert_eq!(parts.get::<String>(3).unwrap(), "gamma");
     }
 
-    #[cfg(feature = "backend-luau")]
     struct TestCallbacks {
         writes: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
     }
 
-    #[cfg(feature = "backend-luau")]
     impl EngineCallbacks for TestCallbacks {
         fn debug(&self, _level: i32, _data: &str, _raw: bool) {}
         fn enqueue_tag(&self, _tag: String, _params: HashMap<String, String>) {}

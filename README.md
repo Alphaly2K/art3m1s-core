@@ -17,7 +17,7 @@ Host 负责。
 
 - 多引擎 runtime 边界：`Art3m1sApiV1`、`Art3m1sRfvpApiV1` 和可选的
   `Art3m1sKrkrApiV1` 各自版本化，不互相复用引擎对象语义
-- ASB/AST/IET 脚本解释与 Lua 桥接（桌面/Android 用 Lua 5.1，iOS 用 Luau）
+- ASB/AST/IET 脚本解释与 Lua 桥接（所有平台统一使用 Luau）
 - 图层树、变换、混合、转场、动画与命中测试；Artemis HLSL shader 子集
 - 共享 GPU 后端：Apple 默认原生 Metal（可选 MetalFX Spatial），GL/ANGLE 为参考路径，
   Vulkan 为实验路径；RFVP/KRKR adapter 不直接依赖具体图形 API
