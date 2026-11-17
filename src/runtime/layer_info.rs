@@ -173,6 +173,7 @@ mod tests {
             magic_paths: Default::default(),
             layer_info: Arc::clone(&state),
             resources: crate::host_files::default_resources().clone(),
+            host: crate::host::HostSession::legacy(),
             surface_cache: Default::default(),
             volumes: Default::default(),
             debug_skip_active: Default::default(),

@@ -116,7 +116,7 @@ impl CoreRuntime {
             .map(|command| command.texture)
             .filter(|&texture| self.gpu.texture_is_opaque(texture))
             .collect::<std::collections::HashSet<_>>();
-        let visualize_damage = crate::ffi::damage_visualization_enabled();
+        let visualize_damage = self.host.damage_visualization_enabled();
         let damage_started = profile.mark();
         let damage_decision = frame_damage(
             self.last_submitted_frame.as_ref(),

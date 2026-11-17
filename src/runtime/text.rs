@@ -3,7 +3,6 @@ use crate::render_pipeline::draw::DrawCommand;
 use crate::text::render::{ScetweenConfig, TextRenderer, TextSpanToken};
 use asb_interpreter::Event;
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
 
 fn text_span_ready(state: &crate::text::render::FontState, span: &TextSpanToken) -> Option<bool> {
     let layer = state.layers.get(&span.layer_id)?;
@@ -23,13 +22,7 @@ pub(super) struct PendingScenarioText {
     span: Option<TextSpanToken>,
 }
 
-/// backlog / message-tags 的进程级镜像，供解释器 `var system=get_backlog_size /
-/// get_backlog_tags / get_message_tags` 的宿主查询钩子读取。
-///
-/// 钩子是进程级注册点（var 标签路径拿不到 runtime 实例，且 text_renderer 非
-/// Send+Sync 不能直接跨线程借入），因此这里维护一份可克隆的快照：runtime 每帧从
-/// text_renderer 抽取 backlog/消息层的再现标签序列刷进来，钩子只读它并按伪数组
-/// 约定（name.0..N + name.size）落值。allfont=0/1 两套预先算好，查询时按需取用。
+/// 可供脚本查询的历史页和消息层文本快照。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BacklogSnapshot {
     /// 每页的再现标签：`.0`=allfont=0 的序列、`.1`=allfont=1 的序列。
@@ -39,58 +32,30 @@ pub struct BacklogSnapshot {
     pub message_layers: HashMap<String, (Vec<String>, Vec<String>)>,
 }
 
-// 这三个访问器是给解释器宿主查询钩子（var system=get_backlog_* / get_message_tags）
-// 消费的读取入口；钩子接线在 ../asb-interpreter 与 events.rs（超出本任务白名单，见
-// skipped）。在此之前非测试构建里它们无调用方，故允许 dead_code 以免噪声。
-#[allow(dead_code)]
 impl BacklogSnapshot {
-    /// get_backlog_size：已存页数。
     pub fn backlog_size(&self) -> usize {
         self.pages.len()
     }
 
-    /// get_backlog_tags：第 `page` 页的再现标签（越界返回 None）。
     pub fn backlog_tags(&self, page: usize, allfont: bool) -> Option<Vec<String>> {
-        self.pages
-            .get(page)
-            .map(|(no, yes)| if allfont { yes.clone() } else { no.clone() })
+        self.pages.get(page).map(|(plain, styled)| {
+            if allfont {
+                styled.clone()
+            } else {
+                plain.clone()
+            }
+        })
     }
 
-    /// get_message_tags：消息层 `id` 的再现标签（层不存在返回 None）。
     pub fn message_tags(&self, id: &str, allfont: bool) -> Option<Vec<String>> {
-        self.message_layers
-            .get(id)
-            .map(|(no, yes)| if allfont { yes.clone() } else { no.clone() })
+        self.message_layers.get(id).map(|(plain, styled)| {
+            if allfont {
+                styled.clone()
+            } else {
+                plain.clone()
+            }
+        })
     }
-}
-
-// HashMap::new() 非 const，无法直接放进 `static Mutex<_>`（Vec::new() 可以），
-// 故用 LazyLock 首次访问时构造缺省快照。
-static BACKLOG_SNAPSHOT: LazyLock<Mutex<BacklogSnapshot>> =
-    LazyLock::new(|| Mutex::new(BacklogSnapshot::default()));
-
-/// 当前消息层文本度量的进程级镜像：`(整体宽度, 总高度, 最后一行宽度)`。
-/// 供 var system=get_message_layer_width/height/line_width 的宿主查询钩子读取，
-/// 由 runtime 每帧从 text_renderer 刷新（同 backlog 快照，text_renderer 非
-/// Send+Sync 不能直接借入进程级钩子）。
-static TEXT_METRICS: Mutex<(f32, f32, f32)> = Mutex::new((0.0, 0.0, 0.0));
-
-/// 读取当前文本度量快照。消费方是解释器宿主查询钩子。
-pub(crate) fn text_metrics_snapshot() -> (f32, f32, f32) {
-    *TEXT_METRICS.lock().unwrap()
-}
-
-/// 读取当前 backlog 快照（get_backlog_* / get_message_tags 钩子入口）。
-///
-/// 消费方是解释器宿主查询钩子（接线见 skipped），故非测试构建里暂无调用方。
-#[allow(dead_code)]
-pub(crate) fn backlog_snapshot() -> BacklogSnapshot {
-    BACKLOG_SNAPSHOT.lock().unwrap().clone()
-}
-
-pub(super) fn clear_process_snapshots() {
-    *BACKLOG_SNAPSHOT.lock().unwrap() = BacklogSnapshot::default();
-    *TEXT_METRICS.lock().unwrap() = (0.0, 0.0, 0.0);
 }
 
 /// 从 FontState 抽取 backlog / 消息层再现标签，构造快照。
@@ -165,20 +130,14 @@ impl CoreRuntime {
         self.text_renderer = Some(renderer);
     }
 
-    /// 从 text_renderer 抽取 backlog / 消息层再现标签，刷进进程级快照，供解释器
-    /// `var system=get_backlog_size / get_backlog_tags / get_message_tags` 的宿主
-    /// 查询钩子读取。每帧（render 前）调用一次即可保证查询读到最新值。
-    ///
-    /// 注意：解释器侧的钩子字段与 execute_var_system 接线尚未落地（在
-    /// ../asb-interpreter，超出本任务白名单），改动点见任务 skipped。快照本身
-    /// 已可用，钩子接上后即刻生效。
     pub(super) fn sync_backlog_snapshot(&self) {
         let Some(renderer) = self.text_renderer.as_ref() else {
             return;
         };
-        *BACKLOG_SNAPSHOT.lock().unwrap() = build_backlog_snapshot(renderer.font_state());
+        let mut snapshot = self.query_snapshots.lock().unwrap();
+        snapshot.backlog = build_backlog_snapshot(renderer.font_state());
         // 顺带刷新文本度量（get_message_layer_width/height/line_width）。
-        *TEXT_METRICS.lock().unwrap() = renderer
+        snapshot.text_metrics = renderer
             .active_layer_text_metrics()
             .unwrap_or((0.0, 0.0, 0.0));
     }
@@ -266,7 +225,7 @@ impl CoreRuntime {
         let mut background_request = None;
         let injected = match event {
             Event::ScenarioText { content, .. } => {
-                let host_text = match crate::ffi::request_text_injection(content) {
+                let host_text = match self.host.text_injection(content) {
                     crate::ffi::TextInjectResult::Unchanged => content.clone(),
                     crate::ffi::TextInjectResult::Replaced(text) => text,
                     crate::ffi::TextInjectResult::Pending => {
@@ -450,7 +409,7 @@ impl CoreRuntime {
                 translated: None,
             },
         );
-        crate::ffi::emit_ui_command(
+        self.host.emit_ui(
             "text_translate",
             serde_json::json!({
                 "serial": serial,
@@ -462,6 +421,7 @@ impl CoreRuntime {
     }
 
     pub fn submit_text_translation(&mut self, serial: u64, translated: Option<&str>) -> bool {
+        let _host_scope = self.host.enter();
         let Some(pending) = self.pending_text_translations.get_mut(&serial) else {
             crate::core_debug!("[translation] 忽略过期结果 serial={serial}");
             return false;
@@ -686,7 +646,7 @@ impl CoreRuntime {
     /// 宿主覆盖字体的世代检查：覆盖被设置/更换/清除时，作废脚本字体的
     /// 短路缓存并按当前活动 face 立即重解，不等下一个 font 事件。
     pub(super) fn sync_font_override(&mut self) {
-        let generation = crate::ffi::font_override().map(|(generation, _)| generation);
+        let generation = self.host.font_override().map(|(generation, _)| generation);
         if generation == self.font_override_generation {
             return;
         }
@@ -702,7 +662,7 @@ impl CoreRuntime {
     }
 
     fn load_script_font(&mut self, face: &str) {
-        let font_override = crate::ffi::font_override();
+        let font_override = self.host.font_override();
         // 覆盖世代在上次 font 事件后变化（sync_font_override 之外的路径，例如
         // 覆盖变更后第一个到达的事件恰好是 FontSettings）时同样作废短路缓存。
         let generation = font_override.as_ref().map(|(generation, _)| *generation);
@@ -810,8 +770,8 @@ pub(super) fn font_fallback_candidates(face: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BACKLOG_SNAPSHOT, BacklogSnapshot, HOST_FONT_OVERRIDE_FACE, apply_font_override,
-        backlog_snapshot, build_backlog_snapshot, font_fallback_candidates, text_span_ready,
+        BacklogSnapshot, HOST_FONT_OVERRIDE_FACE, apply_font_override, build_backlog_snapshot,
+        font_fallback_candidates, text_span_ready,
     };
     use crate::render_pipeline::draw::TextureProvider;
     use crate::text::GlyphTextRenderer;
@@ -943,18 +903,6 @@ mod tests {
             .message_tags(crate::text::glyph::DEFAULT_MESSAGE_LAYER, false)
             .unwrap();
         assert_eq!(no_font, vec!["[print data=\"あ\"]"]);
-    }
-
-    #[test]
-    fn snapshot_static_round_trips() {
-        // 直接写进程级快照再读回，验证 backlog_snapshot() 访问路径（宿主钩子读取入口）。
-        let mut snap = BacklogSnapshot::default();
-        snap.pages
-            .push((vec!["[print data=\"x\"]".to_string()], Vec::new()));
-        *BACKLOG_SNAPSHOT.lock().unwrap() = snap.clone();
-        assert_eq!(backlog_snapshot(), snap);
-        // 复位，避免污染其它测试（进程级静态共享）
-        *BACKLOG_SNAPSHOT.lock().unwrap() = BacklogSnapshot::default();
     }
 
     // ── 任务 #3：lyprop `~` 消息层绑定 ──

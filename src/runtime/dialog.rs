@@ -26,8 +26,8 @@ impl CoreRuntime {
             textfield_size,
         });
 
-        if crate::ffi::ui_command_callback_registered() {
-            crate::ffi::emit_ui_command(
+        if self.host.enabled() {
+            self.host.emit_ui(
                 "dialog_show",
                 json!({
                     "title": title,
@@ -44,6 +44,7 @@ impl CoreRuntime {
     }
 
     pub fn submit_dialog_response(&mut self, accepted: bool, text: Option<&str>) -> bool {
+        let _host_scope = self.host.enter();
         let Some(dialog) = self.pending_dialog.take() else {
             crate::core_warn!("[dialog] 收到响应时没有待处理 dialog");
             return false;

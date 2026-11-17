@@ -56,6 +56,10 @@ thread_local! {
 }
 
 pub(crate) fn set_profile_io_enabled(enabled: bool) {
+    if let Some(host) = crate::host::current_session() {
+        host.set_profile_io_enabled(enabled);
+        return;
+    }
     PROFILE_IO.store(enabled, Ordering::Relaxed);
     if !enabled {
         let _ = take_profile_io_counters();
@@ -63,25 +67,32 @@ pub(crate) fn set_profile_io_enabled(enabled: bool) {
 }
 
 pub(crate) fn take_profile_io_counters() -> HostFfiProfile {
+    if let Some(host) = crate::host::current_session() {
+        return host.take_profile_io_counters();
+    }
     HOST_FFI_PROFILE.with(|cell| cell.replace(HostFfiProfile::default()))
 }
 
 fn begin_profile_io() -> Option<std::time::Instant> {
-    PROFILE_IO
-        .load(Ordering::Relaxed)
-        .then(std::time::Instant::now)
+    let enabled = crate::host::current_session()
+        .map(|host| host.profile_io_enabled())
+        .unwrap_or_else(|| PROFILE_IO.load(Ordering::Relaxed));
+    enabled.then(std::time::Instant::now)
 }
 
 fn finish_profile_io(started: Option<std::time::Instant>, bytes: usize) {
     let Some(started) = started else {
         return;
     };
+    let elapsed_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+    if let Some(host) = crate::host::current_session() {
+        host.record_profile_io(elapsed_ns, bytes as u64);
+        return;
+    }
     HOST_FFI_PROFILE.with(|cell| {
         let mut value = cell.get();
         value.calls = value.calls.saturating_add(1);
-        value.elapsed_ns = value
-            .elapsed_ns
-            .saturating_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64);
+        value.elapsed_ns = value.elapsed_ns.saturating_add(elapsed_ns);
         value.bytes = value.bytes.saturating_add(bytes as u64);
         cell.set(value);
     });
@@ -144,15 +155,22 @@ pub unsafe extern "C" fn art3m1s_set_debug(enabled: c_int) {
 }
 
 pub fn debug_enabled() -> bool {
+    if let Some(host) = crate::host::current_session() {
+        return host.debug_enabled();
+    }
+    legacy_debug_enabled()
+}
+
+pub(crate) fn legacy_debug_enabled() -> bool {
     DEBUG.load(Ordering::Relaxed)
 }
 
 pub unsafe extern "C" fn art3m1s_set_damage_visualization(enabled: c_int) {
-    DAMAGE_VISUALIZATION.store(enabled != 0 && debug_enabled(), Ordering::Relaxed);
+    DAMAGE_VISUALIZATION.store(enabled != 0 && legacy_debug_enabled(), Ordering::Relaxed);
 }
 
 pub fn damage_visualization_enabled() -> bool {
-    debug_enabled() && DAMAGE_VISUALIZATION.load(Ordering::Relaxed)
+    legacy_debug_enabled() && DAMAGE_VISUALIZATION.load(Ordering::Relaxed)
 }
 
 // ── 日志过滤钩子（setLogFilter 的 core 侧）────────────────────────
@@ -200,6 +218,10 @@ fn log_suppressed_by_filter(level: &str, msg: &str) -> bool {
 }
 
 pub fn log(level: &str, msg: &str) {
+    if let Some(host) = crate::host::current_session() {
+        host.log(level, msg);
+        return;
+    }
     if log_suppressed_by_filter(level, msg) {
         return;
     }
@@ -2036,6 +2058,26 @@ pub unsafe extern "C" fn art3m1s_runtime_set_reported_os(rt: *mut CoreRuntime, o
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn io_counters_and_resets_belong_to_the_current_session() {
+        let a = crate::host::HostSession::new();
+        let b = crate::host::HostSession::new();
+        let _scope = a.enter();
+        super::set_profile_io_enabled(true);
+        super::finish_profile_io(super::begin_profile_io(), 11);
+        {
+            let _scope = b.enter();
+            super::set_profile_io_enabled(true);
+            super::finish_profile_io(super::begin_profile_io(), 22);
+            let b_sample = super::take_profile_io_counters();
+            assert_eq!((b_sample.calls, b_sample.bytes), (1, 22));
+            super::set_profile_io_enabled(false);
+        }
+        let a_sample = super::take_profile_io_counters();
+        assert_eq!((a_sample.calls, a_sample.bytes), (1, 11));
+        assert!(super::begin_profile_io().is_some());
+    }
+
     use super::{
         font_override, log_suppressed_by_filter, script_debug_print_allowed, set_font_override,
         set_log_filter, set_script_debug_config,

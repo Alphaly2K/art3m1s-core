@@ -28,9 +28,12 @@ mod media;
 #[cfg(feature = "ffmpeg")]
 mod media_session;
 mod project;
+mod queries;
 mod render;
 mod save_io;
 mod script;
+#[cfg(test)]
+mod session_tests;
 mod telemetry;
 mod text;
 
@@ -77,8 +80,10 @@ pub struct CoreRuntime {
     audio: Box<dyn AudioBackend>,
     video: Box<dyn VideoBackend>,
     resources: HostResources,
+    host: crate::host::HostSession,
     allow_filesystem_fallback: bool,
     surface_cache: Arc<Mutex<callbacks::SurfaceCache>>,
+    query_snapshots: Arc<Mutex<queries::QuerySnapshots>>,
     #[cfg(feature = "ffmpeg")]
     media_session: media_session::RuntimeMediaSession,
     interpreter: asb_interpreter::Interpreter,
@@ -166,6 +171,7 @@ struct PendingLoadResume {
 impl CoreRuntime {
     #[cfg(feature = "ffmpeg")]
     pub fn set_runtime_media_enabled(&mut self, enabled: bool) {
+        let _host_scope = self.host.enter();
         self.media_session.set_enabled(enabled);
     }
 
@@ -187,6 +193,7 @@ impl CoreRuntime {
     /// inside the selected backend and are recreated only when dimensions or
     /// formats require it.
     pub fn configure_post_process(&mut self, pipeline: PostProcessPipeline) -> Result<(), String> {
+        let _host_scope = self.host.enter();
         self.gpu.begin_access();
         let result = self.gpu.configure_post_process(pipeline);
         self.gpu.end_access();
@@ -197,6 +204,7 @@ impl CoreRuntime {
     /// logical coordinates. Native backends never resolve below the game's
     /// logical scene size.
     pub fn set_render_scale(&mut self, scale: f32) -> Result<(), String> {
+        let _host_scope = self.host.enter();
         let mut pipeline = PostProcessPipeline::default();
         pipeline.render_scale = scale;
         self.configure_post_process(pipeline)
@@ -204,6 +212,7 @@ impl CoreRuntime {
 
     /// 应用统一渲染质量策略。MetalFX 不可用时由 backend 自动回退 native。
     pub fn set_render_quality_preset(&mut self, preset: RenderQualityPreset) -> Result<(), String> {
+        let _host_scope = self.host.enter();
         let (scale, mode) = preset.policy();
         let mut pipeline = PostProcessPipeline::default();
         pipeline.render_scale = scale;
@@ -222,6 +231,7 @@ impl CoreRuntime {
         render_scale: f32,
         sharpness: f32,
     ) -> Result<(), String> {
+        let _host_scope = self.host.enter();
         let mut pipeline = PostProcessPipeline::default();
         pipeline.render_scale = render_scale;
         pipeline.passes[0] = PostProcessPass::Upscale(UpscaleConfig {
@@ -237,6 +247,7 @@ impl CoreRuntime {
         name: &str,
         source: &[u8],
     ) -> Result<crate::render_pipeline::hlsl::ShaderId, crate::backend::ShaderCompileError> {
+        let _host_scope = self.host.enter();
         self.gpu.register_hlsl_shader(name, source)
     }
 
@@ -246,6 +257,7 @@ impl CoreRuntime {
         name: &str,
         source: &[u8],
     ) -> Result<crate::render_pipeline::hlsl::ShaderId, crate::backend::ShaderCompileError> {
+        let _host_scope = self.host.enter();
         self.gpu.replace_hlsl_shader(name, source)
     }
 
@@ -254,10 +266,12 @@ impl CoreRuntime {
         name: &str,
         source: &[u8],
     ) -> Result<crate::render_pipeline::hlsl::ShaderId, crate::backend::ShaderCompileError> {
+        let _host_scope = self.host.enter();
         self.gpu.reload_hlsl_shader(name, source)
     }
 
     pub fn unregister_hlsl_shader(&mut self, name: &str) -> bool {
+        let _host_scope = self.host.enter();
         self.gpu.unregister_shader(name)
     }
 
@@ -268,11 +282,12 @@ impl CoreRuntime {
         backend: impl Into<BackendSelection>,
     ) -> Result<Self, String> {
         let gpu = crate::backend::create_backend(backend.into(), stage_width, stage_height)?;
-        let mut runtime = Self::with_host_backend(
+        let mut runtime = Self::with_session(
             stage_width,
             stage_height,
             crate::host_files::default_resources().clone(),
             gpu,
+            crate::host::HostSession::legacy(),
         )?;
         runtime.allow_filesystem_fallback = true;
         Ok(runtime)
@@ -281,14 +296,32 @@ impl CoreRuntime {
     /// Embed with explicit resources and a Host-supplied renderer.
     ///
     /// This entry never selects a platform backend or a default resource mount.
-    /// The renderer owns GPU execution and output. The versioned, queued C frame
-    /// protocol is developed separately; this is the synchronous Rust bridge.
+    /// The renderer owns GPU execution and output. Missing resources return an
+    /// error without falling back to the working directory.
     pub fn with_host_backend(
         stage_width: u32,
         stage_height: u32,
         resources: HostResources,
         gpu: Box<dyn GpuBackend>,
     ) -> Result<Self, String> {
+        Self::with_session(
+            stage_width,
+            stage_height,
+            resources,
+            gpu,
+            crate::host::HostSession::new(),
+        )
+    }
+
+    fn with_session(
+        stage_width: u32,
+        stage_height: u32,
+        resources: HostResources,
+        gpu: Box<dyn GpuBackend>,
+        host: crate::host::HostSession,
+    ) -> Result<Self, String> {
+        let _host_scope = host.enter();
+        crate::host::logging::install_once();
         let extent = crate::backend::Extent2D::new(stage_width, stage_height);
         if extent.is_empty()
             || extent.rgba8_len().is_none()
@@ -312,7 +345,7 @@ impl CoreRuntime {
         let audio = Box::new(crate::audio::AudioStateBackend::new()) as Box<dyn AudioBackend>;
         let video = Box::new(crate::video::VideoStateBackend::new()) as Box<dyn VideoBackend>;
         #[cfg(feature = "ffmpeg")]
-        let media_session = media_session::RuntimeMediaSession::default();
+        let media_session = media_session::RuntimeMediaSession::new(host.clone());
         let interpreter =
             asb_interpreter::Interpreter::new(asb_interpreter::InterpreterConfig::default());
 
@@ -339,8 +372,10 @@ impl CoreRuntime {
             audio,
             video,
             resources,
+            host,
             allow_filesystem_fallback: false,
             surface_cache: Arc::default(),
+            query_snapshots: Arc::default(),
             #[cfg(feature = "ffmpeg")]
             media_session,
             interpreter,
@@ -395,6 +430,10 @@ impl CoreRuntime {
         self.stage_w
     }
 
+    pub fn host_session(&self) -> Option<&crate::host::HostSession> {
+        (!self.host.is_legacy()).then_some(&self.host)
+    }
+
     pub fn set_resources(&mut self, resources: HostResources) {
         self.resources = resources;
     }
@@ -426,6 +465,7 @@ impl CoreRuntime {
     /// Advance logic and render directly into a caller-owned RGBA buffer.
     /// Returns the number of bytes written, or zero when the buffer is too small.
     pub fn advance_and_render_into(&mut self, delta_ms: u64, out_pixels: &mut [u8]) -> usize {
+        let _host_scope = self.host.enter();
         if out_pixels.len() < self.pixel_buffer_size() {
             return 0;
         }
@@ -458,6 +498,7 @@ impl CoreRuntime {
 
     /// Configures a host-owned output surface as the presentation target.
     pub fn set_native_surface(&mut self, surface: NativeSurface) -> Result<(), String> {
+        let _host_scope = self.host.enter();
         self.gpu.begin_access();
         let result = self.gpu.set_native_surface(surface);
         if result.is_ok() {
@@ -469,6 +510,7 @@ impl CoreRuntime {
     }
 
     pub fn clear_native_surface(&mut self) {
+        let _host_scope = self.host.enter();
         self.gpu.begin_access();
         self.gpu.clear_native_surface();
         self.gpu.end_access();
@@ -477,6 +519,7 @@ impl CoreRuntime {
     /// Advances logic and presents a changed frame through the host texture.
     /// Returns `Ok(false)` when no visual update was necessary.
     pub fn advance_and_present(&mut self, delta_ms: u64) -> Result<bool, String> {
+        let _host_scope = self.host.enter();
         let mut profile = self.begin_profile_frame();
         self.gpu.begin_access();
         self.advance_logic(delta_ms, &mut profile);
@@ -506,6 +549,7 @@ impl CoreRuntime {
     /// such as E-Mote lip sync on the audio clock without paying for a GPU
     /// readback whose pixels cannot be displayed yet.
     pub fn advance_without_render(&mut self, delta_ms: u64) {
+        let _host_scope = self.host.enter();
         let mut profile = self.begin_profile_frame();
         self.gpu.begin_access();
         self.advance_logic(delta_ms, &mut profile);
@@ -685,6 +729,7 @@ impl CoreRuntime {
     }
 
     pub fn set_profiler_enabled(&self, enabled: bool) {
+        let _host_scope = self.host.enter();
         self.gpu.set_profile_enabled(enabled);
         self.emote.lock().unwrap().set_profile_enabled(enabled);
         self.profiler.set_enabled(enabled);
@@ -801,8 +846,8 @@ impl CoreRuntime {
 
 impl Drop for CoreRuntime {
     fn drop(&mut self) {
-        text::clear_process_snapshots();
-        media::clear_sound_info_snapshot();
+        let _host_scope = self.host.enter();
+        crate::ffi::set_profile_io_enabled(false);
     }
 }
 

@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use super::magic_path;
-use crate::ffi;
 use crate::host_files::HostResources;
 
 pub(super) type LayerInfoTable =
@@ -21,6 +20,7 @@ pub(super) struct FfiCallbacks {
     pub magic_paths: std::sync::Arc<magic_path::MagicPathTable>,
     pub layer_info: LayerInfoTable,
     pub resources: HostResources,
+    pub host: crate::host::HostSession,
     pub surface_cache: Arc<std::sync::Mutex<SurfaceCache>>,
     pub volumes: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, f32>>>,
     pub debug_skip_active: Arc<AtomicBool>,
@@ -380,7 +380,7 @@ impl InputSnapshot {
 
 impl EngineCallbacks for FfiCallbacks {
     fn debug(&self, _level: i32, data: &str, _raw: bool) {
-        crate::core_info!("{data}");
+        self.host.log("I", data);
     }
 
     fn enqueue_tag(&self, _tag: String, _params: HashMap<String, String>) {}
@@ -533,23 +533,24 @@ impl EngineCallbacks for FfiCallbacks {
     fn get_font_list(&self, monospace: bool, vertical: bool) -> Vec<String> {
         // Host 经 art3m1s_set_font_list_v1 推送可用字体族；
         // 未推送时返回空列表（脚本读到"无可选字体"，退化安全）。
-        ffi::query_font_list(monospace, vertical)
+        self.host.query_font_list(monospace, vertical)
     }
 
     fn get_window_state(&self) -> (bool, bool) {
         // (全屏, 最小化)。Host 经 art3m1s_set_window_state_v1 推送。
-        ffi::query_window_state()
+        self.host.query_window_state()
     }
 
     fn write_clipboard(&self, text: &str) {
         // e:writeClipboard → 经 ui_command 转发宿主（Flutter Clipboard.setData）。
-        ffi::write_clipboard(text);
+        self.host
+            .emit_ui("write_clipboard", serde_json::json!({ "string": text }));
     }
 
     fn call_shell_execute(&self, file: &str, params: HashMap<String, String>) -> i32 {
         // e:callShellExecute → 经 ui_command 转发宿主执行（打开 URL/文件/应用）。
         // 宿主异步执行，这里同步返回 0（成功受理）；失败与否由宿主自处理。
-        ffi::emit_ui_command(
+        self.host.emit_ui(
             "shell_execute",
             serde_json::json!({ "file": file, "params": params }),
         );
@@ -1096,6 +1097,7 @@ mod tests {
             magic_paths: Arc::clone(&magic_paths),
             layer_info: Arc::new(std::sync::Mutex::new(Default::default())),
             resources: crate::host_files::default_resources().clone(),
+            host: crate::host::HostSession::legacy(),
             surface_cache: Default::default(),
             volumes: Arc::new(std::sync::Mutex::new(HashMap::new())),
             debug_skip_active: Arc::new(AtomicBool::new(false)),
@@ -1134,6 +1136,7 @@ mod tests {
                 as Arc<magic_path::MagicPathTable>,
             layer_info: Arc::new(std::sync::Mutex::new(Default::default())),
             resources: crate::host_files::default_resources().clone(),
+            host: crate::host::HostSession::legacy(),
             surface_cache: Default::default(),
             volumes: Arc::new(std::sync::Mutex::new(HashMap::new())),
             debug_skip_active: Arc::new(AtomicBool::new(false)),

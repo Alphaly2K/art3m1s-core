@@ -1,8 +1,7 @@
 //! Host-owned logical resources. Implementations decide where bytes are stored.
 //!
-//! This synchronous Rust boundary preserves existing script semantics while the
-//! queued v2 IO continuation is developed. It is not a native-to-language callback
-//! ABI. Implementations must not call back into the same runtime.
+//! This is a synchronous Rust interface. Implementations must not call back into
+//! the same runtime.
 
 /// A resource view supplied by the embedding Host, without physical paths.
 ///

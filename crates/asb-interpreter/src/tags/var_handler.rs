@@ -32,9 +32,8 @@ pub struct SoundInfoSnapshot {
 /// 宿主查询钩子集合。
 ///
 /// `var system=file_exists/file_crc/file_update_time/get_sound_info` 的真实
-/// 数据来自宿主（包文件系统/存档目录/音频状态）。标签路径的
-/// [`ExecutionContext`](super::ExecutionContext) 不携带 EngineCallbacks，
-/// 因此这里提供进程级钩子注册点；未安装钩子时各命令保持原有的保守回退。
+/// 数据来自宿主（包文件系统/存档目录/音频状态）。通过解释器安装的钩子归该实例所有，
+/// 不参与存档序列化。
 pub struct HostQueryHooks {
     /// (文件路径, save 参数是否为 1) -> 是否存在。宿主负责 magic path/存档路径解析。
     pub file_exists: Box<dyn Fn(&str, bool) -> bool + Send + Sync>,
@@ -55,15 +54,27 @@ pub struct HostQueryHooks {
     pub message_layer_metrics: Box<dyn Fn() -> (f32, f32, f32) + Send + Sync>,
 }
 
+impl std::fmt::Debug for HostQueryHooks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostQueryHooks").finish_non_exhaustive()
+    }
+}
+
 static HOST_QUERY_HOOKS: RwLock<Option<HostQueryHooks>> = RwLock::new(None);
 
-/// 安装（或替换）宿主查询钩子。宿主重建 runtime 后重新安装即可覆盖旧钩子。
+/// 旧调用者的进程默认查询钩子。实例查询使用 `Interpreter::set_host_query_hooks`。
 pub fn set_host_query_hooks(hooks: HostQueryHooks) {
     *HOST_QUERY_HOOKS.write().unwrap() = Some(hooks);
 }
 
 /// 在钩子（若已安装）上执行查询。
-fn with_host_hooks<R>(f: impl FnOnce(&HostQueryHooks) -> R) -> Option<R> {
+fn with_host_hooks<R>(
+    variables: &VariableStore,
+    f: impl FnOnce(&HostQueryHooks) -> R,
+) -> Option<R> {
+    if let Some(hooks) = variables.host_query_hooks() {
+        return Some(f(&hooks));
+    }
     HOST_QUERY_HOOKS.read().unwrap().as_ref().map(f)
 }
 
@@ -381,7 +392,9 @@ pub fn execute_var_system(
             // .exe 文件直接假装存在（引擎不会真正读取 exe，只是游戏的启动检查）
             let exists = if file.to_ascii_lowercase().ends_with(".exe") {
                 true
-            } else if let Some(exists) = with_host_hooks(|h| (h.file_exists)(&file, save)) {
+            } else if let Some(exists) =
+                with_host_hooks(variables, |h| (h.file_exists)(&file, save))
+            {
                 // 宿主钩子可查包文件/magic path/存档目录，优先于本地文件系统
                 exists
             } else {
@@ -470,7 +483,7 @@ pub fn execute_var_system(
         // 有 id：该 SE 的 playing/gain/pan；id 不存在时仅 name.playing=0。
         "get_sound_info" => {
             let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
-            let Some(snapshot) = with_host_hooks(|h| (h.sound_info)()) else {
+            let Some(snapshot) = with_host_hooks(variables, |h| (h.sound_info)()) else {
                 // 无宿主钩子：保持旧的保守回退（脚本读到"什么都没在放"）
                 variables.set(name, Value::Int(0));
                 return Ok(());
@@ -486,7 +499,7 @@ pub fn execute_var_system(
         // 历史总页数（文档 var/get_backlog_size.md）：name = 页数。
         "get_backlog_size" => {
             let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
-            let size = with_host_hooks(|h| (h.backlog_size)()).unwrap_or(0);
+            let size = with_host_hooks(variables, |h| (h.backlog_size)()).unwrap_or(0);
             variables.set(name, Value::Int(size as i64));
         }
 
@@ -501,7 +514,7 @@ pub fn execute_var_system(
                 .unwrap_or(0)
                 .max(0) as usize;
             let allfont = param_is_on(params.get("allfont"));
-            let tags = with_host_hooks(|h| (h.backlog_tags)(page, allfont)).flatten();
+            let tags = with_host_hooks(variables, |h| (h.backlog_tags)(page, allfont)).flatten();
             set_pseudo_array(name, tags.as_deref(), variables);
         }
 
@@ -511,7 +524,7 @@ pub fn execute_var_system(
             let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
             let id = params.get("id").map(|s| s.as_str()).unwrap_or("");
             let allfont = param_is_on(params.get("allfont"));
-            let tags = with_host_hooks(|h| (h.message_tags)(id, allfont)).flatten();
+            let tags = with_host_hooks(variables, |h| (h.message_tags)(id, allfont)).flatten();
             set_pseudo_array(name, tags.as_deref(), variables);
         }
 
@@ -520,7 +533,8 @@ pub fn execute_var_system(
         "get_message_layer_width" | "get_message_layer_height" | "get_message_layer_line_width" => {
             let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
             let (width, height, line_width) =
-                with_host_hooks(|h| (h.message_layer_metrics)()).unwrap_or((0.0, 0.0, 0.0));
+                with_host_hooks(variables, |h| (h.message_layer_metrics)())
+                    .unwrap_or((0.0, 0.0, 0.0));
             let value = match system {
                 "get_message_layer_width" => width,
                 "get_message_layer_height" => height,
@@ -569,7 +583,7 @@ pub fn execute_var_system(
                 // zerox=1 添加 0x 前缀；caps=1 十六进制大写（缺省小写）
                 let zerox = params.get("zerox").map(|s| s.as_str()) == Some("1");
                 let caps = params.get("caps").map(|s| s.as_str()) == Some("1");
-                let crc = with_host_hooks(|h| (h.file_crc32)(&file))
+                let crc = with_host_hooks(variables, |h| (h.file_crc32)(&file))
                     .flatten()
                     .map(|crc| format_crc32(crc, zerox, caps))
                     // 无钩子或读不到文件：保持旧行为返回空串
@@ -677,7 +691,7 @@ pub fn execute_var_system(
                 .filter(|s| !s.is_empty())
                 .unwrap_or("yyyy/MM/dd hh:mm:ss");
             let noexist = params.get("noexist").map(|s| s.as_str()).unwrap_or("");
-            let value = with_host_hooks(|h| (h.file_update_time)(&file))
+            let value = with_host_hooks(variables, |h| (h.file_update_time)(&file))
                 .flatten()
                 .map(|components| format_update_time(&components, format))
                 .unwrap_or_else(|| noexist.to_string());
@@ -1199,7 +1213,7 @@ mod tests {
     #[test]
     fn backlog_var_systems_read_installed_hooks() {
         // 装一个返回固定历史的钩子，验证三个 backlog var system 落值。
-        set_host_query_hooks(HostQueryHooks {
+        let hooks = || HostQueryHooks {
             file_exists: Box::new(|_, _| false),
             file_crc32: Box::new(|_| None),
             file_update_time: Box::new(|_| None),
@@ -1219,10 +1233,11 @@ mod tests {
                 (id == "adv01").then(|| vec!["[print data=\"cur\"]".to_string()])
             }),
             message_layer_metrics: Box::new(|| (320.0, 48.0, 120.0)),
-        });
+        };
 
         let run = |params: &[(&str, &str)]| {
             let mut vars = VariableStore::new();
+            vars.set_host_query_hooks(hooks());
             let map: HashMap<String, String> = params
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -1276,9 +1291,6 @@ mod tests {
         assert_eq!(h.get("t.h").and_then(Value::as_float), Some(48.0));
         let lw = run(&[("system", "get_message_layer_line_width"), ("name", "t.lw")]);
         assert_eq!(lw.get("t.lw").and_then(Value::as_float), Some(120.0));
-
-        // 清理进程级钩子，避免污染其它测试。
-        *HOST_QUERY_HOOKS.write().unwrap() = None;
     }
 
     #[test]

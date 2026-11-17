@@ -14,8 +14,7 @@ impl CoreRuntime {
         delta_ms: u64,
         profile: &mut crate::profiler::FrameProfile,
     ) {
-        // 安装 var system=file_*/get_sound_info 的宿主查询钩子（每 runtime 一次；
-        // 放在这里保证 load_project 之后、脚本第一次执行之前完成）。
+        // Also supports embedders that install an interpreter without loading a project.
         self.ensure_host_query_hooks();
         self.refresh_inline_event_frame();
         // Native dialogs are modal from the scenario script's point of view. The dialog event can
@@ -319,7 +318,7 @@ impl CoreRuntime {
         }
         match time {
             Some(time) => state.clock_ms >= channel.started_at_ms.saturating_add(time),
-            None => !crate::ffi::media_command_callback_registered(),
+            None => !self.host.enabled(),
         }
     }
 

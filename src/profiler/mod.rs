@@ -265,7 +265,6 @@ impl RuntimeProfiler {
 impl Drop for RuntimeProfiler {
     fn drop(&mut self) {
         self.enabled.store(false, Ordering::Relaxed);
-        crate::ffi::set_profile_io_enabled(false);
         self.sender.take();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();

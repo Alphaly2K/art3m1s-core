@@ -1,9 +1,8 @@
 //! Callback-free host event transport and state.
 //!
 //! Event queues and host state live behind an opaque [`HostEvents`] handle.
-//! Logs and media/UI commands originate from process-wide core code, so they
-//! are routed to the currently enabled handle; no native-to-Dart callback is
-//! retained.
+//! Isolated handles remain bound to their runtime. Legacy v1 handles use the
+//! process-wide active route. Neither transport retains native-to-Dart callbacks.
 
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
@@ -52,6 +51,7 @@ struct FontLists {
 }
 
 struct HostEventsInner {
+    legacy_route: bool,
     enabled: AtomicBool,
     window_state: AtomicI32,
     translation_enabled: AtomicBool,
@@ -61,8 +61,9 @@ struct HostEventsInner {
 }
 
 impl HostEventsInner {
-    fn new() -> Self {
+    fn new(legacy_route: bool) -> Self {
         Self {
+            legacy_route,
             enabled: AtomicBool::new(false),
             window_state: AtomicI32::new(0),
             translation_enabled: AtomicBool::new(false),
@@ -119,8 +120,48 @@ pub struct HostEvents {
 impl HostEvents {
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(HostEventsInner::new()),
+            inner: Arc::new(HostEventsInner::new(true)),
         }
+    }
+
+    pub fn new_isolated() -> Self {
+        let events = Self {
+            inner: Arc::new(HostEventsInner::new(false)),
+        };
+        events.set_enabled(true);
+        events
+    }
+
+    pub fn poll_events(&self, output: &mut [u8]) -> (usize, u32) {
+        let mut queue = self.inner.queue.lock().unwrap();
+        let mut written = 0usize;
+        let mut count = 0u32;
+        while let Some(event) = queue.events.front() {
+            let required = EVENT_HEADER_SIZE.saturating_add(event.payload.len());
+            if written.saturating_add(required) > output.len() {
+                break;
+            }
+            let event = queue.events.pop_front().unwrap();
+            let payload_len = event.payload.len() as u32;
+            // Fixed little-endian wire format; the event stream must parse
+            // identically on any host regardless of native byte order.
+            let mut header = [0u8; EVENT_HEADER_SIZE];
+            header[0..4].copy_from_slice(&EVENT_VERSION.to_le_bytes());
+            header[4..8].copy_from_slice(&event.kind.to_le_bytes());
+            header[8..16].copy_from_slice(&event.sequence.to_le_bytes());
+            header[16..20].copy_from_slice(&payload_len.to_le_bytes());
+            header[20..24].copy_from_slice(&event.aux.to_le_bytes());
+            output[written..written + header.len()].copy_from_slice(&header);
+            written += EVENT_HEADER_SIZE;
+            output[written..written + event.payload.len()].copy_from_slice(&event.payload);
+            written += event.payload.len();
+            count = count.saturating_add(1);
+        }
+        (written, count)
+    }
+
+    pub(crate) fn clear_pending(&self) {
+        self.inner.queue.lock().unwrap().events.clear();
     }
 
     pub fn enabled(&self) -> bool {
@@ -135,8 +176,10 @@ impl HostEvents {
             queue.next_sequence = 1;
             queue.dropped = 0;
             drop(queue);
-            activate(self);
-        } else {
+            if self.inner.legacy_route {
+                activate(self);
+            }
+        } else if self.inner.legacy_route {
             deactivate(self);
         }
     }
@@ -374,42 +417,12 @@ pub unsafe extern "C" fn art3m1s_poll_events_v1(
     let Some(events) = (unsafe { events_ref(events) }) else {
         return 0;
     };
-    if output.is_null() || capacity == 0 {
+    if output.is_null() || capacity == 0 || capacity > isize::MAX as usize {
         return 0;
     }
 
-    let mut queue = events.inner.queue.lock().unwrap();
-    let mut written = 0usize;
-    let mut count = 0u32;
-    while let Some(event) = queue.events.front() {
-        let required = EVENT_HEADER_SIZE.saturating_add(event.payload.len());
-        if written.saturating_add(required) > capacity {
-            break;
-        }
-        let event = queue.events.pop_front().unwrap();
-        let payload_len = event.payload.len() as u32;
-        // Fixed little-endian wire format; the event stream must parse
-        // identically on any host regardless of native byte order.
-        let mut header = [0u8; EVENT_HEADER_SIZE];
-        header[0..4].copy_from_slice(&EVENT_VERSION.to_le_bytes());
-        header[4..8].copy_from_slice(&event.kind.to_le_bytes());
-        header[8..16].copy_from_slice(&event.sequence.to_le_bytes());
-        header[16..20].copy_from_slice(&payload_len.to_le_bytes());
-        header[20..24].copy_from_slice(&event.aux.to_le_bytes());
-        unsafe {
-            std::ptr::copy_nonoverlapping(header.as_ptr(), output.add(written), header.len());
-        }
-        written += EVENT_HEADER_SIZE;
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                event.payload.as_ptr(),
-                output.add(written),
-                event.payload.len(),
-            );
-        }
-        written += event.payload.len();
-        count = count.saturating_add(1);
-    }
+    let output = unsafe { std::slice::from_raw_parts_mut(output, capacity) };
+    let (written, count) = events.poll_events(output);
     if !out_count.is_null() {
         unsafe { *out_count = count };
     }

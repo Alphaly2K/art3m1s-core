@@ -491,7 +491,8 @@ impl CoreRuntime {
             }
             // 窗口操作（仅 Windows）：核心不管理窗口，经 ui_command 转发宿主。
             "fullscreen" | "minimize" => {
-                crate::ffi::emit_ui_command("exec", serde_json::json!({ "command": command }));
+                self.host
+                    .emit_ui("exec", serde_json::json!({ "command": command }));
             }
             _ => {
                 if let Some((event_name, key)) = exec_input_route(command) {
@@ -799,7 +800,7 @@ impl CoreRuntime {
         }
         self.control.avoid_active = true;
         self.audio.set_master_volume(0.0);
-        crate::ffi::emit_ui_command(
+        self.host.emit_ui(
             "avoid",
             serde_json::json!({
                 "action": "show",
@@ -816,7 +817,8 @@ impl CoreRuntime {
         }
         self.control.avoid_active = false;
         self.audio.set_master_volume(1.0);
-        crate::ffi::emit_ui_command("avoid", serde_json::json!({ "action": "hide" }));
+        self.host
+            .emit_ui("avoid", serde_json::json!({ "action": "hide" }));
     }
 
     fn toggle_avoid(&mut self) {

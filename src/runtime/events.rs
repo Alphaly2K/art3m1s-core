@@ -87,7 +87,9 @@ impl CoreRuntime {
     ) {
         const EVENT_TRACE_LIMIT: usize = 24;
 
-        let mut trace = crate::ffi::debug_enabled()
+        let mut trace = self
+            .host
+            .debug_enabled()
             .then(|| Vec::with_capacity(events.len().min(EVENT_TRACE_LIMIT)));
         for RuntimeEvent { event, text_source } in events {
             let runtime_started = profile.mark();
@@ -191,7 +193,7 @@ impl CoreRuntime {
                     // 持有与缓存，核心转发命令让宿主清缓存。
                     crate::core_info!("[runtime] FileOperation clear_cache → 转发宿主");
                     self.resources.clear_overrides();
-                    crate::ffi::emit_ui_command("file_clear_cache", serde_json::json!({}));
+                    self.host.emit_ui("file_clear_cache", serde_json::json!({}));
                 }
                 Event::FileOperation {
                     command,
@@ -203,7 +205,7 @@ impl CoreRuntime {
                     // [file command=wasm_sync]：仅 WebAssembly 平台需要同步远端文件到
                     // 本地持久存储（IndexedDB）。桌面/移动宿主收到后可忽略。
                     crate::core_info!("[runtime] FileOperation wasm_sync → 转发宿主");
-                    crate::ffi::emit_ui_command(
+                    self.host.emit_ui(
                         "file_wasm_sync",
                         serde_json::json!({ "url": url, "baseurl": baseurl, "list": list }),
                     );
@@ -284,7 +286,8 @@ impl CoreRuntime {
                 // ── 转发宿主的窗口/系统 UI 命令（payload 风格与 dialog_show 一致）──
                 Event::Caption { data } => {
                     // [caption]：设置窗口标题栏字符串，由 Flutter 宿主落实。
-                    crate::ffi::emit_ui_command("caption", serde_json::json!({ "data": data }));
+                    self.host
+                        .emit_ui("caption", serde_json::json!({ "data": data }));
                 }
                 Event::MouseConfig {
                     left,
@@ -294,7 +297,7 @@ impl CoreRuntime {
                 } => {
                     // [mouse]：移动/隐藏光标与 autohide 计时都属宿主职责；
                     // 缺省参数按 None 序列化为 null，宿主"保持当前设置"。
-                    crate::ffi::emit_ui_command(
+                    self.host.emit_ui(
                         "mouse",
                         serde_json::json!({
                             "left": left,
@@ -306,31 +309,31 @@ impl CoreRuntime {
                 }
                 Event::OpenBrowser { url } => {
                     // [openbrowser]：宿主用系统默认浏览器打开（Flutter url_launcher）。
-                    crate::ffi::emit_ui_command("openbrowser", serde_json::json!({ "url": url }));
+                    self.host
+                        .emit_ui("openbrowser", serde_json::json!({ "url": url }));
                 }
                 Event::StatusBar { visible } => {
                     // [statusbar]：iOS/Android 状态栏显隐（SystemChrome）。
-                    crate::ffi::emit_ui_command(
-                        "statusbar",
-                        serde_json::json!({ "visible": visible }),
-                    );
+                    self.host
+                        .emit_ui("statusbar", serde_json::json!({ "visible": visible }));
                 }
                 Event::Vibrate { time } => {
                     // [vibrate]：触发设备振动（HapticFeedback / vibration 插件）。
-                    crate::ffi::emit_ui_command("vibrate", serde_json::json!({ "time": time }));
+                    self.host
+                        .emit_ui("vibrate", serde_json::json!({ "time": time }));
                 }
                 // ── 脚本日志配置与输出 ──
                 Event::DebugConfig { mode, level } => {
-                    crate::ffi::set_script_debug_config(*mode, *level);
+                    self.host.set_script_debug_config(*mode, *level);
                     crate::core_info!(
                         "[debug] mode={} level={}",
-                        crate::ffi::script_debug_mode(),
-                        crate::ffi::script_debug_level()
+                        self.host.script_debug_mode(),
+                        self.host.script_debug_level()
                     );
                 }
                 Event::DebugPrint { level, data } => {
                     // [debugprint]：按 [debug] 设定的 mode/level 门控后经宿主日志输出。
-                    if crate::ffi::script_debug_print_allowed(*level) {
+                    if self.host.script_debug_print_allowed(*level) {
                         crate::core_info!("[debugprint] {}", data);
                     }
                 }
@@ -674,11 +677,11 @@ impl CoreRuntime {
             self.interpreter
                 .set_variable(result, asb_interpreter::Value::String(String::new()));
         }
-        if !crate::ffi::ui_command_callback_registered() {
+        if !self.host.enabled() {
             crate::core_warn!("[callnative] 宿主未注册 UI 回调，按失败分支跳过: {method}");
             return;
         }
-        crate::ffi::emit_ui_command(
+        self.host.emit_ui(
             "callnative",
             serde_json::json!({
                 "result": result,
@@ -703,7 +706,7 @@ impl CoreRuntime {
         sku: Option<&str>,
         consume: bool,
     ) {
-        if !crate::ffi::ui_command_callback_registered() {
+        if !self.host.enabled() {
             crate::core_warn!("[purchase] 宿主未注册 UI 回调，按失败分支处理");
             if let Some(varname) = varname.filter(|name| !name.is_empty()) {
                 // -1 作为"渠道不可用"的结果码，脚本可据此提示购买失败。
@@ -712,7 +715,7 @@ impl CoreRuntime {
             }
             return;
         }
-        crate::ffi::emit_ui_command(
+        self.host.emit_ui(
             "purchase",
             serde_json::json!({
                 "purchase": purchase,
@@ -747,7 +750,7 @@ impl CoreRuntime {
             self.finish_http_request(0, &[]);
         }
 
-        if !crate::ffi::ui_command_callback_registered() {
+        if !self.host.enabled() {
             crate::core_warn!("[http] 宿主未注册 UI 回调，{method} {url} 按失败分支立即恢复");
             self.control.pending_http = Some(super::control::PendingHttp {
                 varname_code,
@@ -770,7 +773,7 @@ impl CoreRuntime {
             filename,
             serial,
         });
-        crate::ffi::emit_ui_command(
+        self.host.emit_ui(
             "http_request",
             serde_json::json!({
                 "serial": serial,
@@ -786,6 +789,7 @@ impl CoreRuntime {
 
     /// 宿主回填 HTTP 结果（FFI 入口）。返回是否有挂起请求被完成。
     pub fn submit_http_result(&mut self, status_code: i32, body: &[u8]) -> bool {
+        let _host_scope = self.host.enter();
         if self.control.pending_http.is_none() {
             crate::core_warn!("[http] 收到结果时没有挂起的请求");
             return false;
@@ -841,7 +845,8 @@ impl CoreRuntime {
         }
         let serial = pending.serial;
         crate::core_info!("[http] s.http.cancel=1，中断请求 serial={serial}");
-        crate::ffi::emit_ui_command("http_cancel", serde_json::json!({ "serial": serial }));
+        self.host
+            .emit_ui("http_cancel", serde_json::json!({ "serial": serial }));
         self.interpreter
             .set_variable("s.http.cancel", asb_interpreter::Value::Int(0));
         self.finish_http_request(0, &[]);
@@ -1002,6 +1007,7 @@ impl CoreRuntime {
 
     /// 宿主经 FFI 写回解释器变量（callnative/purchase 结果回注通道）。
     pub fn set_string_variable(&mut self, name: &str, value: &str) {
+        let _host_scope = self.host.enter();
         self.interpreter
             .set_variable(name, asb_interpreter::Value::String(value.to_string()));
     }
@@ -1024,8 +1030,13 @@ impl CoreRuntime {
         let resources_for_crc = self.resources.clone();
         let resources_for_time = self.resources.clone();
 
-        asb_interpreter::tags::var_handler::set_host_query_hooks(
-            asb_interpreter::tags::var_handler::HostQueryHooks {
+        let sound_snapshot = std::sync::Arc::clone(&self.query_snapshots);
+        let backlog_size_snapshot = std::sync::Arc::clone(&self.query_snapshots);
+        let backlog_tags_snapshot = std::sync::Arc::clone(&self.query_snapshots);
+        let message_tags_snapshot = std::sync::Arc::clone(&self.query_snapshots);
+        let metrics_snapshot = std::sync::Arc::clone(&self.query_snapshots);
+        self.interpreter
+            .set_host_query_hooks(asb_interpreter::tags::var_handler::HostQueryHooks {
                 file_exists: Box::new(move |file, save| {
                     if save {
                         // save=1：目标为存档数据，按存档目录相对路径查询。
@@ -1058,19 +1069,28 @@ impl CoreRuntime {
                     qualify_hook_save_path(file, &savepath_for_time)
                         .and_then(|path| resources_for_time.file_mtime(&path))
                 }),
-                sound_info: Box::new(super::media::sound_info_snapshot),
-                // backlog / message-tags 从每帧刷新的进程级快照读取
-                // （text_renderer 非 Send+Sync，不能直接借入进程级钩子）。
-                backlog_size: Box::new(|| super::text::backlog_snapshot().backlog_size()),
-                backlog_tags: Box::new(|page, allfont| {
-                    super::text::backlog_snapshot().backlog_tags(page, allfont)
+                sound_info: Box::new(move || sound_snapshot.lock().unwrap().sound.clone()),
+                backlog_size: Box::new(move || {
+                    backlog_size_snapshot.lock().unwrap().backlog.backlog_size()
                 }),
-                message_tags: Box::new(|id, allfont| {
-                    super::text::backlog_snapshot().message_tags(id, allfont)
+                backlog_tags: Box::new(move |page, allfont| {
+                    backlog_tags_snapshot
+                        .lock()
+                        .unwrap()
+                        .backlog
+                        .backlog_tags(page, allfont)
                 }),
-                message_layer_metrics: Box::new(super::text::text_metrics_snapshot),
-            },
-        );
+                message_tags: Box::new(move |id, allfont| {
+                    message_tags_snapshot
+                        .lock()
+                        .unwrap()
+                        .backlog
+                        .message_tags(id, allfont)
+                }),
+                message_layer_metrics: Box::new(move || {
+                    metrics_snapshot.lock().unwrap().text_metrics
+                }),
+            });
     }
 }
 

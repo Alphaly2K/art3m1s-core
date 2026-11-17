@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 /// 变量值
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -159,6 +160,8 @@ pub struct VariableStore {
     message_layer_stack: Vec<String>,
     #[serde(skip)]
     write_macro_local: bool,
+    #[serde(skip)]
+    host_query_hooks: Option<Arc<crate::tags::var_handler::HostQueryHooks>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,6 +174,18 @@ impl VariableStore {
     /// 创建新的变量存储
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn set_host_query_hooks(&mut self, hooks: crate::tags::var_handler::HostQueryHooks) {
+        self.host_query_hooks = Some(Arc::new(hooks));
+    }
+
+    pub(crate) fn host_query_hooks(&self) -> Option<Arc<crate::tags::var_handler::HostQueryHooks>> {
+        self.host_query_hooks.clone()
+    }
+
+    pub(crate) fn restore_host_query_hooks(&mut self, current: &Self) {
+        self.host_query_hooks = current.host_query_hooks.clone();
     }
 
     /// 设置目标平台标识（windows/android/ios/wasm 等）。

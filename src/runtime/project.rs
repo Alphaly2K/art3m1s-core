@@ -11,6 +11,7 @@ use std::sync::Arc;
 impl CoreRuntime {
     /// Load a project from an in-memory system.ini string.
     pub fn load_project(&mut self, ini_content: &str, platform: &str) -> Result<(), String> {
+        let _host_scope = self.host.enter();
         let project =
             Project::open_from_data("", ini_content, platform).map_err(|e| e.to_string())?;
         self.load_open_project(project)
@@ -18,6 +19,7 @@ impl CoreRuntime {
 
     /// Load a project from raw system.ini bytes.
     pub fn load_project_bytes(&mut self, ini_content: &[u8], platform: &str) -> Result<(), String> {
+        let _host_scope = self.host.enter();
         let project =
             Project::open_from_bytes("", ini_content, platform).map_err(|e| e.to_string())?;
         self.load_open_project(project)
@@ -31,9 +33,11 @@ impl CoreRuntime {
     }
 
     fn load_open_project_inner(&mut self, project: Project) -> Result<(), String> {
+        self.host.reset_project();
         // File existence results belong to the currently mounted project.
         self.resources().clear_overrides();
         self.surface_cache.lock().unwrap().clear();
+        *self.query_snapshots.lock().unwrap() = Default::default();
         let new_width = project.config().stage_width;
         let new_height = project.config().stage_height;
 
@@ -63,6 +67,7 @@ impl CoreRuntime {
         self.load_default_font();
         self.register_builtin_textures();
         self.seed_savepath_and_sysload();
+        self.ensure_host_query_hooks();
         self.sync_control_status_variables();
 
         // Boot
@@ -74,12 +79,14 @@ impl CoreRuntime {
     /// 设置上报给脚本的机种串覆盖（如 "switch"/"ps4"），None 清除。
     /// 立即作用于当前解释器，并在项目（重）加载后保持。
     pub fn set_reported_os(&mut self, reported: Option<String>) {
+        let _host_scope = self.host.enter();
         self.reported_os = reported.clone();
         self.interpreter.set_reported_os(reported);
     }
 
     fn install_interpreter(&mut self, interpreter: asb_interpreter::Interpreter) {
         self.interpreter = interpreter;
+        self.control.host_hooks_installed = false;
         // 项目重载会重建解释器，上报机种覆盖需要在每次装载后重新应用。
         let reported = self.reported_os.clone();
         self.interpreter.set_reported_os(reported);
@@ -122,6 +129,7 @@ impl CoreRuntime {
                 magic_paths: Arc::clone(&self.magic_paths),
                 layer_info: Arc::clone(&self.layer_info),
                 resources: self.resources().clone(),
+                host: self.host.clone(),
                 surface_cache: Arc::clone(&self.surface_cache),
                 volumes: Arc::clone(&self.volumes),
                 debug_skip_active: Arc::clone(&self.debug_skip_active),
@@ -256,7 +264,7 @@ impl CoreRuntime {
         self.set_text_renderer(Box::new(text));
         // 覆盖字体在项目加载前就可能已安装；渲染器是新建的，缓存为空，
         // 这里立即应用，保证首个 font 事件之前的文本也用覆盖字体。
-        if let Some((generation, bytes)) = crate::ffi::font_override() {
+        if let Some((generation, bytes)) = self.host.font_override() {
             let mut cached = self.font_override_cached_generation;
             let applied = self.text_renderer.as_mut().is_some_and(|renderer| {
                 super::text::apply_font_override(renderer.as_mut(), &mut cached, generation, &bytes)

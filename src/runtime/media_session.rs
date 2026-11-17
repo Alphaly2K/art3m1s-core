@@ -213,6 +213,7 @@ impl VideoPlayback {
 }
 
 pub struct RuntimeMediaSession {
+    host: crate::host::HostSession,
     enabled: bool,
     fullscreen: Option<VideoPlayback>,
     layers: HashMap<String, VideoPlayback>,
@@ -220,9 +221,16 @@ pub struct RuntimeMediaSession {
     audio_generation: Arc<AtomicU64>,
 }
 
-impl Default for RuntimeMediaSession {
-    fn default() -> Self {
+impl Drop for RuntimeMediaSession {
+    fn drop(&mut self) {
+        self.invalidate_audio();
+    }
+}
+
+impl RuntimeMediaSession {
+    pub fn new(host: crate::host::HostSession) -> Self {
         Self {
+            host,
             enabled: false,
             fullscreen: None,
             layers: HashMap::new(),
@@ -315,7 +323,9 @@ impl RuntimeMediaSession {
         let current_generation = Arc::clone(&self.audio_generation);
         let resources = resources.clone();
         let file = file.to_string();
+        let host = self.host.clone();
         std::thread::spawn(move || {
+            let _host_scope = host.enter();
             if current_generation.load(Ordering::SeqCst) != generation {
                 return;
             }
@@ -340,7 +350,7 @@ impl RuntimeMediaSession {
                         return;
                     }
                     if let Some(path) = path.to_str() {
-                        crate::host_media::emit(
+                        host.emit_media(
                             crate::host_media::HostMediaCommandKind::VideoAudioPlay,
                             crate::host_media::VideoAudioPlay {
                                 id: id.as_deref(),

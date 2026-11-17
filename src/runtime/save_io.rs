@@ -455,6 +455,7 @@ impl CoreRuntime {
     /// state：0=引擎退出前、1=切到后台（iOS/Android）、2=回到前台。
     /// [autosave allow=1] 时在退出/切后台时自动保存。
     pub fn notify_lifecycle(&mut self, state: i32) {
+        let _host_scope = self.host.enter();
         match state {
             0 | 1 => {
                 if self.control.autosave_allow == 1 {

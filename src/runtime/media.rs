@@ -7,28 +7,6 @@ use crate::video::{VideoConfig, VideoFinishHandler, video_layer_texture_name};
 use asb_interpreter::Event;
 use asb_interpreter::tags::var_handler::{SoundChannelInfo, SoundInfoSnapshot};
 use std::collections::HashMap;
-use std::sync::Mutex;
-
-/// 声音播放状态镜像，供 `var system=get_sound_info` 的宿主查询钩子读取。
-///
-/// 钩子是进程级注册点（var 标签路径拿不到 runtime 实例），因此这里维护一份
-/// 进程级快照，media 事件应用后与每帧推进时刷新。
-static SOUND_INFO: Mutex<SoundInfoSnapshot> = Mutex::new(SoundInfoSnapshot {
-    bgm: None,
-    se: Vec::new(),
-});
-
-/// 读取当前声音快照（get_sound_info 钩子入口）。
-pub(super) fn sound_info_snapshot() -> SoundInfoSnapshot {
-    SOUND_INFO.lock().unwrap().clone()
-}
-
-pub(super) fn clear_sound_info_snapshot() {
-    *SOUND_INFO.lock().unwrap() = SoundInfoSnapshot {
-        bgm: None,
-        se: Vec::new(),
-    };
-}
 
 /// splay 的 A-B 循环文件名约定：file 以 `_a` 结尾（扩展名前）时，
 /// 返回把 `_a` 换成 `_b` 的循环段文件名；否则 None。
@@ -45,6 +23,7 @@ fn ab_loop_file(file: &str) -> Option<String> {
 
 impl CoreRuntime {
     pub fn set_volume(&mut self, volume_type: &str, value: f32) {
+        let _host_scope = self.host.enter();
         let v = value.clamp(0.0, 1.0);
         match volume_type {
             "master" => self.audio.set_master_volume(v),
@@ -53,7 +32,7 @@ impl CoreRuntime {
             "voice" => self.audio.set_voice_volume(v),
             _ => {}
         }
-        hm::emit(
+        self.host.emit_media(
             Kind::AudioSetVolume,
             hm::AudioSetVolume {
                 channel: volume_type,
@@ -88,8 +67,10 @@ impl CoreRuntime {
         for id in video_layer_ids {
             self.clear_video_layer_texture(&id);
         }
-        hm::emit(Kind::AudioStopAll, hm::EmptyPayload {});
-        hm::emit(Kind::VideoStopAll, hm::EmptyPayload {});
+        self.host
+            .emit_media(Kind::AudioStopAll, hm::EmptyPayload {});
+        self.host
+            .emit_media(Kind::VideoStopAll, hm::EmptyPayload {});
         self.refresh_sound_info_snapshot();
     }
 
@@ -106,7 +87,7 @@ impl CoreRuntime {
             let resolved_loop_file = loop_file
                 .as_deref()
                 .map(|f| self.resolve_magic_media_path(f));
-            hm::emit(
+            self.host.emit_media(
                 Kind::AudioBgmPlay,
                 hm::BgmPlay {
                     file: &bgm.file,
@@ -122,7 +103,7 @@ impl CoreRuntime {
         }
         for se in &snapshot.se {
             let resolved_file = self.resolve_magic_media_path(&se.file);
-            hm::emit(
+            self.host.emit_media(
                 Kind::AudioSePlay,
                 hm::SePlay {
                     id: &se.id,
@@ -138,7 +119,7 @@ impl CoreRuntime {
         }
         for voice in &snapshot.voice {
             let resolved_file = self.resolve_magic_media_path(&voice.file);
-            hm::emit(
+            self.host.emit_media(
                 Kind::AudioVoicePlay,
                 hm::VoicePlay {
                     id: &voice.id,
@@ -165,11 +146,11 @@ impl CoreRuntime {
         let bgm = state.bgm_channel.as_ref().map(&to_info);
         let mut se: Vec<SoundChannelInfo> = state.se_channels.values().map(&to_info).collect();
         se.sort_by(|a, b| a.id.cmp(&b.id));
-        *SOUND_INFO.lock().unwrap() = SoundInfoSnapshot { bgm, se };
+        self.query_snapshots.lock().unwrap().sound = SoundInfoSnapshot { bgm, se };
     }
 
     pub(super) fn advance_media_and_enqueue_finish_handlers(&mut self, delta_ms: u64) {
-        let host_media = crate::ffi::media_command_callback_registered();
+        let host_media = self.host.enabled();
         #[cfg(feature = "ffmpeg")]
         let runtime_video = self.media_session.is_enabled();
         #[cfg(not(feature = "ffmpeg"))]
@@ -233,6 +214,7 @@ impl CoreRuntime {
     }
 
     pub fn notify_sound_finished(&mut self, id: Option<&str>) {
+        let _host_scope = self.host.enter();
         let handler = if let Some(id) = id {
             self.audio.audio_state().se_finish_handlers.get(id).cloned()
         } else {
@@ -294,6 +276,7 @@ impl CoreRuntime {
     }
 
     pub fn notify_video_finished(&mut self, id: Option<&str>) {
+        let _host_scope = self.host.enter();
         // 图层视频优先取按 ID 登记的处理器，缺省回退到全局；全屏视频用全局。
         let handler = match id {
             Some(layer_id) => self
@@ -349,6 +332,7 @@ impl CoreRuntime {
         height: u32,
         rgba: &[u8],
     ) -> bool {
+        let _host_scope = self.host.enter();
         let is_playing = self
             .video
             .video_state()
@@ -377,6 +361,7 @@ impl CoreRuntime {
         id: &str,
         image: crate::backend::ExternalImage<'_>,
     ) -> Result<crate::backend::ExternalTextureHandle, String> {
+        let _host_scope = self.host.enter();
         let is_playing = self
             .video
             .video_state()
@@ -397,6 +382,7 @@ impl CoreRuntime {
         &mut self,
         handle: crate::backend::ExternalTextureHandle,
     ) -> bool {
+        let _host_scope = self.host.enter();
         self.gpu.begin_access();
         let released = self.gpu.release_external_texture(handle);
         self.gpu.end_access();
@@ -419,6 +405,7 @@ impl CoreRuntime {
         width: u32,
         height: u32,
     ) -> Result<crate::backend::VideoSurfaceHandle, String> {
+        let _host_scope = self.host.enter();
         let is_playing = self
             .video
             .video_state()
@@ -441,6 +428,7 @@ impl CoreRuntime {
         &mut self,
         handle: crate::backend::VideoSurfaceHandle,
     ) -> bool {
+        let _host_scope = self.host.enter();
         self.gpu.begin_access();
         let committed = self.gpu.commit_video_surface(handle);
         self.gpu.end_access();
@@ -448,11 +436,13 @@ impl CoreRuntime {
     }
 
     pub fn capture_screenshot_into(&mut self, out_pixels: &mut [u8]) -> usize {
+        let _host_scope = self.host.enter();
         self.read_current_frame_into(out_pixels)
     }
 
     /// Host screenshot capture. Independent of the video surface ABI.
     pub fn capture_screenshot_from_host(&mut self, out_pixels: &mut [u8]) -> usize {
+        let _host_scope = self.host.enter();
         self.gpu.begin_access();
         let written = self.read_current_frame_into(out_pixels);
         self.gpu.end_access();
@@ -466,6 +456,7 @@ impl CoreRuntime {
 
     /// Starts a short backend-specific external render pass.
     pub fn begin_external_render(&mut self) -> Result<(), String> {
+        let _host_scope = self.host.enter();
         self.gpu.begin_external_render()
     }
 
@@ -475,6 +466,7 @@ impl CoreRuntime {
         width: u32,
         height: u32,
     ) -> Result<u64, String> {
+        let _host_scope = self.host.enter();
         let is_playing = self
             .video
             .video_state()
@@ -490,11 +482,13 @@ impl CoreRuntime {
     }
 
     pub fn commit_video_layer_external_frame(&mut self, id: &str) -> bool {
+        let _host_scope = self.host.enter();
         self.gpu
             .commit_external_render_target(&video_layer_texture_name(id))
     }
 
     pub fn end_external_render(&mut self) {
+        let _host_scope = self.host.enter();
         self.gpu.end_external_render();
     }
 
@@ -552,7 +546,7 @@ impl CoreRuntime {
                 let resolved_loop_file = loop_file
                     .as_deref()
                     .map(|f| self.resolve_magic_media_path(f));
-                hm::emit(
+                self.host.emit_media(
                     Kind::AudioBgmPlay,
                     hm::BgmPlay {
                         file,
@@ -569,7 +563,7 @@ impl CoreRuntime {
             }
             Event::BgmStop { fade_time } => {
                 self.audio.stop_bgm(fade_time.unwrap_or(0));
-                hm::emit(
+                self.host.emit_media(
                     Kind::AudioBgmStop,
                     hm::BgmStop {
                         fade_ms: fade_time.unwrap_or(0),
@@ -579,7 +573,7 @@ impl CoreRuntime {
             }
             Event::BgmFade { gain, time } => {
                 self.audio.fade_bgm_gain(*gain, *time);
-                hm::emit(
+                self.host.emit_media(
                     Kind::AudioBgmFade,
                     hm::BgmFade {
                         gain: *gain,
@@ -592,7 +586,8 @@ impl CoreRuntime {
                 // [span] time=毫秒渐变时间，缺省立即切换
                 let time_ms = time.unwrap_or(0);
                 self.audio.pan_bgm(*pan, time_ms);
-                hm::emit(Kind::AudioBgmPan, hm::BgmPan { pan: *pan, time_ms });
+                self.host
+                    .emit_media(Kind::AudioBgmPan, hm::BgmPan { pan: *pan, time_ms });
                 true
             }
             Event::BgmCrossFade {
@@ -620,7 +615,7 @@ impl CoreRuntime {
                 let resolved_loop_file = loop_file
                     .as_deref()
                     .map(|f| self.resolve_magic_media_path(f));
-                hm::emit(
+                self.host.emit_media(
                     Kind::AudioBgmCrossfade,
                     hm::BgmCrossfade {
                         file,
@@ -660,7 +655,7 @@ impl CoreRuntime {
                         skippable: *skippable,
                     },
                 );
-                hm::emit(
+                self.host.emit_media(
                     Kind::AudioSePlay,
                     hm::SePlay {
                         id,
@@ -677,7 +672,7 @@ impl CoreRuntime {
             }
             Event::SeStop { id, fade_time } => {
                 self.audio.stop_se(id, fade_time.unwrap_or(0));
-                hm::emit(
+                self.host.emit_media(
                     Kind::AudioSeStop,
                     hm::SeStop {
                         id,
@@ -688,7 +683,7 @@ impl CoreRuntime {
             }
             Event::SeFade { id, gain, time } => {
                 self.audio.fade_se_gain(id, *gain, *time);
-                hm::emit(
+                self.host.emit_media(
                     Kind::AudioSeFade,
                     hm::SeFade {
                         id,
@@ -702,7 +697,7 @@ impl CoreRuntime {
                 // [sepan] time=毫秒渐变时间，缺省立即切换
                 let time_ms = time.unwrap_or(0);
                 self.audio.pan_se(id, *pan, time_ms);
-                hm::emit(
+                self.host.emit_media(
                     Kind::AudioSePan,
                     hm::SePan {
                         id,
@@ -744,7 +739,7 @@ impl CoreRuntime {
                         skippable: *skippable,
                     },
                 );
-                hm::emit(
+                self.host.emit_media(
                     Kind::AudioVoicePlay,
                     hm::VoicePlay {
                         id: &voice_id,
@@ -760,7 +755,8 @@ impl CoreRuntime {
             }
             Event::StopAllSounds { .. } => {
                 self.audio.stop_all_sounds();
-                hm::emit(Kind::AudioStopAll, hm::EmptyPayload {});
+                self.host
+                    .emit_media(Kind::AudioStopAll, hm::EmptyPayload {});
                 true
             }
             Event::SoundFinishHandler {
@@ -849,7 +845,7 @@ impl CoreRuntime {
                         return true;
                     }
                 }
-                hm::emit(
+                self.host.emit_media(
                     Kind::VideoPlay,
                     hm::VideoPlay {
                         id: id.as_deref(),
@@ -922,7 +918,7 @@ impl CoreRuntime {
         {
             self.last_system_volume.0 = Some(v);
             self.audio.set_bgm_volume(v);
-            hm::emit(
+            self.host.emit_media(
                 Kind::AudioSetVolume,
                 hm::AudioSetVolume {
                     channel: "bgm",
@@ -935,7 +931,7 @@ impl CoreRuntime {
         {
             self.last_system_volume.1 = Some(v);
             self.audio.set_se_volume(v);
-            hm::emit(
+            self.host.emit_media(
                 Kind::AudioSetVolume,
                 hm::AudioSetVolume {
                     channel: "se",
@@ -950,7 +946,7 @@ impl CoreRuntime {
             }
             self.last_system_se_gain.insert(id.clone(), gain);
             self.audio.fade_se_gain(&id, gain, 0);
-            hm::emit(
+            self.host.emit_media(
                 Kind::AudioSeFade,
                 hm::SeFade {
                     id: &id,

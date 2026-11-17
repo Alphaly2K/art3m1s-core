@@ -1,0 +1,403 @@
+use super::CoreRuntime;
+use crate::backend::*;
+use crate::compositor::mock::MockProvider;
+use crate::host::{HostSession, ResourceProvider};
+use crate::host_events::{EVENT_KIND_LOG, EVENT_KIND_MEDIA, EVENT_KIND_UI};
+use crate::host_files::HostResources;
+use crate::render_pipeline::draw::{DrawList, TextureId, TextureInfo, TextureProvider};
+use asb_interpreter::Value;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+struct Assets(HashMap<String, Vec<u8>>);
+
+impl ResourceProvider for Assets {
+    fn query_size(&self, key: &str) -> Result<Option<u64>, String> {
+        Ok(self.0.get(key).map(|bytes| bytes.len() as u64))
+    }
+
+    fn read_range(&self, key: &str, offset: u64, out: &mut [u8]) -> Result<usize, String> {
+        let bytes = self.0.get(key).ok_or("absent")?;
+        let start = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(bytes.len());
+        let count = out.len().min(bytes.len() - start);
+        out[..count].copy_from_slice(&bytes[start..start + count]);
+        Ok(count)
+    }
+}
+
+// The session tests execute logic only. Unexpected GPU work fails immediately.
+#[derive(Default)]
+struct LogicRenderer(MockProvider);
+
+impl TextureProvider for LogicRenderer {
+    fn resolve(&mut self, name: &str) -> Option<(TextureId, TextureInfo)> {
+        self.0.resolve(name)
+    }
+
+    fn upload_rgba(
+        &mut self,
+        name: &str,
+        w: u32,
+        h: u32,
+        rgba: &[u8],
+    ) -> Option<(TextureId, TextureInfo)> {
+        self.0.upload_rgba(name, w, h, rgba)
+    }
+}
+
+impl GpuBackend for LogicRenderer {
+    fn backend_info(&self) -> BackendInfo {
+        BackendInfo {
+            name: "logic-test",
+            kind: BackendKind::GlReference,
+            stability: BackendStability::Legacy,
+            capabilities: BackendCapabilities::default(),
+        }
+    }
+    fn begin_access(&mut self) {
+        art3m1s_log::global().unwrap().log(art3m1s_log::Record::new(
+            art3m1s_log::Level::Info,
+            "session-test",
+            "renderer-access",
+        ));
+    }
+    fn end_access(&mut self) {}
+    fn create_texture(
+        &mut self,
+        name: &str,
+        desc: TextureDesc,
+        data: TextureData<'_>,
+    ) -> Result<TextureId, String> {
+        let TextureData::Rgba8(bytes) = data else {
+            panic!("unexpected texture format")
+        };
+        Ok(self
+            .upload_rgba(name, desc.extent.width, desc.extent.height, bytes)
+            .unwrap()
+            .0)
+    }
+    fn update_texture(&mut self, _: TextureId, _: TextureUpdate<'_>) -> Result<(), String> {
+        panic!("unexpected GPU update")
+    }
+    fn destroy_texture(&mut self, _: TextureId) {}
+    fn create_render_target(
+        &mut self,
+        _: &str,
+        _: RenderTargetDesc,
+    ) -> Result<RenderTarget, String> {
+        panic!("unexpected target")
+    }
+    fn destroy_render_target(&mut self, _: RenderTargetId) {}
+    fn resize(&mut self, _: Extent2D) -> Result<(), String> {
+        Ok(())
+    }
+    fn begin_frame(&mut self, _: FrameTarget) -> Result<(), String> {
+        panic!("unexpected frame")
+    }
+    fn clear(&mut self, _: [f32; 4]) {
+        panic!("unexpected clear")
+    }
+    fn end_frame(&mut self) {
+        panic!("unexpected frame")
+    }
+    fn capture_frame(&mut self, _: &str, _: Extent2D) -> FrameCapture {
+        panic!("unexpected capture")
+    }
+    fn readback(&mut self, _: FrameTarget, _: Extent2D, _: &mut [u8]) -> Result<usize, String> {
+        panic!("unexpected readback")
+    }
+    fn render(&mut self, _: &DrawList) -> RenderRegion {
+        panic!("unexpected render")
+    }
+    fn render_damage(&mut self, _: &DrawList, _: [f32; 4]) -> RenderRegion {
+        panic!("unexpected render")
+    }
+    fn render_damage_visualized(&mut self, _: &DrawList, _: [f32; 4]) -> RenderRegion {
+        panic!("unexpected render")
+    }
+    fn render_visualized(&mut self, _: &DrawList) -> RenderRegion {
+        panic!("unexpected render")
+    }
+    fn clear_damage_overlay(&mut self, _: &DrawList) -> Option<RenderRegion> {
+        None
+    }
+    fn replace_asset_source(&mut self, _: Box<AssetSource>) {}
+    fn cached_texture_info(&self, _: &str) -> Option<TextureInfo> {
+        None
+    }
+    fn texture_content_revision(&self) -> u64 {
+        0
+    }
+    fn changed_texture_ids_since(&self, _: u64) -> HashSet<TextureId> {
+        HashSet::new()
+    }
+    fn evict_texture_prefix(&mut self, _: &str) -> usize {
+        0
+    }
+    fn upload_video_rgba(&mut self, _: &str, _: u32, _: u32, _: &[u8]) -> bool {
+        panic!("unexpected video")
+    }
+    fn set_native_surface(&mut self, _: NativeSurface) -> Result<(), String> {
+        panic!("unexpected surface")
+    }
+    fn clear_native_surface(&mut self) {}
+    fn present(&mut self, _: Option<[f32; 4]>) -> Result<(), String> {
+        panic!("unexpected present")
+    }
+    fn register_hlsl_shader(&mut self, _: &str, _: &[u8]) -> Result<ShaderId, ShaderCompileError> {
+        panic!("unexpected shader")
+    }
+    fn unregister_shader(&mut self, _: &str) -> bool {
+        false
+    }
+    fn set_profile_enabled(&self, _: bool) {}
+    fn take_profile_stats(&mut self) -> GpuProfileStats {
+        GpuProfileStats::default()
+    }
+}
+
+const INI: &str = "[WINDOWS]\nWIDTH=64\nHEIGHT=64\nBOOT=boot.ast\nCHARSET=UTF-8\n";
+
+fn runtime(name: &str, has_asset: bool) -> CoreRuntime {
+    let boot = format!(
+        r#"[lua]
+local e = __engine
+e:tag{{"var", system="file_exists", name="t.loaded", file="probe.dat"}}
+function probe(e)
+    e:tag{{"var", system="file_exists", name="t.exists", file="probe.dat"}}
+    e:tag{{"var", system="get_sound_info", name="t.sound"}}
+    e:tag{{"var", system="get_backlog_size", name="t.backlog"}}
+    e:tag{{"var", system="get_message_layer_width", name="t.width"}}
+    e:tag{{"var", system="fullscreen", name="t.fullscreen"}}
+    e:tag{{"var", system="get_font", name="t.fonts"}}
+end
+[/lua]
+*top
+[caption data="{name}"]
+[seplay id="{name}.1.80" file="tone.ogg" loop="1"]
+[stop]
+"#
+    );
+    let mut files = HashMap::from([("boot.ast".into(), boot.into_bytes())]);
+    if has_asset {
+        files.insert("probe.dat".into(), vec![1]);
+    }
+    let resources = HostResources::from_provider(Arc::new(Assets(files)));
+    CoreRuntime::with_host_backend(64, 64, resources, Box::<LogicRenderer>::default()).unwrap()
+}
+
+fn query(runtime: &mut CoreRuntime) {
+    runtime
+        .interpreter
+        .lua()
+        .load("probe(__engine)")
+        .exec()
+        .unwrap();
+}
+
+fn drain(host: &HostSession) -> Vec<(u32, String)> {
+    let mut bytes = vec![0; host.events().queued_bytes()];
+    let (written, count) = host.events().poll_events(&mut bytes);
+    let mut offset = 0;
+    let mut records = Vec::new();
+    while offset < written {
+        let kind = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap());
+        let length =
+            u32::from_le_bytes(bytes[offset + 16..offset + 20].try_into().unwrap()) as usize;
+        records.push((
+            kind,
+            String::from_utf8(bytes[offset + 24..offset + 24 + length].to_vec()).unwrap(),
+        ));
+        offset += 24 + length;
+    }
+    assert_eq!(records.len(), count as usize);
+    records
+}
+
+#[test]
+fn interleaved_runtimes_keep_queries_events_and_host_state() {
+    let mut a = runtime("A", true);
+    let mut b = runtime("B", false);
+    let host_a = a.host_session().unwrap().clone();
+    let host_b = b.host_session().unwrap().clone();
+    host_a.events().set_window_state(1);
+    host_b.events().set_window_state(2);
+    host_a
+        .events()
+        .set_font_list(false, false, vec!["Font A".into()]);
+    host_b
+        .events()
+        .set_font_list(false, false, vec!["Font B".into()]);
+    a.load_project(INI, "WINDOWS").unwrap();
+    b.load_project(INI, "WINDOWS").unwrap();
+    assert_eq!(
+        a.interpreter
+            .get_variable("t.loaded")
+            .and_then(|v| v.as_int()),
+        Some(1)
+    );
+    assert_eq!(
+        b.interpreter
+            .get_variable("t.loaded")
+            .and_then(|v| v.as_int()),
+        Some(0)
+    );
+    a.advance_without_render(16);
+    b.advance_without_render(16);
+    a.query_snapshots
+        .lock()
+        .unwrap()
+        .backlog
+        .pages
+        .resize(3, Default::default());
+    b.query_snapshots
+        .lock()
+        .unwrap()
+        .backlog
+        .pages
+        .resize(1, Default::default());
+    a.query_snapshots.lock().unwrap().text_metrics = (100.0, 20.0, 80.0);
+    b.query_snapshots.lock().unwrap().text_metrics = (200.0, 30.0, 90.0);
+    for _ in 0..2 {
+        query(&mut a);
+        query(&mut b);
+        assert_eq!(
+            a.interpreter
+                .get_variable("t.exists")
+                .and_then(|v| v.as_int()),
+            Some(1)
+        );
+        assert_eq!(
+            b.interpreter
+                .get_variable("t.exists")
+                .and_then(|v| v.as_int()),
+            Some(0)
+        );
+        assert_eq!(
+            a.interpreter
+                .get_variable("t.backlog")
+                .and_then(|v| v.as_int()),
+            Some(3)
+        );
+        assert_eq!(
+            b.interpreter
+                .get_variable("t.backlog")
+                .and_then(|v| v.as_int()),
+            Some(1)
+        );
+        assert_eq!(
+            a.interpreter
+                .get_variable("t.width")
+                .and_then(|v| v.as_float()),
+            Some(100.0)
+        );
+        assert_eq!(
+            b.interpreter
+                .get_variable("t.width")
+                .and_then(|v| v.as_float()),
+            Some(200.0)
+        );
+        assert_eq!(
+            a.interpreter.get_variable("t.sound.0.id"),
+            Some(Value::String("A.1.80".into()))
+        );
+        assert_eq!(
+            b.interpreter.get_variable("t.sound.0.id"),
+            Some(Value::String("B.1.80".into()))
+        );
+        assert_eq!(
+            a.interpreter
+                .get_variable("t.fullscreen")
+                .and_then(|v| v.as_int()),
+            Some(1)
+        );
+        assert_eq!(
+            b.interpreter
+                .get_variable("t.fullscreen")
+                .and_then(|v| v.as_int()),
+            Some(0)
+        );
+        assert_eq!(
+            a.interpreter.get_variable("t.fonts.0"),
+            Some(Value::String("Font A".into()))
+        );
+        assert_eq!(
+            b.interpreter.get_variable("t.fonts.0"),
+            Some(Value::String("Font B".into()))
+        );
+    }
+    let check_output = |host: &HostSession, owner: &str| {
+        let records = drain(host);
+        assert!(
+            records
+                .iter()
+                .any(|(kind, text)| *kind == EVENT_KIND_LOG && text == "renderer-access")
+        );
+        let commands: Vec<serde_json::Value> = records
+            .iter()
+            .filter(|(kind, _)| matches!(*kind, EVENT_KIND_MEDIA | EVENT_KIND_UI))
+            .map(|(_, text)| serde_json::from_str(text).unwrap())
+            .collect();
+        let captions: Vec<_> = commands
+            .iter()
+            .filter(|v| v["kind"] == "caption")
+            .map(|v| v["payload"]["data"].as_str().unwrap())
+            .collect();
+        assert_eq!(captions, [owner]);
+    };
+    check_output(&host_a, "A");
+    check_output(&host_b, "B");
+
+    let saved: asb_interpreter::VariableStore =
+        serde_json::from_str(&serde_json::to_string(&a.interpreter.variables()).unwrap()).unwrap();
+    b.interpreter.restore_variables(saved);
+    query(&mut b);
+    assert_eq!(
+        b.interpreter
+            .get_variable("t.exists")
+            .and_then(|v| v.as_int()),
+        Some(0)
+    );
+    assert_eq!(
+        b.interpreter
+            .get_variable("t.backlog")
+            .and_then(|v| v.as_int()),
+        Some(1)
+    );
+    b.interpreter.restore_variables(a.interpreter.variables());
+    query(&mut b);
+    assert_eq!(
+        b.interpreter
+            .get_variable("t.exists")
+            .and_then(|v| v.as_int()),
+        Some(0)
+    );
+    a.load_project(INI, "WINDOWS").unwrap();
+    query(&mut a);
+    assert_eq!(
+        a.interpreter
+            .get_variable("t.backlog")
+            .and_then(|v| v.as_int()),
+        Some(0)
+    );
+    a.set_profiler_enabled(true);
+    b.set_profiler_enabled(true);
+    host_b.record_profile_io(5, 9);
+    drop(a);
+    assert!(host_b.profile_io_enabled());
+    assert_eq!(host_b.take_profile_io_counters().bytes, 9);
+    query(&mut b);
+    assert_eq!(
+        b.interpreter
+            .get_variable("t.backlog")
+            .and_then(|v| v.as_int()),
+        Some(1)
+    );
+    assert_eq!(
+        b.interpreter.get_variable("t.sound.0.id"),
+        Some(Value::String("B.1.80".into()))
+    );
+    assert!(drain(&host_b).is_empty());
+}

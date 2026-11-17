@@ -2337,6 +2337,10 @@ impl Interpreter {
         Arc::clone(&self.variables)
     }
 
+    pub fn set_host_query_hooks(&mut self, hooks: crate::tags::var_handler::HostQueryHooks) {
+        self.variables.lock().unwrap().set_host_query_hooks(hooks);
+    }
+
     /// 设置上报给脚本的机种串覆盖（None/空串清除，回到 `platform`）。
     /// 对运行中的解释器立即生效，下次 `var system="os"` 即返回新值。
     pub fn set_reported_os(&mut self, reported: Option<String>) {
@@ -2385,8 +2389,10 @@ impl Interpreter {
     }
 
     /// 恢复变量状态（用于读档）
-    pub fn restore_variables(&mut self, store: VariableStore) {
-        *self.variables.lock().unwrap() = store;
+    pub fn restore_variables(&mut self, mut store: VariableStore) {
+        let mut current = self.variables.lock().unwrap();
+        store.restore_host_query_hooks(&current);
+        *current = store;
     }
 
     /// 加载存档后恢复解释器执行位置。
