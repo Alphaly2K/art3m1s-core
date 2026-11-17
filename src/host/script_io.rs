@@ -3,6 +3,7 @@
 
 mod lifecycle;
 mod ui;
+mod wait;
 
 use lifecycle::Shutdown;
 pub use lifecycle::{RUNTIME_CLOSED, RUNTIME_EXIT_REQUESTED};
@@ -220,6 +221,7 @@ pub struct ScriptIoSession {
     random_seed: u64,
     frame: Option<HostFrame>,
     frame_handler_due: bool,
+    timed_wait_start: Option<HostFrame>,
     event_filter: Option<EventFilterWork>,
     save_work: Option<SaveWork>,
     numbered_load: Option<NumberedLoadWork>,
@@ -263,6 +265,7 @@ impl ScriptIoSession {
             random_seed: 0,
             frame: None,
             frame_handler_due: false,
+            timed_wait_start: None,
             event_filter: None,
             save_work: None,
             numbered_load: None,
@@ -366,6 +369,7 @@ impl ScriptIoSession {
         self.scenario_event = None;
         self.frame = None;
         self.frame_handler_due = false;
+        self.timed_wait_start = None;
         self.event_filter = None;
         self.save_work = None;
         self.numbered_load = None;
@@ -466,6 +470,7 @@ impl ScriptIoSession {
         self.scenario_event = None;
         self.frame = None;
         self.frame_handler_due = false;
+        self.timed_wait_start = None;
         self.event_filter = None;
         self.save_work = None;
         self.numbered_load = None;
@@ -601,6 +606,7 @@ impl ScriptIoSession {
         }
         self.save_work = None;
         self.numbered_load = None;
+        self.timed_wait_start = None;
         self.interpreter.advance_line();
         Ok(())
     }

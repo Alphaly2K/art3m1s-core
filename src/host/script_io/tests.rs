@@ -1332,6 +1332,94 @@ fn shutdown_waits_for_confirmations_and_reports_partial_persistence() {
 }
 
 #[test]
+fn timed_wait_uses_elapsed_monotonic_time_and_starts_in_its_own_frame() {
+    use crate::host::runtime;
+
+    let handle = runtime::create(0, TransportLimits::default(), 4096).unwrap();
+    let mut host = MemoryHost::default();
+    host.asset(
+        "boot.iet",
+        b"*top\n[wait time=10 input=0]\n[caption data=elapsed]\n[wait time=0 input=0]\n[caption data=next]\n",
+    );
+    let mut frame = HostFrame {
+        id: 1,
+        monotonic_ns: 900_500,
+        utc_unix_ms: 0,
+        utc_offset_minutes: 0,
+    };
+    runtime::open_project(
+        handle,
+        b"[WINDOWS]\nWIDTH=640\nHEIGHT=480\nBOOT=boot.iet\n",
+        "windows",
+        None,
+    )
+    .unwrap();
+    let poll = || {
+        let mut bytes = vec![0; 4096];
+        let result = runtime::poll_events(handle, &mut bytes).unwrap();
+        bytes.truncate(result.written_bytes);
+        bytes
+    };
+    for _ in 0..128 {
+        match runtime::step(handle, frame).unwrap() {
+            ScriptIoProgress::Waiting => {
+                let request = decode_requests(&poll()).pop().unwrap();
+                runtime::submit_replies(handle, &[host.complete(&request)]).unwrap();
+            }
+            ScriptIoProgress::Event => break,
+            progress => panic!("unexpected startup progress {progress:?}"),
+        }
+    }
+    let ready = poll();
+    assert_eq!(
+        u32::from_le_bytes(ready[8..12].try_into().unwrap()),
+        PROJECT_READY.kind
+    );
+
+    frame.id += 1;
+    frame.monotonic_ns += 9_999_999;
+    frame.utc_unix_ms += 86_400_000;
+    assert_eq!(
+        runtime::step(handle, frame).unwrap(),
+        ScriptIoProgress::Event
+    );
+    assert!(poll().is_empty());
+
+    frame.id += 1;
+    frame.monotonic_ns += 1;
+    assert_eq!(
+        runtime::step(handle, frame).unwrap(),
+        ScriptIoProgress::Event
+    );
+    let caption = poll();
+    assert_eq!(
+        u32::from_le_bytes(caption[8..12].try_into().unwrap()),
+        UI_CAPTION.kind
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&caption[64..]).unwrap(),
+        json!({"text":"elapsed"})
+    );
+    assert_eq!(
+        runtime::step(handle, frame).unwrap(),
+        ScriptIoProgress::Event
+    );
+    assert!(poll().is_empty());
+
+    frame.id += 1;
+    assert_eq!(
+        runtime::step(handle, frame).unwrap(),
+        ScriptIoProgress::Completed
+    );
+    let caption = poll();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&caption[64..]).unwrap(),
+        json!({"text":"next"})
+    );
+    runtime::destroy(handle).unwrap();
+}
+
+#[test]
 fn host_calendar_and_monotonic_clocks_remain_distinct_across_io_suspension() {
     let mut session = session(1, TransportLimits::default(), 1024);
     session
