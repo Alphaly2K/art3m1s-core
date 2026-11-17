@@ -50,6 +50,7 @@ pub mod error;
 pub mod event;
 pub mod expression;
 pub mod interpreter;
+pub mod io_continuation;
 pub mod lua_engine;
 pub mod luau_polyfill;
 pub mod r#macro;

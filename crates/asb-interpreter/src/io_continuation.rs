@@ -1,0 +1,410 @@
+//! Opt-in Luau IO tasks. Lua yields after each native request builder returns,
+//! so no borrowed userdata or Rust callback frame survives suspension.
+
+use crate::luau_polyfill::BufferedFile;
+use crate::{Interpreter, Result};
+use mlua::{AnyUserData, Lua, MultiValue, Thread, ThreadStatus, UserData, Value};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IoRequest {
+    Read { path: String },
+    Exists { path: String },
+    Write { path: String, data: Vec<u8> },
+}
+
+impl UserData for IoRequest {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IoFailure {
+    NotFound,
+    Denied,
+    IoError,
+    Cancelled,
+    Unsupported,
+    Limit,
+}
+
+impl IoFailure {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotFound => "not_found",
+            Self::Denied => "denied",
+            Self::IoError => "io_error",
+            Self::Cancelled => "cancelled",
+            Self::Unsupported => "unsupported",
+            Self::Limit => "limit",
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum IoResponse {
+    Read(Vec<u8>),
+    Exists(bool),
+    Written,
+    Failed { kind: IoFailure, message: String },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IoProgress {
+    Waiting,
+    Completed,
+}
+
+pub struct IoTask {
+    lua: Lua,
+    thread: Thread,
+    started: bool,
+    finished: bool,
+    failed: bool,
+    pending: Option<IoRequest>,
+}
+
+impl IoTask {
+    /// Compile without executing. IO wrappers must be installed before loading
+    /// script code that might retain references to the engine or IO functions.
+    pub fn compile(lua: &Lua, source: &[u8], name: &str) -> Result<Self> {
+        let function = lua.load(source).set_name(name).into_function()?;
+        Ok(Self {
+            lua: lua.clone(),
+            thread: lua.create_thread(function)?,
+            started: false,
+            finished: false,
+            failed: false,
+            pending: None,
+        })
+    }
+
+    pub fn pending_request(&self) -> Option<&IoRequest> {
+        self.pending.as_ref()
+    }
+
+    /// A missing response while waiting leaves the coroutine untouched.
+    pub fn step(&mut self, response: Option<IoResponse>) -> Result<IoProgress> {
+        if self.finished || self.failed {
+            return Err(mlua::Error::external("IO task is no longer runnable").into());
+        }
+        let args = match (self.pending.as_ref(), response) {
+            (Some(_), None) => return Ok(IoProgress::Waiting),
+            (None, None) if !self.started => MultiValue::new(),
+            (Some(request), Some(response)) => {
+                let value = match (request, response) {
+                    (_, IoResponse::Failed { kind, message }) => MultiValue::from_vec(vec![
+                        Value::Boolean(false),
+                        Value::String(self.lua.create_string(message)?),
+                        Value::String(self.lua.create_string(kind.as_str())?),
+                    ]),
+                    (IoRequest::Read { .. }, IoResponse::Read(bytes)) => {
+                        MultiValue::from_vec(vec![
+                            Value::Boolean(true),
+                            Value::String(self.lua.create_string(bytes)?),
+                        ])
+                    }
+                    (IoRequest::Exists { .. }, IoResponse::Exists(exists)) => {
+                        MultiValue::from_vec(vec![Value::Boolean(true), Value::Boolean(exists)])
+                    }
+                    (IoRequest::Write { .. }, IoResponse::Written) => {
+                        MultiValue::from_vec(vec![Value::Boolean(true), Value::Boolean(true)])
+                    }
+                    _ => {
+                        return Err(
+                            mlua::Error::external("IO response does not match request").into()
+                        );
+                    }
+                };
+                self.pending = None;
+                value
+            }
+            _ => return Err(mlua::Error::external("IO task has no pending request").into()),
+        };
+        self.started = true;
+        let result = self.resume(args);
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
+
+    fn resume(&mut self, args: MultiValue) -> Result<IoProgress> {
+        let values = self.thread.resume::<MultiValue>(args)?;
+        if self.thread.status() == ThreadStatus::Finished {
+            self.finished = true;
+            return Ok(IoProgress::Completed);
+        }
+        if values.len() == 1
+            && let Some(Value::UserData(value)) = values.front()
+            && let Ok(request) = value.borrow::<IoRequest>()
+        {
+            self.pending = Some(request.clone());
+            return Ok(IoProgress::Waiting);
+        }
+        Err(mlua::Error::external("unexpected coroutine yield outside Host IO").into())
+    }
+}
+
+/// Install on a fresh interpreter. Normal synchronous entry points remain for
+/// other interpreters; this interpreter's IO must run through [`IoTask`].
+pub fn install(interpreter: &Interpreter) -> Result<()> {
+    let lua = interpreter.lua();
+    if lua
+        .named_registry_value::<bool>("__art3m1s_io_continuation")
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let native: AnyUserData = lua.globals().get("__engine")?;
+    let methods: mlua::Table = native.metatable()?.get("__index")?;
+    let helpers = lua.create_table()?;
+    helpers.set("tag", methods.get::<mlua::Function>("tag")?)?;
+    helpers.set(
+        "read",
+        lua.create_function(|_, path: String| Ok(IoRequest::Read { path }))?,
+    )?;
+    helpers.set(
+        "exists",
+        lua.create_function(|_, path: String| Ok(IoRequest::Exists { path }))?,
+    )?;
+    helpers.set(
+        "write",
+        lua.create_function(|_, (path, data): (String, mlua::String)| {
+            Ok(IoRequest::Write {
+                path,
+                data: data.as_bytes().to_vec(),
+            })
+        })?,
+    )?;
+    helpers.set(
+        "compile",
+        lua.create_function(|lua, (source, name): (mlua::String, String)| {
+            lua.load(source.as_bytes().as_ref())
+                .set_name(name)
+                .into_function()
+        })?,
+    )?;
+    let ctx = interpreter.engine_context().clone();
+    let probe = lua.create_userdata(
+        BufferedFile::from_bytes(String::new(), "r", ctx.clone(), vec![])
+            .map_err(mlua::Error::external)?,
+    )?;
+    let file_methods: mlua::Table = probe.metatable()?.get("__index")?;
+    helpers.set(
+        "file",
+        lua.create_function(
+            move |lua, (path, mode, data): (String, String, mlua::String)| {
+                let file =
+                    BufferedFile::from_bytes(path, &mode, ctx.clone(), data.as_bytes().to_vec())
+                        .map_err(mlua::Error::external)?;
+                lua.create_userdata(file)
+            },
+        )?,
+    )?;
+    helpers.set(
+        "snapshot",
+        lua.create_function(|lua, file: AnyUserData| {
+            match file.borrow::<BufferedFile>()?.write_snapshot()? {
+                Some((path, data)) => Ok((Some(path), Some(lua.create_string(data)?))),
+                None => Ok((None, None)),
+            }
+        })?,
+    )?;
+    helpers.set(
+        "ack",
+        lua.create_function(|_, file: AnyUserData| {
+            file.borrow_mut::<BufferedFile>()?.acknowledge_write()
+        })?,
+    )?;
+    helpers.set(
+        "close",
+        lua.create_function(|_, file: AnyUserData| {
+            file.borrow_mut::<BufferedFile>()?.mark_closed();
+            Ok(())
+        })?,
+    )?;
+    helpers.set(
+        "closed",
+        lua.create_function(|_, file: AnyUserData| Ok(file.borrow::<BufferedFile>()?.is_closed()))?,
+    )?;
+    let functions: mlua::Table = lua
+        .load(include_str!("io_continuation.luau"))
+        .call(helpers)?;
+    methods.set("file", functions.get::<mlua::Function>("file")?)?;
+    methods.set("include", functions.get::<mlua::Function>("include")?)?;
+    methods.set("isFileExists", functions.get::<mlua::Function>("exists")?)?;
+    methods.set("tag", functions.get::<mlua::Function>("tag")?)?;
+    let flush: mlua::Function = functions.get("flush")?;
+    let close: mlua::Function = functions.get("close")?;
+    file_methods.set("flush", flush)?;
+    file_methods.set("close", close)?;
+    lua.globals()
+        .set("io", functions.get::<mlua::Table>("io")?)?;
+    lua.set_named_registry_value("__art3m1s_io_continuation", true)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn interpreter() -> Interpreter {
+        let interpreter = Interpreter::default();
+        install(&interpreter).unwrap();
+        install(&interpreter).unwrap();
+        interpreter
+    }
+
+    #[test]
+    fn nested_include_and_dynamic_read_resume_without_replaying_locals_or_side_effects() {
+        let i = interpreter();
+        let mut task = IoTask::compile(
+            i.lua(),
+            br#"
+            count = (count or 0) + 1
+            local saved = { value = 73 }
+            __engine:include('lib.lua')
+            result = dynamic(__engine, 'data' .. count)
+            assert(saved.value == 73 and count == 1)
+        "#,
+            "main",
+        )
+        .unwrap();
+        assert_eq!(task.step(None).unwrap(), IoProgress::Waiting);
+        assert_eq!(
+            task.pending_request(),
+            Some(&IoRequest::Read {
+                path: "lib.lua".into()
+            })
+        );
+        assert_eq!(task.step(None).unwrap(), IoProgress::Waiting);
+        assert_eq!(
+            task.step(Some(IoResponse::Read(
+                b"function dynamic(e, path) return e:file(path) end".to_vec()
+            )))
+            .unwrap(),
+            IoProgress::Waiting
+        );
+        assert_eq!(
+            task.pending_request(),
+            Some(&IoRequest::Read {
+                path: "data1".into()
+            })
+        );
+        assert!(task.step(Some(IoResponse::Exists(false))).is_err());
+        assert_eq!(
+            task.step(Some(IoResponse::Read(vec![0, 255, 128])))
+                .unwrap(),
+            IoProgress::Completed
+        );
+        assert_eq!(i.lua().globals().get::<i32>("count").unwrap(), 1);
+        assert_eq!(
+            i.lua()
+                .globals()
+                .get::<mlua::String>("result")
+                .unwrap()
+                .as_bytes()
+                .as_ref(),
+            &[0, 255, 128]
+        );
+        assert!(task.step(None).is_err());
+    }
+
+    #[test]
+    fn close_waits_for_write_confirmation_and_failed_flush_keeps_the_file_retryable() {
+        let i = interpreter();
+        let mut task = IoTask::compile(
+            i.lua(),
+            br#"
+            count = (count or 0) + 1
+            local f = assert(io.open('save/test', 'w+'))
+            assert(f:write('value') == f)
+            local ok, message = pcall(function() return io.close(f) end)
+            assert(not ok and string.find(message, 'denied'))
+            assert(io.type(f) == 'file')
+            assert(f:flush())
+            assert(f:seek('set', 0) == 0 and f:read('*a') == 'value')
+            assert(f:close() and io.type(f) == 'closed file' and count == 1)
+        "#,
+            "write",
+        )
+        .unwrap();
+        assert_eq!(task.step(None).unwrap(), IoProgress::Waiting);
+        assert_eq!(
+            task.pending_request(),
+            Some(&IoRequest::Write {
+                path: "save/test".into(),
+                data: vec![]
+            })
+        );
+        task.step(Some(IoResponse::Written)).unwrap();
+        let write = IoRequest::Write {
+            path: "save/test".into(),
+            data: b"value".to_vec(),
+        };
+        assert_eq!(task.pending_request(), Some(&write));
+        task.step(Some(IoResponse::Failed {
+            kind: IoFailure::Denied,
+            message: "denied".into(),
+        }))
+        .unwrap();
+        assert_eq!(task.pending_request(), Some(&write));
+        assert_eq!(
+            task.step(Some(IoResponse::Written)).unwrap(),
+            IoProgress::Completed
+        );
+    }
+
+    #[test]
+    fn append_only_creates_missing_files_and_preserves_other_failures() {
+        let i = interpreter();
+        let mut task = IoTask::compile(
+            i.lua(),
+            br#"
+            local f, message = io.open('save/denied', 'a')
+            assert(f == nil and message == 'denied')
+            f = assert(io.open('save/new', 'a'))
+            f:write('x')
+            assert(f:close())
+            local n = 0
+            for line in io.lines('empty') do n = n + 1 end
+            assert(n == 0)
+        "#,
+            "append",
+        )
+        .unwrap();
+        task.step(None).unwrap();
+        task.step(Some(IoResponse::Failed {
+            kind: IoFailure::Denied,
+            message: "denied".into(),
+        }))
+        .unwrap();
+        assert_eq!(
+            task.pending_request(),
+            Some(&IoRequest::Read {
+                path: "save/new".into()
+            })
+        );
+        task.step(Some(IoResponse::Failed {
+            kind: IoFailure::NotFound,
+            message: "missing".into(),
+        }))
+        .unwrap();
+        assert_eq!(
+            task.pending_request(),
+            Some(&IoRequest::Write {
+                path: "save/new".into(),
+                data: vec![]
+            })
+        );
+        task.step(Some(IoResponse::Written)).unwrap();
+        task.step(Some(IoResponse::Written)).unwrap();
+        assert_eq!(
+            task.pending_request(),
+            Some(&IoRequest::Read {
+                path: "empty".into()
+            })
+        );
+        assert_eq!(
+            task.step(Some(IoResponse::Read(vec![]))).unwrap(),
+            IoProgress::Completed
+        );
+    }
+}

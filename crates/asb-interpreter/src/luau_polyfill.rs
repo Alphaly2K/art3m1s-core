@@ -199,7 +199,7 @@ fn install_io_polyfills(lua: &Lua, engine_ctx: Arc<Mutex<EngineContext>>) -> mlu
     Ok(())
 }
 
-struct BufferedFile {
+pub(crate) struct BufferedFile {
     path: String,
     data: Vec<u8>,
     position: usize,
@@ -212,20 +212,63 @@ struct BufferedFile {
 }
 
 impl BufferedFile {
+    fn mode_flags(mode: &str) -> Result<(bool, bool, bool, bool), String> {
+        match mode {
+            "r" | "rb" => Ok((true, false, false, false)),
+            "r+" | "r+b" | "rb+" => Ok((true, true, false, false)),
+            "w" | "wb" => Ok((false, true, false, true)),
+            "w+" | "w+b" | "wb+" => Ok((true, true, false, true)),
+            "a" | "ab" => Ok((false, true, true, false)),
+            "a+" | "a+b" | "ab+" => Ok((true, true, true, false)),
+            _ => Err(format!("unsupported io.open mode: {mode}")),
+        }
+    }
+
+    pub(crate) fn from_bytes(
+        path: String,
+        mode: &str,
+        engine_ctx: Arc<Mutex<EngineContext>>,
+        data: Vec<u8>,
+    ) -> Result<Self, String> {
+        let (readable, writable, append, _) = Self::mode_flags(mode)?;
+        Ok(Self {
+            path,
+            position: if append { data.len() } else { 0 },
+            data,
+            readable,
+            writable,
+            append,
+            dirty: false,
+            closed: false,
+            engine_ctx,
+        })
+    }
+
+    pub(crate) fn write_snapshot(&self) -> mlua::Result<Option<(String, Vec<u8>)>> {
+        self.ensure_open()?;
+        Ok(self.dirty.then(|| (self.path.clone(), self.data.clone())))
+    }
+
+    pub(crate) fn acknowledge_write(&mut self) -> mlua::Result<()> {
+        self.ensure_open()?;
+        self.dirty = false;
+        Ok(())
+    }
+
+    pub(crate) fn mark_closed(&mut self) {
+        self.closed = true;
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed
+    }
+
     fn open(
         path: String,
         mode: &str,
         engine_ctx: Arc<Mutex<EngineContext>>,
     ) -> Result<Self, String> {
-        let (readable, writable, append, truncate) = match mode {
-            "r" | "rb" => (true, false, false, false),
-            "r+" | "r+b" | "rb+" => (true, true, false, false),
-            "w" | "wb" => (false, true, false, true),
-            "w+" | "w+b" | "wb+" => (true, true, false, true),
-            "a" | "ab" => (false, true, true, false),
-            "a+" | "a+b" | "ab+" => (true, true, true, false),
-            _ => return Err(format!("unsupported io.open mode: {mode}")),
-        };
+        let (_, _, append, truncate) = Self::mode_flags(mode)?;
         let data = if truncate {
             engine_ctx
                 .lock()
@@ -256,17 +299,7 @@ impl BufferedFile {
                 }
             }
         };
-        Ok(Self {
-            path,
-            position: if append { data.len() } else { 0 },
-            data,
-            readable,
-            writable,
-            append,
-            dirty: false,
-            closed: false,
-            engine_ctx,
-        })
+        Self::from_bytes(path, mode, engine_ctx, data)
     }
 
     fn ensure_open(&self) -> mlua::Result<()> {

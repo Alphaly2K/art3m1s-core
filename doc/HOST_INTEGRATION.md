@@ -75,6 +75,33 @@ Host 以 `HostReply` 批量回填，完整保留原请求的 runtime、epoch、r
 它不执行脚本，core 只在 step 边界按顺序 `pop_reply()`。`cancel(identity)` 使本地请求失效；
 外部任务取消由服务层另行处理。重载、取消、重复或串实例结果不会重新进入可执行队列。
 
+### Luau IO chunk 驱动
+
+`host::script_io::ScriptIoSession::new(handle, config, limits, max_file_bytes)` 创建不安装物理
+文件加载器和 renderer 的解释器。`open_chunk(bytes, name)` 编译并替换当前任务，递增
+epoch；语法错误保留旧任务。相同解释器的 globals 保留，换游戏应创建新实例。
+
+Host 循环调用 `step()`、`poll_events()` 和 `submit_replies()`。只有 `step()` 执行 Lua，
+等待或容量阻塞时保留原调用栈；提交结果后需再次 step 才恢复执行。`cancel_pending()`
+既可取消已排队的请求，也可取消因容量不足尚未派发的操作；取消分支同样在下一次 step 执行。
+
+支持 `e:file(path)`、`e:isFileExists(path)`、嵌套 `e:include(path)`，以及 `io.open` 的
+读写/追加/更新模式、seek、lines、flush 和 close。读取先 stat，再按 revision 分块，允许
+短读且要求前进，空文件不发 read。累计大小受 `max_file_bytes` 限制。写入使用单 blob
+原子请求，受传输 blob 预算限制；成功确认后才清除 dirty 状态，失败保留文件供脚本重试。
+`io.open` 失败返回 nil/error，flush/close 失败产生可由 `pcall` 捕获的 Lua 错误。
+
+资源 key 使用 UTF-8、`/` 和 ASCII 小写，拒绝绝对路径、驱动器、NUL 和 `..`。
+`config.savepath` 为逻辑 save 前缀，默认 `save`；此前缀下的路径映射到 save namespace
+并剥离前缀，其余路径映射到 asset。写入必须使用 save 前缀。此 chunk 接口不解析 magic path，
+不执行 ASB/AST 调度，不推进输入或 onEnterFrame；旧文件 var 查询须由可恢复场景调度器处理。
+源文件编码、场景加载和完整帧调度由调用方管理。
+
+IO domain 的 kind=1 为 stat、2 为 read、4 为 write_atomic，结果保留请求的 service kind。
+具体 payload 见 [IO 契约](HOST_ABI_V2.md#6-iohost-实现core-保留语义)。底层
+`asb_interpreter::io_continuation` 可独立使用：在新解释器加载源码前 `install()`，编译
+`IoTask`，以 `step(Some(response))` 从当前 IO 点继续；重复等待不重新执行脚本。
+
 ## 1. 职责与能力边界
 
 | Core | Host |

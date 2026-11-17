@@ -8,6 +8,26 @@
 
 ## 当前阶段
 
+已完成 Luau IO chunk continuation 与请求传输接入：
+
+- `IoTask` 从原 Lua 栈挂起/恢复，Lua 包装层负责 `e:file`、嵌套 include、exists 及文件确认。
+- `ScriptIoSession` 把读取拆为 stat 和按 revision 的分块 read；等待 Host 确认后才完成写入。
+- 结果提交不运行脚本；取消和替换任务按 epoch/请求身份失效，队列满载保留当前 continuation。
+- 不调用物理文件加载器或 GPU；新路径拦截仍带磁盘回退的旧文件 var 查询。
+
+当前入口执行显式 Lua chunk，复用解释器的引擎对象、变量和内存文件方法；同步 v1 调用链
+保持独立。ASB/AST 调度、加载期 Lua 块、tag/filter/event handler 的可恢复调度和 Host 时钟
+仍需接入，完成前不发布 v2 C ABI。
+
+验证覆盖动态路径读取前副作用仅执行一次、嵌套 include 与局部变量、空文件/短读、读写可见性、
+失败确认与重试、非法结果整批保留、双实例交错、容量阻塞及派发前/后的取消。输入均为内存
+构造，无外部素材或系统图形条件；公共缓冲文件实现有改动，需要完整解释器回归与 core Host 回归。
+本批完整解释器单元/集成 251 项与 core 单元/Host 集成 370 项通过，共 621 项通过、
+2 项既有测试跳过；全 feature 编译与格式检查通过。新增 8 项测试均保留用于明确的
+continuation/确认/边界回归，无硬件或专有输入依赖。
+
+## 已完成：v2 会话传输
+
 已实现独立的 v2 Rust 会话传输核心（`host::protocol`）：
 
 - 请求身份包含 runtime、epoch、request_id 和 service kind；请求与序列计数耗尽时报错。
@@ -45,7 +65,8 @@
 
 ## 下一阶段
 
-先验证 Luau IO continuation，确保动态 miss 恢复不重复副作用，再连接已实现的请求传输层。
+将已验证的 Luau continuation 接入场景调度与加载路径，覆盖 tag/filter/事件回调和加载期 Lua，
+落实同 Host frame 内 IO resume 不重复输入/onEnterFrame 的调度契约。
 P1 的代际句柄 facade 和时钟注入仍待实现，纯核心依赖拆分与 Host renderer SDK
 按后续阶段推进。
 
