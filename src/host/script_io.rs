@@ -217,6 +217,7 @@ pub struct ScriptIoSession {
     save_work: Option<SaveWork>,
     numbered_load: Option<NumberedLoadWork>,
     boot_restore: Option<BootRestore>,
+    project_loading: bool,
     read_history: ReadHistory,
     read_history_dirty: bool,
 }
@@ -257,6 +258,7 @@ impl ScriptIoSession {
             save_work: None,
             numbered_load: None,
             boot_restore: None,
+            project_loading: false,
             read_history: ReadHistory::default(),
             read_history_dirty: false,
         })
@@ -270,6 +272,40 @@ impl ScriptIoSession {
     }
     pub fn limits(&self) -> TransportLimits {
         self.transport.limits()
+    }
+
+    pub(super) fn runtime_state(&self) -> super::runtime::RuntimeState {
+        use super::runtime::{RuntimePhase, RuntimeState};
+
+        let transport = self.transport.state();
+        let phase = if self.faulted {
+            RuntimePhase::Faulted
+        } else if transport.epoch == 0 {
+            RuntimePhase::Created
+        } else if self.project_loading {
+            RuntimePhase::Loading
+        } else {
+            RuntimePhase::Running
+        };
+        let config = self.interpreter.config();
+        RuntimeState {
+            phase,
+            transport,
+            host_frame_id: self.frame.map(|frame| frame.id),
+            stage_size: (transport.epoch != 0).then_some([config.stage_width, config.stage_height]),
+            waiting_for_io: self.operation.is_some(),
+            waiting_for_scenario: self.scenario_event.is_some(),
+            exit_requested: matches!(self.scenario_event, Some(Event::Exit)),
+            scenario_finished: self.completed,
+        }
+    }
+
+    pub(super) fn is_faulted(&self) -> bool {
+        self.faulted
+    }
+
+    pub(super) fn mark_faulted(&mut self) {
+        self.faulted = true;
     }
 
     /// Select the session's deterministic seed before opening a task. The same
@@ -318,6 +354,7 @@ impl ScriptIoSession {
         self.save_work = None;
         self.numbered_load = None;
         self.boot_restore = None;
+        self.project_loading = false;
         Ok(epoch)
     }
 
@@ -378,6 +415,7 @@ impl ScriptIoSession {
         let epoch = self.replace_scenario(interpreter)?;
         self.save_prefix = save_prefix;
         self.boot_restore = Some(BootRestore::ReadTagIni);
+        self.project_loading = true;
         Ok(epoch)
     }
 
@@ -414,6 +452,7 @@ impl ScriptIoSession {
         self.save_work = None;
         self.numbered_load = None;
         self.boot_restore = None;
+        self.project_loading = false;
         self.read_history = ReadHistory::default();
         self.read_history_dirty = false;
         Ok(epoch)
@@ -756,6 +795,18 @@ impl ScriptIoSession {
         }
         if let Some(response) = response {
             self.interpreter.resume_host_io(response)?;
+        }
+        if self.project_loading {
+            if self.interpreter.prepare_host_handler()? == IoProgress::Waiting {
+                return self.interpreter_request();
+            }
+            match self.transport.notify(PROJECT_READY, MessageBody::default()) {
+                Ok(()) => self.project_loading = false,
+                Err(ProtocolError::WouldBlock) => {
+                    return Ok(ScenarioStep::Progress(ScriptIoProgress::WouldBlock));
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
         if (self.frame_handler_due
             || matches!(self.event_filter, Some(EventFilterWork::Queued(..))))

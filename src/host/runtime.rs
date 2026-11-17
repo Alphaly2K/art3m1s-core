@@ -1,0 +1,242 @@
+//! Artemis runtime handles for the queued Host interface.
+
+use super::protocol::{HostReply, PollResult, ProtocolError, TransportLimits, TransportState};
+use super::script_io::{HostFrame, ScriptIoError, ScriptIoProgress, ScriptIoSession};
+use std::collections::HashMap;
+use std::fmt;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::{Arc, LazyLock, Mutex, TryLockError};
+use std::thread::{self, ThreadId};
+
+const ARTEMIS_RUNTIME_TAG: u64 = 0xA201 << 48;
+const MAX_RUNTIME_SERIAL: u64 = (1 << 48) - 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct RuntimeHandle(u64);
+
+impl RuntimeHandle {
+    pub const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    pub const fn as_raw(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimePhase {
+    Created,
+    Loading,
+    Running,
+    Faulted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimeState {
+    pub phase: RuntimePhase,
+    pub transport: TransportState,
+    pub host_frame_id: Option<u64>,
+    pub stage_size: Option<[u32; 2]>,
+    pub waiting_for_io: bool,
+    pub waiting_for_scenario: bool,
+    pub exit_requested: bool,
+    pub scenario_finished: bool,
+}
+
+#[derive(Debug)]
+pub enum RuntimeError {
+    Handle,
+    Thread,
+    Panic,
+    Session(ScriptIoError),
+}
+
+impl fmt::Display for RuntimeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Handle => f.write_str("invalid Artemis runtime handle"),
+            Self::Thread => f.write_str("runtime must be accessed on its owner thread"),
+            Self::Panic => f.write_str("Artemis runtime panicked"),
+            Self::Session(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for RuntimeError {}
+
+impl From<ScriptIoError> for RuntimeError {
+    fn from(error: ScriptIoError) -> Self {
+        Self::Session(error)
+    }
+}
+
+impl From<ProtocolError> for RuntimeError {
+    fn from(error: ProtocolError) -> Self {
+        ScriptIoError::from(error).into()
+    }
+}
+
+struct Entry {
+    owner: ThreadId,
+    session: Arc<Mutex<ScriptIoSession>>,
+}
+
+#[derive(Default)]
+struct Registry {
+    serial: u64,
+    entries: HashMap<RuntimeHandle, Entry>,
+}
+
+impl Registry {
+    fn allocate(&mut self) -> Result<RuntimeHandle, ProtocolError> {
+        if self.serial == MAX_RUNTIME_SERIAL {
+            return Err(ProtocolError::Limit);
+        }
+        self.serial += 1;
+        Ok(RuntimeHandle(ARTEMIS_RUNTIME_TAG | self.serial))
+    }
+
+    fn owned_entry(&self, handle: RuntimeHandle) -> Result<&Entry, RuntimeError> {
+        let entry = self.entries.get(&handle).ok_or(RuntimeError::Handle)?;
+        if entry.owner != thread::current().id() {
+            return Err(RuntimeError::Thread);
+        }
+        Ok(entry)
+    }
+}
+
+static RUNTIMES: LazyLock<Mutex<Registry>> = LazyLock::new(|| Mutex::new(Registry::default()));
+
+/// Create a runtime owned by the calling thread. Destroy it before that thread exits.
+pub fn create(
+    random_seed: u64,
+    limits: TransportLimits,
+    max_file_bytes: usize,
+) -> Result<RuntimeHandle, RuntimeError> {
+    let handle = RUNTIMES.lock().unwrap().allocate()?;
+    let session = catch_unwind(|| {
+        let mut session =
+            ScriptIoSession::new(handle.0, Default::default(), limits, max_file_bytes)?;
+        session.set_random_seed(random_seed)?;
+        Ok::<_, ScriptIoError>(session)
+    })
+    .map_err(|_| RuntimeError::Panic)??;
+    RUNTIMES.lock().unwrap().entries.insert(
+        handle,
+        Entry {
+            owner: thread::current().id(),
+            session: Arc::new(Mutex::new(session)),
+        },
+    );
+    Ok(handle)
+}
+
+/// Release the runtime and invalidate its handle and outstanding requests.
+pub fn destroy(handle: RuntimeHandle) -> Result<(), RuntimeError> {
+    let entry = {
+        let mut registry = RUNTIMES.lock().unwrap();
+        if Arc::strong_count(&registry.owned_entry(handle)?.session) != 1 {
+            return Err(ProtocolError::State.into());
+        }
+        registry.entries.remove(&handle).unwrap()
+    };
+    catch_unwind(AssertUnwindSafe(|| drop(entry))).map_err(|_| RuntimeError::Panic)
+}
+
+fn with_session<T>(
+    handle: RuntimeHandle,
+    f: impl FnOnce(&mut ScriptIoSession) -> Result<T, RuntimeError>,
+) -> Result<T, RuntimeError> {
+    let session = RUNTIMES
+        .lock()
+        .unwrap()
+        .owned_entry(handle)?
+        .session
+        .clone();
+    let mut session = match session.try_lock() {
+        Ok(session) => session,
+        Err(TryLockError::WouldBlock) => return Err(ProtocolError::State.into()),
+        Err(TryLockError::Poisoned(_)) => return Err(RuntimeError::Panic),
+    };
+    match catch_unwind(AssertUnwindSafe(|| f(&mut session))) {
+        Ok(result) => result,
+        Err(_) => {
+            session.mark_faulted();
+            Err(RuntimeError::Panic)
+        }
+    }
+}
+
+/// Validate and accept a project. Its startup runs in subsequent calls to `step`.
+pub fn open_project(
+    handle: RuntimeHandle,
+    ini: &[u8],
+    platform: &str,
+    reported_os: Option<&str>,
+) -> Result<u64, RuntimeError> {
+    with_session(handle, |session| {
+        Ok(session.open_project(ini, platform, reported_os)?)
+    })
+}
+
+pub fn step(handle: RuntimeHandle, frame: HostFrame) -> Result<ScriptIoProgress, RuntimeError> {
+    with_session(handle, |session| Ok(session.step_frame(frame)?))
+}
+
+pub fn poll_events(handle: RuntimeHandle, output: &mut [u8]) -> Result<PollResult, RuntimeError> {
+    with_session(handle, |session| Ok(session.poll_events(output)))
+}
+
+pub fn submit_replies(handle: RuntimeHandle, replies: &[HostReply]) -> Result<(), RuntimeError> {
+    with_session(handle, |session| {
+        if session.is_faulted() {
+            return Err(ProtocolError::State.into());
+        }
+        Ok(session.submit_replies(replies)?)
+    })
+}
+
+pub fn get_state(handle: RuntimeHandle) -> Result<RuntimeState, RuntimeError> {
+    with_session(handle, |session| Ok(session.runtime_state()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handles_reject_other_threads_types_and_stale_values() {
+        let create = || create(0, TransportLimits::default(), 4096).unwrap();
+        let first = create();
+        let state = get_state(first).unwrap();
+        assert_eq!(state.phase, RuntimePhase::Created);
+        assert_eq!(state.transport.epoch, 0);
+        assert_eq!(state.stage_size, None);
+        assert_eq!(state.host_frame_id, None);
+
+        thread::spawn(move || {
+            assert!(matches!(get_state(first), Err(RuntimeError::Thread)));
+            assert!(matches!(destroy(first), Err(RuntimeError::Thread)));
+            let second = create();
+            assert_ne!(first, second);
+            assert_eq!(get_state(second).unwrap().phase, RuntimePhase::Created);
+            destroy(second).unwrap();
+        })
+        .join()
+        .unwrap();
+
+        destroy(first).unwrap();
+        let replacement = create();
+        assert_ne!(first, replacement);
+        assert!(matches!(destroy(first), Err(RuntimeError::Handle)));
+        for raw in [0, 1, first.as_raw(), replacement.as_raw() ^ (1 << 48)] {
+            assert!(matches!(
+                get_state(RuntimeHandle::from_raw(raw)),
+                Err(RuntimeError::Handle)
+            ));
+        }
+        destroy(replacement).unwrap();
+    }
+}

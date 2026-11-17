@@ -15,6 +15,10 @@ fn requests(session: &mut ScriptIoSession) -> Vec<Request> {
     let mut bytes = vec![0; session.state().control.bytes];
     let result = session.poll_events(&mut bytes);
     assert_eq!(result.written_bytes, bytes.len());
+    decode_requests(&bytes)
+}
+
+fn decode_requests(bytes: &[u8]) -> Vec<Request> {
     let mut offset = 0;
     let mut requests = vec![];
     while offset < bytes.len() {
@@ -940,6 +944,113 @@ fn project_open_applies_tag_ini_and_starts_at_configured_top_entry() {
             .as_string(),
         "switch"
     );
+}
+
+#[test]
+fn runtime_loading_waits_for_boot_lua_before_queuing_project_ready() {
+    use crate::host::runtime::{self, RuntimeError, RuntimePhase};
+
+    let limits = TransportLimits {
+        control: QueueBudget {
+            records: 1,
+            bytes: 4096,
+        },
+        ..TransportLimits::default()
+    };
+    let handle = runtime::create(42, limits, 4096).unwrap();
+    let mut host = MemoryHost::default();
+    host.asset(
+        "boot.iet",
+        b"*top\n[caption data=started]\n[lua]\nassert(__engine:file('init')=='ok')\n[/lua]",
+    );
+    host.asset("init", b"ok");
+    let ini = b"[WINDOWS]\nWIDTH=1280\nHEIGHT=720\nBOOT=boot.iet\n";
+    let frame = HostFrame {
+        id: 9,
+        monotonic_ns: 1_000_000,
+        utc_unix_ms: 0,
+        utc_offset_minutes: 0,
+    };
+    let mut bytes = [0; 4096];
+
+    let epoch = runtime::open_project(handle, ini, "windows", None).unwrap();
+    let state = runtime::get_state(handle).unwrap();
+    assert_eq!(state.phase, RuntimePhase::Loading);
+    assert_eq!(state.stage_size, Some([1280, 720]));
+    assert_eq!(state.host_frame_id, None);
+    assert_eq!(
+        runtime::step(handle, frame).unwrap(),
+        ScriptIoProgress::WouldBlock
+    );
+    let polled = runtime::poll_events(handle, &mut bytes).unwrap();
+    assert_eq!(polled.record_count, 1);
+    assert_eq!(
+        u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+        SESSION_CHANGED.kind
+    );
+
+    let mut waited_for_init = false;
+    let mut ready = false;
+    for _ in 0..128 {
+        let progress = runtime::step(handle, frame).unwrap();
+        let state = runtime::get_state(handle).unwrap();
+        let polled = runtime::poll_events(handle, &mut bytes).unwrap();
+        assert_eq!(state.host_frame_id, Some(frame.id));
+        assert_eq!(state.transport.epoch, epoch);
+        if state.phase == RuntimePhase::Running {
+            assert_eq!(progress, ScriptIoProgress::Event);
+            assert!(state.waiting_for_scenario && !state.waiting_for_io);
+            assert_eq!(polled.record_count, 1);
+            assert_eq!(
+                u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+                PROJECT_READY.kind
+            );
+            ready = true;
+            break;
+        }
+        assert_eq!(state.phase, RuntimePhase::Loading);
+        assert_eq!(state.transport.pending_requests, 1);
+        assert!(state.waiting_for_io && !state.waiting_for_scenario);
+        let requests = decode_requests(&bytes[..polled.written_bytes]);
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        waited_for_init |= request.metadata["key"] == "init";
+        runtime::submit_replies(handle, &[host.complete(request)]).unwrap();
+        assert_eq!(
+            runtime::get_state(handle).unwrap().phase,
+            RuntimePhase::Loading
+        );
+    }
+    assert!(waited_for_init && ready);
+
+    assert_eq!(
+        runtime::open_project(handle, ini, "windows", None).unwrap(),
+        epoch + 1
+    );
+    runtime::poll_events(handle, &mut bytes).unwrap();
+    let mut empty_host = MemoryHost::default();
+    for _ in 0..8 {
+        match runtime::step(handle, frame) {
+            Ok(ScriptIoProgress::Waiting) => {
+                let polled = runtime::poll_events(handle, &mut bytes).unwrap();
+                let request = decode_requests(&bytes[..polled.written_bytes])
+                    .pop()
+                    .unwrap();
+                runtime::submit_replies(handle, &[empty_host.complete(&request)]).unwrap();
+            }
+            Err(RuntimeError::Session(ScriptIoError::Script(_))) => break,
+            result => panic!("unexpected startup result {result:?}"),
+        }
+    }
+    assert_eq!(
+        runtime::get_state(handle).unwrap().phase,
+        RuntimePhase::Faulted
+    );
+    assert_eq!(
+        runtime::poll_events(handle, &mut bytes).unwrap().status,
+        PollStatus::NoData
+    );
+    runtime::destroy(handle).unwrap();
 }
 
 #[test]

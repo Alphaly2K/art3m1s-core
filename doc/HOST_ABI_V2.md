@@ -179,6 +179,8 @@ WOULD_BLOCK 且不受理。Host 先回填并恢复原帧，再提交新帧；结
 `metadata_bytes:u32, blob_bytes:u32, UTF-8 JSON metadata, raw blob`，两段长度相加加 8
 必须等于 body_bytes；metadata 必须为 JSON object，无 NUL/隐含 padding。诊断使用相同 body。
 Runtime domain=1、kind=1 为 `session_changed`，request_id=0，metadata=`{}`，blob 为空。
+Runtime kind=2 为 `project_ready`，字段同上；BOOT 与加载期 Lua 完成后交付。记录排入
+可靠队列时状态由 Loading 转为 Running，且排在首条场景输出之前。
 服务请求只使用 IO/UI/media/render domain；其余 service kind 和 payload 由各自 schema 定义。
 高频 input/render 可以使用独立版本化二进制
 body，由 flags/kind 唯一标识。JSON 中的 u64/i64 使用十进制字符串，避免宿主 Number 精度丢失。

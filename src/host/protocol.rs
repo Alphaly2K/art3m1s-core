@@ -37,6 +37,10 @@ pub const SESSION_CHANGED: MessageKind = MessageKind {
     domain: Domain::Runtime,
     kind: 1,
 };
+pub const PROJECT_READY: MessageKind = MessageKind {
+    domain: Domain::Runtime,
+    kind: 2,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProtocolError {

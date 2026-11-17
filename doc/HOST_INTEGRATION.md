@@ -120,6 +120,12 @@ Rust 的 `ExecutionResult`/`TagResult` 新增 `HostIoPending`，穷举匹配需�
 脚本编码和逻辑存档前缀。该入口在读取持久状态和启动 BOOT 前先请求可选的 `tag.ini`，
 以配置的编码解码并应用到脚本解析。若 INI 或逻辑路径校验失败，旧会话继续有效。
 
+`host::runtime` 是 Artemis 的 Rust 句柄入口。`create`、`open_project`、`step`、
+`poll_events`、`submit_replies`、`get_state` 和 `destroy` 均由创建线程调用。运行时需在
+该线程退出前销毁。工作线程把结果投递给创建线程；跨线程直调返回 `Thread`，已销毁的句柄
+返回 `Handle`。`get_state` 分开报告项目阶段、IO 等待和场景等待。`session_changed` 后可以
+先收到启动 IO；`project_ready` 在 BOOT 与加载期 Lua 完成后发布，表示项目已进入 Running。
+
 独立解释器启用 resumable IO 后，未安装同步加载器时，start/boot/restore_position 可能
 受理一个尚待 Host 完成的加载，调用方随后处理 HostIoPending。显式安装的同步内存加载器
 仍可使用；ScriptIoSession 始终通过请求传输读取。
