@@ -13,6 +13,9 @@
 use std::path::PathBuf;
 
 fn main() {
+    if std::env::var_os("CARGO_FEATURE_LEGACY").is_none() {
+        return;
+    }
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if std::env::var_os("CARGO_FEATURE_KRKR_ENGINE").is_some() {
         if let Some(native_dir) =

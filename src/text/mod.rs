@@ -25,7 +25,9 @@ pub mod render;
 
 pub use backlog::{Backlog, BacklogPage, BacklogSettings, BacklogTag};
 pub use glyph::GlyphTextRenderer;
-pub use inject::{FfiTextInject, InjectionChain, TextInject};
+#[cfg(feature = "legacy")]
+pub use inject::FfiTextInject;
+pub use inject::{InjectionChain, TextInject};
 pub use render::{
     FontDesc, FontMetrics, FontState, GlyphInfo, LinkHitArea, LinkRange, MessageLayer, RubyRange,
     ScetweenConfig, ScetweenMode, ScetweenSetMode, TextAlignment, TextRenderer, TextSpanToken,

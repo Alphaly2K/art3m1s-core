@@ -8,6 +8,7 @@
 //! decoded layer frames enter core through the native frame-upload FFI.
 
 use serde::Serialize;
+#[cfg(feature = "legacy")]
 use serde_json::json;
 
 pub(crate) fn ab_loop_file(file: &str) -> Option<String> {
@@ -79,6 +80,7 @@ impl HostMediaCommandKind {
     }
 }
 
+#[cfg(feature = "legacy")]
 pub fn emit<T: Serialize>(kind: HostMediaCommandKind, payload: T) {
     let payload = serde_json::to_value(payload).unwrap_or_else(|e| {
         crate::core_warn!(

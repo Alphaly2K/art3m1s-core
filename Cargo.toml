@@ -19,11 +19,12 @@ required-features = ["game-probes"]
 
 [dependencies]
 asb-interpreter = { path = "crates/asb-interpreter" }
-art3m1s-emote = { path = "crates/art3m1s-emote" }
+art3m1s-emote = { path = "crates/art3m1s-emote", optional = true }
 art3m1s-log = { path = "crates/art3m1s-log" }
 art3m1s-render = { path = "crates/art3m1s-render" }
-pfs-upk-rust = { path = "crates/pfs-upk-rust" }
-art3m1s-media = { path = "crates/art3m1s-media" }
+pfs-upk-rust = { path = "crates/pfs-upk-rust", optional = true }
+art3m1s-media = { path = "crates/art3m1s-media", optional = true }
+art3m1s-native-render = { path = "crates/art3m1s-native-render", optional = true }
 art3m1s-rfvp = { path = "crates/art3m1s-rfvp", optional = true, features = ["host-runtime"] }
 art3m1s-krkr = { path = "crates/art3m1s-krkr", optional = true }
 art3m1s-siglus = { path = "crates/art3m1s-siglus", optional = true }
@@ -37,29 +38,23 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # 字体光栅化（字形渲染子系统）
 ab_glyph = "0.2"
 
-[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
-art3m1s-render = { path = "crates/art3m1s-render", features = ["metal"] }
-
-[target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "android"))'.dependencies]
-art3m1s-render = { path = "crates/art3m1s-render", features = ["vulkan"] }
-
 [target.'cfg(target_os = "android")'.dependencies]
 ndk-context = { version = "0.1.1", optional = true }
 
 [target.'cfg(any(target_os = "android", target_os = "ios", all(target_os = "macos", target_arch = "aarch64")))'.dependencies]
-ctt-astcenc = "0.5"
+ctt-astcenc = { version = "0.5", optional = true }
 
 [features]
 default = ["gl-backend"]
-gl-backend = ["art3m1s-render/gl"]
-# Compatibility aliases; native backends are enabled by target dependencies above.
-metal-backend = ["runtime-shader", "art3m1s-render/metal"]
-vulkan-backend = ["runtime-shader", "art3m1s-render/vulkan"]
+legacy = ["dep:art3m1s-native-render", "dep:pfs-upk-rust", "dep:art3m1s-media", "dep:art3m1s-emote", "dep:ctt-astcenc"]
+gl-backend = ["legacy", "art3m1s-render/gl"]
+metal-backend = ["legacy", "runtime-shader", "art3m1s-render/metal"]
+vulkan-backend = ["legacy", "runtime-shader", "art3m1s-render/vulkan"]
 runtime-shader = ["art3m1s-render/runtime-shader"]
-rfvp-engine = ["dep:art3m1s-rfvp"]
-krkr-engine = ["dep:art3m1s-krkr", "art3m1s-krkr/native-upstream"]
-siglus-engine = ["dep:art3m1s-siglus", "art3m1s-siglus/host-audio", "dep:cpal", "dep:ndk-context"]
-ffmpeg = ["art3m1s-media/ffmpeg", "art3m1s-siglus?/uci-ffmpeg"]
+rfvp-engine = ["legacy", "dep:art3m1s-rfvp"]
+krkr-engine = ["legacy", "dep:art3m1s-krkr", "art3m1s-krkr/native-upstream"]
+siglus-engine = ["legacy", "dep:art3m1s-siglus", "art3m1s-siglus/host-audio", "dep:cpal", "dep:ndk-context"]
+ffmpeg = ["legacy", "art3m1s-media/ffmpeg", "art3m1s-siglus?/uci-ffmpeg"]
 game-probes = ["gl-backend"]
 
 [dev-dependencies]

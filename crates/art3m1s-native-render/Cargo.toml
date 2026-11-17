@@ -1,0 +1,12 @@
+[package]
+name = "art3m1s-native-render"
+version = "0.1.0"
+license = "MPL-2.0"
+edition = "2024"
+publish = false
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+art3m1s-render = { path = "../art3m1s-render", features = ["metal"] }
+
+[target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "android"))'.dependencies]
+art3m1s-render = { path = "../art3m1s-render", features = ["vulkan"] }

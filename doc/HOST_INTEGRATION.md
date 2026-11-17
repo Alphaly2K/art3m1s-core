@@ -51,8 +51,8 @@ provider 接收已解析 magic path 的逻辑 key（`/` 分隔、ASCII 小写）
 
 这是同步 Rust 接口，Host 方法不得重入同一个 runtime，也不应依赖正在等待 core 的 GUI
 线程；它没有注册 native→Dart 回调。renderer 执行现有 DrawList/GpuBackend 契约，窗口、
-GPU 对象和呈现由其实现管理。纯核心的独立构建、v2 帧 lease 和可靠请求协议仍在实施中，
-当前 C ABI 继续使用 v1。
+GPU 对象和呈现由其实现管理。可用 `cargo build --no-default-features` 构建纯 Core 的
+Rust 队列运行时。默认构建继续提供 v1 C ABI。
 
 ### v2 Rust 会话传输
 

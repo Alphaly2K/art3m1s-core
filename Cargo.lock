@@ -200,6 +200,7 @@ dependencies = [
  "art3m1s-krkr",
  "art3m1s-log",
  "art3m1s-media",
+ "art3m1s-native-render",
  "art3m1s-render",
  "art3m1s-rfvp",
  "art3m1s-siglus",
@@ -237,6 +238,13 @@ version = "0.1.0"
 dependencies = [
  "ffmpeg-next",
  "libc",
+]
+
+[[package]]
+name = "art3m1s-native-render"
+version = "0.1.0"
+dependencies = [
+ "art3m1s-render",
 ]
 
 [[package]]

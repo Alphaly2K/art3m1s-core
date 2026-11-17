@@ -4,15 +4,19 @@
 //! Artemis project directory to `asb-interpreter`, while renderer code consumes
 //! interpreter events through a graphics-API-neutral GPU backend boundary.
 
-use asb_interpreter::{Interpreter, InterpreterConfig};
+#[cfg(feature = "legacy")]
+use asb_interpreter::Interpreter;
+use asb_interpreter::InterpreterConfig;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::path::{Component, Path, PathBuf};
 
 pub mod audio;
+#[cfg(feature = "legacy")]
 pub mod backend;
 pub mod compositor;
+#[cfg(feature = "legacy")]
 pub mod ffi;
 #[cfg(any(
     feature = "gl-backend",
@@ -21,25 +25,39 @@ pub mod ffi;
 ))]
 pub use ffi::api as ffi_api;
 pub mod host;
+#[cfg(feature = "legacy")]
 pub use host::{events as host_events, files as host_files, media as host_media};
+#[cfg(not(feature = "legacy"))]
+mod core_log;
+#[cfg(not(feature = "legacy"))]
+#[doc(hidden)]
+pub use core_log::emit as __core_log;
 mod magic_path;
-#[cfg(any(
-    target_os = "android",
-    target_os = "ios",
-    all(target_os = "macos", target_arch = "aarch64")
+#[cfg(all(
+    feature = "legacy",
+    any(
+        target_os = "android",
+        target_os = "ios",
+        all(target_os = "macos", target_arch = "aarch64")
+    )
 ))]
 mod platform;
+#[cfg(feature = "legacy")]
 pub mod profiler;
 pub mod render_pipeline;
+#[cfg(feature = "legacy")]
 pub mod runtime;
 pub mod save;
 mod script_handler;
 pub mod text;
 pub mod video;
 
+#[cfg(feature = "legacy")]
 pub use art3m1s_emote as emote;
+#[cfg(feature = "legacy")]
 pub use art3m1s_media as media;
 pub use asb_interpreter as script;
+#[cfg(feature = "legacy")]
 pub use pfs_upk as archive;
 
 /// Result type used by the core bootstrap layer.
@@ -224,12 +242,14 @@ impl ProjectConfig {
 }
 
 /// An unpacked Artemis project directory.
+#[cfg(feature = "legacy")]
 #[derive(Debug, Clone)]
 pub struct Project {
     root: PathBuf,
     config: ProjectConfig,
 }
 
+#[cfg(feature = "legacy")]
 impl Project {
     /// Open a project from an in-memory `system.ini` string (no disk
     /// access needed).  The `root` path is stored for virtual-path
@@ -375,6 +395,7 @@ impl Project {
 /// 文件加载复用 [`Project::create_interpreter`] 装好的 FFI 文件加载器，故宿主须在调用前
 /// 把文件供给（目录/pfs）指向该游戏。任何失败（system.ini 非法、boot 读不到、boot 在
 /// 发 caption 前就阻塞/跑完/出错）都返回 `None`，调用方回退到手动/目录名。
+#[cfg(feature = "legacy")]
 fn caption_probe_blocks_progress(event: &asb_interpreter::Event) -> bool {
     use asb_interpreter::{Event, WaitReason};
     match event {
@@ -396,6 +417,7 @@ fn caption_probe_blocks_progress(event: &asb_interpreter::Event) -> bool {
     }
 }
 
+#[cfg(feature = "legacy")]
 fn caption_probe_on_event(
     event: asb_interpreter::Event,
     caption: &std::sync::Mutex<Option<String>>,
@@ -411,10 +433,12 @@ fn caption_probe_on_event(
     }
 }
 
+#[cfg(feature = "legacy")]
 pub fn probe_caption_from_bytes(ini_content: &[u8], platform: &str) -> Option<String> {
     probe_caption_from_bytes_with_resources(ini_content, platform, None)
 }
 
+#[cfg(feature = "legacy")]
 pub fn probe_caption_from_bytes_with_resources(
     ini_content: &[u8],
     platform: &str,
@@ -438,6 +462,7 @@ pub fn probe_caption_from_bytes_with_resources(
 
 /// Load one owned font file through the FFI bridge. The active text renderer
 /// owns the returned bytes, so destroying a runtime releases its font data.
+#[cfg(feature = "legacy")]
 pub fn load_font_ffi(path: &str) -> std::result::Result<Vec<u8>, String> {
     crate::ffi::request_file(path)
 }
@@ -618,6 +643,7 @@ pub fn resolve_project_path(root: &Path, virtual_path: &str) -> Result<PathBuf> 
     Ok(resolved)
 }
 
+#[cfg(feature = "legacy")]
 fn to_interpreter_error(error: CoreError) -> asb_interpreter::Error {
     asb_interpreter::Error::IoError(std::io::Error::new(
         std::io::ErrorKind::InvalidInput,
@@ -625,7 +651,7 @@ fn to_interpreter_error(error: CoreError) -> asb_interpreter::Error {
     ))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy"))]
 mod tests {
     use super::*;
 
