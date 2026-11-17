@@ -94,7 +94,7 @@ Host 循环调用 `step()`、`poll_events()` 和 `submit_replies()`。只有 `st
 资源 key 使用 UTF-8、`/` 和 ASCII 小写，拒绝绝对路径、驱动器、NUL 和 `..`。
 `config.savepath` 为逻辑 save 前缀，默认 `save`；此前缀下的路径映射到 save namespace
 并剥离前缀，其余路径映射到 asset。写入必须使用 save 前缀。此 chunk 接口不解析 magic path，
-不执行 ASB/AST 调度，不推进输入或 onEnterFrame；旧文件 var 查询须由可恢复场景调度器处理。
+不执行 ASB/AST 调度，不推进输入或 onEnterFrame。文件 var 查询与直接文件方法共用同一 IO 路径。
 Host 提交原始场景字节和编码配置，完整帧调度由调用方管理。
 
 `open_scenario(bytes, name, label)` 解析 Host 提交的 AST/IET/ASB，并在新 VM 中受理场景。
@@ -102,9 +102,16 @@ Host 提交原始场景字节和编码配置，完整帧调度由调用方管理
 `ScriptIoProgress::Event` 表示 `pending_event()` 可读取一个普通场景事件，Host 处理/等待后
 调用 `resume_scenario()` 释放该等待。等待 IO 时 PC 由 continuation 管理，Host 不额外加一。
 替换场景使旧 VM 和 IO 失效；解析或起点标签校验失败则保留旧场景。Lua 执行错误在 step 报告。
-tag filter 和外部场景文件 miss 尚未使用该驱动的可恢复路径，完整游戏接入须由 facade 覆盖这些入口。
+tag filter 支持相同挂起路径，保留通过/拦截、动态展开和排队顺序。外部场景文件 miss
+尚未由此驱动请求，完整游戏接入须覆盖这些入口和帧调度。
 Rust 的 `ExecutionResult`/`TagResult` 新增 `HostIoPending`，穷举匹配需处理该分支；
 未启用 resumable IO 的解释器不产生它，v1 C 函数表与同步路径保持原语义。
+
+场景及 Lua `e:tag` 的 `file_exists`/`file_exist`、`file_crc`、`file_update_time` 均等待
+Host 结果再更新变量，支持原有 CRC 大小写/前缀、日期 format/noexist 和 writelocal。
+save=1 使用配置的逻辑 save 前缀；`.exe` 存在性检查保留引擎的虚拟存在语义。
+修改时间由 stat 的可选 `modified_utc_ms` 提供，以规范十进制 i64 字符串传输，当前日期
+分量按 UTC 计算；未提供时间时使用 noexist，不查询系统文件或本机时区。
 
 IO domain 的 kind=1 为 stat、2 为 read、4 为 write_atomic，结果保留请求的 service kind。
 具体 payload 见 [IO 契约](HOST_ABI_V2.md#6-iohost-实现core-保留语义)。底层

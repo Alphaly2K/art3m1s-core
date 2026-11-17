@@ -142,3 +142,86 @@ end
         assert_eq!(i.lua().globals().get::<i32>(name).unwrap(), 1);
     }
 }
+
+#[test]
+fn a_queued_filter_finishes_its_continuation_before_restoring_an_older_stop() {
+    let mut i = Interpreter::default();
+    i.enable_resumable_io().unwrap();
+    i.set_callback(|_| CallbackResult::Pause);
+    i.load_script(
+        "story",
+        r#"
+*main
+[calllua function=hold]
+[var name=after data=1]
+[lua]
+function hold(e) e:enqueueTag{'stop'} end
+__engine:setTagFilter{custom=function(e,p)
+    assert(e:file('probe') == 'ok')
+    e:tag{'caption', data='resumed'}
+    return 1
+end}
+[/lua]
+"#,
+    )
+    .unwrap();
+    i.start("story", "main").unwrap();
+    assert!(matches!(
+        i.run().unwrap(),
+        ExecutionResult::Wait(Event::Wait { .. })
+    ));
+    i.lua()
+        .load("__engine:enqueueTag{'tag',data='custom'}")
+        .exec()
+        .unwrap();
+    i.drain_queued_tags_only().unwrap();
+    assert!(i.pending_host_io().is_some());
+    i.resume_host_io(IoResponse::Read(b"ok".to_vec())).unwrap();
+    assert!(
+        matches!(i.run().unwrap(), ExecutionResult::Wait(Event::Caption { data }) if data == "resumed")
+    );
+    i.advance_line();
+    assert!(matches!(
+        i.run().unwrap(),
+        ExecutionResult::Wait(Event::Wait { .. })
+    ));
+    assert!(i.get_variable("after").is_none());
+}
+
+#[test]
+fn restoring_a_position_discards_the_suspended_filter_and_its_old_side_effects() {
+    let mut i = Interpreter::default();
+    i.enable_resumable_io().unwrap();
+    i.set_callback(|_| CallbackResult::Pause);
+    i.load_script(
+        "story",
+        r#"
+*main
+[caption data=original]
+[lua]
+filter_calls = 0
+__engine:setTagFilter{caption=function(e,p)
+    filter_calls=filter_calls+1
+    local invocation=filter_calls
+    assert(e:file('probe') == 'ok')
+    e:tag{'caption', data=tostring(invocation)}
+    return 1
+end}
+[/lua]
+"#,
+    )
+    .unwrap();
+    i.start("story", "main").unwrap();
+    assert!(matches!(i.run().unwrap(), ExecutionResult::HostIoPending));
+    i.restore_position("story", i.current_line(), vec![])
+        .unwrap();
+    assert!(i.pending_host_io().is_none());
+    assert!(i.resume_host_io(IoResponse::Read(b"old".to_vec())).is_err());
+    assert!(matches!(i.run().unwrap(), ExecutionResult::HostIoPending));
+    i.resume_host_io(IoResponse::Read(b"ok".to_vec())).unwrap();
+    assert!(
+        matches!(i.run().unwrap(), ExecutionResult::Wait(Event::Caption { data }) if data == "2")
+    );
+    i.advance_line();
+    assert!(matches!(i.run().unwrap(), ExecutionResult::Completed));
+}

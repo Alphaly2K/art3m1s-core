@@ -8,6 +8,21 @@
 
 ## 当前阶段
 
+已完成可恢复 tag filter 和文件查询：
+
+- 过滤器保留原指令、来源和返回值，恢复后先完成原标签，再抽干过滤器生成的命令。
+- 内联、动态展开、排队及 elseif 跳转均不重跑过滤器；旧 queued stop 在 continuation 后恢复。
+- AST 与 Lua 的 file_exists/file_exist、file_crc、file_update_time 共用 Host 请求路径。
+  CRC/日期格式沿用已有逻辑；stat 可携带 modified_utc_ms，当前按 UTC 生成日期分量。
+- restore_position 与 reset 释放旧任务和过滤器状态，阻止旧调用现场继续改写场景。
+
+验证使用内存 Host，包含 IEEE CRC32 参考输入、负时间戳、空文件、save namespace、过滤输出
+顺序、旧等待和位置恢复。仍待完成外部场景资源 miss、其余 Lua 入口及 Host frame/时钟调度。
+本批新增 6 项必要回归；完整解释器 256 项及 core/Host 376 项通过，共 632 项通过、
+2 项既有测试跳过。全 feature 编译和格式检查通过；未改绘制算法，不运行图形硬件回归。
+
+## 已完成：加载期 Lua 与 calllua
+
 已接入加载期 Lua 与 calllua 的可恢复场景调度：
 
 - 解释器显式启用 resumable IO；加载期 Lua 块与内联/排队 calllua 均保存真实 continuation。
@@ -18,7 +33,7 @@
 验证采用纯内存场景/加载器，覆盖 PC、队列、加载顺序、重复加载、重置、场景替换和旧结果。
 本批新增 5 项回归；完整解释器 254 项及 core/Host 372 项通过，共 626 项通过、2 项既有
 测试跳过。新增测试均不依赖外部素材/图形设备；全 feature 编译和格式检查通过。
-仍待连接可恢复 tag filter、文件 var 查询、外部场景资源 miss 与 Host frame/时钟调度。
+其余调度入口的进度见当前阶段及下一阶段。
 
 ## 已完成：Luau IO chunk 接入
 
@@ -29,9 +44,8 @@
 - 结果提交不运行脚本；取消和替换任务按 epoch/请求身份失效，队列满载保留当前 continuation。
 - 不调用物理文件加载器或 GPU；新路径拦截仍带磁盘回退的旧文件 var 查询。
 
-当前入口执行显式 Lua chunk，复用解释器的引擎对象、变量和内存文件方法；同步 v1 调用链
-保持独立。ASB/AST 调度、加载期 Lua 块、tag/filter/event handler 的可恢复调度和 Host 时钟
-仍需接入，完成前不发布 v2 C ABI。
+该检查点以显式 Lua chunk 为入口，复用解释器的引擎对象、变量和内存文件方法；同步 v1
+调用链保持独立。后续场景入口与调度接入的进度见上文，完整契约完成前不发布 v2 C ABI。
 
 验证覆盖动态路径读取前副作用仅执行一次、嵌套 include 与局部变量、空文件/短读、读写可见性、
 失败确认与重试、非法结果整批保留、双实例交错、容量阻塞及派发前/后的取消。输入均为内存
@@ -79,8 +93,8 @@ continuation/确认/边界回归，无硬件或专有输入依赖。
 
 ## 下一阶段
 
-将已验证的 Luau continuation 接入场景调度与加载路径，覆盖 tag/filter/事件回调和加载期 Lua，
-落实同 Host frame 内 IO resume 不重复输入/onEnterFrame 的调度契约。
+继续接入外部场景/macro 资源的按需读取及其余 Lua/事件入口，落实同 Host frame 内 IO resume
+不重复输入/onEnterFrame 的调度契约，并注入 Host 时钟。
 P1 的代际句柄 facade 和时钟注入仍待实现，纯核心依赖拆分与 Host renderer SDK
 按后续阶段推进。
 
@@ -136,7 +150,7 @@ v1 adapter 可以复用逐步拆出的内部逻辑，但继续暴露原语义。
 - 项目初始化读取 tag.ini 时使用该 runtime 的资源；surface 绑定缓存改为 runtime 所有，
   销毁一个实例不会清空另一个实例的 surface 引用。
 
-后续仍待完成：v2 C 查询入口与可发布 schema、Luau IO continuation、纯核心依赖拆分
+后续仍待完成：v2 C 查询入口与可发布 schema、剩余场景/事件入口的 IO 调度、纯核心依赖拆分
 以及独立 FramePacket/Host renderer SDK。
 Rust 注入入口与已完成的会话隔离属于前置改造；P1–P5 的其余项目仍待完成。
 

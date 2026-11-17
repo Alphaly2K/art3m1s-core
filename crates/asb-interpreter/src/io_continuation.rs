@@ -9,6 +9,7 @@ use mlua::{AnyUserData, Lua, MultiValue, Thread, ThreadStatus, UserData, Value};
 pub enum IoRequest {
     Read { path: String },
     Exists { path: String },
+    ModifiedTime { path: String },
     Write { path: String, data: Vec<u8> },
 }
 
@@ -41,6 +42,7 @@ impl IoFailure {
 pub enum IoResponse {
     Read(Vec<u8>),
     Exists(bool),
+    ModifiedTime(Option<i64>),
     Written,
     Failed { kind: IoFailure, message: String },
 }
@@ -59,6 +61,7 @@ pub struct IoTask {
     failed: bool,
     pending: Option<IoRequest>,
     initial_args: MultiValue,
+    result: Option<MultiValue>,
 }
 
 impl IoTask {
@@ -66,6 +69,14 @@ impl IoTask {
     /// script code that might retain references to the engine or IO functions.
     pub fn compile(lua: &Lua, source: &[u8], name: &str) -> Result<Self> {
         let function = lua.load(source).set_name(name).into_function()?;
+        Self::from_function(lua, function, MultiValue::new())
+    }
+
+    pub fn from_function(
+        lua: &Lua,
+        function: mlua::Function,
+        initial_args: MultiValue,
+    ) -> Result<Self> {
         Ok(Self {
             lua: lua.clone(),
             thread: lua.create_thread(function)?,
@@ -73,7 +84,8 @@ impl IoTask {
             finished: false,
             failed: false,
             pending: None,
-            initial_args: MultiValue::new(),
+            initial_args,
+            result: None,
         })
     }
 
@@ -109,19 +121,15 @@ impl IoTask {
         }
         let engine: Value = lua.globals().get("__engine")?;
         let args = MultiValue::from_vec(vec![engine, Value::Table(table)]);
-        Ok(Some(Self {
-            lua: lua.clone(),
-            thread: lua.create_thread(function)?,
-            started: false,
-            finished: false,
-            failed: false,
-            pending: None,
-            initial_args: args,
-        }))
+        Ok(Some(Self::from_function(lua, function, args)?))
     }
 
     pub fn pending_request(&self) -> Option<&IoRequest> {
         self.pending.as_ref()
+    }
+
+    pub fn take_result(&mut self) -> Option<MultiValue> {
+        self.result.take()
     }
 
     /// A missing response while waiting leaves the coroutine untouched.
@@ -147,6 +155,17 @@ impl IoTask {
                     }
                     (IoRequest::Exists { .. }, IoResponse::Exists(exists)) => {
                         MultiValue::from_vec(vec![Value::Boolean(true), Value::Boolean(exists)])
+                    }
+                    (IoRequest::ModifiedTime { .. }, IoResponse::ModifiedTime(time)) => {
+                        MultiValue::from_vec(vec![
+                            Value::Boolean(true),
+                            match time {
+                                Some(time) => {
+                                    Value::String(self.lua.create_string(time.to_string())?)
+                                }
+                                None => Value::Nil,
+                            },
+                        ])
                     }
                     (IoRequest::Write { .. }, IoResponse::Written) => {
                         MultiValue::from_vec(vec![Value::Boolean(true), Value::Boolean(true)])
@@ -174,6 +193,7 @@ impl IoTask {
         let values = self.thread.resume::<MultiValue>(args)?;
         if self.thread.status() == ThreadStatus::Finished {
             self.finished = true;
+            self.result = Some(values);
             return Ok(IoProgress::Completed);
         }
         if values.len() == 1
@@ -201,6 +221,82 @@ pub fn install(interpreter: &Interpreter) -> Result<()> {
     let methods: mlua::Table = native.metatable()?.get("__index")?;
     let helpers = lua.create_table()?;
     helpers.set("tag", methods.get::<mlua::Function>("tag")?)?;
+    helpers.set(
+        "mtime",
+        lua.create_function(|_, path: String| Ok(IoRequest::ModifiedTime { path }))?,
+    )?;
+    let query_variables = interpreter.variables_handle();
+    let path_variables = query_variables.clone();
+    helpers.set(
+        "query_path",
+        lua.create_function(move |_, (params, resolved): (mlua::Table, Option<bool>)| {
+            let path = query_param(&params, "file")?.unwrap_or_default();
+            if resolved == Some(true) {
+                return Ok(path);
+            }
+            crate::ExpressionEvaluator::new(&path_variables.lock().unwrap())
+                .resolve_param(&path)
+                .map(|value| value.as_string())
+                .map_err(mlua::Error::external)
+        })?,
+    )?;
+    helpers.set(
+        "complete_query",
+        lua.create_function(
+            move |_, (params, value, virtual_exe): (mlua::Table, Value, Option<bool>)| {
+                let system = query_param(&params, "system")?.unwrap_or_default();
+                let name = query_param(&params, "name")?.unwrap_or_default();
+                let local_write = query_param(&params, "writelocal")?;
+                let result = match system.as_str() {
+                    "file_exist" | "file_exists" => {
+                        crate::Value::Bool(matches!(value, Value::Boolean(true)))
+                    }
+                    "file_crc" => {
+                        let text = if virtual_exe == Some(true) {
+                            query_variables
+                                .lock()
+                                .unwrap()
+                                .get(name.strip_suffix(".check").unwrap_or(&name))
+                                .map(|value| value.as_string())
+                                .unwrap_or_default()
+                        } else if let Value::String(bytes) = value {
+                            crate::tags::var_handler::format_crc32(
+                                crc32(&bytes.as_bytes()),
+                                query_param(&params, "zerox")?.as_deref() == Some("1"),
+                                query_param(&params, "caps")?.as_deref() == Some("1"),
+                            )
+                        } else {
+                            String::new()
+                        };
+                        crate::Value::String(text)
+                    }
+                    "file_update_time" => {
+                        let time = match value {
+                            Value::String(value) => value.to_str()?.parse::<i64>().ok(),
+                            _ => None,
+                        };
+                        let text = match time {
+                            Some(time) => crate::tags::var_handler::format_update_time(
+                                &crate::luau_polyfill::utc_components_from_millis(time),
+                                query_param(&params, "format")?
+                                    .as_deref()
+                                    .filter(|format| !format.is_empty())
+                                    .unwrap_or("yyyy/MM/dd hh:mm:ss"),
+                            ),
+                            None => query_param(&params, "noexist")?.unwrap_or_default(),
+                        };
+                        crate::Value::String(text)
+                    }
+                    _ => return Err(mlua::Error::external("unsupported resumed file query")),
+                };
+                query_variables.lock().unwrap().with_local_writes(
+                    crate::tags::var_handler::param_is_on(local_write.as_ref()),
+                    |store| store.set(&name, result),
+                );
+                Ok(())
+            },
+        )?,
+    )?;
     helpers.set(
         "read",
         lua.create_function(|_, path: String| Ok(IoRequest::Read { path }))?,
@@ -276,6 +372,10 @@ pub fn install(interpreter: &Interpreter) -> Result<()> {
     methods.set("include", functions.get::<mlua::Function>("include")?)?;
     methods.set("isFileExists", functions.get::<mlua::Function>("exists")?)?;
     methods.set("tag", functions.get::<mlua::Function>("tag")?)?;
+    lua.set_named_registry_value(
+        "__art3m1s_io_file_query",
+        functions.get::<mlua::Function>("file_query")?,
+    )?;
     let flush: mlua::Function = functions.get("flush")?;
     let close: mlua::Function = functions.get("close")?;
     file_methods.set("flush", flush)?;
@@ -284,6 +384,44 @@ pub fn install(interpreter: &Interpreter) -> Result<()> {
         .set("io", functions.get::<mlua::Table>("io")?)?;
     lua.set_named_registry_value("__art3m1s_io_continuation", true)?;
     Ok(())
+}
+
+pub fn file_query_task(
+    lua: &Lua,
+    params: &std::collections::HashMap<String, String>,
+) -> Result<IoTask> {
+    let function = lua.named_registry_value("__art3m1s_io_file_query")?;
+    let table = lua.create_table()?;
+    for (key, value) in params {
+        table.set(key.as_str(), value.as_str())?;
+    }
+    let engine: Value = lua.globals().get("__engine")?;
+    IoTask::from_function(
+        lua,
+        function,
+        MultiValue::from_vec(vec![engine, Value::Table(table), Value::Boolean(true)]),
+    )
+}
+
+fn query_param(table: &mlua::Table, key: &str) -> mlua::Result<Option<String>> {
+    Ok(match table.get::<Value>(key)? {
+        Value::String(value) => Some(value.to_str()?.to_string()),
+        Value::Integer(value) => Some(value.to_string()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Boolean(value) => Some(value.to_string()),
+        _ => None,
+    })
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xEDB88320 & 0u32.wrapping_sub(crc & 1));
+        }
+    }
+    !crc
 }
 
 #[cfg(test)]

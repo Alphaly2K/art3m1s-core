@@ -67,7 +67,7 @@ enum Operation {
     Stat {
         namespace: &'static str,
         key: String,
-        exists_only: bool,
+        purpose: StatPurpose,
     },
     Read {
         namespace: &'static str,
@@ -82,11 +82,18 @@ enum Operation {
     },
 }
 
+enum StatPurpose {
+    Read,
+    Exists,
+    ModifiedTime,
+}
+
 enum Completion {
     Stat {
         found: bool,
         size: u64,
         revision: u64,
+        modified_utc_ms: Option<i64>,
     },
     Read,
     Written,
@@ -322,6 +329,7 @@ impl ScriptIoSession {
                 ExecutionMode::Chunk => {
                     let task = self.task.as_mut().unwrap();
                     if task.step(response.take())? == IoProgress::Completed {
+                        let _ = task.take_result();
                         self.completed = true;
                         return Ok(ScriptIoProgress::Completed);
                     }
@@ -361,6 +369,7 @@ impl ScriptIoSession {
         let path = match &request {
             IoRequest::Read { path }
             | IoRequest::Exists { path }
+            | IoRequest::ModifiedTime { path }
             | IoRequest::Write { path, .. } => path,
         };
         let normalized = logical_key(path)?;
@@ -372,12 +381,17 @@ impl ScriptIoSession {
             IoRequest::Read { .. } => Ok(Operation::Stat {
                 namespace,
                 key,
-                exists_only: false,
+                purpose: StatPurpose::Read,
             }),
             IoRequest::Exists { .. } => Ok(Operation::Stat {
                 namespace,
                 key,
-                exists_only: true,
+                purpose: StatPurpose::Exists,
+            }),
+            IoRequest::ModifiedTime { .. } => Ok(Operation::Stat {
+                namespace,
+                key,
+                purpose: StatPurpose::ModifiedTime,
             }),
             IoRequest::Write { data, .. } if namespace == "save" => {
                 Ok(Operation::Write { key, data })
@@ -442,6 +456,11 @@ impl ScriptIoSession {
                     found,
                     size,
                     revision,
+                    modified_utc_ms: if found {
+                        optional_signed_decimal(&metadata, "modified_utc_ms")?
+                    } else {
+                        None
+                    },
                 })
             }
             Operation::Read {
@@ -481,10 +500,20 @@ impl ScriptIoSession {
             (_, Completion::Failed(kind, message)) => Ok(Some(failed(kind, message))),
             (
                 Operation::Stat {
-                    exists_only: true, ..
+                    purpose: StatPurpose::Exists,
+                    ..
                 },
                 Completion::Stat { found, .. },
             ) => Ok(Some(IoResponse::Exists(found))),
+            (
+                Operation::Stat {
+                    purpose: StatPurpose::ModifiedTime,
+                    ..
+                },
+                Completion::Stat {
+                    modified_utc_ms, ..
+                },
+            ) => Ok(Some(IoResponse::ModifiedTime(modified_utc_ms))),
             (Operation::Stat { .. }, Completion::Stat { found: false, .. }) => {
                 Ok(Some(failed(IoFailure::NotFound, "file not found")))
             }
@@ -562,6 +591,17 @@ fn decimal(metadata: &Value, key: &str) -> Result<u64, ProtocolError> {
         return Err(invalid_reply());
     }
     Ok(value)
+}
+fn optional_signed_decimal(metadata: &Value, key: &str) -> Result<Option<i64>, ProtocolError> {
+    let Some(value) = metadata.get(key).filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let text = value.as_str().ok_or_else(invalid_reply)?;
+    let value = text.parse::<i64>().map_err(|_| invalid_reply())?;
+    if value.to_string() != text {
+        return Err(invalid_reply());
+    }
+    Ok(Some(value))
 }
 fn logical_key(path: &str) -> Result<String, ProtocolError> {
     let path = path.replace('\\', "/");

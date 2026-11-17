@@ -555,6 +555,11 @@ fn utc_datetime_from_unix(seconds: i64) -> DateTimeParts {
     }
 }
 
+pub(crate) fn utc_components_from_millis(milliseconds: i64) -> [i64; 6] {
+    let p = utc_datetime_from_unix(milliseconds.div_euclid(1000));
+    [p.year, p.month, p.day, p.hour, p.minute, p.second]
+}
+
 fn unix_from_utc_parts(year: i64, month: i64, day: i64, hour: i64, min: i64, sec: i64) -> i64 {
     let days = days_from_civil(year, month, day);
     days * 86_400 + hour * 3600 + min * 60 + sec

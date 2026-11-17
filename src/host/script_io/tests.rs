@@ -71,6 +71,7 @@ struct MemoryHost {
     files: HashMap<(String, String), (u64, Vec<u8>)>,
     reads: Vec<(String, usize)>,
     captions: Vec<String>,
+    modified_times: HashMap<(String, String), i64>,
 }
 
 impl MemoryHost {
@@ -86,7 +87,8 @@ impl MemoryHost {
             IO_STAT => match self.files.get(&file_key) {
                 Some((revision, bytes)) => reply(
                     request,
-                    json!({"status":"ok","found":true,"size":bytes.len().to_string(),"revision":revision.to_string()}),
+                    json!({"status":"ok","found":true,"size":bytes.len().to_string(),"revision":revision.to_string(),
+                        "modified_utc_ms":self.modified_times.get(&file_key).map(|value| value.to_string())}),
                     vec![],
                 ),
                 None => reply(request, json!({"status":"ok","found":false}), vec![]),
@@ -249,6 +251,230 @@ fn scenario_replacement_is_atomic_and_stale_loading_results_cannot_touch_the_new
 }
 
 #[test]
+fn suspended_filters_preserve_pass_consume_and_filter_command_order() {
+    let mut session = session(1, TransportLimits::default(), 128);
+    let mut host = MemoryHost::default();
+    host.asset("filter", b"yes");
+    session
+        .open_scenario(
+            br#"
+*main
+[caption data=pass]
+[caption data=consume]
+[custom data=only]
+[lua]
+filter_calls = 0
+local function filter(e, p)
+    filter_calls = filter_calls + 1
+    local saved = filter_calls
+    assert(e:file('filter') == 'yes' and saved == filter_calls)
+    e:tag{'caption', data='emitted:' .. p.data}
+    return p.data == 'consume' and 1 or 0
+end
+__engine:setTagFilter{caption=filter, custom=filter}
+[/lua]
+"#,
+            "filter",
+            "main",
+        )
+        .unwrap();
+    host.run(&mut session);
+    assert_eq!(
+        host.captions,
+        ["pass", "emitted:pass", "emitted:consume", "emitted:only"]
+    );
+    assert_eq!(
+        session
+            .interpreter()
+            .lua()
+            .globals()
+            .get::<i32>("filter_calls")
+            .unwrap(),
+        3
+    );
+}
+
+#[test]
+fn dynamic_and_queued_filters_resume_the_expanded_tag_without_replaying_its_wrapper() {
+    let mut session = session(1, TransportLimits::default(), 128);
+    let mut host = MemoryHost::default();
+    host.asset("outer", b"ok");
+    host.asset("caption", b"ok");
+    session
+        .open_scenario(
+            br#"
+*main
+[tag data="caption,data,inline"]
+[var name=after data=1]
+[lua]
+tag_calls, caption_calls = 0, 0
+__engine:setTagFilter{
+    tag = function(e, p)
+        tag_calls = tag_calls + 1
+        assert(e:file('outer') == 'ok')
+        return 0
+    end,
+    caption = function(e, p)
+        caption_calls = caption_calls + 1
+        assert(e:file('caption') == 'ok')
+        e:tag{'caption', data='emitted:' .. p.data}
+        return 0
+    end,
+}
+__engine:enqueueTag{'tag', data='caption,data,queued'}
+[/lua]
+"#,
+            "expanded-filter",
+            "main",
+        )
+        .unwrap();
+    host.run(&mut session);
+    assert_eq!(
+        host.captions,
+        ["queued", "emitted:queued", "inline", "emitted:inline"]
+    );
+    assert_eq!(
+        session
+            .interpreter()
+            .lua()
+            .globals()
+            .get::<i32>("tag_calls")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        session
+            .interpreter()
+            .lua()
+            .globals()
+            .get::<i32>("caption_calls")
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        session
+            .interpreter()
+            .get_variable("after")
+            .and_then(|value| value.as_int()),
+        Some(1)
+    );
+}
+
+#[test]
+fn a_suspended_elseif_filter_retains_its_jump_arrival_semantics() {
+    let mut session = session(1, TransportLimits::default(), 128);
+    let mut host = MemoryHost::default();
+    host.asset("condition", b"ok");
+    session
+        .open_scenario(
+            br#"
+*main
+[if estimate=0]
+[caption data=wrong-if]
+[elseif estimate=1]
+[caption data=right]
+[else]
+[caption data=wrong-else]
+[/if]
+[lua]
+filter_calls = 0
+__engine:setTagFilter{['elseif']=function(e, p)
+    filter_calls=filter_calls+1
+    assert(e:file('condition') == 'ok')
+    return 0
+end}
+[/lua]
+"#,
+            "elseif-filter",
+            "main",
+        )
+        .unwrap();
+    host.run(&mut session);
+    assert_eq!(host.captions, ["right"]);
+    assert_eq!(
+        session
+            .interpreter()
+            .lua()
+            .globals()
+            .get::<i32>("filter_calls")
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn scenario_and_lua_file_queries_wait_for_host_data_and_share_legacy_formatting() {
+    let mut session = session(1, TransportLimits::default(), 128);
+    let mut host = MemoryHost::default();
+    host.asset("hash", b"123456789");
+    host.asset("empty", b"");
+    host.modified_times
+        .insert(("asset".into(), "hash".into()), -1);
+    host.files
+        .insert(("save".into(), "slot".into()), (1, vec![]));
+    session
+        .open_scenario(
+            br#"
+*main
+[var system=file_exists name=t.exists file=hash]
+[var system=file_crc name=t.crc file=hash zerox=1 caps=1]
+[var system=file_update_time name=t.time file=hash format="yyyy-MM-dd hh:mm:ss"]
+[var system=file_update_time name=t.no_time file=empty noexist=unknown]
+[calllua function=check]
+[lua]
+function check(e)
+    e:tag{'var', system='file_exists', name='t.saved', file='slot', save=1}
+    assert(e:var('t.saved') == '1')
+    e:tag{'var', system='file_crc', name='t.empty', file='empty'}
+    assert(e:var('t.empty') == '00000000')
+    e:tag{'var', system='file_exist', name='t.exe', file='game.exe'}
+    assert(e:var('t.exe') == '1')
+    e:tag{'var', name='t.expected.exe', data='expected'}
+    e:tag{'var', system='file_crc', name='t.expected.exe.check', file='game.exe'}
+    assert(e:var('t.expected.exe.check') == 'expected')
+    e:tag{'var', name='t.path', data='hash'}
+    e:tag{'var', system='file_crc', name='t.dynamic', file='$t.path'}
+    assert(e:var('t.dynamic') == 'cbf43926')
+    e:tag{'var', system='file_update_time', name='t.lua_time', file='hash', format='yyyy/MM/dd'}
+    assert(e:var('t.lua_time') == '1969/12/31')
+end
+[/lua]
+"#,
+            "file-queries",
+            "main",
+        )
+        .unwrap();
+    session.step().unwrap();
+    assert!(session.interpreter().get_variable("t.exists").is_none());
+    let request = requests(&mut session).pop().unwrap();
+    session.submit_replies(&[host.complete(&request)]).unwrap();
+    assert!(session.interpreter().get_variable("t.exists").is_none());
+    host.run(&mut session);
+    assert_eq!(
+        session
+            .interpreter()
+            .get_variable("t.exists")
+            .map(|value| value.as_bool()),
+        Some(true)
+    );
+    for (name, expected) in [
+        ("t.crc", "0xCBF43926"),
+        ("t.time", "1969-12-31 23:59:59"),
+        ("t.no_time", "unknown"),
+    ] {
+        assert_eq!(
+            session
+                .interpreter()
+                .get_variable(name)
+                .unwrap()
+                .as_string(),
+            expected
+        );
+    }
+    assert!(host.reads.iter().all(|(key, _)| key != "empty"));
+}
+
+#[test]
 fn nested_dynamic_reads_short_chunks_and_save_read_your_writes_use_only_the_host() {
     let mut limits = TransportLimits::default();
     limits.blob_bytes = 2;
@@ -389,6 +615,8 @@ fn malformed_reply_batches_preserve_requests_and_enforce_revision_and_eof() {
     for metadata in [
         json!({"status":"ok","found":true,"size":2,"revision":"7"}),
         json!({"status":"ok","found":true,"size":"18446744073709551616","revision":"7"}),
+        json!({"status":"ok","found":true,"size":"2","revision":"7","modified_utc_ms":0}),
+        json!({"status":"ok","found":true,"size":"2","revision":"7","modified_utc_ms":"9223372036854775808"}),
     ] {
         let before = session.state();
         assert!(matches!(
@@ -515,8 +743,8 @@ fn resource_limits_and_invalid_keys_complete_without_physical_io_or_false_succes
             br#"
         assert(__engine:file('../outside') == nil)
         assert(__engine:file('/absolute') == nil)
-        local ok = pcall(function() __engine:tag{'var',system='file_exists',name='t.x',file='/'} end)
-        assert(not ok)
+        __engine:tag{'var',system='file_exists',name='t.x',file='/'}
+        assert(__engine:var('t.x') == '0')
         assert(__engine:file('large') == nil)
         local f = io.open('asset', 'w')
         assert(f == nil)

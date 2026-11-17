@@ -70,13 +70,42 @@ function io.lines(path)
         return line
     end
 end
+local function file_query(self, params, resolved)
+    local system = params.system
+    local path = h.query_path(params, resolved)
+    if tostring(params.save) == '1' and not path:find(':', 1, true)
+        and path:sub(1, 1) ~= '/' and path:sub(1, 1) ~= '\\' then
+        local prefix = self:var('s.savepath') .. '/'
+        local normalized = path:gsub('\\', '/')
+        if normalized:sub(1, #prefix):lower() ~= prefix:lower() then path = prefix .. path end
+    end
+    local value
+    if system == 'file_exist' or system == 'file_exists' then
+        if path:lower():sub(-4) == '.exe' then value = true
+        else
+            local ok, exists = yield(h.exists(path))
+            value = ok and exists or false
+        end
+    elseif system == 'file_crc' then
+        if path:lower():sub(-4) == '.exe' then
+            h.complete_query(params, nil, true)
+            return
+        end
+        value = read(path)
+    elseif system == 'file_update_time' then
+        local ok, time = yield(h.mtime(path))
+        if ok then value = time end
+    else error('unsupported resumed file query', 2) end
+    h.complete_query(params, value)
+end
 return {
     io = io, flush = flush, close = close,
+    file_query = file_query,
     tag = function(self, params, ...)
         if type(params) == "table" and params[1] == "var" then
             local s = params.system
             if s == "file_exist" or s == "file_exists" or s == "file_crc" or s == "file_update_time" then
-                error("file var queries require the resumable scenario dispatcher", 2)
+                return file_query(self, params)
             end
         end
         return h.tag(self, params, ...)

@@ -755,7 +755,7 @@ fn apply_sound_info(
 }
 
 /// 格式化 CRC32：8 位十六进制，zerox 加 0x 前缀，caps 大写。
-fn format_crc32(crc: u32, zerox: bool, caps: bool) -> String {
+pub(crate) fn format_crc32(crc: u32, zerox: bool, caps: bool) -> String {
     let hex = if caps {
         format!("{crc:08X}")
     } else {
@@ -768,7 +768,7 @@ fn format_crc32(crc: u32, zerox: bool, caps: bool) -> String {
 ///
 /// 模式：yyyy=四位年、yy=年末两位、MM/dd/hh/mm/ss=补零两位、M/d/h/m/s=不补零；
 /// 其余字符原样输出。较长模式优先匹配（yyyy 先于 yy，MM 先于 M）。
-fn format_update_time(c: &[i64; 6], format: &str) -> String {
+pub(crate) fn format_update_time(c: &[i64; 6], format: &str) -> String {
     let [year, month, day, hour, minute, second] = *c;
     let mut out = String::with_capacity(format.len() + 8);
     let chars: Vec<char> = format.chars().collect();

@@ -225,7 +225,7 @@ request ID、epoch 和 runtime 均由信封/提交描述符携带。
 | 消息 | metadata | blob |
 |---|---|---|
 | stat 请求 | `namespace: "asset"/"save"`，`key: string` | 空 |
-| stat 成功 | `status: "ok"`，`found: bool`；found=true 时还需 `size`、`revision` | 空 |
+| stat 成功 | `status: "ok"`，`found: bool`；found=true 时还需 `size`、`revision`，可选 `modified_utc_ms` | 空 |
 | read 请求 | namespace、key、revision、offset、length | 空 |
 | read 成功 | `status: "ok"`、revision、`eof: bool` | 读取的原始字节 |
 | write_atomic 请求 | `namespace: "save"`、key | 整个待提交文件 |
@@ -233,6 +233,7 @@ request ID、epoch 和 runtime 均由信封/提交描述符携带。
 | 任何失败 | status 为 `not_found`/`denied`/`io_error`/`cancelled`/`unsupported`，可选 `message: string` | 空 |
 
 size、revision、offset、length 均为规范十进制 u64 字符串，不使用 JSON number。
+modified_utc_ms 为规范十进制 i64 字符串，表示 UTC Unix 毫秒；缺失或 null 表示无时间元数据。
 读取须保持 stat 返回的 revision，单次不超过 length；短读允许，但非 EOF 必须有数据，
 累计数据必须与 stat 大小一致，准确到达文件末尾时 eof=true。revision/EOF/大小不一致的
 结果返回 ARGUMENT，原请求仍等待 Host 修正。Host 发现资源变化时可返回 io_error，让

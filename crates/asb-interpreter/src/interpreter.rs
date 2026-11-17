@@ -208,6 +208,20 @@ enum LuaTagFilterDecision {
     Missing,
     PassThrough,
     Consume,
+    Pending,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FilterOrigin {
+    Inline,
+    DynamicInline,
+    Queued,
+}
+
+struct PendingLuaFilter {
+    instruction: Instruction,
+    origin: FilterOrigin,
+    decision: Option<LuaTagFilterDecision>,
 }
 
 fn lua_filter_consumes(value: &mlua::Value) -> bool {
@@ -309,6 +323,7 @@ pub struct Interpreter {
     io_task: Option<crate::io_continuation::IoTask>,
     loading_lua: VecDeque<(String, usize, String)>,
     loading_lua_key: Option<(String, usize)>,
+    io_filter: Option<PendingLuaFilter>,
 }
 
 fn json_to_lua_value(lua: &Lua, value: serde_json::Value) -> mlua::Result<mlua::Value> {
@@ -573,6 +588,7 @@ impl Interpreter {
             io_task: None,
             loading_lua: VecDeque::new(),
             loading_lua_key: None,
+            io_filter: None,
         }
     }
 
@@ -606,6 +622,17 @@ impl Interpreter {
         })?;
         let progress = task.step(Some(response))?;
         if progress == crate::io_continuation::IoProgress::Completed {
+            if let Some(filter) = &mut self.io_filter {
+                let result = task
+                    .take_result()
+                    .and_then(|values| values.into_iter().next())
+                    .unwrap_or(mlua::Value::Nil);
+                filter.decision = Some(if lua_filter_consumes(&result) {
+                    LuaTagFilterDecision::Consume
+                } else {
+                    LuaTagFilterDecision::PassThrough
+                });
+            }
             self.io_task = None;
             if let Some(key) = self.loading_lua_key.take() {
                 self.executed_lua_blocks.insert(key);
@@ -618,10 +645,11 @@ impl Interpreter {
         self.io_task = None;
         self.loading_lua.clear();
         self.loading_lua_key = None;
+        self.io_filter = None;
     }
 
     fn check_io_idle(&self) -> Result<()> {
-        if self.io_task.is_some() {
+        if self.io_task.is_some() || self.io_filter.is_some() {
             return Err(Error::RuntimeError {
                 line: self.current_line,
                 message: "cannot replace script state while Host IO is pending".into(),
@@ -942,31 +970,41 @@ impl Interpreter {
             if self.drive_loading_lua()? {
                 return Ok(ExecutionResult::HostIoPending);
             }
-            // A queued handler may return to a PC that is already the next
-            // script instruction. Re-emit the original wait before flushing
-            // deferred tags or executing that instruction.
-            //
-            // Load-restored waits set `allow_queue` so onLoad follow-up can
-            // run first; only hold once that queue is empty.
-            if self.queued_wait_blocks_before_flush()
-                && let Some(event) = self.queued_wait_at_current_position()
-            {
-                self.last_wait_from_queue = true;
-                self.last_queue_pause_is_wait = true;
-                return Ok(ExecutionResult::Wait(event));
-            }
-            // 先抽干 Lua 通过 e:tag{} 排队的标签（如图层操作），它们由上一条
-            // [calllua]/[lua] 产生，必须走标签管线才能发出对应事件。
-            if let Some(result) = self.flush_tag_queue()? {
-                return Ok(result);
-            }
-            if !self.loading_lua.is_empty() {
-                continue;
-            }
-            if let Some(event) = self.queued_wait_at_current_position() {
-                self.last_wait_from_queue = true;
-                self.last_queue_pause_is_wait = true;
-                return Ok(ExecutionResult::Wait(event));
+            let resuming_inline_filter = self.io_filter.as_ref().is_some_and(|filter| {
+                filter.origin != FilterOrigin::Queued && filter.decision.is_some()
+            });
+            let resuming_dynamic_filter = self.io_filter.as_ref().is_some_and(|filter| {
+                filter.origin == FilterOrigin::DynamicInline && filter.decision.is_some()
+            });
+            // Finish the suspended tag before draining commands emitted by its filter.
+            if !resuming_inline_filter {
+                // A queued handler may return to a PC that is already the next
+                // script instruction. Re-emit the original wait before flushing
+                // deferred tags or executing that instruction.
+                //
+                // Load-restored waits set `allow_queue` so onLoad follow-up can
+                // run first; only hold once that queue is empty.
+                if self.io_filter.is_none()
+                    && self.queued_wait_blocks_before_flush()
+                    && let Some(event) = self.queued_wait_at_current_position()
+                {
+                    self.last_wait_from_queue = true;
+                    self.last_queue_pause_is_wait = true;
+                    return Ok(ExecutionResult::Wait(event));
+                }
+                // 先抽干 Lua 通过 e:tag{} 排队的标签（如图层操作），它们由上一条
+                // [calllua]/[lua] 产生，必须走标签管线才能发出对应事件。
+                if let Some(result) = self.flush_tag_queue()? {
+                    return Ok(result);
+                }
+                if !self.loading_lua.is_empty() {
+                    continue;
+                }
+                if let Some(event) = self.queued_wait_at_current_position() {
+                    self.last_wait_from_queue = true;
+                    self.last_queue_pause_is_wait = true;
+                    return Ok(ExecutionResult::Wait(event));
+                }
             }
             // 走到这里说明队列已抽干，接下来执行的是脚本流里的内联指令；它若产生
             // Wait，current_line 指向的就是该 Wait 指令本身，宿主需要 advance_line()
@@ -993,7 +1031,11 @@ impl Interpreter {
                 return Ok(ExecutionResult::Completed);
             }
 
-            let instruction = script.instructions[self.current_line].clone();
+            let instruction = if resuming_inline_filter {
+                self.io_filter.as_ref().unwrap().instruction.clone()
+            } else {
+                script.instructions[self.current_line].clone()
+            };
 
             if std::env::var("ASB_TRACE_STEP").is_ok() {
                 eprintln!(
@@ -1009,7 +1051,8 @@ impl Interpreter {
             // 的分支已经命中并执行完毕，剩余分支必须整段跳过到匹配的 [/if]；
             // 只有经由 if/elseif 条件为假的 Jump 到达时才进入正常求值派发
             // （见 docs/tag/script/if.md 与 tags/condition.rs）。
-            if !arrived_by_jump
+            if !resuming_inline_filter
+                && !arrived_by_jump
                 && !instruction.has("\u{b}index")
                 && (instruction.tag == "elseif" || instruction.tag == "else")
             {
@@ -1074,10 +1117,18 @@ impl Interpreter {
 
             // 执行标签
             let tag_result = self.execute_tag(&instruction, true)?;
+            if resuming_dynamic_filter && matches!(tag_result, TagResult::Dynamic(_)) {
+                return Err(Error::RuntimeError {
+                    line: self.current_line,
+                    message: "不支持嵌套的 tag 标签".into(),
+                });
+            }
 
             match tag_result {
                 TagResult::HostIoPending => {
-                    self.current_line += 1;
+                    if self.io_filter.is_none() {
+                        self.current_line += 1;
+                    }
                     return Ok(ExecutionResult::HostIoPending);
                 }
                 TagResult::Continue => {
@@ -1194,7 +1245,11 @@ impl Interpreter {
                     // 处理内部指令的结果（不增加行号，因为外层会处理）
                     match inner_result {
                         TagResult::HostIoPending => {
-                            self.current_line += 1;
+                            if let Some(filter) = &mut self.io_filter {
+                                filter.origin = FilterOrigin::DynamicInline;
+                            } else {
+                                self.current_line += 1;
+                            }
                             return Ok(ExecutionResult::HostIoPending);
                         }
                         TagResult::Continue => {
@@ -1332,33 +1387,47 @@ impl Interpreter {
         if self.io_task.is_some() {
             return Ok(Some(ExecutionResult::HostIoPending));
         }
+        if self
+            .io_filter
+            .as_ref()
+            .is_some_and(|filter| filter.origin != FilterOrigin::Queued)
+        {
+            return Ok(None);
+        }
         loop {
             if !self.loading_lua.is_empty() {
                 return Ok(None);
             }
             // e:setScriptStack 请求的调用栈重写在此落实——Lua 执行期间只能
             // 记录请求，队列抽干点是回到解释器控制流后的第一个安全时机。
-            self.apply_pending_stack_override()?;
-            let queued = {
-                let mut ctx = self.engine_ctx.lock().unwrap();
-                if ctx.tag_queue.is_empty() {
-                    None
-                } else {
-                    let queued = ctx.tag_queue.remove(0);
-                    if ctx.immediate_tag_count > 0 {
-                        ctx.immediate_tag_count -= 1;
+            let resuming_filter = self.io_filter.as_ref().is_some_and(|filter| {
+                filter.origin == FilterOrigin::Queued && filter.decision.is_some()
+            });
+            let instruction = if resuming_filter {
+                self.io_filter.as_ref().unwrap().instruction.clone()
+            } else {
+                self.apply_pending_stack_override()?;
+                let queued = {
+                    let mut ctx = self.engine_ctx.lock().unwrap();
+                    if ctx.tag_queue.is_empty() {
+                        None
+                    } else {
+                        let queued = ctx.tag_queue.remove(0);
+                        if ctx.immediate_tag_count > 0 {
+                            ctx.immediate_tag_count -= 1;
+                        }
+                        Some(queued)
                     }
-                    Some(queued)
-                }
-            };
-            let Some((tag, params)) = queued else {
-                return Ok(None);
-            };
+                };
+                let Some((tag, params)) = queued else {
+                    return Ok(None);
+                };
 
-            let instruction = Instruction {
-                tag,
-                params,
-                line: self.current_line,
+                Instruction {
+                    tag,
+                    params,
+                    line: self.current_line,
+                }
             };
 
             if std::env::var("ASB_TRACE_FLUSH").is_ok() {
@@ -1375,13 +1444,20 @@ impl Interpreter {
             // expanded instruction enters the filter boundary. Direct tags
             // queued by a filter still use the low-level path above and do not
             // recursively re-enter the filter.
-            let mut result = self.execute_tag(&instruction, false)?;
-            if let TagResult::Dynamic(inner) = result {
-                result = self.execute_tag(&inner, true)?;
+            let mut result = self.execute_tag(&instruction, resuming_filter)?;
+            if !resuming_filter {
+                if let TagResult::Dynamic(inner) = result {
+                    result = self.execute_tag(&inner, true)?;
+                }
             }
 
             match result {
-                TagResult::HostIoPending => return Ok(Some(ExecutionResult::HostIoPending)),
+                TagResult::HostIoPending => {
+                    if let Some(filter) = &mut self.io_filter {
+                        filter.origin = FilterOrigin::Queued;
+                    }
+                    return Ok(Some(ExecutionResult::HostIoPending));
+                }
                 TagResult::Continue => continue,
                 TagResult::Emit(event) | TagResult::Wait(event) => {
                     match self.emit_event(event.clone()) {
@@ -1843,8 +1919,10 @@ impl Interpreter {
             // tags.wait -> enqueueTag{"wait"} 会无限递归。
             // filter 是 Lua 函数，可能调用 e:getScriptStack——先刷新栈镜像。
             self.sync_script_state_to_engine();
-            let filter_decision =
-                self.dispatch_lua_tag_filter(&instruction.tag, &instruction.params)?;
+            let filter_decision = self.dispatch_lua_tag_filter(instruction)?;
+            if filter_decision == LuaTagFilterDecision::Pending {
+                return Ok(TagResult::HostIoPending);
+            }
             // A pass-through filter can decorate a registered macro as well
             // as a builtin. Only filter-only tags have no default handler.
             if filter_decision == LuaTagFilterDecision::Consume
@@ -1942,16 +2020,30 @@ impl Interpreter {
             && let Some(system_raw) = instruction.get("system")
         {
             if self.resumable_io {
-                let variables = self.variables.lock().unwrap();
-                let system = ExpressionEvaluator::new(&variables).resolve_param_str(system_raw)?;
-                if matches!(
-                    system.as_str(),
-                    "file_exist" | "file_exists" | "file_crc" | "file_update_time"
-                ) {
-                    return Err(Error::RuntimeError {
-                        line: current_line,
-                        message: "file var queries require a resumable query dispatcher".into(),
-                    });
+                let params = {
+                    let variables = self.variables.lock().unwrap();
+                    let evaluator = ExpressionEvaluator::new(&variables);
+                    let system = evaluator.resolve_param_str(system_raw)?;
+                    if matches!(
+                        system.as_str(),
+                        "file_exist" | "file_exists" | "file_crc" | "file_update_time"
+                    ) {
+                        let mut params = HashMap::new();
+                        for (key, value) in &instruction.params {
+                            params.insert(key.clone(), evaluator.resolve_param_str(value)?);
+                        }
+                        Some(params)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(params) = params {
+                    let mut task = crate::io_continuation::file_query_task(&self.lua, &params)?;
+                    if task.step(None)? == crate::io_continuation::IoProgress::Waiting {
+                        self.io_task = Some(task);
+                        return Ok(TagResult::HostIoPending);
+                    }
+                    return Ok(TagResult::Continue);
                 }
             }
             let resolved = {
@@ -2116,10 +2208,27 @@ impl Interpreter {
     /// 调用签名与 `calllua` 一致：`func(__engine, param_table)`。
     /// 非零返回值表示脚本已经处理，0/nil 表示继续执行引擎默认处理。
     fn dispatch_lua_tag_filter(
-        &self,
-        tag: &str,
-        params: &HashMap<String, String>,
+        &mut self,
+        instruction: &Instruction,
     ) -> Result<LuaTagFilterDecision> {
+        if let Some(filter) = &self.io_filter {
+            if filter.instruction.tag != instruction.tag
+                || filter.instruction.params != instruction.params
+            {
+                return Err(Error::RuntimeError {
+                    line: self.current_line,
+                    message: "resumed filter does not match its original tag".into(),
+                });
+            }
+            let decision = filter.decision.ok_or_else(|| Error::RuntimeError {
+                line: self.current_line,
+                message: "filter IO has not completed".into(),
+            })?;
+            self.io_filter = None;
+            return Ok(decision);
+        }
+        let tag = instruction.tag.as_str();
+        let params = &instruction.params;
         // 查找 filter.<tag> 函数，嵌套路径如 tags.msgon 走 Lua 递归解析。
         let func: mlua::Function = {
             let tags: mlua::Table = match self.lua.named_registry_value(TAG_FILTER_REGISTRY_KEY) {
@@ -2158,6 +2267,29 @@ impl Interpreter {
 
         // 获取 engine 对象
         let engine: mlua::Value = self.lua.globals().get("__engine")?;
+
+        if self.resumable_io {
+            let args = mlua::MultiValue::from_vec(vec![engine, mlua::Value::Table(param_table)]);
+            let mut task = crate::io_continuation::IoTask::from_function(&self.lua, func, args)?;
+            if task.step(None)? == crate::io_continuation::IoProgress::Waiting {
+                self.io_task = Some(task);
+                self.io_filter = Some(PendingLuaFilter {
+                    instruction: instruction.clone(),
+                    origin: FilterOrigin::Inline,
+                    decision: None,
+                });
+                return Ok(LuaTagFilterDecision::Pending);
+            }
+            let value = task
+                .take_result()
+                .and_then(|values| values.into_iter().next())
+                .unwrap_or(mlua::Value::Nil);
+            return Ok(if lua_filter_consumes(&value) {
+                LuaTagFilterDecision::Consume
+            } else {
+                LuaTagFilterDecision::PassThrough
+            });
+        }
 
         let result: mlua::Value = match engine {
             mlua::Value::UserData(ud) => func.call((ud, param_table)),
@@ -2545,6 +2677,7 @@ impl Interpreter {
         line: usize,
         stack: Vec<CallFrame>,
     ) -> Result<()> {
+        self.clear_host_io();
         self.current_script = Some(script.to_string());
         self.current_line = line;
         self.call_stack = stack;
