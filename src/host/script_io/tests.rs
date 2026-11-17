@@ -1982,6 +1982,105 @@ end
 }
 
 #[test]
+fn runtime_dispatches_save_and_load_with_confirmation_before_the_script_continues() {
+    use crate::host::runtime;
+
+    let mut host = MemoryHost::default();
+    host.asset(
+        "boot.iet",
+        br#"*top
+[save file=../invalid]
+[save file=slot]
+[calllua function=load_once]
+[load file=missing]
+[caption data=done]
+[stop]
+[lua]
+function load_once()
+    local e=__engine
+    if e:var('g.loaded') ~= '1' then
+        e:tag{'var', name='g.loaded', data=1}
+        e:enqueueTag{'load', file='slot'}
+        e:enqueueTag{'caption', data='abandoned'}
+    end
+end
+[/lua]
+"#,
+    );
+    let limits = TransportLimits {
+        control: QueueBudget {
+            records: 1,
+            bytes: 8192,
+        },
+        ..TransportLimits::default()
+    };
+    let handle = runtime::create(0, limits, 8192).unwrap();
+    runtime::open_project(
+        handle,
+        b"[WINDOWS]\nWIDTH=320\nHEIGHT=200\nBOOT=boot.iet\n",
+        "windows",
+        None,
+    )
+    .unwrap();
+    let frame = HostFrame {
+        id: 1,
+        monotonic_ns: 0,
+        utc_unix_ms: 0,
+        utc_offset_minutes: 0,
+    };
+    let mut writes = Vec::new();
+    let mut observed = Vec::new();
+    let mut blocked = false;
+    for _ in 0..4096 {
+        let progress = runtime::step(handle, frame).unwrap();
+        blocked |= progress == ScriptIoProgress::WouldBlock;
+        let mut bytes = [0; 8192];
+        let result = runtime::poll_events(handle, &mut bytes).unwrap();
+        let bytes = &bytes[..result.written_bytes];
+        let requests = decode_requests(bytes);
+        if !bytes.is_empty() && requests.is_empty() {
+            let domain = u16::from_le_bytes(bytes[6..8].try_into().unwrap());
+            let kind = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+            if (domain, kind) == (Domain::Runtime as u16, RUNTIME_PERSISTENCE_RESULT.kind)
+                || domain == Domain::Ui as u16
+            {
+                observed.push(serde_json::from_slice::<Value>(&bytes[64..]).unwrap());
+            }
+        }
+        for request in requests {
+            let key = request.metadata["key"].as_str().unwrap();
+            let response = if request.identity.service == IO_WRITE_ATOMIC {
+                writes.push(key.to_owned());
+                if key == "system.dat" {
+                    reply(&request, json!({"status":"io_error"}), vec![])
+                } else {
+                    host.complete(&request)
+                }
+            } else {
+                host.complete(&request)
+            };
+            runtime::submit_replies(handle, &[response]).unwrap();
+        }
+        if progress == ScriptIoProgress::Event {
+            break;
+        }
+    }
+    assert!(blocked);
+    assert_eq!(writes, ["slot", "saveg.dat", "system.dat"]);
+    assert_eq!(
+        observed,
+        [
+            json!({"operation":"save", "status":"failed", "reason":"denied", "files_written":0}),
+            json!({"operation":"save", "status":"failed", "reason":"io_error", "files_written":2}),
+            json!({"operation":"load", "status":"restored"}),
+            json!({"operation":"load", "status":"failed", "reason":"not_found"}),
+            json!({"text":"done"}),
+        ]
+    );
+    runtime::destroy(handle).unwrap();
+}
+
+#[test]
 fn host_calendar_and_monotonic_clocks_remain_distinct_across_io_suspension() {
     let mut session = session(1, TransportLimits::default(), 1024);
     session

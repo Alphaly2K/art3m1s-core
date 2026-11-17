@@ -74,9 +74,15 @@ impl ScriptIoSession {
                     self.resume_scenario()
                         .map(|()| Some(ScriptIoProgress::Event))
                 }
+                ScriptIoProgress::Event if self.has_persistence_event() => {
+                    self.start_persistence().map(|()| None)
+                }
                 ScriptIoProgress::Event => self.dispatch_ui_event(),
                 ScriptIoProgress::SaveReady if self.shutdown.is_closing_or_closed() => {
                     self.notify_closed().map(Some)
+                }
+                ScriptIoProgress::SaveReady | ScriptIoProgress::LoadReady => {
+                    self.finish_persistence(progress).map(|()| None)
                 }
                 _ => return Ok(progress),
             };

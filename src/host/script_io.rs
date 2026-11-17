@@ -2,12 +2,14 @@
 //! storage; this driver never installs a physical file loader or renderer.
 
 mod lifecycle;
+mod persistence;
 mod scene;
 mod ui;
 mod wait;
 
 use lifecycle::Shutdown;
 pub use lifecycle::{RUNTIME_CLOSED, RUNTIME_EXIT_REQUESTED};
+pub use persistence::RUNTIME_PERSISTENCE_RESULT;
 pub use ui::{UI_CAPTION, UI_DIALOG};
 
 use super::protocol::*;

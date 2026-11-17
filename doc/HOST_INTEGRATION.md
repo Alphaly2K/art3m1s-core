@@ -144,6 +144,10 @@ IO 挂起期间可继续呈现上次取得的帧。借用跨重载有效；单�
 然后调用 `render(&lease)`。成功后由 Host 结束帧并呈现；出错时也要结束已打开的访问和帧。
 清理适配器缓存须在后端上下文可用时调用 `clear_cached_textures()`。
 
+句柄入口的 `step` 会自动处理 `[save]` 和编号 `[load]`。Host 按现有 IO 请求读写并回填结果，
+Core 会在继续场景前将 `persistence_result` 排入可靠事件队列。成功读档从恢复后的脚本位置
+继续。当前句柄入口的存档快照覆盖解释器状态，完整画面、文字及音频快照仍待接入。
+
 独立解释器启用 resumable IO 后，未安装同步加载器时，start/boot/restore_position 可能
 受理一个尚待 Host 完成的加载，调用方随后处理 HostIoPending。显式安装的同步内存加载器
 仍可使用；ScriptIoSession 始终通过请求传输读取。
