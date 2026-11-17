@@ -37,6 +37,7 @@ impl ScriptIoSession {
             return Err(ProtocolError::State);
         }
         if self.dialog_request.is_some()
+            || self.screenshot.pending_request().is_some()
             || self.operation.is_some()
             || self.cancelled
             || self.interpreter.pending_host_io().is_some()
@@ -82,6 +83,9 @@ impl ScriptIoSession {
                     if matches!(self.scenario_event, Some(Event::Trans { .. })) =>
                 {
                     self.start_transition(frame).map(Some)
+                }
+                ScriptIoProgress::Event if self.has_screenshot_event() => {
+                    self.dispatch_screenshot()
                 }
                 ScriptIoProgress::Event if self.has_persistence_event() => {
                     self.start_persistence().map(|()| None)

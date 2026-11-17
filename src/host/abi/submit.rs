@@ -74,10 +74,11 @@ pub(super) unsafe extern "C" fn submit(rt: u64, messages: *const Message, count:
                             epoch,
                             request_id: message.request_id,
                             service: MessageKind {
-                                domain: if message.domain == Domain::Io as u16 {
-                                    Domain::Io
-                                } else {
-                                    Domain::Ui
+                                domain: match message.domain {
+                                    3 => Domain::Io,
+                                    4 => Domain::Ui,
+                                    6 => Domain::Render,
+                                    _ => unreachable!("validated reply domain"),
                                 },
                                 kind: message.kind,
                             },
@@ -114,7 +115,7 @@ enum Family {
 
 fn classify(message: &Message) -> Result<Family, Failure> {
     match (message.domain, message.kind, message.request_id) {
-        (3, 1 | 2 | 4 | 5, 1..) | (4, 2, 1..) => Ok(Family::Reply),
+        (3, 1 | 2 | 4 | 5, 1..) | (4, 2, 1..) | (6, 1 | 2, 1..) => Ok(Family::Reply),
         (2, 1..=4, 0) => Ok(Family::Input),
         (1 | 5, 16 | 17, 0) => Ok(Family::Control),
         _ => Err(Failure::new(UNSUPPORTED, "unknown submitted message")),

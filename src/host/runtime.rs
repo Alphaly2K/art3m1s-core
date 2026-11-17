@@ -47,6 +47,7 @@ pub struct RuntimeState {
     pub stage_size: Option<[u32; 2]>,
     pub waiting_for_io: bool,
     pub waiting_for_ui: bool,
+    pub waiting_for_render: bool,
     pub waiting_for_scenario: bool,
     pub exit_requested: bool,
     pub scenario_finished: bool,
@@ -122,14 +123,15 @@ pub fn create(
     limits: TransportLimits,
     max_file_bytes: usize,
 ) -> Result<RuntimeHandle, RuntimeError> {
-    create_with_transition(random_seed, limits, max_file_bytes, true)
+    create_with_renderer(random_seed, limits, max_file_bytes, true, true)
 }
 
-pub(super) fn create_with_transition(
+pub(super) fn create_with_renderer(
     random_seed: u64,
     limits: TransportLimits,
     max_file_bytes: usize,
     transitions_enabled: bool,
+    screenshots_enabled: bool,
 ) -> Result<RuntimeHandle, RuntimeError> {
     let handle = RUNTIMES.lock().unwrap().allocate()?;
     let session = catch_unwind(|| {
@@ -137,6 +139,7 @@ pub(super) fn create_with_transition(
             ScriptIoSession::new(handle.0, Default::default(), limits, max_file_bytes)?;
         session.set_random_seed(random_seed)?;
         session.transitions_enabled = transitions_enabled;
+        session.screenshots_enabled = screenshots_enabled;
         Ok::<_, ScriptIoError>(session)
     })
     .map_err(|_| RuntimeError::Panic)??;

@@ -19,6 +19,8 @@ Artemis 解释器在所有平台统一使用 Luau。现有 v1 C 函数表保持�
 创建 runtime 的线程负责所有调用；工作线程把结果交回该线程。Host 循环推进逻辑、处理请求并
 借用帧，绘制完释放令牌。只绘制精灵的 Host 可提交 `ART_RENDERER_CAP_SPRITE`；支持旧场景
 捕获及转场合成的 Host 同时提交 `ART_RENDERER_CAP_TRANSITION`。
+支持存档缩略图的 Host 可声明 `ART_RENDERER_CAP_SCREENSHOT`，按捕获请求中的帧 ID 绘制并保留
+图像，再按保存请求写入 save 命名空间。
 
 [内存 Host 示例](../tools/host-smoke/artemis_v2.c) 不依赖窗口或游戏素材。在 macOS 或 Linux
 从仓库根目录运行下列命令，会独立构建预览库、检查导出并运行示例：

@@ -42,6 +42,7 @@ fn decode_requests(bytes: &[u8]) -> Vec<Request> {
             {
                 3 => Domain::Io,
                 4 => Domain::Ui,
+                6 => Domain::Render,
                 domain => panic!("unexpected service domain: {domain}"),
             };
             let metadata_bytes = u32_at(56) as usize;
@@ -2277,6 +2278,112 @@ fn transitions_keep_both_scenes_and_obey_time_and_input_policy() {
         old_pixel
     );
     drop(skipped);
+    drop(old);
+    runtime::destroy(handle).unwrap();
+}
+
+#[test]
+fn screenshot_pins_the_gameplay_frame_and_uses_it_after_a_menu_opens() {
+    use crate::host::runtime;
+
+    let mut host = MemoryHost::default();
+    host.asset(
+        "boot.iet",
+        br#"*top
+[lyc id=game width=2 height=1 color=ff112233]
+[takess]
+[lydel id=game]
+[lyc id=menu width=2 height=1 color=ff445566]
+[savess file=thumb width=1 height=1]
+[save file=slot]
+[stop]
+"#,
+    );
+    let handle = runtime::create(0, TransportLimits::default(), 4096).unwrap();
+    runtime::open_project(
+        handle,
+        b"[WINDOWS]\nWIDTH=320\nHEIGHT=200\nBOOT=boot.iet\n",
+        "windows",
+        None,
+    )
+    .unwrap();
+    let frame = HostFrame {
+        id: 1,
+        monotonic_ns: 0,
+        utc_unix_ms: 0,
+        utc_offset_minutes: 0,
+    };
+    let step = || runtime::step(handle, frame).unwrap();
+    let poll = || {
+        let mut bytes = [0; 4096];
+        let result = runtime::poll_events(handle, &mut bytes).unwrap();
+        decode_requests(&bytes[..result.written_bytes])
+    };
+    let submit = |reply| runtime::submit_replies(handle, &[reply]);
+    let capture = (0..1024)
+        .find_map(|_| {
+            assert_eq!(step(), ScriptIoProgress::Waiting);
+            let request = poll().pop().unwrap();
+            if request.identity.service == RENDER_CAPTURE {
+                Some(request)
+            } else {
+                submit(host.complete(&request)).unwrap();
+                None
+            }
+        })
+        .expect("capture request");
+    assert!(runtime::get_state(handle).unwrap().waiting_for_render);
+    let old = runtime::acquire_latest(handle, 0).unwrap().unwrap();
+    assert_eq!(
+        capture.metadata["render_frame_id"],
+        old.render_frame_id.to_string()
+    );
+    assert_eq!(old.sprites[0].layer_id, "game");
+    assert_eq!(step(), ScriptIoProgress::Waiting);
+    assert!(poll().is_empty());
+    assert_eq!(
+        runtime::step(handle, HostFrame { id: 2, ..frame }).unwrap(),
+        ScriptIoProgress::WouldBlock
+    );
+    assert!(matches!(
+        submit(reply(&capture, json!({"status":"invalid"}), vec![])),
+        Err(runtime::RuntimeError::Session(ScriptIoError::Protocol(
+            ProtocolError::Argument(_)
+        )))
+    ));
+    submit(reply(&capture, json!({"status":"ok"}), vec![])).unwrap();
+
+    assert_eq!(step(), ScriptIoProgress::Waiting);
+    let write = poll().pop().unwrap();
+    assert_eq!(write.identity.service, RENDER_SAVE_CAPTURE);
+    assert_eq!(
+        write.metadata,
+        json!({
+            "capture_id": capture.identity.request_id.to_string(), "namespace": "save",
+            "key": "thumb.png", "width": 1, "height": 1,
+        })
+    );
+    submit(reply(&write, json!({"status":"ok"}), vec![])).unwrap();
+    loop {
+        match step() {
+            ScriptIoProgress::Event => break,
+            ScriptIoProgress::Waiting => {
+                let request = poll().pop().unwrap();
+                submit(host.complete(&request)).unwrap();
+            }
+            progress => panic!("unexpected save progress: {progress:?}"),
+        }
+    }
+    let (_, bytes) = &host.files[&("save".into(), "slot".into())];
+    let save: crate::save::SaveData = serde_json::from_slice(bytes).unwrap();
+    let scene = save.scene.unwrap();
+    assert!(scene.get("game").is_some());
+    assert!(scene.get("menu").is_none());
+    let menu = runtime::acquire_latest(handle, old.render_frame_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(menu.sprites[0].layer_id, "menu");
+    drop(menu);
     drop(old);
     runtime::destroy(handle).unwrap();
 }

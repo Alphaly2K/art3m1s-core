@@ -124,7 +124,7 @@ poll 若至少写出一条完整记录则返回 OK，并在 out 标出下一条�
 ## 4. 会话、线程和生命周期
 
 运行时状态为 Created → Loading → Running → Closing → Closed；不可恢复错误进入 Faulted。
-IO/UI 等等待另用 wait_flags/pending_requests 表示，不把全局状态改为“整个引擎暂停”。
+IO/UI/截图等等待另用 wait_flags/pending_requests 表示，不把全局状态改为“整个引擎暂停”。
 Loading 完成必须有事件和状态转换；`open_project` 返回 OK 只表示已受理。
 
 - 句柄 0 无效，registry 记录对象类型、代际和 owner thread。跨类型、陈旧或重复 destroy
@@ -183,7 +183,7 @@ Core 根据 `penetration` 从上往下选择处理器，选中的处理器按从
 输入、状态和结果在批内按顺序处理。初始建议上限为每批 4096 条、单条 blob 1 MiB，
 大文件必须分块，最终限制作为可查询能力冻结。
 
-C 预览版 `ArtMessage.schema_version=1`、`flags=0`。一个批次可包含一组 IO/UI 回复、一组输入，
+C 预览版 `ArtMessage.schema_version=1`、`flags=0`。一个批次可包含一组 IO/UI/Render 回复、一组输入，
 或单条控制消息。回复沿用原请求的 domain、kind、epoch 和 request_id。输入和控制的
 `request_id=0`，metadata 为 UTF-8 JSON object；下表未列出 blob 的消息不携带 blob。
 
@@ -198,7 +198,8 @@ C 预览版 `ArtMessage.schema_version=1`、`flags=0`。一个批次可包含一
 | Media (5) | 16 | `playback_id`、`status`（`started`、`ended`、`failed`、`cancelled`） |
 | Media (5) | 17 | `playback_id`、`frame_id`、`width`、`height`；blob 为 RGBA8 |
 
-`ArtCreateInfo` 的 Host 能力位分别为 IO=1、UI=2、Media=4，renderer 位为 sprite=1。
+`ArtCreateInfo` 的 Host 能力位分别为 IO=1、UI=2、Media=4。Renderer 位分别为 sprite=1、
+transition=2、screenshot=4。
 预览版检查未知位；Host 仍须处理收到的服务请求，缺少可选服务时返回相应失败。
 
 `poll_events` 按以下固定小端格式写入完整记录，不直接 memcpy C struct：
@@ -427,6 +428,23 @@ Host 时钟求值并交付图层变化。
 
 `[lyedit]` 的反色、灰度、棕褐、加色、乘色和叠图生成新的纹理版本。叠图预读缺失资产；
 同一图层的连续加工从上次结果继续。重新创建图层使用原始资产，已借出的旧帧仍有效。
+
+### 截图与缩略图
+
+C Host 通过 `ART_RENDERER_CAP_SCREENSHOT` 启用截图服务。Core 在 `[takess]` 发布捕获用快照，
+并发出 Render 域（6）kind 1 请求，metadata 为 `{"render_frame_id":"…"}`。Host 借用该帧并按
+舞台尺寸绘制和捕获，按捕获请求 ID 保留结果。该帧在请求确认前保持最新；Host 可用
+`acquire_latest(render_frame_id - 1)` 取得它。确认成功后可释放帧借用。
+
+`[savess]` 发出同域 kind 2 请求，metadata 包含 `capture_id`（前次成功捕获请求 ID 的十进制
+字符串）、`namespace:"save"`、带 `.png` 后缀的逻辑 `key`，以及输出像素尺寸 `width`、`height`
+（`null` 表示沿用捕获尺寸）。Host 从该捕获缩放、编码 PNG，并完成原子替换后确认。后续读取
+使用同一 save 命名空间。编号存档使用捕获时的场景和文字。
+
+两个请求和结果均无 blob；结果为 `{"status":"ok"}` 或失败状态 `cancelled`、`denied`、
+`unsupported`、`io_error`。失败后脚本继续，失败的捕获保留上一份成功结果。新捕获成功后
+可释放上一份，重载和销毁清空 Host 的捕获。无可用捕获时跳过 `[savess]`。等待截图时 C 标记
+`ART_WAIT_RENDER`，收到结果后用原 Host frame ID 恢复；队列满时先排空队列再用同一帧重试。
 
 Host 可在首帧前通过 `set_default_font(handle, epoch, bytes)` 提交默认字体。Core 排版并生成
 RGBA8 字形图集，将字形四边形按消息层顺序放进帧包；图集遵循纹理版本及借用约定。逐字显示

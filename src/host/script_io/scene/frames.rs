@@ -14,6 +14,7 @@ impl ScriptIoSession {
     ) -> Result<(), ProtocolError> {
         if self.project_loading
             || self.shutdown.is_closing_or_closed()
+            || self.screenshot.pending_request().is_some()
             || self.operation.is_some()
             || !matches!(
                 progress,

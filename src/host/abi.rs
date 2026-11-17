@@ -32,7 +32,8 @@ const MAJOR: u32 = 2;
 const MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
 const HOST_CAPS: u64 = 0b111;
 const CAP_TRANSITIONS: u64 = 2;
-const RENDERER_CAPS: u64 = 1 | CAP_TRANSITIONS;
+const CAP_SCREENSHOTS: u64 = 4;
+const RENDERER_CAPS: u64 = 1 | CAP_TRANSITIONS | CAP_SCREENSHOTS;
 
 type AbiResult = Result<i32, Failure>;
 
@@ -396,11 +397,12 @@ unsafe extern "C" fn create(info: *const CreateInfo, out: *mut u64) -> i32 {
                 "unknown create flag or capability",
             ));
         }
-        let handle = runtime::create_with_transition(
+        let handle = runtime::create_with_renderer(
             info.random_seed,
             TransportLimits::default(),
             MAX_FILE_BYTES,
             info.renderer_caps & CAP_TRANSITIONS != 0,
+            info.renderer_caps & CAP_SCREENSHOTS != 0,
         )?;
         unsafe { out.write(handle.as_raw()) };
         Ok(OK)
@@ -514,6 +516,7 @@ fn wait_flags(state: RuntimeState) -> u32 {
     u32::from(state.waiting_for_io)
         | (u32::from(state.waiting_for_ui) << 1)
         | (u32::from(state.waiting_for_scenario) << 2)
+        | (u32::from(state.waiting_for_render) << 4)
 }
 
 unsafe extern "C" fn poll_events(

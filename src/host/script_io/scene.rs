@@ -154,6 +154,7 @@ struct SceneProjection {
     magic_paths: crate::magic_path::MagicPathTable,
     textures: HashMap<String, Option<Arc<FrameTexture>>>,
     texture_bytes: usize,
+    texture_revision: u64,
     video_frames: HashMap<String, Arc<FrameTexture>>,
     pending_video_frames: HashMap<String, Arc<FrameTexture>>,
     video_revision: u64,
@@ -278,6 +279,15 @@ impl TextureRead {
 }
 
 impl SceneIo {
+    pub(super) fn invalidate_texture(&self, key: &str) {
+        let mut scene = self.scene.lock().unwrap();
+        for key in [Some(key), key.strip_suffix(".png")].into_iter().flatten() {
+            if let Some(Some(texture)) = scene.textures.remove(key) {
+                scene.texture_bytes -= texture.rgba().len();
+            }
+        }
+    }
+
     pub(super) fn transition_rule(&self, name: &str) -> Option<Arc<FrameTexture>> {
         let key = self.resolve_media_asset(name).ok()?;
         self.scene.lock().unwrap().textures.get(&key)?.clone()
@@ -531,16 +541,21 @@ impl SceneIo {
             });
         }
         if scene.textures.len() < MAX_TEXTURES {
-            let texture = image.map(|image| {
+            let texture = image.and_then(|image| {
                 let (width, height) = image.dimensions();
                 let rgba = image.into_raw().into_boxed_slice();
+                let revision = scene
+                    .texture_revision
+                    .checked_add(1)
+                    .filter(|id| *id < 1 << 60)?;
+                scene.texture_revision = revision;
                 scene.texture_bytes += rgba.len();
-                Arc::new(FrameTexture {
-                    revision: scene.textures.len() as u64 + 1,
+                Some(Arc::new(FrameTexture {
+                    revision,
                     width,
                     height,
                     rgba,
-                })
+                }))
             });
             scene
                 .textures

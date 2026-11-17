@@ -5,6 +5,7 @@ mod audio;
 mod lifecycle;
 mod persistence;
 mod scene;
+mod screenshot;
 mod transition;
 mod ui;
 mod video;
@@ -14,6 +15,7 @@ pub use audio::MEDIA_AUDIO_COMMAND;
 use lifecycle::Shutdown;
 pub use lifecycle::{RUNTIME_CLOSED, RUNTIME_EXIT_REQUESTED};
 pub use persistence::RUNTIME_PERSISTENCE_RESULT;
+pub use screenshot::{RENDER_CAPTURE, RENDER_SAVE_CAPTURE};
 pub use ui::{UI_CAPTION, UI_DIALOG};
 pub use video::MEDIA_VIDEO_COMMAND;
 
@@ -261,6 +263,8 @@ pub struct ScriptIoSession {
     video: video::Video,
     pub(super) transitions_enabled: bool,
     transition: Option<transition::Transition>,
+    pub(super) screenshots_enabled: bool,
+    screenshot: screenshot::Screenshot,
     scene: Option<scene::SceneIo>,
     pub(super) frames: super::frame::FramePublisher,
     read_history: ReadHistory,
@@ -311,6 +315,8 @@ impl ScriptIoSession {
             video: Default::default(),
             transitions_enabled: true,
             transition: None,
+            screenshots_enabled: true,
+            screenshot: Default::default(),
             scene: None,
             frames: Default::default(),
             read_history: ReadHistory::default(),
@@ -354,6 +360,7 @@ impl ScriptIoSession {
             stage_size: (transport.epoch != 0).then_some([config.stage_width, config.stage_height]),
             waiting_for_io: self.operation.is_some(),
             waiting_for_ui: matches!(self.scenario_event, Some(Event::ShowDialog { .. })),
+            waiting_for_render: self.screenshot.pending_request().is_some(),
             waiting_for_scenario: self.scenario_event.is_some(),
             exit_requested: matches!(self.scenario_event, Some(Event::Exit)),
             scenario_finished: self.completed,
@@ -421,6 +428,7 @@ impl ScriptIoSession {
         self.audio = Default::default();
         self.video = Default::default();
         self.transition = None;
+        self.screenshot = Default::default();
         self.scene = None;
         self.frames.clear();
         Ok(epoch)
@@ -527,6 +535,7 @@ impl ScriptIoSession {
         self.audio = Default::default();
         self.video = Default::default();
         self.transition = None;
+        self.screenshot = Default::default();
         self.scene = None;
         self.frames.clear();
         self.read_history = ReadHistory::default();
@@ -549,6 +558,7 @@ impl ScriptIoSession {
             return Err(ProtocolError::State);
         }
         if self.event_filter.is_some()
+            || self.screenshot.pending_request().is_some()
             || self.save_work.is_some()
             || self.numbered_load.is_some()
             || self.operation.is_some()
@@ -641,6 +651,7 @@ impl ScriptIoSession {
         if self.faulted
             || self.interpreter.pending_host_io().is_some()
             || self.event_filter.is_some()
+            || self.screenshot.pending_request().is_some()
             || self
                 .save_work
                 .as_ref()
@@ -694,6 +705,8 @@ impl ScriptIoSession {
                 self.decode(reply)?;
             } else if Some(reply.identity) == self.dialog_request {
                 ui::decode_dialog_reply(reply)?;
+            } else if Some(reply.identity) == self.screenshot.pending_request() {
+                screenshot::decode_screenshot_reply(reply)?;
             } else {
                 return Err(ProtocolError::Stale);
             }
@@ -781,6 +794,9 @@ impl ScriptIoSession {
         if new_frame
             && (self.operation.is_some()
                 || self.cancelled
+                || (self.scene.is_some()
+                    && self.screenshots_enabled
+                    && self.has_screenshot_event())
                 || self.save_work.as_ref().is_some_and(|work| {
                     !matches!(
                         (&self.shutdown, work),
@@ -1191,9 +1207,14 @@ impl ScriptIoSession {
         save.current_line = self.interpreter.position_after_event();
         save.waiting_for_input = Some(false);
         if let Some(scene) = &self.scene {
-            save.scene = Some(scene.save_snapshot());
+            if let Some(capture) = &self.screenshot.captured {
+                save.scene = Some(capture.scene.clone());
+                save.message_text = capture.text.clone();
+            } else {
+                save.scene = Some(scene.save_snapshot());
+                save.message_text = scene.capture_text();
+            }
             save.audio = Some(self.audio.snapshot());
-            save.message_text = scene.capture_text();
         }
         let data = match serde_json::to_vec(&save) {
             Ok(data) => data,
@@ -1532,6 +1553,7 @@ impl ScriptIoSession {
         self.audio.commit_restore(audio, &mut self.transport)?;
         self.video.reset_playback();
         self.transition = None;
+        self.screenshot = Default::default();
         self.wait_start = None;
         self.scenario_event = None;
         self.start_numbered_load_hook(file)
