@@ -34,6 +34,7 @@ pub const IO_DELETE: MessageKind = MessageKind {
 pub enum ScriptIoError {
     Protocol(ProtocolError),
     Script(asb_interpreter::Error),
+    Project(crate::CoreError),
 }
 
 impl fmt::Display for ScriptIoError {
@@ -41,6 +42,7 @@ impl fmt::Display for ScriptIoError {
         match self {
             Self::Protocol(error) => error.fmt(f),
             Self::Script(error) => error.fmt(f),
+            Self::Project(error) => error.fmt(f),
         }
     }
 }
@@ -107,6 +109,8 @@ enum ExecutionMode {
 }
 
 enum BootRestore {
+    ReadTagIni,
+    TagIni,
     Start,
     Globals,
     Settings,
@@ -342,8 +346,50 @@ impl ScriptIoSession {
         Ok(epoch)
     }
 
+    /// Accept a project descriptor from the Host. Parse optional tag.ini and
+    /// restore persistent data before loading the configured BOOT script.
+    pub fn open_project(
+        &mut self,
+        ini: &[u8],
+        platform: &str,
+        reported_os: Option<&str>,
+    ) -> Result<u64, ScriptIoError> {
+        if ini.len() > self.max_file_bytes {
+            return Err(ProtocolError::Limit.into());
+        }
+        let project = crate::ProjectConfig::from_system_ini_bytes(ini, platform)
+            .map_err(ScriptIoError::Project)?;
+        if project.stage_width == 0 || project.stage_height == 0 {
+            return Err(ProtocolError::Argument("project stage dimensions must be nonzero").into());
+        }
+        logical_key(&project.boot_script)?;
+        let save_prefix = logical_key(
+            project
+                .savepath
+                .as_deref()
+                .filter(|path| !path.trim().is_empty())
+                .unwrap_or("save"),
+        )?;
+        let mut config = project.to_interpreter_config(None);
+        config.savepath = Some(save_prefix.clone());
+        config.reported_os = reported_os.filter(|os| !os.is_empty()).map(str::to_owned);
+        let mut interpreter = self.configured_interpreter(config)?;
+        interpreter.boot(&project.boot_script)?;
+        let epoch = self.replace_scenario(interpreter)?;
+        self.save_prefix = save_prefix;
+        self.boot_restore = Some(BootRestore::ReadTagIni);
+        Ok(epoch)
+    }
+
     fn scenario_interpreter(&self) -> Result<Interpreter, ScriptIoError> {
-        let mut interpreter = Interpreter::new(self.interpreter.config().clone());
+        self.configured_interpreter(self.interpreter.config().clone())
+    }
+
+    fn configured_interpreter(
+        &self,
+        config: InterpreterConfig,
+    ) -> Result<Interpreter, ScriptIoError> {
+        let mut interpreter = Interpreter::new(config);
         interpreter.enable_host_services(self.random_seed)?;
         interpreter.set_host_time(self.host_time)?;
         interpreter.enable_resumable_io()?;
@@ -799,6 +845,12 @@ impl ScriptIoSession {
     ) -> Result<Option<IoRequest>, ScriptIoError> {
         use crate::save::system::{SAVEG_FILE, SYSTEM_FILE, apply_persistent_variables};
         let file = match stage {
+            BootRestore::ReadTagIni => {
+                self.boot_restore = Some(BootRestore::TagIni);
+                return Ok(Some(IoRequest::Read {
+                    path: "tag.ini".into(),
+                }));
+            }
             BootRestore::Start => {
                 self.boot_restore = Some(BootRestore::Globals);
                 return Ok(Some(IoRequest::Read {
@@ -806,10 +858,16 @@ impl ScriptIoSession {
                 }));
             }
             BootRestore::Globals => SAVEG_FILE,
+            BootRestore::TagIni => "tag.ini",
             BootRestore::Settings => SYSTEM_FILE,
             BootRestore::ReadHistory => AREAD_FILE,
         };
         let result = match response {
+            Some(IoResponse::Read(data)) if matches!(stage, BootRestore::TagIni) => {
+                let (text, _, _) = self.interpreter.config().encoding.decode(&data);
+                self.interpreter.load_tag_ini(&text);
+                Ok(())
+            }
             Some(IoResponse::Read(data)) if file == AREAD_FILE => serde_json::from_slice(&data)
                 .map(|values| self.read_history.import(values))
                 .map_err(|error| error.to_string()),
@@ -834,10 +892,11 @@ impl ScriptIoSession {
                 .debug(0, &format!("system restore skipped {file}: {error}"), false);
         }
         let (next, requested) = match stage {
+            BootRestore::TagIni => (BootRestore::Globals, SAVEG_FILE),
             BootRestore::Globals => (BootRestore::Settings, SYSTEM_FILE),
             BootRestore::Settings => (BootRestore::ReadHistory, AREAD_FILE),
             BootRestore::ReadHistory => return Ok(None),
-            BootRestore::Start => unreachable!(),
+            BootRestore::Start | BootRestore::ReadTagIni => unreachable!(),
         };
         self.boot_restore = Some(next);
         Ok(Some(IoRequest::Read {

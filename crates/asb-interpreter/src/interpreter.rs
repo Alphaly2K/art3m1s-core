@@ -3066,17 +3066,20 @@ impl Interpreter {
 
     fn position_boot(&mut self, script: &str) -> Result<()> {
         let script_obj = self.scripts.get(script).unwrap();
-        let start_label = if script_obj.get_label_line("main").is_some() {
-            "main"
-        } else if script_obj.get_label_line("start").is_some() {
-            "start"
-        } else if script_obj.get_label_line("_start").is_some() {
-            "_start"
-        } else {
-            // 从文件开头
-            self.set_start_position(script, 0);
-            return Ok(());
-        };
+        let start_label =
+            if self.uses_host_resources() && script_obj.get_label_line("top").is_some() {
+                "top"
+            } else if script_obj.get_label_line("main").is_some() {
+                "main"
+            } else if script_obj.get_label_line("start").is_some() {
+                "start"
+            } else if script_obj.get_label_line("_start").is_some() {
+                "_start"
+            } else {
+                // 从文件开头
+                self.set_start_position(script, 0);
+                return Ok(());
+            };
 
         self.start(script, start_label)
     }

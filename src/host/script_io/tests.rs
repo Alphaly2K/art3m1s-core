@@ -889,6 +889,60 @@ assert(e:var('s.savepath')=='save')
 }
 
 #[test]
+fn project_open_applies_tag_ini_and_starts_at_configured_top_entry() {
+    let mut session = session(1, TransportLimits::default(), 4096);
+    let mut host = MemoryHost::default();
+    host.asset("tag.ini", b"[caption]\n0=data\n");
+    host.asset("sub/boot.iet", "*main\n[caption data=wrong-main]\n[return]\n*top\n[&linetag allow=\"1\" prefix=\"#\"]\n[var system=os name=g.detected]\n#caption \u{8d77}\u{52d5}\n".as_bytes());
+    let ini = b"[WINDOWS]\nWIDTH=1280\nHEIGHT=720\nBOOT=Sub\\BOOT.IET\nCHARSET=UTF-8\nSAVEPATH=Data\\Slots\n";
+    session
+        .open_project(ini, "windows", Some("switch"))
+        .unwrap();
+    assert_eq!(session.interpreter().config().stage_width, 1280);
+    assert_eq!(session.interpreter().config().stage_height, 720);
+    assert_eq!(
+        session
+            .interpreter()
+            .get_variable("s.savepath")
+            .unwrap()
+            .as_string(),
+        "data/slots"
+    );
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
+    let request = requests(&mut session).pop().unwrap();
+    assert_eq!(
+        request.metadata,
+        json!({"namespace":"asset","key":"tag.ini"})
+    );
+    let before = session.state();
+    assert!(matches!(
+        session.open_project(ini, "no-section", None),
+        Err(ScriptIoError::Project(_))
+    ));
+    assert_eq!(session.state(), before);
+    assert!(matches!(
+        session.open_project(
+            b"[WINDOWS]\nWIDTH=1280\nHEIGHT=720\nBOOT=../bad\n",
+            "windows",
+            None
+        ),
+        Err(ScriptIoError::Protocol(ProtocolError::Argument(_)))
+    ));
+    assert_eq!(session.state(), before);
+    session.submit_replies(&[host.complete(&request)]).unwrap();
+    host.run(&mut session);
+    assert_eq!(host.captions, ["\u{8d77}\u{52d5}"]);
+    assert_eq!(
+        session
+            .interpreter()
+            .get_variable("g.detected")
+            .unwrap()
+            .as_string(),
+        "switch"
+    );
+}
+
+#[test]
 fn host_calendar_and_monotonic_clocks_remain_distinct_across_io_suspension() {
     let mut session = session(1, TransportLimits::default(), 1024);
     session

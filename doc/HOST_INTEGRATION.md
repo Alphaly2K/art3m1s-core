@@ -113,8 +113,12 @@ Rust 的 `ExecutionResult`/`TagResult` 新增 `HostIoPending`，穷举匹配需�
 
 `open_boot(name)` 创建新 VM，先从 save 命名空间恢复可选的 `saveg.dat`、`system.dat` 和 `aread.dat`，
 再按逻辑名称请求 BOOT 和可选的 `macro.iet`。缺少或读不出系统文件时继续启动；只恢复可持久化
-的设置。脚本支持文本与 ASB，按 main/start/_start/文件开头选择入口。文件请求和加载在 step
+的设置。脚本支持文本与 ASB，按 top/main/start/_start/文件开头选择入口。文件请求和加载在 step
 中推进。替换会话会使旧请求失效，非法逻辑名称保留旧会话。
+
+`open_project(ini_bytes, platform, reported_os)` 解析所选 `system.ini` 分节并设置舞台尺寸、
+脚本编码和逻辑存档前缀。该入口在读取持久状态和启动 BOOT 前先请求可选的 `tag.ini`，
+以配置的编码解码并应用到脚本解析。若 INI 或逻辑路径校验失败，旧会话继续有效。
 
 独立解释器启用 resumable IO 后，未安装同步加载器时，start/boot/restore_position 可能
 受理一个尚待 Host 完成的加载，调用方随后处理 HostIoPending。显式安装的同步内存加载器
