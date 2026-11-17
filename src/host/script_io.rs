@@ -998,6 +998,13 @@ impl ScriptIoSession {
             return self.interpreter_request();
         }
         if self.event_filter.is_none() && self.pointer_ready() {
+            if self
+                .scene
+                .as_ref()
+                .is_some_and(scene::SceneIo::freeze_new_input)
+            {
+                self.handle_early_input();
+            }
             self.event_filter = self
                 .scene
                 .as_mut()
@@ -1249,7 +1256,7 @@ impl ScriptIoSession {
                 save.scene = Some(capture.scene.clone());
                 save.message_text = capture.text.clone();
             } else {
-                save.scene = Some(scene.save_snapshot());
+                save.scene = Some(self.capture_scene_snapshot(scene));
                 save.message_text = scene.capture_text();
             }
             save.audio = Some(self.audio.snapshot());

@@ -61,11 +61,16 @@ impl SceneIo {
         self.pointer.due || self.pointer.current.is_some() || !self.pointer.pending.is_empty()
     }
 
+    pub(in crate::host::script_io) fn freeze_new_input(&self) -> bool {
+        if self.pointer.due {
+            self.with_input(|input| input.freeze());
+        }
+        self.pointer.due
+    }
+
     pub(in crate::host::script_io) fn next_pointer_filter(&mut self) -> Option<EventFilterWork> {
         if std::mem::take(&mut self.pointer.due) {
-            let mut scene = self.scene.lock().unwrap();
-            scene.input.freeze();
-            self.pointer.sample(&mut scene);
+            self.pointer.sample(&mut self.scene.lock().unwrap());
         }
         let mut dispatch = self.pointer.pending.pop_front()?;
         let name = std::mem::take(&mut dispatch.name);
@@ -75,15 +80,32 @@ impl SceneIo {
     }
 
     pub(in crate::host::script_io) fn queue_mode_handler(&mut self, event: &str) {
+        self.queue_global_handler(event, "", &[("type", event)]);
+    }
+
+    pub(in crate::host::script_io) fn queue_global_handler(
+        &mut self,
+        event: &str,
+        key: &str,
+        params: &[(&str, &str)],
+    ) {
         let scene = self.scene.lock().unwrap();
-        if let Some(handler) = scene.compositor.get_input_handler(event, "") {
-            self.pointer.pending.push_back(InputDispatch::global(
-                handler,
-                event,
-                None,
-                &[("type", event)],
-            ));
+        if let Some(handler) = scene.compositor.get_input_handler(event, key) {
+            self.pointer
+                .pending
+                .push_back(InputDispatch::global(handler, event, None, params));
         }
+    }
+
+    pub(in crate::host::script_io) fn queue_menu(&mut self, file: &str, leaving: bool) {
+        self.pointer.tags.extend(handler_tags(
+            None,
+            Some(file),
+            leaving.then_some("leave"),
+            !leaving,
+            &HashMap::new(),
+            &[],
+        ));
     }
 
     pub(in crate::host::script_io) fn force_drag(&mut self, id: &str) {
@@ -120,9 +142,13 @@ impl SceneIo {
 
 impl PointerDispatch {
     fn sample(&mut self, scene: &mut SceneProjection) {
+        let claimed = [1, 2, 27].map(|code| scene.input.is_claimed(code));
         let link_clicked = self.sample_pointer(scene);
         for (code, bits) in scene.input.effective_keys() {
-            if code == 1 && link_clicked {
+            if (code == 1 && (link_clicked || claimed[0]))
+                || (code == 2 && claimed[1])
+                || (code == 27 && claimed[2])
+            {
                 continue;
             }
             let key = code.to_string();
@@ -152,7 +178,7 @@ impl PointerDispatch {
     fn sample_pointer(&mut self, scene: &mut SceneProjection) -> bool {
         let position = scene.input.pointer_present.then_some(scene.input.pointer);
         let left = scene.input.frame_bits(1);
-        let click = left & OVERRIDE_IS_DOWN_EDGE != 0;
+        let click = left & OVERRIDE_IS_DOWN_EDGE != 0 && !scene.input.is_claimed(1);
         let moved = position != self.position;
         let release = scene.input.focus_lost || scene.input.is_physical_release(1);
         let link = if moved || click || scene.dirty {

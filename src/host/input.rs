@@ -232,6 +232,10 @@ impl InputFrame {
         self.claimed.insert(code);
     }
 
+    pub fn is_claimed(&self, code: u32) -> bool {
+        self.claimed.contains(&code)
+    }
+
     pub fn is_physical_press(&self, code: u32) -> bool {
         self.keys.get(&code).is_some_and(|key| key.pressed)
     }

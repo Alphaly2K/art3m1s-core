@@ -178,6 +178,14 @@ struct SceneProjection {
 }
 
 impl SceneProjection {
+    fn set_control_layer_visible(&mut self, id: &str, visible: bool) {
+        self.apply(&Event::Layer(LayerEvent::SetProperty {
+            id: id.to_owned(),
+            property: "visible".into(),
+            value: if visible { "1" } else { "0" }.into(),
+        }));
+    }
+
     fn apply(&mut self, event: &Event) {
         if let Event::LayerEdit { .. } = event {
             self.dirty |= self
@@ -319,12 +327,10 @@ impl TextureRead {
 
 impl SceneIo {
     pub(super) fn set_control_layer_visible(&self, id: &str, visible: bool) {
-        let mut scene = self.scene.lock().unwrap();
-        scene.apply(&Event::Layer(LayerEvent::SetProperty {
-            id: id.to_owned(),
-            property: "visible".into(),
-            value: if visible { "1" } else { "0" }.into(),
-        }));
+        self.scene
+            .lock()
+            .unwrap()
+            .set_control_layer_visible(id, visible);
     }
 
     pub(super) fn invalidate_texture(&self, key: &str) {

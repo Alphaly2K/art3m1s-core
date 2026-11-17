@@ -1973,6 +1973,126 @@ function jumped() trace..=';jumped' end
 }
 
 #[test]
+fn hidden_message_window_consumes_the_restore_click_and_preserves_visibility() {
+    let (mut session, epoch, mut host) = playback_project(
+        br#"*top
+[lyc id=window width=10 height=10 color=ffffff]
+[lyc id=off width=10 height=10 color=ffffff]
+[lyprop id=off visible=0]
+[chgmsg id=message layered=1]
+[hide allow=1 window="window,off"]
+[setonhidein handler=calllua function=mark]
+[setonhideout handler=calllua function=mark]
+[setonbacklogin handler=calllua function=mark]
+[wt0]
+[calllua function=advance]
+[stop]
+[lua]
+function mark(e,p) trace=(trace or '')..p.type..';' end
+function advance() trace..='advance;' end
+[/lua]
+"#,
+    );
+    drive_playback_boot(&mut session, &mut host);
+    let globals = session.interpreter().lua().globals();
+    let mut step = |id, keys: &[(u32, bool)]| {
+        submit_playback_keys(&mut session, epoch, keys);
+        assert_eq!(
+            session.step_queued_frame(playback_frame(id, id)).unwrap(),
+            ScriptIoProgress::Event
+        );
+        let scene = session.scene.as_ref().unwrap();
+        (scene.save_snapshot(), session.capture_scene_snapshot(scene))
+    };
+    let (hidden, saved) = step(2, &[(32, true)]);
+    assert!(!hidden.is_effectively_visible("window"));
+    assert!(!hidden.is_effectively_visible("message"));
+    assert!(saved.is_effectively_visible("window"));
+    assert!(saved.is_effectively_visible("message"));
+    assert!(!saved.is_effectively_visible("off"));
+    let (shown, _) = step(3, &[(1, true)]);
+    assert!(shown.is_effectively_visible("window"));
+    assert!(shown.is_effectively_visible("message"));
+    assert!(!shown.is_effectively_visible("off"));
+    step(4, &[(38, true)]);
+    assert_eq!(
+        globals.get::<String>("trace").unwrap(),
+        "hidein;hideout;backlogin;"
+    );
+    step(5, &[(1, false), (1, true)]);
+    assert_eq!(
+        globals.get::<String>("trace").unwrap(),
+        "hidein;hideout;backlogin;advance;"
+    );
+}
+
+#[test]
+fn right_click_menu_loads_through_host_io_and_returns_to_the_story_wait() {
+    let (mut session, epoch, mut host) = playback_project(
+        br#"*top
+[rclick allow=1 file=menu.iet]
+[setonpush key=2 handler=calllua function=wrong]
+[wt0]
+[calllua function=advance]
+[stop]
+[lua]
+function wrong() error('right click fell through to push') end
+function advance() trace..=';advance' end
+[/lua]
+"#,
+    );
+    host.asset(
+        "menu.iet",
+        br#"*top
+[calllua function=open]
+[stop]
+*leave
+[calllua function=close]
+[return]
+[lua]
+function open() trace='open' end
+function close() trace..=';close' end
+[/lua]
+"#,
+    );
+    drive_playback_boot(&mut session, &mut host);
+    let globals = session.interpreter().lua().globals();
+    submit_playback_keys(&mut session, epoch, &[(2, true)]);
+    let open_frame = playback_frame(2, 1);
+    assert_eq!(
+        session.step_queued_frame(open_frame).unwrap(),
+        ScriptIoProgress::Waiting
+    );
+    for _ in 0..1024 {
+        for request in requests(&mut session) {
+            assert_eq!(request.metadata["key"], "menu.iet");
+            session.submit_replies(&[host.complete(&request)]).unwrap();
+        }
+        if session.step_queued_frame(open_frame).unwrap() == ScriptIoProgress::Event {
+            break;
+        }
+    }
+    assert_eq!(session.interpreter().current_script(), Some("menu.iet"));
+    assert_eq!(globals.get::<String>("trace").unwrap(), "open");
+    submit_playback_keys(&mut session, epoch, &[(2, false), (27, true)]);
+    assert_eq!(
+        session.step_queued_frame(playback_frame(3, 2)).unwrap(),
+        ScriptIoProgress::Event
+    );
+    assert_eq!(session.interpreter().current_script(), Some("boot.iet"));
+    assert_eq!(globals.get::<String>("trace").unwrap(), "open;close");
+    submit_playback_keys(&mut session, epoch, &[(13, true)]);
+    assert_eq!(
+        session.step_queued_frame(playback_frame(4, 3)).unwrap(),
+        ScriptIoProgress::Event
+    );
+    assert_eq!(
+        globals.get::<String>("trace").unwrap(),
+        "open;close;advance"
+    );
+}
+
+#[test]
 fn audio_feedback_uses_playback_identity_and_resumes_its_wait_after_callback_io() {
     use crate::host::{
         media::PlaybackStatus,

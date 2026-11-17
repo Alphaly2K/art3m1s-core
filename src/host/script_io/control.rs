@@ -1,8 +1,12 @@
 use super::*;
-use crate::host::input::{InputFrame, OVERRIDE_IS_DOWN};
+use crate::host::input::{InputFrame, OVERRIDE_IS_DOWN, OVERRIDE_IS_DOWN_EDGE};
 use asb_interpreter::WaitReason;
 
 const ADVANCE: i32 = 0;
+const HIDE_IN: i32 = 3;
+const HIDE_OUT: i32 = 4;
+const BACKLOG_IN: i32 = 5;
+const BACKLOG_OUT: i32 = 6;
 const AUTO_IN: i32 = 9;
 const AUTO_OUT: i32 = 10;
 const AUTO_OUT_NOCLICK: i32 = 11;
@@ -22,6 +26,11 @@ pub(super) struct PlaybackControl {
     stop_on_stop: bool,
     auto_layer: Option<String>,
     auto_sync: Vec<String>,
+    hide_allowed: bool,
+    hide_window: Vec<String>,
+    hidden_layers: Option<Vec<(String, Option<bool>)>>,
+    right_click_allowed: bool,
+    right_click_file: Option<String>,
     check_read: bool,
     ready_since: Option<u64>,
     input_frame: Option<u64>,
@@ -33,6 +42,9 @@ impl Default for PlaybackControl {
         Self {
             keys: HashMap::from([
                 (ADVANCE, vec![1, 13, 137]),
+                (HIDE_IN, vec![32]),
+                (HIDE_OUT, vec![32]),
+                (BACKLOG_IN, vec![38, 136]),
                 (AUTO_IN, vec![65]),
                 (SKIP_IN, vec![16]),
                 (SKIP_OUT, vec![16]),
@@ -48,6 +60,11 @@ impl Default for PlaybackControl {
             stop_on_stop: true,
             auto_layer: None,
             auto_sync: Vec::new(),
+            hide_allowed: true,
+            hide_window: Vec::new(),
+            hidden_layers: None,
+            right_click_allowed: false,
+            right_click_file: None,
             check_read: true,
             ready_since: None,
             input_frame: None,
@@ -83,6 +100,77 @@ impl PlaybackControl {
 }
 
 impl ScriptIoSession {
+    fn set_hide(&mut self, hide: bool) {
+        let Some(scene) = &self.scene else {
+            return;
+        };
+        if hide {
+            if !self.control.hide_allowed || self.control.hidden_layers.is_some() {
+                return;
+            }
+            self.control.hidden_layers = Some(scene.hide_message_layers(&self.control.hide_window));
+            self.queue_mode_handler("hidein");
+        } else if let Some(layers) = self.control.hidden_layers.take() {
+            scene.restore_hidden_layers(layers);
+            self.queue_mode_handler("hideout");
+        }
+    }
+
+    fn right_click(&mut self) -> bool {
+        if self.control.hidden_layers.is_some() {
+            self.set_hide(false);
+            return true;
+        }
+        if !self.control.right_click_allowed {
+            return false;
+        }
+        if let Some(scene) = self.scene.as_mut() {
+            let file = self
+                .control
+                .right_click_file
+                .as_deref()
+                .unwrap_or("rclick.iet");
+            scene.queue_menu(file, self.interpreter.current_script() == Some(file));
+        }
+        true
+    }
+
+    pub(super) fn capture_scene_snapshot(
+        &self,
+        scene: &scene::SceneIo,
+    ) -> crate::compositor::Scene {
+        let mut snapshot = scene.save_snapshot();
+        for (id, visible) in self.control.hidden_layers.iter().flatten() {
+            if let Some(layer) = snapshot.get_mut(id) {
+                layer.props.visible = *visible;
+            }
+        }
+        snapshot
+    }
+
+    pub(super) fn handle_early_input(&mut self) {
+        let Some(scene) = &self.scene else {
+            return;
+        };
+        let keys = [1, 2, 27];
+        let pressed = scene
+            .with_input(|input| keys.map(|key| input.frame_bits(key) & OVERRIDE_IS_DOWN_EDGE != 0));
+        let restore = self.control.hidden_layers.is_some() && pressed.into_iter().any(|down| down);
+        let right = (pressed[1] || pressed[2]) && !restore && self.right_click();
+        if restore {
+            self.set_hide(false);
+        }
+        if let Some(scene) = &self.scene {
+            scene.with_input(|input| {
+                for (key, down) in keys.into_iter().zip(pressed) {
+                    if down && (restore || (key != 1 && right)) {
+                        input.claim(key);
+                    }
+                }
+            });
+        }
+    }
+
     fn queue_mode_handler(&mut self, event: &str) {
         if let Some(scene) = self.scene.as_mut() {
             scene.queue_mode_handler(event);
@@ -156,6 +244,7 @@ impl ScriptIoSession {
         self.control.command_skip = false;
         self.control.held_skip = false;
         self.control.auto = false;
+        self.control.hidden_layers = None;
         self.control.reset_wait();
         self.publish_control_state();
     }
@@ -200,6 +289,18 @@ impl ScriptIoSession {
             }
         }
         for &key in &pressed {
+            let hide_out = self.control.keys(HIDE_OUT).contains(&key);
+            if self.control.keys(HIDE_IN).contains(&key) {
+                self.set_hide(!hide_out || self.control.hidden_layers.is_none());
+            } else if hide_out {
+                self.set_hide(false);
+            }
+            if self.control.keys(BACKLOG_IN).contains(&key) {
+                self.queue_mode_handler("backlogin");
+            }
+            if self.control.keys(BACKLOG_OUT).contains(&key) {
+                self.queue_mode_handler("backlogout");
+            }
             if self.control.keys(AUTO_IN).contains(&key) {
                 self.set_auto(true);
             } else if self.control.keys(AUTO_OUT).contains(&key)
@@ -231,6 +332,21 @@ impl ScriptIoSession {
                 }
             }
             Some(Event::AlreadyReadConfig { mode }) => self.control.check_read = mode != 0,
+            Some(Event::HideConfig { allow, window }) => {
+                self.control.hide_allowed = allow;
+                if let Some(window) = window {
+                    self.control.hide_window = window;
+                }
+                if !allow {
+                    self.set_hide(false);
+                }
+            }
+            Some(Event::RightClickConfig { allow, file }) => {
+                self.control.right_click_allowed = allow;
+                if file.as_ref().is_some_and(|file| !file.is_empty()) {
+                    self.control.right_click_file = file;
+                }
+            }
             Some(Event::SkipConfig { allow, skip_unread }) => {
                 if let Some(allow) = allow {
                     let control_changed =
@@ -288,6 +404,19 @@ impl ScriptIoSession {
             }
             Some(Event::Exec { command, mode }) if command == "automode" => {
                 self.set_auto(mode.unwrap_or(1) != 0);
+            }
+            Some(Event::Exec { command, .. }) if command == "hide" => {
+                self.set_hide(self.control.hidden_layers.is_none());
+            }
+            Some(Event::Exec { command, .. }) if command == "backlog" => {
+                self.queue_mode_handler("backlogin");
+            }
+            Some(Event::Exec { command, .. }) if command == "rclick" => {
+                if !self.right_click()
+                    && let Some(scene) = self.scene.as_mut()
+                {
+                    scene.queue_global_handler("push", "2", &[("key", "2"), ("type", "click")]);
+                }
             }
             _ => return Ok(false),
         }

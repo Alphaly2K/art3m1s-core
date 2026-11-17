@@ -83,7 +83,7 @@ impl ScriptIoSession {
                             identity,
                             CaptureWork::Take(Box::new(CapturedScene {
                                 id: identity.request_id,
-                                scene: scene.save_snapshot(),
+                                scene: self.capture_scene_snapshot(scene),
                                 text: scene.capture_text(),
                             })),
                         ));

@@ -85,6 +85,46 @@ impl ScriptIoSession {
 }
 
 impl SceneIo {
+    pub(in crate::host::script_io) fn hide_message_layers(
+        &self,
+        windows: &[String],
+    ) -> Vec<(String, Option<bool>)> {
+        let mut scene = self.scene.lock().unwrap();
+        let mut targets = windows.to_vec();
+        let text = scene.text.renderer.font_state();
+        if let Some(id) = text.active_layer.as_ref()
+            && let Some(layer) = text.layers.get(id)
+        {
+            targets.push(message_layer_scene_id(id, layer.layered));
+        }
+        targets.sort_unstable();
+        targets.dedup();
+        let saved: Vec<_> = targets
+            .into_iter()
+            .filter_map(|id| {
+                let visible = scene.compositor.scene().get(&id)?.props.visible;
+                Some((id, visible))
+            })
+            .collect();
+        for (id, _) in &saved {
+            scene.set_control_layer_visible(id, false);
+        }
+        saved
+    }
+
+    pub(in crate::host::script_io) fn restore_hidden_layers(
+        &self,
+        layers: Vec<(String, Option<bool>)>,
+    ) {
+        let mut scene = self.scene.lock().unwrap();
+        for (id, visible) in layers {
+            if let Some(layer) = scene.compositor.scene.get_mut(&id) {
+                layer.props.visible = visible;
+                scene.dirty = true;
+            }
+        }
+    }
+
     pub(in crate::host::script_io) fn capture_text(&self) -> Option<MessageTextSnapshot> {
         capture_message_text(self.scene.lock().unwrap().text.renderer.font_state())
     }
