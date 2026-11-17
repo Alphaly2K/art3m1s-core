@@ -1,0 +1,11 @@
+name: ArtemisV2
+description: Dart bindings for the Artemis v2 C preview.
+output: lib/artemis_v2.dart
+headers:
+  entry-points:
+    - '../../../doc/abi/art3m1s_core_v2.draft.h'
+  include-directives:
+    - '**/art3m1s_core_v2.draft.h'
+functions:
+  include:
+    - 'art3m1s_get_api_v2'

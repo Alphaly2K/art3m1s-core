@@ -41,6 +41,17 @@ Windows 使用装有 MSVC x64 工具的 PowerShell：
 ./scripts/test-host-v2.ps1
 ```
 
+独立 [Dart 绑定](../tools/host-bindings/dart/lib/artemis_v2.dart) 从同一份 C 头文件生成。
+使用 Dart 3.10 或以上及 libclang，从仓库根目录运行以下命令可重新生成并调用动态库
+（库文件名按平台替换）：
+
+```sh
+cd tools/host-bindings/dart
+dart pub get --enforce-lockfile
+dart run ffigen --config ffigen.yaml
+dart run bin/smoke.dart ../../../target/host-v2/debug/libart3m1s_core.dylib
+```
+
 macOS Host 可单独运行离屏像素探针。它需要可访问的 Metal 设备，不需要窗口或游戏素材：
 
 ```sh
