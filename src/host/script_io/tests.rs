@@ -234,6 +234,155 @@ end
 }
 
 #[test]
+fn numbered_save_runs_only_its_own_queue_before_waiting_for_host_commit() {
+    for should_write in [false, true] {
+        let mut session = session(1, TransportLimits::default(), 4096);
+        session
+            .open_scenario(
+                br#"
+*main
+[calllua function=enqueue_save]
+[caption data=inline]
+[lua]
+function enqueue_save(e)
+    e:enqueueTag{'save', file='Save/Slot'}
+    e:enqueueTag{'calllua', ['function']='outside'}
+    e:enqueueTag{'caption', data='queued'}
+end
+function outside(e) e:tag{'var', name='memsave.bad', data='wrong'} end
+function capture(e, p)
+    captures=(captures or 0)+1
+    assert(p.file=='Save/Slot' and e:file('before')=='')
+    e:enqueueTag{'calllua', ['function']='capture_queued'}
+end
+function capture_queued(e)
+    assert(e:file('after')=='')
+    e:tag{'var', name='memsave.good', data='right'}
+end
+__engine:setEventHandler{onSave='capture'}
+[/lua]
+"#,
+                "save-scene",
+                "main",
+            )
+            .unwrap();
+        let mut host = MemoryHost::default();
+        host.asset("before", b"");
+        host.asset("after", b"");
+        assert_eq!(session.step().unwrap(), ScriptIoProgress::Event);
+        let line = session.interpreter().current_line();
+        assert!(matches!(
+            session.pending_event(),
+            Some(Event::SaveGame { .. })
+        ));
+        session.submit_numbered_save().unwrap();
+        assert_eq!(session.resume_scenario(), Err(ProtocolError::State));
+        for key in ["before", "after"] {
+            assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
+            let request = requests(&mut session).pop().unwrap();
+            assert_eq!(request.identity.service, IO_STAT);
+            assert_eq!(request.metadata["key"], key);
+            assert_eq!(session.interpreter().current_line(), line);
+            assert!(session.interpreter().get_variable("memsave.bad").is_none());
+            session.submit_replies(&[host.complete(&request)]).unwrap();
+        }
+        assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
+        let request = requests(&mut session).pop().unwrap();
+        assert_eq!(request.identity.service, IO_WRITE_ATOMIC);
+        assert_eq!(request.metadata, json!({"namespace":"save","key":"slot"}));
+        let save: crate::save::SaveData = serde_json::from_slice(&request.blob).unwrap();
+        assert_eq!(save.current_script, "save-scene");
+        assert_eq!(save.current_line, line);
+        assert_eq!(
+            save.variables.get("memsave.good").unwrap().as_string(),
+            "right"
+        );
+        assert!(save.variables.get("memsave.bad").is_none());
+        assert_eq!(session.take_numbered_save_result(), None);
+        let (reply, outcome) = if should_write {
+            (host.complete(&request), NumberedSaveResult::Written)
+        } else {
+            (
+                reply(
+                    &request,
+                    json!({"status":"denied","message":"offline"}),
+                    vec![],
+                ),
+                NumberedSaveResult::Failed {
+                    kind: IoFailure::Denied,
+                    message: "offline".into(),
+                },
+            )
+        };
+        session.submit_replies(&[reply]).unwrap();
+        assert_eq!(session.take_numbered_save_result(), None);
+        assert_eq!(session.step().unwrap(), ScriptIoProgress::SaveReady);
+        assert_eq!(session.resume_scenario(), Err(ProtocolError::State));
+        assert_eq!(session.take_numbered_save_result(), Some(outcome));
+        assert_eq!(session.submit_numbered_save(), Err(ProtocolError::State));
+        session.resume_scenario().unwrap();
+        host.run(&mut session);
+        assert_eq!(host.captions, ["queued", "inline"]);
+        assert_eq!(
+            session
+                .interpreter()
+                .lua()
+                .globals()
+                .get::<i32>("captures")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            host.files.contains_key(&("save".into(), "slot".into())),
+            should_write
+        );
+    }
+}
+
+#[test]
+fn failed_save_hook_leaves_the_saved_event_position_and_caller_queue_intact() {
+    let mut session = session(1, TransportLimits::default(), 4096);
+    session
+        .open_scenario(
+            br#"
+*main
+[save file=slot]
+[caption data=inline]
+[return]
+*start
+[caption data=unreachable]
+[lua]
+function capture(e)
+    assert(e:file('before')=='')
+    e:enqueueTag{'jump', label='start'}
+end
+__engine:setEventHandler{onSave='capture'}
+[/lua]
+"#,
+            "failed-save",
+            "main",
+        )
+        .unwrap();
+    let mut host = MemoryHost::default();
+    host.asset("before", b"");
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::Event);
+    let line = session.interpreter().current_line();
+    session.submit_numbered_save().unwrap();
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
+    let request = requests(&mut session).pop().unwrap();
+    session.submit_replies(&[host.complete(&request)]).unwrap();
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::SaveReady);
+    assert_eq!(session.interpreter().current_line(), line);
+    assert!(requests(&mut session).is_empty());
+    assert!(matches!(session.take_numbered_save_result(),
+        Some(NumberedSaveResult::Failed {kind: IoFailure::IoError, message})
+            if message.contains("onSave tag requires scenario dispatch")));
+    session.resume_scenario().unwrap();
+    host.run(&mut session);
+    assert_eq!(host.captions, ["inline"]);
+}
+
+#[test]
 fn external_calls_macros_and_jumps_resume_without_replaying_filters_or_callers() {
     let mut session = session(1, TransportLimits::default(), 1024);
     let mut host = MemoryHost::default();

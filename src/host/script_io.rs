@@ -62,6 +62,13 @@ pub enum ScriptIoProgress {
     Completed,
     Event,
     EventFilterReady,
+    SaveReady,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NumberedSaveResult {
+    Written,
+    Failed { kind: IoFailure, message: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,6 +98,13 @@ enum EventFilterWork {
     Queued(String, HashMap<String, String>),
     Running(IoTask),
     Ready(EventFilterDecision),
+}
+
+enum NumberedSaveWork {
+    Queued { key: String },
+    Hook { key: String },
+    Writing,
+    Finished(Option<NumberedSaveResult>),
 }
 
 enum ScenarioStep {
@@ -160,6 +174,7 @@ pub struct ScriptIoSession {
     frame: Option<HostFrame>,
     frame_handler_due: bool,
     event_filter: Option<EventFilterWork>,
+    numbered_save: Option<NumberedSaveWork>,
 }
 
 impl ScriptIoSession {
@@ -195,6 +210,7 @@ impl ScriptIoSession {
             frame: None,
             frame_handler_due: false,
             event_filter: None,
+            numbered_save: None,
         })
     }
 
@@ -251,6 +267,7 @@ impl ScriptIoSession {
         self.frame = None;
         self.frame_handler_due = false;
         self.event_filter = None;
+        self.numbered_save = None;
         Ok(epoch)
     }
 
@@ -300,6 +317,7 @@ impl ScriptIoSession {
         self.frame = None;
         self.frame_handler_due = false;
         self.event_filter = None;
+        self.numbered_save = None;
         Ok(epoch)
     }
 
@@ -317,7 +335,11 @@ impl ScriptIoSession {
         if self.mode != ExecutionMode::Scenario || self.completed || self.faulted {
             return Err(ProtocolError::State);
         }
-        if self.event_filter.is_some() || self.operation.is_some() || self.cancelled {
+        if self.event_filter.is_some()
+            || self.numbered_save.is_some()
+            || self.operation.is_some()
+            || self.cancelled
+        {
             return Err(ProtocolError::WouldBlock);
         }
         if name.is_empty() {
@@ -348,16 +370,46 @@ impl ScriptIoSession {
         }
     }
 
+    /// Persist the interpreter snapshot for a pending [save file=...] event.
+    /// The snapshot includes the handler's data updates and resumes at the
+    /// position after the save event. Only step runs the handler or writes.
+    pub fn submit_numbered_save(&mut self) -> Result<(), ProtocolError> {
+        if self.faulted || self.numbered_save.is_some() {
+            return Err(ProtocolError::State);
+        }
+        let Some(Event::SaveGame { file }) = &self.scenario_event else {
+            return Err(ProtocolError::State);
+        };
+        if self.event_filter.is_some() || self.operation.is_some() || self.cancelled {
+            return Err(ProtocolError::WouldBlock);
+        }
+        let key = self.save_key(file)?;
+        self.numbered_save = Some(NumberedSaveWork::Queued { key });
+        Ok(())
+    }
+
+    pub fn take_numbered_save_result(&mut self) -> Option<NumberedSaveResult> {
+        match &mut self.numbered_save {
+            Some(NumberedSaveWork::Finished(result)) => result.take(),
+            _ => None,
+        }
+    }
+
     pub fn resume_scenario(&mut self) -> Result<(), ProtocolError> {
         if self.faulted
             || self.interpreter.pending_host_io().is_some()
             || self.event_filter.is_some()
+            || self
+                .numbered_save
+                .as_ref()
+                .is_some_and(|work| !matches!(work, NumberedSaveWork::Finished(None)))
         {
             return Err(ProtocolError::State);
         }
         if self.scenario_event.take().is_none() {
             return Err(ProtocolError::State);
         }
+        self.numbered_save = None;
         self.interpreter.advance_line();
         Ok(())
     }
@@ -423,6 +475,7 @@ impl ScriptIoSession {
             && !self.frame_handler_due
             && self.interpreter.pending_host_io().is_none()
             && self.event_filter.is_none()
+            && self.numbered_save.is_none()
         {
             return Ok(ScriptIoProgress::Event);
         }
@@ -457,6 +510,7 @@ impl ScriptIoSession {
         if new_frame
             && (self.operation.is_some()
                 || self.cancelled
+                || self.numbered_save.is_some()
                 || matches!(self.event_filter, Some(EventFilterWork::Ready(_))))
         {
             return Ok(ScriptIoProgress::WouldBlock);
@@ -549,6 +603,9 @@ impl ScriptIoSession {
         &mut self,
         response: Option<IoResponse>,
     ) -> Result<ScenarioStep, ScriptIoError> {
+        if let Some(work) = self.numbered_save.take() {
+            return self.step_numbered_save(work, response);
+        }
         if matches!(self.event_filter, Some(EventFilterWork::Running(_))) {
             let Some(EventFilterWork::Running(task)) = self.event_filter.take() else {
                 unreachable!()
@@ -616,6 +673,90 @@ impl ScriptIoSession {
                 .ok_or(ProtocolError::State)?
                 .clone(),
         ))
+    }
+
+    fn step_numbered_save(
+        &mut self,
+        work: NumberedSaveWork,
+        response: Option<IoResponse>,
+    ) -> Result<ScenarioStep, ScriptIoError> {
+        let key = match work {
+            NumberedSaveWork::Queued { key } => {
+                let Some(Event::SaveGame { file }) = &self.scenario_event else {
+                    return Err(ProtocolError::State.into());
+                };
+                if let Err(error) = self.interpreter.start_host_save_hook(file) {
+                    return self.fail_save_hook(error);
+                }
+                key
+            }
+            NumberedSaveWork::Hook { key } => {
+                if let Some(response) = response
+                    && let Err(error) = self.interpreter.resume_host_io(response)
+                {
+                    return self.fail_save_hook(error);
+                }
+                key
+            }
+            NumberedSaveWork::Writing => {
+                let result = match response {
+                    Some(IoResponse::Written) => NumberedSaveResult::Written,
+                    Some(IoResponse::Failed { kind, message }) => {
+                        NumberedSaveResult::Failed { kind, message }
+                    }
+                    _ => return Err(ProtocolError::State.into()),
+                };
+                return Ok(self.finish_numbered_save(result));
+            }
+            NumberedSaveWork::Finished(result) => {
+                let progress = if result.is_some() {
+                    ScriptIoProgress::SaveReady
+                } else {
+                    ScriptIoProgress::Event
+                };
+                self.numbered_save = Some(NumberedSaveWork::Finished(result));
+                return Ok(ScenarioStep::Progress(progress));
+            }
+        };
+        match self.interpreter.finish_host_save_hook() {
+            Ok(IoProgress::Completed) => {}
+            Ok(IoProgress::Waiting) => {
+                self.numbered_save = Some(NumberedSaveWork::Hook { key });
+                return self.interpreter_request();
+            }
+            Err(error) => return self.fail_save_hook(error),
+        }
+        let mut save = crate::save::SaveData::from_interpreter(&self.interpreter);
+        save.current_line = self.interpreter.position_after_event();
+        save.waiting_for_input = Some(false);
+        let data = match serde_json::to_vec(&save) {
+            Ok(data) => data,
+            Err(error) => return self.fail_save_hook(error),
+        };
+        if data.len() > self.max_file_bytes {
+            return Ok(self.finish_numbered_save(NumberedSaveResult::Failed {
+                kind: IoFailure::Limit,
+                message: "save snapshot exceeds file budget".into(),
+            }));
+        }
+        self.numbered_save = Some(NumberedSaveWork::Writing);
+        Ok(ScenarioStep::Request(IoRequest::Write {
+            path: format!("{}/{key}", self.save_prefix),
+            data,
+        }))
+    }
+
+    fn fail_save_hook(&mut self, error: impl fmt::Display) -> Result<ScenarioStep, ScriptIoError> {
+        self.interpreter.abort_host_save_hook();
+        Ok(self.finish_numbered_save(NumberedSaveResult::Failed {
+            kind: IoFailure::IoError,
+            message: error.to_string(),
+        }))
+    }
+
+    fn finish_numbered_save(&mut self, result: NumberedSaveResult) -> ScenarioStep {
+        self.numbered_save = Some(NumberedSaveWork::Finished(Some(result)));
+        ScenarioStep::Progress(ScriptIoProgress::SaveReady)
     }
 
     fn step_event_filter(
@@ -701,6 +842,14 @@ impl ScriptIoSession {
             )),
             IoRequest::DeleteSave { .. } => Ok(Operation::Delete { key }),
         }
+    }
+
+    fn save_key(&self, path: &str) -> Result<String, ProtocolError> {
+        let normalized = logical_key(path)?;
+        Ok(normalized
+            .strip_prefix(&format!("{}/", self.save_prefix))
+            .map(str::to_owned)
+            .unwrap_or(normalized))
     }
 
     fn message(&self, operation: &Operation) -> (MessageKind, String, Vec<u8>) {

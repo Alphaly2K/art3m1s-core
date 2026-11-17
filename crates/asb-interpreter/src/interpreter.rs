@@ -237,6 +237,12 @@ struct PendingHostResource {
     action: HostResourceAction,
 }
 
+struct ParkedSaveQueue {
+    tags: Vec<(String, HashMap<String, String>)>,
+    immediate_count: usize,
+    stack_override: Option<Vec<(String, usize)>>,
+}
+
 fn lua_filter_consumes(value: &mlua::Value) -> bool {
     match value {
         mlua::Value::Nil => false,
@@ -338,6 +344,7 @@ pub struct Interpreter {
     loading_lua_key: Option<(String, usize)>,
     io_filter: Option<PendingLuaFilter>,
     io_resource: Option<PendingHostResource>,
+    parked_save_queue: Option<ParkedSaveQueue>,
 }
 
 fn json_to_lua_value(lua: &Lua, value: serde_json::Value) -> mlua::Result<mlua::Value> {
@@ -605,6 +612,7 @@ impl Interpreter {
             loading_lua_key: None,
             io_filter: None,
             io_resource: None,
+            parked_save_queue: None,
         }
     }
 
@@ -702,6 +710,7 @@ impl Interpreter {
     }
 
     pub fn clear_host_io(&mut self) {
+        self.restore_save_queue();
         self.io_task = None;
         self.loading_lua.clear();
         self.loading_lua_key = None;
@@ -1121,6 +1130,11 @@ impl Interpreter {
 
     /// 执行到下一个等待点（迭代版本，避免栈溢出）
     pub fn step(&mut self) -> Result<ExecutionResult> {
+        if self.parked_save_queue.is_some() {
+            return Err(
+                self.invalid_save_hook("finish the Host save hook before advancing the scenario")
+            );
+        }
         if self.pending_host_io().is_some() {
             return Ok(ExecutionResult::HostIoPending);
         }
@@ -1570,7 +1584,21 @@ impl Interpreter {
             let instruction = if resuming_filter {
                 self.io_filter.as_ref().unwrap().instruction.clone()
             } else {
-                self.apply_pending_stack_override()?;
+                if self.parked_save_queue.is_some() {
+                    if self
+                        .engine_ctx
+                        .lock()
+                        .unwrap()
+                        .pending_stack_override
+                        .is_some()
+                    {
+                        return Err(
+                            self.invalid_save_hook("onSave cannot replace the script stack")
+                        );
+                    }
+                } else {
+                    self.apply_pending_stack_override()?;
+                }
                 if self.pending_host_io().is_some() {
                     return Ok(Some(ExecutionResult::HostIoPending));
                 }
@@ -1621,6 +1649,11 @@ impl Interpreter {
                 }
             }
 
+            if self.parked_save_queue.is_some()
+                && !matches!(result, TagResult::Continue | TagResult::HostIoPending)
+            {
+                return Err(self.invalid_save_hook("onSave tag requires scenario dispatch"));
+            }
             match result {
                 TagResult::HostIoPending => {
                     if let Some(filter) = &mut self.io_filter {
@@ -2590,6 +2623,98 @@ impl Interpreter {
             });
         }
         Ok(())
+    }
+
+    /// Run onSave with the caller's tags and pending stack override parked.
+    pub fn start_host_save_hook(
+        &mut self,
+        file: &str,
+    ) -> Result<crate::io_continuation::IoProgress> {
+        self.check_host_handler_ready()?;
+        if self.parked_save_queue.is_some() {
+            return Err(self.invalid_save_hook("a Host save hook is already active"));
+        }
+        let parked = {
+            let mut ctx = self.engine_ctx.lock().unwrap();
+            ParkedSaveQueue {
+                tags: std::mem::take(&mut ctx.tag_queue),
+                immediate_count: std::mem::take(&mut ctx.immediate_tag_count),
+                stack_override: ctx.pending_stack_override.take(),
+            }
+        };
+        self.parked_save_queue = Some(parked);
+        let result =
+            self.start_host_event_handler("onSave", &HashMap::from([("file".into(), file.into())]));
+        if result.is_err() {
+            self.abort_host_save_hook();
+        }
+        result
+    }
+
+    /// Apply the save hook's own state updates before snapshotting variables.
+    pub fn finish_host_save_hook(&mut self) -> Result<crate::io_continuation::IoProgress> {
+        use crate::io_continuation::IoProgress;
+        if self.parked_save_queue.is_none() {
+            return Err(self.invalid_save_hook("no Host save hook is active"));
+        }
+        let drain = (|| {
+            loop {
+                if self.pending_host_io().is_some() || self.drive_loading_lua()? {
+                    return Ok(Some(ExecutionResult::HostIoPending));
+                }
+                let result = self.flush_tag_queue()?;
+                if result.is_some() || self.loading_lua.is_empty() {
+                    return Ok(result);
+                }
+            }
+        })();
+        match drain {
+            Ok(Some(ExecutionResult::HostIoPending)) => Ok(IoProgress::Waiting),
+            Ok(None) => {
+                self.restore_save_queue();
+                Ok(IoProgress::Completed)
+            }
+            Ok(Some(_)) => {
+                self.abort_host_save_hook();
+                Err(self.invalid_save_hook("onSave interrupted the scenario"))
+            }
+            Err(error) => {
+                self.abort_host_save_hook();
+                Err(error)
+            }
+        }
+    }
+
+    pub fn abort_host_save_hook(&mut self) {
+        if self.parked_save_queue.is_some() {
+            self.clear_host_io();
+            self.variables
+                .lock()
+                .unwrap()
+                .retain_macro_scopes(self.call_stack.len());
+        }
+    }
+
+    fn restore_save_queue(&mut self) {
+        if let Some(parked) = self.parked_save_queue.take() {
+            let mut ctx = self.engine_ctx.lock().unwrap();
+            ctx.tag_queue = parked.tags;
+            ctx.immediate_tag_count = parked.immediate_count;
+            ctx.pending_stack_override = parked.stack_override;
+        }
+    }
+
+    fn invalid_save_hook(&self, message: &str) -> Error {
+        Error::RuntimeError {
+            line: self.current_line,
+            message: message.into(),
+        }
+    }
+
+    /// Script position after acknowledging the event currently held by Host.
+    pub fn position_after_event(&self) -> usize {
+        self.current_line
+            .saturating_add(usize::from(!self.last_wait_from_queue))
     }
 
     /// 触发注册在 `onEnterFrame` 上的每帧回调（Artemis 约定 `e:setEventHandler{
