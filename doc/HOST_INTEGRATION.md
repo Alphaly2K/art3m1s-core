@@ -125,6 +125,9 @@ Rust 的 `ExecutionResult`/`TagResult` 新增 `HostIoPending`，穷举匹配需�
 该线程退出前销毁。工作线程把结果投递给创建线程；跨线程直调返回 `Thread`，已销毁的句柄
 返回 `Handle`。`get_state` 分开报告项目阶段、IO 等待和场景等待。`session_changed` 后可以
 先收到启动 IO；`project_ready` 在 BOOT 与加载期 Lua 完成后发布，表示项目已进入 Running。
+标题与对话框通过 [UI 消息](HOST_ABI_V2.md#5-消息可靠性与能力协商) 交付。标题无需回复；
+对话框只接受 `poll_events` 已交付的请求身份。`submit_replies` 只入队，脚本在下次 `step`
+处理结果。直接使用 `ScriptIoSession` 时，场景事件仍由调用方通过 `pending_event()` 处理。
 
 独立解释器启用 resumable IO 后，未安装同步加载器时，start/boot/restore_position 可能
 受理一个尚待 Host 完成的加载，调用方随后处理 HostIoPending。显式安装的同步内存加载器

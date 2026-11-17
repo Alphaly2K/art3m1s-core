@@ -38,10 +38,12 @@ fn decode_requests(bytes: &[u8]) -> Vec<Request> {
         };
         let record_bytes = u32_at(0) as usize;
         if u64_at(40) != 0 {
-            assert_eq!(
-                u16::from_le_bytes(bytes[offset + 6..offset + 8].try_into().unwrap()),
-                Domain::Io as u16
-            );
+            let domain = match u16::from_le_bytes(bytes[offset + 6..offset + 8].try_into().unwrap())
+            {
+                3 => Domain::Io,
+                4 => Domain::Ui,
+                domain => panic!("unexpected service domain: {domain}"),
+            };
             let metadata_bytes = u32_at(56) as usize;
             let blob_start = offset + 64 + metadata_bytes;
             requests.push(Request {
@@ -50,7 +52,7 @@ fn decode_requests(bytes: &[u8]) -> Vec<Request> {
                     epoch: u64_at(24),
                     request_id: u64_at(40),
                     service: MessageKind {
-                        domain: Domain::Io,
+                        domain,
                         kind: u32_at(8),
                     },
                 },
@@ -961,7 +963,7 @@ fn runtime_loading_waits_for_boot_lua_before_queuing_project_ready() {
     let mut host = MemoryHost::default();
     host.asset(
         "boot.iet",
-        b"*top\n[caption data=started]\n[lua]\nassert(__engine:file('init')=='ok')\n[/lua]",
+        b"*top\n[stop]\n[lua]\nassert(__engine:file('init')=='ok')\n[/lua]",
     );
     host.asset("init", b"ok");
     let ini = b"[WINDOWS]\nWIDTH=1280\nHEIGHT=720\nBOOT=boot.iet\n";
@@ -1050,6 +1052,158 @@ fn runtime_loading_waits_for_boot_lua_before_queuing_project_ready() {
         runtime::poll_events(handle, &mut bytes).unwrap().status,
         PollStatus::NoData
     );
+    runtime::destroy(handle).unwrap();
+}
+
+#[test]
+fn runtime_delivers_ui_once_and_resumes_dialog_only_after_valid_reply() {
+    use crate::host::runtime::{self, RuntimeError};
+
+    let limits = TransportLimits {
+        control: QueueBudget {
+            records: 1,
+            bytes: 4096,
+        },
+        ..TransportLimits::default()
+    };
+    let handle = runtime::create(0, limits, 4096).unwrap();
+    let ini = b"[WINDOWS]\nWIDTH=640\nHEIGHT=480\nBOOT=boot.iet\nCHARSET=UTF-8\n";
+    let frame = HostFrame {
+        id: 1,
+        monotonic_ns: 0,
+        utc_unix_ms: 0,
+        utc_offset_minutes: 0,
+    };
+    let mut host = MemoryHost::default();
+    host.asset(
+        "boot.iet",
+        br#"*top
+[var name=t.player data=original]
+[caption data=before]
+[dialog title=Name message=Input varname=t.accepted textfield=t.player textfieldsize=2]
+[caption data="$t.accepted + ':' + t.player"]
+[dialog title=Other varname=t.accepted textfield=t.player]
+[caption data="$t.accepted + ':' + t.player"]
+[dialog title=Pending varname=t.accepted]
+"#,
+    );
+    runtime::open_project(handle, ini, "windows", None).unwrap();
+
+    let poll = || {
+        let mut bytes = vec![0; 4096];
+        let polled = runtime::poll_events(handle, &mut bytes).unwrap();
+        bytes.truncate(polled.written_bytes);
+        bytes
+    };
+    let assert_record = |bytes: &[u8], kind: MessageKind, metadata: Value| {
+        assert_eq!(
+            u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize,
+            bytes.len()
+        );
+        assert_eq!(
+            u16::from_le_bytes(bytes[6..8].try_into().unwrap()),
+            kind.domain as u16
+        );
+        assert_eq!(
+            u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            kind.kind
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes[64..]).unwrap(),
+            metadata
+        );
+    };
+    assert_record(&poll(), SESSION_CHANGED, json!({}));
+    for _ in 0..512 {
+        let progress = runtime::step(handle, frame).unwrap();
+        let bytes = poll();
+        if progress == ScriptIoProgress::WouldBlock {
+            assert_record(&bytes, PROJECT_READY, json!({}));
+            break;
+        }
+        assert_eq!(progress, ScriptIoProgress::Waiting);
+        let request = decode_requests(&bytes).pop().unwrap();
+        runtime::submit_replies(handle, &[host.complete(&request)]).unwrap();
+    }
+    assert_eq!(
+        runtime::step(handle, frame).unwrap(),
+        ScriptIoProgress::WouldBlock
+    );
+    assert_record(&poll(), UI_CAPTION, json!({"text":"before"}));
+    assert_eq!(
+        runtime::step(handle, frame).unwrap(),
+        ScriptIoProgress::Waiting
+    );
+    let request = decode_requests(&poll()).pop().unwrap();
+    assert_eq!(request.identity.service, UI_DIALOG);
+    assert_eq!(
+        request.metadata,
+        json!({"title":"Name","message":"Input","allow_cancel":true,
+        "initial_text":"original","max_characters":"2"})
+    );
+    let state = runtime::get_state(handle).unwrap();
+    assert!(state.waiting_for_ui && !state.waiting_for_io);
+    assert_eq!(state.transport.pending_requests, 1);
+    assert_eq!(
+        runtime::step(handle, frame).unwrap(),
+        ScriptIoProgress::Waiting
+    );
+    assert!(poll().is_empty());
+
+    let invalid = reply(&request, json!({"status":"ok","accepted":1}), vec![]);
+    assert!(matches!(
+        runtime::submit_replies(handle, &[invalid]),
+        Err(RuntimeError::Session(ScriptIoError::Protocol(
+            ProtocolError::Argument(_)
+        )))
+    ));
+    let ok = reply(
+        &request,
+        json!({"status":"ok","accepted":true,"text":"\u{306f}\u{306a}X"}),
+        vec![],
+    );
+    runtime::submit_replies(handle, std::slice::from_ref(&ok)).unwrap();
+    assert!(poll().is_empty());
+    assert!(matches!(
+        runtime::submit_replies(handle, &[ok]),
+        Err(RuntimeError::Session(ScriptIoError::Protocol(
+            ProtocolError::Stale
+        )))
+    ));
+    assert_eq!(
+        runtime::step(handle, frame).unwrap(),
+        ScriptIoProgress::WouldBlock
+    );
+    assert_record(&poll(), UI_CAPTION, json!({"text":"1:\u{306f}\u{306a}"}));
+
+    assert_eq!(
+        runtime::step(handle, frame).unwrap(),
+        ScriptIoProgress::Waiting
+    );
+    let second = decode_requests(&poll()).pop().unwrap();
+    assert_ne!(request.identity, second.identity);
+    let unsupported = reply(&second, json!({"status":"unsupported"}), vec![]);
+    runtime::submit_replies(handle, &[unsupported]).unwrap();
+    assert_eq!(
+        runtime::step(handle, frame).unwrap(),
+        ScriptIoProgress::WouldBlock
+    );
+    assert_record(&poll(), UI_CAPTION, json!({"text":"0:\u{306f}\u{306a}"}));
+    assert_eq!(
+        runtime::step(handle, frame).unwrap(),
+        ScriptIoProgress::Waiting
+    );
+    let pending = decode_requests(&poll()).pop().unwrap();
+    runtime::open_project(handle, ini, "windows", None).unwrap();
+    assert_record(&poll(), SESSION_CHANGED, json!({}));
+    assert!(!runtime::get_state(handle).unwrap().waiting_for_ui);
+    let late = reply(&pending, json!({"status":"cancelled"}), vec![]);
+    assert!(matches!(
+        runtime::submit_replies(handle, &[late]),
+        Err(RuntimeError::Session(ScriptIoError::Protocol(
+            ProtocolError::Stale
+        )))
+    ));
     runtime::destroy(handle).unwrap();
 }
 

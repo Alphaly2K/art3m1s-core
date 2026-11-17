@@ -40,6 +40,7 @@ pub struct RuntimeState {
     pub host_frame_id: Option<u64>,
     pub stage_size: Option<[u32; 2]>,
     pub waiting_for_io: bool,
+    pub waiting_for_ui: bool,
     pub waiting_for_scenario: bool,
     pub exit_requested: bool,
     pub scenario_finished: bool,
@@ -182,7 +183,7 @@ pub fn open_project(
 }
 
 pub fn step(handle: RuntimeHandle, frame: HostFrame) -> Result<ScriptIoProgress, RuntimeError> {
-    with_session(handle, |session| Ok(session.step_frame(frame)?))
+    with_session(handle, |session| Ok(session.step_queued_frame(frame)?))
 }
 
 pub fn poll_events(handle: RuntimeHandle, output: &mut [u8]) -> Result<PollResult, RuntimeError> {

@@ -49,6 +49,8 @@ typedef uint64_t ArtFrameToken;
 
 #define ART_RUNTIME_SESSION_CHANGED UINT32_C(1)
 #define ART_RUNTIME_PROJECT_READY UINT32_C(2)
+#define ART_UI_CAPTION UINT32_C(1)
+#define ART_UI_DIALOG UINT32_C(2)
 
 typedef struct ArtBytes {
     const uint8_t *data;

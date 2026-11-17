@@ -1,6 +1,10 @@
 //! Luau execution over the Host IO request transport. The Host owns all
 //! storage; this driver never installs a physical file loader or renderer.
 
+mod ui;
+
+pub use ui::{UI_CAPTION, UI_DIALOG};
+
 use super::protocol::*;
 use crate::save::read_history::{AREAD_FILE, ReadHistory};
 use asb_interpreter::io_continuation::{
@@ -218,6 +222,7 @@ pub struct ScriptIoSession {
     numbered_load: Option<NumberedLoadWork>,
     boot_restore: Option<BootRestore>,
     project_loading: bool,
+    dialog_request: Option<RequestIdentity>,
     read_history: ReadHistory,
     read_history_dirty: bool,
 }
@@ -259,6 +264,7 @@ impl ScriptIoSession {
             numbered_load: None,
             boot_restore: None,
             project_loading: false,
+            dialog_request: None,
             read_history: ReadHistory::default(),
             read_history_dirty: false,
         })
@@ -294,6 +300,7 @@ impl ScriptIoSession {
             host_frame_id: self.frame.map(|frame| frame.id),
             stage_size: (transport.epoch != 0).then_some([config.stage_width, config.stage_height]),
             waiting_for_io: self.operation.is_some(),
+            waiting_for_ui: matches!(self.scenario_event, Some(Event::ShowDialog { .. })),
             waiting_for_scenario: self.scenario_event.is_some(),
             exit_requested: matches!(self.scenario_event, Some(Event::Exit)),
             scenario_finished: self.completed,
@@ -355,6 +362,7 @@ impl ScriptIoSession {
         self.numbered_load = None;
         self.boot_restore = None;
         self.project_loading = false;
+        self.dialog_request = None;
         Ok(epoch)
     }
 
@@ -453,6 +461,7 @@ impl ScriptIoSession {
         self.numbered_load = None;
         self.boot_restore = None;
         self.project_loading = false;
+        self.dialog_request = None;
         self.read_history = ReadHistory::default();
         self.read_history_dirty = false;
         Ok(epoch)
@@ -613,10 +622,13 @@ impl ScriptIoSession {
             }
         }
         for reply in replies {
-            if Some(reply.identity) != self.identity {
+            if Some(reply.identity) == self.identity {
+                self.decode(reply)?;
+            } else if Some(reply.identity) == self.dialog_request {
+                ui::decode_dialog_reply(reply)?;
+            } else {
                 return Err(ProtocolError::Stale);
             }
-            self.decode(reply)?;
         }
         self.transport.submit_replies(replies)
     }

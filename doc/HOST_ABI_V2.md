@@ -186,6 +186,16 @@ Runtime kind=2 为 `project_ready`，字段同上；BOOT 与加载期 Lua 完成
 body，由 flags/kind 唯一标识。JSON 中的 u64/i64 使用十进制字符串，避免宿主 Number 精度丢失。
 禁止把图片/存档/HTTP body 转成 JSON 数组或 base64 作为常规传输。
 
+UI domain=4 当前实现两个草案 kind，blob 均为空：
+
+| kind | 请求或通知 | 结果 |
+|---|---|---|
+| 1 `ui.caption` | 可靠通知，`{"text":"…"}` | 无回复 |
+| 2 `ui.dialog` | 请求，`title`、`message` 为字符串，`allow_cancel` 为布尔值，`initial_text` 为字符串或 null，`max_characters` 为十进制字符串或 null | `{"status":"ok","accepted":true,"text":"…"}`；`text` 可省略。`cancelled`、`denied`、`unsupported`、`io_error` 按取消完成 |
+
+`initial_text=null` 表示无输入框。Core 在 `step` 应用结果，接受时按约定字符上限写入
+输入变量，取消时保留旧输入内容。Host 重载时按 `session_changed` 取消旧对话框。
+
 控制队列与诊断队列各有条数和总字节预算。初始建议为控制 4096 条/16 MiB、诊断
 1024 条/1 MiB；实际配置和上限需可查询。请求和媒体控制消息可靠，日志可丢并计数。
 满载时必须在产生副作用前预留控制记录，或挂起尚未提交的内部操作；不能先推进脚本再
