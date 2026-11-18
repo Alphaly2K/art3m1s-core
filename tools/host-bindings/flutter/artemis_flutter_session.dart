@@ -44,9 +44,9 @@ final class ArtemisFlutterEvent {
       epoch = wire['epoch'] as String,
       sequence = wire['sequence'] as String,
       request = wire['request'] as String,
-      metadata = jsonDecode(
-        utf8.decode(wire['metadata'] as Uint8List),
-      ) as Map<String, Object?>,
+      metadata =
+          jsonDecode(utf8.decode(wire['metadata'] as Uint8List))
+              as Map<String, Object?>,
       blob = wire['blob'] as Uint8List;
 
   final String _owner;
@@ -199,6 +199,48 @@ final class ArtemisFlutterSession {
           .cast<Map<Object?, Object?>>()
           .map(ArtemisFlutterEvent._)
           .toList(growable: false);
+
+  Future<void> openVideo({
+    required String epoch,
+    required ArtemisVideoPlay play,
+    required String path,
+  }) => _call<void>('videoOpen', {
+    'epoch': epoch,
+    'playback': play.id,
+    'path': path,
+    'fullscreen': play.layer == null,
+    'loop': play.loop,
+  });
+
+  Future<void> closeVideo(String playback) =>
+      _call<void>('videoClose', {'playback': playback});
+
+  Future<void> suspendVideos(bool suspended) =>
+      _call<void>('videoSuspend', {'suspended': suspended});
+
+  Future<
+    List<
+      ({
+        String id,
+        ArtemisPlaybackStatus status,
+        int? texture,
+        int? width,
+        int? height,
+      })
+    >
+  >
+  pollVideos() async => (await _call<List<Object?>>('videoPoll'))!
+      .cast<Map<Object?, Object?>>()
+      .map(
+        (wire) => (
+          id: wire['playback'] as String,
+          status: ArtemisPlaybackStatus.values.byName(wire['status'] as String),
+          texture: wire['texture'] as int?,
+          width: wire['width'] as int?,
+          height: wire['height'] as int?,
+        ),
+      )
+      .toList(growable: false);
 
   /// A false result means the batch was not accepted and can be retried.
   Future<bool> submit(List<ArtemisFlutterMessage> batch) async {

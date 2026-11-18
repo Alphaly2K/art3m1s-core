@@ -40,8 +40,9 @@ sealed class ArtemisMediaCommand {
       ),
       _ => false,
     };
-    if (!matches)
+    if (!matches) {
       throw ArgumentError('The command did not start this playback');
+    }
     return {'playback_id': playbackId, 'status': status.name};
   }
 

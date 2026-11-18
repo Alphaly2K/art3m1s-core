@@ -28,6 +28,7 @@ enum {
     ArtSwiftAudioCommand = ART_MEDIA_AUDIO_COMMAND,
     ArtSwiftPlaybackStatus = ART_MEDIA_PLAYBACK_STATUS,
     ArtSwiftMediaCapability = ART_HOST_CAP_MEDIA,
+    ArtSwiftVideoFrame = ART_MEDIA_VIDEO_FRAME,
     ArtSwiftRender = ART_DOMAIN_RENDER,
     ArtSwiftCapture = ART_RENDER_CAPTURE,
 };
