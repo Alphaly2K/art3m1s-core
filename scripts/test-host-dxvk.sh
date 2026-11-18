@@ -7,21 +7,23 @@ if [[ $(uname -s) != Darwin ]]; then
   exit 2
 fi
 backend=${1:-dxvk}
-usage() { printf '%s\n' 'Usage: test-host-dxvk.sh [dxvk|wined3d] [--d3d11] [--iosurface|--worker]' >&2; exit 2; }
+usage() { printf '%s\n' 'Usage: test-host-dxvk.sh [dxvk|wined3d] [--d3d11] [--iosurface|--worker|--interop]' >&2; exit 2; }
 [[ $backend == dxvk || $backend == wined3d ]] || usage
 if [[ $# -gt 0 ]]; then shift; fi
 api=d3d9
 iosurface=0
 worker=0
+interop=0
 for option; do
   case $option in
     --d3d11) api=d3d11 ;;
     --iosurface) iosurface=1 ;;
     --worker) worker=1 ;;
+    --interop) interop=1 ;;
     *) usage ;;
   esac
 done
-if [[ $worker == 1 && ( $api != d3d11 || $iosurface != 0 ) ]]; then usage; fi
+if ((iosurface + worker + interop > 1)) || [[ $api != d3d11 && ( $worker == 1 || $interop == 1 ) ]]; then usage; fi
 crossover=${CROSSOVER_ROOT:-/Applications/CrossOver.app/Contents/SharedSupport/CrossOver}
 : "${CX_BOTTLE:?Set CX_BOTTLE to a dedicated CrossOver test bottle}"
 cc=${ARTEMIS_D3D_CC:-${ARTEMIS_D3D9_CC:-x86_64-w64-mingw32-gcc}}
@@ -56,12 +58,16 @@ scratch=$(mktemp -d)
 trap 'rm -rf -- "$scratch"' EXIT
 sources=("tools/host-smoke/artemis_$api.c")
 libraries=("-l$api" -ld3dcompiler_47 -luser32)
-if [[ $api == d3d11 ]]; then
+includes=()
+if [[ $interop == 1 ]]; then
+  sources=(tools/host-smoke/artemis_d3d11_interop.c)
+  includes=(-I "${ARTEMIS_VULKAN_INCLUDE:?Set this to a directory containing vulkan/vulkan_core.h}")
+elif [[ $api == d3d11 ]]; then
   if [[ $worker == 1 ]]; then sources=(tools/host-bindings/d3d11/artemis_shader_worker.c); fi
   sources+=(tools/host-bindings/d3d11/artemis_shader_pass.c)
   libraries+=(-ldxguid)
 fi
-"$cc" -std=c11 -O2 -Wall -Wextra -Werror "${sources[@]}" \
+"$cc" -std=c11 -O2 -Wall -Wextra -Werror ${includes[@]+"${includes[@]}"} "${sources[@]}" \
   -o "$scratch/artemis-$api.exe" "${libraries[@]}"
 if [[ -n $candidate ]]; then
   if [[ $api == d3d11 ]]; then
@@ -100,7 +106,7 @@ else
 fi
 
 awk '/^info: +DXVK: / && !dxvk++ || /MoltenVK version/ && !mvk++ ||
-     /Created VkDevice|D3D9 adapter:|D3D11 device:|^[pv]s_[235]_0|failed:|cannot reserve|^err:|^Error:|panicked at/' \
+     /Created VkDevice|D3D9 adapter:|D3D11 device:|D3D11 interop:|^[pv]s_[235]_0|failed:|cannot reserve|^err:|^Error:|panicked at/' \
      "$scratch/result.log"
 if [[ $backend == dxvk ]]; then
   if ! grep -Eq '^info: +DXVK: ' "$scratch/result.log" ||

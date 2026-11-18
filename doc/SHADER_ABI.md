@@ -179,6 +179,12 @@ buffer after GPU completion. This probe creates a native Vulkan device
 with `VK_EXT_metal_objects` enabled. The tested Wine/DXVK device did not
 enable that extension.
 
+Run `scripts/test-host-dxvk.sh dxvk --d3d11 --interop` with the same
+`ARTEMIS_VULKAN_INCLUDE` to query `IDXGIVkInteropDevice` in Wine. The probe
+checks the device and queue, enumerates the visible device extensions and
+reports whether Metal object export or Win32 external memory and semaphore
+entry points can be resolved. It does not submit Vulkan work to DXVK's queue.
+
 To test transfer from Wine to a Flutter texture, set
 `FLUTTER_MACOS_FRAMEWORK_DIR` to the directory containing
 `FlutterMacOS.framework`, select the bottle, and run:
