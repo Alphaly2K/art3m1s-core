@@ -86,10 +86,12 @@ run_wine() (
 )
 status=0
 if [[ $worker == 1 ]]; then
-  client="$PWD/tools/host-smoke/artemis_d3d11_worker.py"
+  cargo build --quiet --locked --manifest-path crates/artemis-shader-host/Cargo.toml \
+    --target-dir target/shader-host --example smoke
+  client="$PWD/target/shader-host/debug/examples/smoke"
   (cd "$scratch"
    CX_GRAPHICS_BACKEND=$graphics_backend DXVK_LOG_LEVEL=info MVK_CONFIG_LOG_LEVEL=3 \
-     python3 "$client" "$crossover/bin/wine" "${wine_args[@]}" "artemis-$api.exe") \
+     "$client" "$crossover/bin/wine" "${wine_args[@]}" "artemis-$api.exe") \
      2> "$scratch/result.log" || status=$?
 elif [[ $iosurface == 1 ]]; then
   run_wine --stream-bgra 2> "$scratch/result.log" | "$scratch/readback-texture" || status=$?
@@ -98,7 +100,7 @@ else
 fi
 
 awk '/^info: +DXVK: / && !dxvk++ || /MoltenVK version/ && !mvk++ ||
-     /Created VkDevice|D3D9 adapter:|D3D11 device:|^[pv]s_[235]_0|failed:|cannot reserve|^err:|AssertionError|Traceback/' \
+     /Created VkDevice|D3D9 adapter:|D3D11 device:|^[pv]s_[235]_0|failed:|cannot reserve|^err:|^Error:|panicked at/' \
      "$scratch/result.log"
 if [[ $backend == dxvk ]]; then
   if ! grep -Eq '^info: +DXVK: ' "$scratch/result.log" ||

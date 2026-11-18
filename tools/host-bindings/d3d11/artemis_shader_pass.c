@@ -15,6 +15,9 @@ struct ArtD3D11Pass {
     ID3D11SamplerState *point, *linear;
     ID3D11BlendState *alpha;
     ID3D11RasterizerState *rasterizer;
+    uint32_t width, height;
+    ID3D11Texture2D *target, *readback;
+    ID3D11RenderTargetView *view;
 };
 
 struct ArtD3D11Program {
@@ -96,6 +99,9 @@ done:
 void art_d3d11_pass_destroy(ArtD3D11Pass *pass) {
     if (!pass) return;
     if (pass->context) ID3D11DeviceContext_ClearState(pass->context);
+    RELEASE(ID3D11RenderTargetView, pass->view);
+    RELEASE(ID3D11Texture2D, pass->readback);
+    RELEASE(ID3D11Texture2D, pass->target);
     RELEASE(ID3D11RasterizerState, pass->rasterizer);
     RELEASE(ID3D11BlendState, pass->alpha);
     RELEASE(ID3D11SamplerState, pass->linear);
@@ -206,6 +212,38 @@ static HRESULT upload(ID3D11Device *device, const ArtD3D11Image *image, ID3D11Sh
     return result;
 }
 
+static HRESULT resize_target(ArtD3D11Pass *pass, uint32_t width, uint32_t height) {
+    if (pass->width == width && pass->height == height) return S_OK;
+    HRESULT result;
+    ID3D11Texture2D *target = NULL, *readback = NULL;
+    ID3D11RenderTargetView *view = NULL;
+    D3D11_TEXTURE2D_DESC desc = {
+        .Width = width, .Height = height, .MipLevels = 1, .ArraySize = 1,
+        .Format = DXGI_FORMAT_B8G8R8A8_UNORM, .SampleDesc = { 1, 0 },
+        .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_RENDER_TARGET,
+    };
+    TRY(ID3D11Device_CreateTexture2D(pass->device, &desc, NULL, &target));
+    TRY(ID3D11Device_CreateRenderTargetView(pass->device, (ID3D11Resource *)target, NULL, &view));
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    TRY(ID3D11Device_CreateTexture2D(pass->device, &desc, NULL, &readback));
+    RELEASE(ID3D11RenderTargetView, pass->view);
+    RELEASE(ID3D11Texture2D, pass->readback);
+    RELEASE(ID3D11Texture2D, pass->target);
+    pass->target = target;
+    pass->readback = readback;
+    pass->view = view;
+    pass->width = width;
+    pass->height = height;
+    return S_OK;
+done:
+    RELEASE(ID3D11RenderTargetView, view);
+    RELEASE(ID3D11Texture2D, readback);
+    RELEASE(ID3D11Texture2D, target);
+    return result;
+}
+
 HRESULT art_d3d11_pass_draw(ArtD3D11Pass *pass, const ArtD3D11Program *program,
                             const ArtD3D11Draw *draw, void *bgra, size_t capacity) {
     if (!pass || !program || !draw || !bgra || !valid_extent(draw->width, draw->height) ||
@@ -218,8 +256,7 @@ HRESULT art_d3d11_pass_draw(ArtD3D11Pass *pass, const ArtD3D11Program *program,
     ID3D11DeviceContext *context = pass->context;
     ID3D11ShaderResourceView *textures[4] = { NULL };
     ID3D11Buffer *constants = NULL;
-    ID3D11Texture2D *target = NULL, *readback = NULL;
-    ID3D11RenderTargetView *view = NULL;
+    TRY(resize_target(pass, draw->width, draw->height));
     for (unsigned i = 0; i < 4; ++i) TRY(upload(device, &draw->textures[i], &textures[i]));
     if (draw->constant_bytes) {
         const D3D11_BUFFER_DESC desc = {
@@ -229,18 +266,6 @@ HRESULT art_d3d11_pass_draw(ArtD3D11Pass *pass, const ArtD3D11Program *program,
         const D3D11_SUBRESOURCE_DATA data = { .pSysMem = draw->constants };
         TRY(ID3D11Device_CreateBuffer(device, &desc, &data, &constants));
     }
-
-    D3D11_TEXTURE2D_DESC desc = {
-        .Width = draw->width, .Height = draw->height, .MipLevels = 1, .ArraySize = 1,
-        .Format = DXGI_FORMAT_B8G8R8A8_UNORM, .SampleDesc = { 1, 0 },
-        .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_RENDER_TARGET,
-    };
-    TRY(ID3D11Device_CreateTexture2D(device, &desc, NULL, &target));
-    TRY(ID3D11Device_CreateRenderTargetView(device, (ID3D11Resource *)target, NULL, &view));
-    desc.Usage = D3D11_USAGE_STAGING;
-    desc.BindFlags = 0;
-    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    TRY(ID3D11Device_CreateTexture2D(device, &desc, NULL, &readback));
 
     const UINT stride = sizeof(ArtD3D11Vertex), offset = 0;
     const D3D11_VIEWPORT viewport = { 0, 0, (FLOAT)draw->width, (FLOAT)draw->height, 0, 1 };
@@ -255,26 +280,23 @@ HRESULT art_d3d11_pass_draw(ArtD3D11Pass *pass, const ArtD3D11Program *program,
     ID3D11DeviceContext_PSSetSamplers(context, 0, 1, &sampler);
     ID3D11DeviceContext_PSSetConstantBuffers(context, 0, 1, &constants);
     ID3D11DeviceContext_OMSetBlendState(context, draw->alpha_blend ? pass->alpha : NULL, NULL, UINT32_MAX);
-    ID3D11DeviceContext_OMSetRenderTargets(context, 1, &view, NULL);
+    ID3D11DeviceContext_OMSetRenderTargets(context, 1, &pass->view, NULL);
     ID3D11DeviceContext_RSSetViewports(context, 1, &viewport);
     ID3D11DeviceContext_RSSetState(context, pass->rasterizer);
-    ID3D11DeviceContext_ClearRenderTargetView(context, view, draw->clear_rgba);
+    ID3D11DeviceContext_ClearRenderTargetView(context, pass->view, draw->clear_rgba);
     ID3D11DeviceContext_Draw(context, 4, 0);
     ID3D11DeviceContext_OMSetRenderTargets(context, 0, NULL, NULL);
-    ID3D11DeviceContext_CopyResource(context, (ID3D11Resource *)readback, (ID3D11Resource *)target);
+    ID3D11DeviceContext_CopyResource(context, (ID3D11Resource *)pass->readback, (ID3D11Resource *)pass->target);
 
     D3D11_MAPPED_SUBRESOURCE map;
-    TRY(ID3D11DeviceContext_Map(context, (ID3D11Resource *)readback, 0, D3D11_MAP_READ, 0, &map));
+    TRY(ID3D11DeviceContext_Map(context, (ID3D11Resource *)pass->readback, 0, D3D11_MAP_READ, 0, &map));
     for (uint32_t y = 0; y < draw->height; ++y) {
         memcpy((char *)bgra + (size_t)y * draw->width * 4,
                (const char *)map.pData + (size_t)y * map.RowPitch, draw->width * 4);
     }
-    ID3D11DeviceContext_Unmap(context, (ID3D11Resource *)readback, 0);
+    ID3D11DeviceContext_Unmap(context, (ID3D11Resource *)pass->readback, 0);
 done:
     ID3D11DeviceContext_ClearState(context);
-    RELEASE(ID3D11RenderTargetView, view);
-    RELEASE(ID3D11Texture2D, readback);
-    RELEASE(ID3D11Texture2D, target);
     RELEASE(ID3D11Buffer, constants);
     for (unsigned i = 0; i < 4; ++i) RELEASE(ID3D11ShaderResourceView, textures[i]);
     return result;

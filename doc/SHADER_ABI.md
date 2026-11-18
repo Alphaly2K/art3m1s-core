@@ -142,7 +142,11 @@ are rejected; the engine's frame packet and the default renderer are unchanged.
 
 Run `CX_BOTTLE=DedicatedTestBottle bash scripts/test-host-dxvk.sh dxvk --d3d11 --worker`
 to exercise the Windows worker from a macOS process. The probe also accepts
-`wined3d`. It requires Python 3 in addition to the Direct3D probe prerequisites.
+`wined3d`. The Rust SDK in `crates/artemis-shader-host` uses the worker's
+stdout and stdin; the Host owns process launch, timeouts and configuration.
+Set `ARTEMIS_D3D11_MEASURE=1` to measure a 1920×1080 draw with two full-size
+inputs and one full-size output across the pipe. It excludes the Host's scene
+rendering and final presentation.
 
 Every request uses a little-endian `ADX1` header: four bytes of magic, then
 `u32 operation`, `u32 request_id`, and `u32 payload_bytes`. IDs are nonzero
