@@ -10,15 +10,25 @@
 
 继续核对剩余快照字段、实机画面对照和生产 Host 接入。
 v2 预览已提供独立构建、C 内存 Host 和 Dart 封装；Linux、Windows 原生 CI 和生产 Host 切换待完成。
-生产 Flutter 已接入 macOS Artemis v2 可选预览。下一步接通媒体、截图和网络服务，并用实际
-游戏验证存档兼容、帧时序和前后台切换，再决定默认切换条件。
+生产 Flutter 已接入 macOS Artemis v2 可选预览和脚本截图。下一步接通媒体和网络服务，并用
+实际游戏验证存档兼容、帧时序和前后台切换，再决定默认切换条件。
+
+着色器编译与执行分开评估。Artemis Host 已生成 SPIR-V；想在 Apple 平台复用 Vulkan Host
+时，先用 MoltenVK 验证像素、资源绑定及 IOSurface 共享。DXVK 适用于规划 Direct3D Host 时
+评估。glslang 的 HLSL 前端已弃用，另行验证 DXC 对旧语法归一化后的着色器与反射布局的兼容性。
+
+## 已完成：macOS Flutter 脚本截图
+
+应用仓库的 `4e34f16` 在 Host 按指定帧捕获，保留最近一次成功的结果，并将 `[savess]` 的 PNG
+写入现有原子存档服务。macOS 应用冒烟覆盖切换画面后保存、路径拒绝后重试和输出尺寸与像素。
+Flutter 静态检查和 181 项测试通过。
 
 ## 已完成：macOS Flutter 播放器预览
 
 应用仓库的 `49f1af3` 接入 Runner、帧循环、现有项目 VFS 和原子存档；`--artemis-v2` 启用，
 同步 v1 仍是默认。独立 Core 与 Metal 库和原 v1 库同包。真实应用使用合成项目验证服务请求、
 动态读、写入拒绝、保存、纹理呈现和关闭，Flutter 静态检查和 181 项测试通过。Dart 直连绑定
-与 Flutter 通道共用文件服务，原有 Dart 动态库冒烟通过。媒体、截图和网络服务尚未启用。
+与 Flutter 通道共用文件服务，原有 Dart 动态库冒烟通过。
 
 ## 已完成：Flutter 方法通道与共享纹理适配
 
