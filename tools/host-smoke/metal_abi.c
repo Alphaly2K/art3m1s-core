@@ -1,5 +1,6 @@
 #include "art3m1s_core_v2.draft.h"
 
+#include <CoreVideo/CoreVideo.h>
 #include <dlfcn.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -113,4 +114,52 @@ ArtStatus metal_pixels(ArtRuntimeHandle rt, ArtFrameToken token, uint32_t index,
 
 ArtStatus metal_release(ArtRuntimeHandle rt, ArtFrameToken token) {
     return frame->release(rt, token);
+}
+
+void *metal_create_pixel_buffer(uint32_t width, uint32_t height) {
+    CFDictionaryRef properties = CFDictionaryCreate(NULL, NULL, NULL, 0,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    if (!properties) return NULL;
+    const void *keys[] = { kCVPixelBufferIOSurfacePropertiesKey,
+                           kCVPixelBufferMetalCompatibilityKey };
+    const void *values[] = { properties, kCFBooleanTrue };
+    CFDictionaryRef attributes = CFDictionaryCreate(NULL, keys, values, 2,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFRelease(properties);
+    if (!attributes) return NULL;
+    CVPixelBufferRef buffer = NULL;
+    CVReturn status = CVPixelBufferCreate(NULL, width, height, kCVPixelFormatType_32BGRA,
+                                         attributes, &buffer);
+    CFRelease(attributes);
+    return status == kCVReturnSuccess ? buffer : NULL;
+}
+
+void *metal_pixel_buffer_surface(void *buffer) {
+    return CVPixelBufferGetIOSurface(buffer);
+}
+
+void metal_free_pixel_buffer(void *buffer) {
+    CVPixelBufferRelease(buffer);
+}
+
+CVReturn metal_read_pixel_buffer(void *buffer, uint8_t *rgba, uint64_t size) {
+    const size_t width = CVPixelBufferGetWidth(buffer);
+    const size_t height = CVPixelBufferGetHeight(buffer);
+    if (size != width * height * 4) return kCVReturnInvalidArgument;
+    const CVPixelBufferLockFlags lock = kCVPixelBufferLock_ReadOnly;
+    CVReturn status = CVPixelBufferLockBaseAddress(buffer, lock);
+    if (status != kCVReturnSuccess) return status;
+    const size_t stride = CVPixelBufferGetBytesPerRow(buffer);
+    const uint8_t *base = CVPixelBufferGetBaseAddress(buffer);
+    for (size_t y = 0; y < height; ++y) {
+        const uint8_t *row = base + y * stride;
+        for (size_t i = 0; i < width * 4; i += 4) {
+            rgba[0] = row[i + 2];
+            rgba[1] = row[i + 1];
+            rgba[2] = row[i];
+            rgba[3] = row[i + 3];
+            rgba += 4;
+        }
+    }
+    return CVPixelBufferUnlockBaseAddress(buffer, lock);
 }

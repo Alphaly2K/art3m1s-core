@@ -643,7 +643,8 @@ Flutter 的最小 Host 样例。平台 IO/render/media 适配器可以复用，�
 
 独立 C Host 可用 `bash scripts/test-host-v2.sh` 或 `scripts/test-host-v2.ps1` 构建并验证。
 macOS 上可用 `bash scripts/test-host-v2-metal.sh` 运行独立 Metal Host，验证从 C ABI 借用
-ARFP 和纹理像素后的绘制结果。该检查需要 Metal 设备；不需要窗口或外部游戏文件。
+ARFP 和纹理像素后的绘制结果，包含向共享 IOSurface 连续呈现。该检查需要 Metal 设备；
+不需要窗口或外部游戏文件。
 在 `tools/host-bindings/dart` 目录运行 `dart pub get --enforce-lockfile` 后，使用
 `dart run bin/smoke.dart <纯 Core 动态库路径>` 可验证 Dart 接入。`artemis_host.dart` 的
 `ArtemisSession` 负责协商接口、推进帧以及收发消息。同一会话的创建、调用与关闭须在同一

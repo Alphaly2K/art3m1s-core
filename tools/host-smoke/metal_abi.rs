@@ -1,7 +1,9 @@
 use art3m1s_render::artemis::FramePacket;
+use art3m1s_render::{Extent2D, NativeSurface, NativeSurfaceKind};
 use std::{
-    ffi::CStr,
+    ffi::{CStr, c_void},
     os::raw::c_char,
+    ptr::NonNull,
     sync::{Mutex, MutexGuard},
 };
 
@@ -48,6 +50,10 @@ unsafe extern "C" {
     fn metal_acquire(rt: u64, after: u64, token: *mut u64, packet: *mut Bytes) -> i32;
     fn metal_pixels(rt: u64, token: u64, index: u32, pixels: *mut Bytes) -> i32;
     fn metal_release(rt: u64, token: u64) -> i32;
+    fn metal_create_pixel_buffer(width: u32, height: u32) -> *mut c_void;
+    fn metal_pixel_buffer_surface(buffer: *mut c_void) -> *mut c_void;
+    fn metal_free_pixel_buffer(buffer: *mut c_void);
+    fn metal_read_pixel_buffer(buffer: *mut c_void, rgba: *mut u8, size: u64) -> i32;
 }
 
 fn check(status: i32, operation: &str) -> Result<(), String> {
@@ -188,5 +194,46 @@ impl Drop for Frame<'_> {
         if self.token != 0 {
             unsafe { metal_release(self.runtime(), self.token) };
         }
+    }
+}
+
+pub struct SharedSurface {
+    buffer: NonNull<c_void>,
+    extent: Extent2D,
+}
+
+impl SharedSurface {
+    pub fn new(extent: Extent2D) -> Result<Self, String> {
+        let buffer =
+            NonNull::new(unsafe { metal_create_pixel_buffer(extent.width, extent.height) })
+                .ok_or("cannot allocate shared pixel buffer")?;
+        Ok(Self { buffer, extent })
+    }
+
+    pub fn target(&self) -> Result<NativeSurface, String> {
+        let handle = NonNull::new(unsafe { metal_pixel_buffer_surface(self.buffer.as_ptr()) })
+            .ok_or("pixel buffer has no IOSurface")?;
+        Ok(NativeSurface {
+            kind: NativeSurfaceKind::AppleIoSurface,
+            handle: handle.as_ptr(),
+            extent: self.extent,
+        })
+    }
+
+    pub fn pixels(&self) -> Result<Vec<u8>, String> {
+        let mut rgba = vec![0; self.extent.rgba8_len().ok_or("invalid buffer extent")?];
+        check(
+            unsafe {
+                metal_read_pixel_buffer(self.buffer.as_ptr(), rgba.as_mut_ptr(), rgba.len() as u64)
+            },
+            "read shared pixel buffer",
+        )?;
+        Ok(rgba)
+    }
+}
+
+impl Drop for SharedSurface {
+    fn drop(&mut self) {
+        unsafe { metal_free_pixel_buffer(self.buffer.as_ptr()) };
     }
 }

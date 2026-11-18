@@ -10,8 +10,14 @@
 
 继续核对剩余快照字段、实机画面对照和生产 Host 接入。
 v2 预览已提供独立构建、C 内存 Host 和 Dart 封装；Linux、Windows 原生 CI 和生产 Host 切换待完成。
-生产 Flutter 先接 Artemis 的 Metal 共享纹理路径：验证 Host 将 v2 帧绘制到 Flutter 所用的
-共享表面，再接入实际帧循环、资源和媒体。创建 runtime、推进与释放帧须由同一 OS 线程执行。
+生产 Flutter 先接 Artemis 的 Metal 共享纹理路径。共享表面已独立验过，下一步接入应用帧循环、
+资源和媒体。创建 runtime、推进与释放帧须由同一 OS 线程执行。
+
+## 已完成：Metal Host 呈现到共享 IOSurface
+
+独立 Host 使用与 macOS Flutter 纹理相同的 BGRA 像素缓冲格式，将 C ABI 交付的规则转场帧和
+菜单帧依次呈现到同一 IOSurface。两帧均在释放 Core 令牌后呈现，Host 直接从共享缓冲区读回
+并核对像素。应用侧的纹理注册、帧通知和 v2 runtime 生命周期尚未接入。
 
 ## 已完成：独立 Metal Host 通过 C ABI 绘制
 

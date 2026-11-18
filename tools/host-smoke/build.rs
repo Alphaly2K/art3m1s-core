@@ -7,5 +7,7 @@ fn main() {
             .include("../../doc/abi")
             .warnings_into_errors(true)
             .compile("artemis_metal_abi");
+        println!("cargo:rustc-link-lib=framework=CoreFoundation");
+        println!("cargo:rustc-link-lib=framework=CoreVideo");
     }
 }

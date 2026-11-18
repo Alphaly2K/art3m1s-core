@@ -3,9 +3,9 @@ mod metal_abi;
 
 #[cfg(target_os = "macos")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use crate::metal_abi::{Frame, Session};
-    use art3m1s_render::artemis::SpriteRenderer;
-    use art3m1s_render::backend::{FrameTarget, GpuBackend, metal::MetalBackend};
+    use crate::metal_abi::{Frame, Session, SharedSurface};
+    use art3m1s_render::artemis::{FramePacket, SpriteRenderer};
+    use art3m1s_render::backend::{FrameTarget, GpuBackend, RenderRegion, metal::MetalBackend};
     use art3m1s_render::types::Extent2D;
     use image::{ImageFormat, RgbaImage, imageops::FilterType};
     use serde_json::{Value, json};
@@ -74,6 +74,7 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
         .nth(1)
         .ok_or("expected the Core dylib path")?;
     let session = Session::open(&CString::new(library.as_bytes())?)?;
+    let shared = SharedSurface::new(Extent2D::new(4, 4))?;
     let mut renderer = SpriteRenderer::new(MetalBackend::new(4, 4)?);
     let mut capture = None;
     let mut service_until_event = |renderer: &mut SpriteRenderer<MetalBackend>,
@@ -167,36 +168,60 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
         frame: &Frame<'_>,
     ) -> Result<Vec<u8>, String> {
         let packet = frame.decode()?;
-        draw_target(renderer, |renderer| {
-            renderer.render_packet(
-                frame.runtime(),
-                &packet,
-                |index| frame.pixels(index),
-                [0.0, 0.0, 0.0, 1.0],
-            )
-        })
+        draw_target(renderer, |renderer| draw_packet(renderer, frame, &packet))
+    }
+
+    fn draw_packet(
+        renderer: &mut SpriteRenderer<MetalBackend>,
+        frame: &Frame<'_>,
+        packet: &FramePacket,
+    ) -> Result<RenderRegion, String> {
+        renderer.render_packet(
+            frame.runtime(),
+            packet,
+            |index| frame.pixels(index),
+            [0.0, 0.0, 0.0, 1.0],
+        )
+    }
+
+    fn render_scene(
+        renderer: &mut SpriteRenderer<MetalBackend>,
+        draw: impl FnOnce(&mut SpriteRenderer<MetalBackend>) -> Result<RenderRegion, String>,
+    ) -> Result<(), String> {
+        renderer.backend_mut().begin_frame(FrameTarget::Main)?;
+        renderer.backend_mut().clear([0.0, 0.0, 0.0, 1.0]);
+        let rendered = draw(renderer);
+        renderer.backend_mut().end_frame();
+        rendered.map(|_| ())
     }
 
     fn draw_target(
         renderer: &mut SpriteRenderer<MetalBackend>,
-        draw: impl FnOnce(
-            &mut SpriteRenderer<MetalBackend>,
-        ) -> Result<art3m1s_render::backend::RenderRegion, String>,
+        draw: impl FnOnce(&mut SpriteRenderer<MetalBackend>) -> Result<RenderRegion, String>,
     ) -> Result<Vec<u8>, String> {
-        let target = FrameTarget::Main;
         renderer.backend_mut().begin_access();
-        let result = (|| {
-            renderer.backend_mut().begin_frame(target)?;
-            renderer.backend_mut().clear([0.0, 0.0, 0.0, 1.0]);
-            let rendered = draw(renderer);
-            renderer.backend_mut().end_frame();
-            rendered?;
+        let result = render_scene(renderer, draw).and_then(|()| {
             renderer
                 .backend_mut()
-                .readback_owned(target, Extent2D::new(4, 4))
-        })();
+                .readback_owned(FrameTarget::Main, Extent2D::new(4, 4))
+        });
         renderer.backend_mut().end_access();
         result
+    }
+
+    fn present(
+        renderer: &mut SpriteRenderer<MetalBackend>,
+        frame: Frame<'_>,
+        shared: &SharedSurface,
+    ) -> Result<Vec<u8>, String> {
+        let packet = frame.decode()?;
+        renderer.backend_mut().begin_access();
+        let result = render_scene(renderer, |renderer| draw_packet(renderer, &frame, &packet));
+        drop(frame);
+        let result = result.and_then(|()| renderer.backend_mut().present(None));
+        renderer.backend_mut().end_access();
+        result?;
+        shared.pixels()
     }
 
     fn check(pixels: &[u8], expected: impl Fn(usize, usize) -> [u8; 4]) {
@@ -243,20 +268,25 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
     assert!(start.decode()?.transition().unwrap().rule.is_some());
     check(&draw(&mut renderer, &start)?, |_, _| BLUE);
     drop(start);
+    renderer
+        .backend_mut()
+        .set_native_surface(shared.target()?)?;
     service_until_event(&mut renderer, 6, 170)?;
     let middle = session.frame(0)?;
-    check(&draw(&mut renderer, &middle)?, |x, y| match (x, y < 2) {
-        (0, true) => GREEN,
-        (0, false) => YELLOW,
-        (1, true) => [0, 125, 130, 255],
-        (1, false) => [125, 125, 130, 255],
-        _ => BLUE,
+    check(&present(&mut renderer, middle, &shared)?, |x, y| {
+        match (x, y < 2) {
+            (0, true) => GREEN,
+            (0, false) => YELLOW,
+            (1, true) => [0, 125, 130, 255],
+            (1, false) => [125, 125, 130, 255],
+            _ => BLUE,
+        }
     });
-    drop(middle);
     service_until_event(&mut renderer, 7, 220)?;
     let menu = session.frame(0)?;
-    check(&draw(&mut renderer, &menu)?, |_, _| [255, 0, 0, 255]);
-    drop(menu);
+    check(&present(&mut renderer, menu, &shared)?, |_, _| {
+        [255, 0, 0, 255]
+    });
     let thumbnail = image::open(save_dir.0.join("thumb.png"))?.into_rgba8();
     assert_eq!(thumbnail.dimensions(), (2, 2));
     assert_eq!(thumbnail.get_pixel(0, 0).0, [36, 255, 0, 255]);
@@ -266,8 +296,11 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
     renderer.backend_mut().begin_access();
     renderer.clear_cached_textures();
     renderer.clear_cached_shaders();
+    renderer.backend_mut().clear_native_surface();
     renderer.backend_mut().end_access();
-    println!("Artemis v2 Metal pixels passed (E-Mote, groups, transitions, HLSL and thumbnails)");
+    println!(
+        "Artemis v2 Metal pixels passed (E-Mote, groups, transitions, HLSL, thumbnails and IOSurface)"
+    );
     Ok(())
 }
 
