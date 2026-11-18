@@ -6,6 +6,7 @@ mod control;
 mod http;
 mod lifecycle;
 mod persistence;
+mod save_files;
 mod scene;
 mod screenshot;
 mod transition;
@@ -284,6 +285,7 @@ pub struct ScriptIoSession {
     wait_start: Option<(u64, u64)>,
     event_filter: Option<EventFilterWork>,
     save_work: Option<SaveWork>,
+    save_file_work: Option<save_files::SaveFileWork>,
     gameplay_checkpoint: Option<crate::save::GameplayCheckpoint>,
     numbered_load: Option<NumberedLoadWork>,
     boot_restore: Option<BootRestore>,
@@ -345,6 +347,7 @@ impl ScriptIoSession {
             wait_start: None,
             event_filter: None,
             save_work: None,
+            save_file_work: None,
             gameplay_checkpoint: None,
             numbered_load: None,
             boot_restore: None,
@@ -469,6 +472,7 @@ impl ScriptIoSession {
         self.wait_start = None;
         self.event_filter = None;
         self.save_work = None;
+        self.save_file_work = None;
         self.gameplay_checkpoint = None;
         self.numbered_load = None;
         self.boot_restore = None;
@@ -580,6 +584,7 @@ impl ScriptIoSession {
         self.wait_start = None;
         self.event_filter = None;
         self.save_work = None;
+        self.save_file_work = None;
         self.gameplay_checkpoint = None;
         self.numbered_load = None;
         self.boot_restore = None;
@@ -709,6 +714,7 @@ impl ScriptIoSession {
             || self.interpreter.pending_host_io().is_some()
             || self.event_filter.is_some()
             || self.http.is_pending()
+            || self.save_file_work.is_some()
             || self.screenshot.pending_request().is_some()
             || self
                 .save_work
@@ -826,6 +832,7 @@ impl ScriptIoSession {
             && self.interpreter.pending_host_io().is_none()
             && self.event_filter.is_none()
             && self.save_work.is_none()
+            && self.save_file_work.is_none()
             && self.numbered_load.is_none()
             && !matches!(self.http, http::Http::Writing(_))
             && !dispatch_scene
@@ -978,6 +985,12 @@ impl ScriptIoSession {
         &mut self,
         mut response: Option<IoResponse>,
     ) -> Result<ScenarioStep, ScriptIoError> {
+        if let Some(work) = self.save_file_work.take() {
+            self.complete_save_file_operation(work, response.take().ok_or(ProtocolError::State)?)?;
+            if self.operation.is_some() {
+                return Ok(ScenarioStep::Continue);
+            }
+        }
         if matches!(self.http, http::Http::Writing(_)) {
             self.complete_http_write(response.take().ok_or(ProtocolError::State)?)?;
         }

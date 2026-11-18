@@ -1985,6 +1985,72 @@ __engine:setEventHandler{onEnterFrame='tick'}
 }
 
 #[test]
+fn save_file_moves_preserve_the_source_until_the_destination_is_confirmed() {
+    let (mut session, _, mut host) = playback_project(
+        br#"*top
+[flip]
+[file command=move src=SOURCE dst=denied]
+[file command=copy src=source dst=backup]
+[file command=move src=source dst=final]
+[file command=delete target=backup]
+[file command=move src=final dst=FINAL]
+[stop]
+"#,
+    );
+    let save_key = |key: &str| ("save".into(), key.into());
+    host.files.insert(save_key("source"), (17, vec![0, 255]));
+    drive_playback_boot(&mut session, &mut host);
+
+    let frame = playback_frame(2, 20);
+    let mut mutations = Vec::new();
+    for turn in 0..32 {
+        match session.step_queued_frame(frame).unwrap() {
+            ScriptIoProgress::Event => break,
+            ScriptIoProgress::Waiting => {}
+            progress => panic!("unexpected file operation progress: {progress:?}"),
+        }
+        assert!(turn < 31, "file operations did not finish");
+        let mut outgoing = requests(&mut session);
+        assert_eq!(outgoing.len(), 1);
+        let request = outgoing.pop().unwrap();
+        assert_eq!(request.metadata["namespace"], "save");
+        let key = request.metadata["key"].as_str().unwrap();
+        if matches!(request.identity.service, IO_WRITE_ATOMIC | IO_DELETE) {
+            mutations.push((request.identity.service, key.to_owned()));
+        }
+        if request.identity.service == IO_DELETE && key == "source" {
+            assert_eq!(host.files[&save_key("final")].1, [0, 255]);
+            assert_eq!(host.files[&save_key("source")].1, [0, 255]);
+        }
+        let response = if key == "denied" {
+            assert_eq!(request.identity.service, IO_WRITE_ATOMIC);
+            assert_eq!(
+                session.step_queued_frame(playback_frame(3, 30)).unwrap(),
+                ScriptIoProgress::WouldBlock
+            );
+            reply(&request, json!({"status":"denied"}), vec![])
+        } else {
+            host.complete(&request)
+        };
+        session.submit_replies(&[response]).unwrap();
+    }
+    assert_eq!(
+        mutations,
+        [
+            (IO_WRITE_ATOMIC, "denied".into()),
+            (IO_WRITE_ATOMIC, "backup".into()),
+            (IO_WRITE_ATOMIC, "final".into()),
+            (IO_DELETE, "source".into()),
+            (IO_DELETE, "backup".into()),
+        ]
+    );
+    assert_eq!(host.files[&save_key("final")].1, [0, 255]);
+    for deleted in ["denied", "source", "backup"] {
+        assert!(!host.files.contains_key(&save_key(deleted)));
+    }
+}
+
+#[test]
 fn translation_preserves_original_text_and_retires_results_from_previous_pages() {
     use crate::text::BacklogTag;
 

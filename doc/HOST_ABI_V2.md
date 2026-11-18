@@ -349,6 +349,10 @@ modified_utc_ms 为规范十进制 i64 字符串，表示 UTC Unix 毫秒；缺�
 文件写入完成。删除只适用于 save 文件，目标不存在返回 not_found；完成前脚本不能继续。
 完整服务能力由 facade 协商。
 
+`[file]` 的 `copy`、`move` 和 `delete` 使用 save 命名空间。复制和移动通过 `stat/read`
+读取源文件，并按写入预算提交 `write_atomic`；移动只在写入成功后删除源文件。归一化后同名
+的复制或移动直接结束。失败后脚本继续；写入失败保留源文件，删除失败保留已确认写入的目标。
+
 namespace 至少区分 asset 与 save；逻辑 key 使用 `/`，拒绝绝对路径、驱动器、NUL 和 `..`。
 Artemis 的大小写兼容查找、归档覆盖顺序、别名和 savepath 需要独立 conformance 样例；
 不能直接照 OS 大小写规则查找，也不能因重构改变已有 patch/sidecar 优先级。

@@ -94,6 +94,9 @@ impl ScriptIoSession {
                     self.dispatch_screenshot()
                 }
                 ScriptIoProgress::Event if self.has_http_event() => self.dispatch_http(),
+                ScriptIoProgress::Event if self.has_save_file_event() => {
+                    self.start_save_file_operation().map(|()| None)
+                }
                 ScriptIoProgress::Event if self.has_persistence_event() => {
                     self.start_persistence().map(|()| None)
                 }

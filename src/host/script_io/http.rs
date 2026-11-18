@@ -178,11 +178,7 @@ impl ScriptIoSession {
             return Err(ProtocolError::State);
         };
         match response {
-            IoResponse::Written => {
-                if let Some(scene) = &self.scene {
-                    scene.invalidate_texture(&format!("{}/{key}", self.save_prefix));
-                }
-            }
+            IoResponse::Written => self.invalidate_save_texture(&key),
             IoResponse::Failed { kind, .. } => {
                 crate::core_warn!("HTTP response write failed: {}", kind.as_str());
             }

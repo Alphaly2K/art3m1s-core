@@ -60,11 +60,7 @@ impl ScriptIoSession {
             if saved {
                 match work {
                     CaptureWork::Take(captured) => self.screenshot.captured = Some(*captured),
-                    CaptureWork::Save(key) => {
-                        if let Some(scene) = &self.scene {
-                            scene.invalidate_texture(&format!("{}/{}", self.save_prefix, key));
-                        }
-                    }
+                    CaptureWork::Save(key) => self.invalidate_save_texture(&key),
                 }
             }
             self.resume_scenario()?;
