@@ -7,19 +7,23 @@ if [[ $(uname -s) != Darwin ]]; then
   exit 2
 fi
 backend=${1:-dxvk}
-presentation=${2:-}
-if [[ $# -gt 2 || ( $backend != dxvk && $backend != wined3d ) ||
-      ( -n $presentation && $presentation != --iosurface && $presentation != --d3d11 ) ]]; then
-  printf '%s\n' 'Usage: test-host-dxvk.sh [dxvk|wined3d] [--d3d11|--iosurface]' >&2
-  exit 2
-fi
+usage() { printf '%s\n' 'Usage: test-host-dxvk.sh [dxvk|wined3d] [--d3d11] [--iosurface]' >&2; exit 2; }
+[[ $backend == dxvk || $backend == wined3d ]] || usage
+if [[ $# -gt 0 ]]; then shift; fi
+api=d3d9
+iosurface=0
+for option; do
+  case $option in
+    --d3d11) api=d3d11 ;;
+    --iosurface) iosurface=1 ;;
+    *) usage ;;
+  esac
+done
 crossover=${CROSSOVER_ROOT:-/Applications/CrossOver.app/Contents/SharedSupport/CrossOver}
 : "${CX_BOTTLE:?Set CX_BOTTLE to a dedicated CrossOver test bottle}"
 cc=${ARTEMIS_D3D_CC:-${ARTEMIS_D3D9_CC:-x86_64-w64-mingw32-gcc}}
-api=d3d9
 override=d3d9
-if [[ $presentation == --d3d11 ]]; then
-  api=d3d11
+if [[ $api == d3d11 ]]; then
   override=d3d11,dxgi
   candidate=${ARTEMIS_DXVK_D3D11_DIR:-}
   if [[ -n $candidate && ( ! -f $candidate/d3d11.dll || ! -f $candidate/dxgi.dll ) ]]; then
@@ -56,7 +60,7 @@ if [[ -n $candidate ]]; then
     cp "$candidate" "$scratch/d3d9.dll"
   fi
 fi
-if [[ $presentation == --iosurface ]]; then
+if [[ $iosurface == 1 ]]; then
   : "${FLUTTER_MACOS_FRAMEWORK_DIR:?Set this to the directory containing FlutterMacOS.framework}"
   framework_dir=$(cd "$FLUTTER_MACOS_FRAMEWORK_DIR" && pwd)
   MACOSX_DEPLOYMENT_TARGET=12.0 xcrun swiftc -parse-as-library -swift-version 5 \
@@ -71,7 +75,7 @@ run_wine() (
     "$crossover/bin/wine" "${wine_args[@]}" "artemis-$api.exe" "$@"
 )
 status=0
-if [[ $presentation == --iosurface ]]; then
+if [[ $iosurface == 1 ]]; then
   run_wine --stream-bgra 2> "$scratch/result.log" | "$scratch/readback-texture" || status=$?
 else
   run_wine > "$scratch/result.log" 2>&1 || status=$?

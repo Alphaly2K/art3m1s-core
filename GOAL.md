@@ -16,8 +16,8 @@ v2 预览已提供独立构建、C 内存 Host 和 Dart 封装；Linux、Windows
 当前 HLSL 转换仅覆盖已验证样本，保留为试验路径。生产候选使用兼容的 HLSL 编译器生成原引擎
 目标的 Direct3D 字节码，再由 DXVK 执行；Apple 平台优先验证 DXVK + MoltenVK。该组合已有
 macOS 运行经验；当前已核实一个原版 Windows 发行样本走 D3D11 和 Shader Model 5.0。
-仍需确认原版脚本效果的编译参数、采样和混合行为，以及 Flutter 所需的 IOSurface 共享。原型先在独立 Host 验证单帧，
-与原引擎对照后再决定是否接入生产。Core 的帧协议不增加 Direct3D 或平台对象。
+原型已验证原版脚本效果和 Host 的 IOSurface 拷贝。生产接入仍需核对后端分发、游戏效果覆盖、
+Flutter 引擎呈现及全尺寸帧吞吐。Core 的帧协议不增加 Direct3D 或平台对象。
 
 ### DXVK D3D9 像素验证
 
@@ -40,18 +40,23 @@ Flutter 引擎实际呈现、Wine 侧 GPU 共享及真实分辨率吞吐仍待�
 
 ### 原版 D3D11 路径与像素对照
 
-公开 Windows 发行样本（发行页 ID `32670`，归档 SHA-256
+公开 Windows 发行样本（[发行页 32670](https://www.freem.ne.jp/win/game/32670)，归档 SHA-256
 `ee80b55c3e8417ddfb8f7bce4138dcd3665e9d32ff9c4140099999a62fbfb078`）导入
 `D3D11CreateDevice` 和 `D3DCompile`。启动跟踪记录着色器入口 `main`、目标 `vs_5_0`
 和 `ps_5_0`，以及 D3D11 像素着色器创建。当前候选验证以这个 D3D11 路径为主；D3D9
-及此前 IOSurface 冒烟单独保留。此样本的启动跟踪还未捕获 `[lyshader]` 加载的自定义效果。
+及此前 IOSurface 冒烟单独保留。合成场景的 `[lyshader]` 也调用 `D3DCompile`；跟踪中的
+效果 ID 和源码长度与场景一致，入口 `main`，目标 `ps_5_0`，编译 flags 为 0。
 
 CrossOver 自带的 DXVK (`cxaddon-1.10.3-1-25-g737aacd`) 与 MoltenVK 1.2.10 启动了
 原版 D3D11 设备并编译两个目标。独立 D3D11 探针的两个着色器使用同一阶段衔接签名，
 在该组合和 WineD3D 对照上均通过 16 个像素的逐通道检查，覆盖双 UV、常量缓冲及 alpha
-混合。Swingby DXVK 的 D3D11 构建搭配 MoltenVK 1.4.2 时，原版连最低 feature level `9_1`
-都未通过。后续需用原版自定义效果捕获编译参数和画面，验证 D3D11 到 Flutter 的帧交付，
-并核对可分发的 D3D11 后端来源。
+混合。原引擎运行合成场景时，WineD3D 和该 DXVK 组合的两张 320×200 截图解码后逐字节一致：
+基线为不透明白色，应用着色器后为不透明 `#204080`。独立 D3D11 探针另将三帧读回传入
+Host IOSurface，通过 FlutterTexture 更新、尺寸变化、解绑和旧缓冲区检查。
+
+Swingby DXVK 的 D3D11 构建搭配 MoltenVK 1.4.2 时，原版连最低 feature level `9_1`
+都未通过。生产候选仍需可分发的 D3D11 后端、带纹理和常量的原版游戏效果对照、Flutter
+引擎实际呈现和全尺寸帧吞吐测量。零拷贝需要单独确认 Wine 侧 GPU 共享和同步机制。
 
 ## 已完成：媒体能力协商与 Dart 媒体接口
 

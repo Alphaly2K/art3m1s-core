@@ -1,0 +1,13 @@
+*top
+[lyshader id=sample file=probe.hlsl]
+[lyc id=1 width=320 height=200 color=ffffffff]
+[flip]
+[wait time=100]
+[takess]
+[savess file=baseline width=320 height=200]
+[lyprop id=1 shader=sample]
+[flip]
+[wait time=100]
+[takess]
+[savess file=effect width=320 height=200]
+[stop]

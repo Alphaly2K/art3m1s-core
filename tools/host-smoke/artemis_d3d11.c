@@ -2,6 +2,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <d3d11.h>
 #include <d3dcompiler.h>
+#include <fcntl.h>
+#include <io.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -82,20 +84,23 @@ static int channel(uint32_t pixel, int shift) {
     return (int)((pixel >> shift) & 255);
 }
 
-static int check_pixels(const D3D11_MAPPED_SUBRESOURCE *map) {
+static int check_pixels(const D3D11_MAPPED_SUBRESOURCE *map, unsigned width,
+                        unsigned height, BOOL dim_red) {
     int mismatches = 0;
-    for (int y = 0; y < extent; ++y) {
+    for (unsigned y = 0; y < height; ++y) {
         const uint32_t *row = (const uint32_t *)((const char *)map->pData + y * map->RowPitch);
-        for (int x = 0; x < extent; ++x) {
-            uint32_t fore = foreground[y / 2 * 2 + 1 - x / 2];
-            uint32_t back = background[y / 2 * 2 + x / 2];
+        for (unsigned x = 0; x < width; ++x) {
+            unsigned row_index = (y >= height / 2) * 2;
+            unsigned column = x >= width / 2;
+            uint32_t fore = foreground[row_index + 1 - column];
+            uint32_t back = background[row_index + column];
             for (int shift = 0; shift <= 24; shift += 8) {
                 int expected = shift == 24 ? 255 :
-                    ((shift == 16 ? 4 : 2) * channel(fore, shift) + channel(back, shift) +
+                    ((shift == 16 && !dim_red ? 4 : 2) * channel(fore, shift) + channel(back, shift) +
                      4 * channel(clear_color, shift)) / 8;
                 if (abs(channel(row[x], shift) - expected) > 1) {
                     if (!mismatches) {
-                        fprintf(stderr, "ps_5_0 pixel (%d,%d) = %08lx; channel %d expected %d\n",
+                        fprintf(stderr, "ps_5_0 pixel (%u,%u) = %08lx; channel %d expected %d\n",
                                 x, y, (unsigned long)row[x], shift, expected);
                     }
                     ++mismatches;
@@ -105,21 +110,81 @@ static int check_pixels(const D3D11_MAPPED_SUBRESOURCE *map) {
         }
     }
     if (mismatches) {
-        for (int y = 0; y < extent; ++y) {
+        for (unsigned y = 0; y < height; ++y) {
             const uint32_t *row = (const uint32_t *)((const char *)map->pData + y * map->RowPitch);
-            fprintf(stderr, "ps_5_0 row %d:", y);
-            for (int x = 0; x < extent; ++x) {
+            fprintf(stderr, "ps_5_0 row %u:", y);
+            for (unsigned x = 0; x < width; ++x) {
                 fprintf(stderr, " %08lx", (unsigned long)row[x]);
             }
             fputc('\n', stderr);
         }
         return 1;
     }
-    fprintf(stderr, "ps_5_0: passed %d RGBA pixels\n", extent * extent);
+    fprintf(stderr, "ps_5_0: passed %u RGBA pixels\n", width * height);
     return 0;
 }
 
-int main(void) {
+static void write_bytes(const void *bytes, size_t size) {
+    if (fwrite(bytes, 1, size, stdout) != size) {
+        fputs("Cannot write the BGRA frame stream\n", stderr);
+        exit(1);
+    }
+}
+
+static int draw(ID3D11Device *device, ID3D11DeviceContext *context, ID3D11Buffer *constant,
+                uint32_t width, uint32_t height, BOOL dim_red, uint32_t frame_id) {
+    D3D11_TEXTURE2D_DESC desc = {
+        .Width = width, .Height = height, .MipLevels = 1, .ArraySize = 1,
+        .Format = DXGI_FORMAT_B8G8R8A8_UNORM, .SampleDesc = { 1, 0 },
+        .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_RENDER_TARGET,
+    };
+    ID3D11Texture2D *target = NULL, *readback = NULL;
+    ID3D11RenderTargetView *view = NULL;
+    CHECK(ID3D11Device_CreateTexture2D(device, &desc, NULL, &target));
+    CHECK(ID3D11Device_CreateRenderTargetView(device, (ID3D11Resource *)target, NULL, &view));
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    CHECK(ID3D11Device_CreateTexture2D(device, &desc, NULL, &readback));
+
+    const D3D11_VIEWPORT viewport = { 0, 0, width, height, 0, 1 };
+    const float clear[] = { 16 / 255.0f, 24 / 255.0f, 32 / 255.0f, 1 };
+    const float tint[] = { dim_red ? 0.5f : 1, 0.5f, 0.5f, 0.5f };
+    ID3D11DeviceContext_UpdateSubresource(context, (ID3D11Resource *)constant, 0, NULL, tint, 0, 0);
+    ID3D11DeviceContext_OMSetRenderTargets(context, 1, &view, NULL);
+    ID3D11DeviceContext_RSSetViewports(context, 1, &viewport);
+    ID3D11DeviceContext_ClearRenderTargetView(context, view, clear);
+    ID3D11DeviceContext_Draw(context, 4, 0);
+    ID3D11DeviceContext_CopyResource(context, (ID3D11Resource *)readback, (ID3D11Resource *)target);
+
+    D3D11_MAPPED_SUBRESOURCE map;
+    CHECK(ID3D11DeviceContext_Map(context, (ID3D11Resource *)readback, 0, D3D11_MAP_READ, 0, &map));
+    int result = check_pixels(&map, width, height, dim_red);
+    if (!result && frame_id) {
+        const uint32_t header[] = { frame_id, width, height };
+        write_bytes(header, sizeof(header));
+        for (uint32_t y = 0; y < height; ++y) {
+            write_bytes((const char *)map.pData + y * map.RowPitch, width * sizeof(uint32_t));
+        }
+    }
+    ID3D11DeviceContext_Unmap(context, (ID3D11Resource *)readback, 0);
+    ID3D11DeviceContext_OMSetRenderTargets(context, 0, NULL, NULL);
+    ID3D11Texture2D_Release(readback);
+    ID3D11RenderTargetView_Release(view);
+    ID3D11Texture2D_Release(target);
+    return result;
+}
+
+int main(int argc, char **argv) {
+    const BOOL stream = argc == 2 && strcmp(argv[1], "--stream-bgra") == 0;
+    if (argc != 1 && !stream) {
+        fputs("Usage: artemis-d3d11.exe [--stream-bgra]\n", stderr);
+        return 2;
+    }
+    if (stream && _setmode(_fileno(stdout), _O_BINARY) == -1) {
+        fputs("Cannot set the BGRA stream to binary mode\n", stderr);
+        return 1;
+    }
     const D3D_FEATURE_LEVEL level = D3D_FEATURE_LEVEL_11_0;
     ID3D11Device *device = NULL;
     ID3D11DeviceContext *context = NULL;
@@ -164,27 +229,11 @@ int main(void) {
     };
     ID3D11SamplerState *sampler = NULL;
     CHECK(ID3D11Device_CreateSamplerState(device, &sampler_desc, &sampler));
-    const float tint[] = { 1, 0.5f, 0.5f, 0.5f };
     const D3D11_BUFFER_DESC constant_desc = {
-        .ByteWidth = sizeof(tint), .Usage = D3D11_USAGE_IMMUTABLE, .BindFlags = D3D11_BIND_CONSTANT_BUFFER,
+        .ByteWidth = 4 * sizeof(float), .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_CONSTANT_BUFFER,
     };
-    const D3D11_SUBRESOURCE_DATA constant_data = { .pSysMem = tint };
     ID3D11Buffer *constant = NULL;
-    CHECK(ID3D11Device_CreateBuffer(device, &constant_desc, &constant_data, &constant));
-
-    D3D11_TEXTURE2D_DESC target_desc = {
-        .Width = extent, .Height = extent, .MipLevels = 1, .ArraySize = 1,
-        .Format = DXGI_FORMAT_B8G8R8A8_UNORM, .SampleDesc = { 1, 0 },
-        .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_RENDER_TARGET,
-    };
-    ID3D11Texture2D *target = NULL, *readback = NULL;
-    ID3D11RenderTargetView *view = NULL;
-    CHECK(ID3D11Device_CreateTexture2D(device, &target_desc, NULL, &target));
-    CHECK(ID3D11Device_CreateRenderTargetView(device, (ID3D11Resource *)target, NULL, &view));
-    target_desc.Usage = D3D11_USAGE_STAGING;
-    target_desc.BindFlags = 0;
-    target_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    CHECK(ID3D11Device_CreateTexture2D(device, &target_desc, NULL, &readback));
+    CHECK(ID3D11Device_CreateBuffer(device, &constant_desc, NULL, &constant));
 
     const D3D11_BLEND_DESC blend_desc = {
         .RenderTarget[0] = {
@@ -201,12 +250,8 @@ int main(void) {
     };
     ID3D11RasterizerState *rasterizer = NULL;
     CHECK(ID3D11Device_CreateRasterizerState(device, &rasterizer_desc, &rasterizer));
-    const D3D11_VIEWPORT viewport = { 0, 0, extent, extent, 0, 1 };
-    const float clear[] = { 16 / 255.0f, 24 / 255.0f, 32 / 255.0f, 1 };
-    ID3D11DeviceContext_OMSetRenderTargets(context, 1, &view, NULL);
     ID3D11DeviceContext_OMSetBlendState(context, blend, NULL, UINT32_MAX);
     ID3D11DeviceContext_RSSetState(context, rasterizer);
-    ID3D11DeviceContext_RSSetViewports(context, 1, &viewport);
     const UINT stride = sizeof(vertices[0]), offset = 0;
     ID3D11DeviceContext_IASetInputLayout(context, layout);
     ID3D11DeviceContext_IASetVertexBuffers(context, 0, 1, &vertex, &stride, &offset);
@@ -216,20 +261,14 @@ int main(void) {
     ID3D11DeviceContext_PSSetShaderResources(context, 0, 2, textures);
     ID3D11DeviceContext_PSSetSamplers(context, 0, 1, &sampler);
     ID3D11DeviceContext_PSSetConstantBuffers(context, 0, 1, &constant);
-    ID3D11DeviceContext_ClearRenderTargetView(context, view, clear);
-    ID3D11DeviceContext_Draw(context, 4, 0);
-    ID3D11DeviceContext_CopyResource(context, (ID3D11Resource *)readback, (ID3D11Resource *)target);
-
-    D3D11_MAPPED_SUBRESOURCE map;
-    CHECK(ID3D11DeviceContext_Map(context, (ID3D11Resource *)readback, 0, D3D11_MAP_READ, 0, &map));
-    int result = check_pixels(&map);
-    ID3D11DeviceContext_Unmap(context, (ID3D11Resource *)readback, 0);
+    int result = draw(device, context, constant, extent, extent, FALSE, stream ? 1 : 0);
+    if (stream && !result) {
+        result = draw(device, context, constant, extent, extent, TRUE, 2);
+        if (!result) result = draw(device, context, constant, 6, 8, FALSE, 3);
+    }
     ID3D11DeviceContext_ClearState(context);
     ID3D11RasterizerState_Release(rasterizer);
     ID3D11BlendState_Release(blend);
-    ID3D11Texture2D_Release(readback);
-    ID3D11RenderTargetView_Release(view);
-    ID3D11Texture2D_Release(target);
     ID3D11Buffer_Release(constant);
     ID3D11SamplerState_Release(sampler);
     ID3D11ShaderResourceView_Release(textures[1]);

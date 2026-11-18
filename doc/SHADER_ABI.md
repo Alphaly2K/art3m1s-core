@@ -112,6 +112,26 @@ bytecode header identifies shader model and stage; it cannot distinguish
 compiler profiles that emit the same version token. Use the same effect,
 textures and render state for both captures, and compare the resulting pixels.
 
+The [original-runtime fixture](../tools/host-smoke/original-shader) exercises
+`[lyshader]` using a self-contained scene. Use the Windows x64 Artemis executable
+from the public release identified in [GOAL.md](../GOAL.md#原版-d3d11-路径与像素对照).
+Copy the fixture and the executable into an empty working directory for each
+backend, then launch the executable from that directory in a dedicated bottle.
+Select `CX_GRAPHICS_BACKEND=wined3d` or `CX_GRAPHICS_BACKEND=dxvk` and use
+`wine --no-gui --debugmsg '-all,+d3dcompiler'` to record compiler arguments.
+Close the window after `save/baseline.png` and `save/effect.png` have appeared.
+The compiler trace for `sample` must show `D3DCompile`, `main`, and `ps_5_0`.
+Compare decoded RGBA bytes between the two runs, for example with FFmpeg:
+
+```sh
+ffmpeg -v error -i save/baseline.png -f rawvideo -pix_fmt rgba - | shasum -a 256
+ffmpeg -v error -i save/effect.png -f rawvideo -pix_fmt rgba - | shasum -a 256
+```
+
+The baseline is 320×200 opaque white; the effect is 320×200 opaque `#204080`.
+This fixture uses a constant-color effect. The independent D3D11 pixel probe
+exercises texture and constant-buffer bindings.
+
 `scripts/test-host-mvk-surface.sh` checks the native presentation boundary.
 Set `ARTEMIS_MOLTENVK_DYLIB` and `ARTEMIS_VULKAN_INCLUDE` from the public
 MoltenVK distribution. The probe imports the IOSurface of a BGRA
@@ -122,16 +142,16 @@ enable that extension.
 
 To test transfer from Wine to a Flutter texture, set
 `FLUTTER_MACOS_FRAMEWORK_DIR` to the directory containing
-`FlutterMacOS.framework`, set the bottle and candidate variables above, and run:
+`FlutterMacOS.framework`, select the bottle, and run:
 
 ```sh
-bash scripts/test-host-dxvk.sh dxvk --iosurface
+bash scripts/test-host-dxvk.sh dxvk --d3d11 --iosurface
 ```
 
 The DXVK probe reads back three frames and streams BGRA pixels to a native
 Host process. The Host copies rows into its own IOSurfaces and returns the
-buffers through `FlutterTexture.copyPixelBuffer()`. The passing candidate
-preserved retained pixels across an update, a resize, and a detach. This run
-uses a CPU copy and calls the texture directly. Flutter engine presentation,
+buffers through `FlutterTexture.copyPixelBuffer()`. It checks retained pixels
+across an update, a resize, and a detach. Omit `--d3d11` for the D3D9 variant.
+This run uses a CPU copy and calls the texture directly. Flutter engine presentation,
 shared GPU surfaces from Wine, and full-size frame throughput need separate
 validation.
