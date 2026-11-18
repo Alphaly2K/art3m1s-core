@@ -140,12 +140,14 @@ Host 循环调用 `step()`、`poll_events()` 和 `submit_replies()`。只有 `st
 
 支持 `e:file(path)`、`e:isFileExists(path)`、嵌套 `e:include(path)`，以及 `io.open` 的
 读写/追加/更新模式、seek、lines、flush 和 close。读取先 stat，再按 revision 分块，允许
-短读且要求前进，空文件不发 read。累计大小受 `max_file_bytes` 限制。写入使用单 blob
-原子请求，受传输 blob 预算限制；成功确认后才清除 dirty 状态，失败保留文件供脚本重试。
+短读且要求前进，空文件不发 read。累计大小受 `max_file_bytes` 限制。写入使用原子请求；
+Host 声明分块写入能力时可暂存多块，在最后一块确认前不替换原文件。成功确认后才清除待写状态，
+失败保留待写内容供脚本重试。
 `io.open` 失败返回 nil/error，flush/close 失败产生可由 `pcall` 捕获的 Lua 错误。
-`e:file{command='delete', target=key}` 与 `[file command=delete target=...]` 均等待 Host 确认。
-目标只在 save 命名空间解析，可省略配置的 save 前缀。Lua 调用成功返回 nil，失败返回
-`nil, message, kind`；场景标签报告失败后继续。copy/move 尚未接入可靠 IO。
+`e:file{command='delete', target=key}`、`e:file{command='copy', src=key, dst=key}`、
+`e:file{command='move', src=key, dst=key}` 与相应的 `[file]` 标签均等待 Host 确认。
+文件只在 save 命名空间解析，可省略配置的 save 前缀。移动只在目标写入确认后删除源文件。
+Lua 调用成功返回 nil，失败返回 `nil, message, kind`；场景标签报告失败后继续。
 
 资源 key 使用 UTF-8、`/` 和 ASCII 小写，拒绝绝对路径、驱动器、NUL 和 `..`。
 `config.savepath` 为逻辑 save 前缀，默认 `save`；此前缀下的路径映射到 save namespace

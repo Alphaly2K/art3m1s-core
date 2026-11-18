@@ -291,7 +291,7 @@ pub struct ScriptIoSession {
     wait_start: Option<(u64, u64)>,
     event_filter: Option<EventFilterWork>,
     save_work: Option<SaveWork>,
-    save_file_work: Option<save_files::SaveFileWork>,
+    save_file_work: Option<(save_files::SaveFileCaller, save_files::SaveFileWork)>,
     gameplay_checkpoint: Option<crate::save::GameplayCheckpoint>,
     numbered_load: Option<NumberedLoadWork>,
     boot_restore: Option<BootRestore>,
@@ -976,6 +976,25 @@ impl ScriptIoSession {
                     Err(error) => return Err(error.into()),
                 }
             }
+            if let Some((caller, work)) = self.save_file_work.take() {
+                let result = self.advance_save_file_operation(
+                    caller,
+                    work,
+                    response.take().ok_or(ProtocolError::State)?,
+                )?;
+                let Some(result) = result else {
+                    continue;
+                };
+                match caller {
+                    save_files::SaveFileCaller::Scenario => {
+                        if let IoResponse::Failed { kind, .. } = result {
+                            crate::core_warn!("save file operation failed: {}", kind.as_str());
+                        }
+                        self.resume_scenario()?;
+                    }
+                    save_files::SaveFileCaller::Lua => response = Some(result),
+                }
+            }
             let request = match self.mode {
                 ExecutionMode::Chunk => {
                     let task = self.task.as_mut().unwrap();
@@ -993,8 +1012,8 @@ impl ScriptIoSession {
                 },
                 ExecutionMode::Idle => return Err(ProtocolError::State.into()),
             };
-            match self.operation_for(request) {
-                Ok(operation) => self.operation = Some(operation),
+            match self.schedule_io(request) {
+                Ok(result) => response = result,
                 Err(error) => response = Some(failed(IoFailure::Denied, error.to_string())),
             }
         }
@@ -1004,12 +1023,6 @@ impl ScriptIoSession {
         &mut self,
         mut response: Option<IoResponse>,
     ) -> Result<ScenarioStep, ScriptIoError> {
-        if let Some(work) = self.save_file_work.take() {
-            self.complete_save_file_operation(work, response.take().ok_or(ProtocolError::State)?)?;
-            if self.operation.is_some() {
-                return Ok(ScenarioStep::Continue);
-            }
-        }
         if matches!(self.http, http::Http::Writing(_)) {
             self.complete_http_write(response.take().ok_or(ProtocolError::State)?)?;
         }
@@ -1961,43 +1974,62 @@ impl ScriptIoSession {
         self.finish_event_filter(EventFilterDecision::Rejected)
     }
 
-    fn operation_for(&self, request: IoRequest) -> Result<Operation, ProtocolError> {
+    fn schedule_io(&mut self, request: IoRequest) -> Result<Option<IoResponse>, ProtocolError> {
         let path = match &request {
             IoRequest::Read { path }
             | IoRequest::Exists { path }
             | IoRequest::ModifiedTime { path }
             | IoRequest::Write { path, .. }
             | IoRequest::DeleteSave { path } => path,
+            IoRequest::TransferSave {
+                source,
+                destination,
+                remove_source,
+            } => {
+                let source = self.save_key(source)?;
+                let destination = self.save_key(destination)?;
+                if let Some((operation, work)) =
+                    Self::save_transfer(source, destination, *remove_source)
+                {
+                    self.operation = Some(operation);
+                    self.save_file_work = Some((save_files::SaveFileCaller::Lua, work));
+                    return Ok(None);
+                }
+                return Ok(Some(IoResponse::Transferred));
+            }
         };
         let normalized = logical_key(path)?;
         let (namespace, key) = match normalized.strip_prefix(&format!("{}/", self.save_prefix)) {
             Some(key) => ("save", key.to_string()),
             None => ("asset", normalized),
         };
-        match request {
-            IoRequest::Read { .. } => Ok(Operation::Stat {
+        let operation = match request {
+            IoRequest::Read { .. } => Operation::Stat {
                 namespace,
                 key,
                 purpose: StatPurpose::Read,
-            }),
-            IoRequest::Exists { .. } => Ok(Operation::Stat {
+            },
+            IoRequest::Exists { .. } => Operation::Stat {
                 namespace,
                 key,
                 purpose: StatPurpose::Exists,
-            }),
-            IoRequest::ModifiedTime { .. } => Ok(Operation::Stat {
+            },
+            IoRequest::ModifiedTime { .. } => Operation::Stat {
                 namespace,
                 key,
                 purpose: StatPurpose::ModifiedTime,
-            }),
-            IoRequest::Write { data, .. } if namespace == "save" => {
-                Ok(Operation::Write { key, data })
+            },
+            IoRequest::Write { data, .. } if namespace == "save" => Operation::Write { key, data },
+            IoRequest::Write { .. } => {
+                return Err(ProtocolError::Argument(
+                    "writes require the logical save prefix",
+                ));
             }
-            IoRequest::Write { .. } => Err(ProtocolError::Argument(
-                "writes require the logical save prefix",
-            )),
-            IoRequest::DeleteSave { .. } => Ok(Operation::Delete { key }),
-        }
+            IoRequest::DeleteSave { .. } => Operation::Delete { key },
+            IoRequest::TransferSave { .. } => unreachable!(),
+        };
+        self.operation = Some(operation);
+        Ok(None)
     }
 
     fn save_key(&self, path: &str) -> Result<String, ProtocolError> {

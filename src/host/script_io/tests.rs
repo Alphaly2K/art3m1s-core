@@ -2051,6 +2051,102 @@ fn save_file_moves_preserve_the_source_until_the_destination_is_confirmed() {
 }
 
 #[test]
+fn lua_save_transfers_resume_after_confirmation_without_replaying_the_call() {
+    let (mut session, _, mut host) = playback_project(
+        br#"*top
+[flip]
+[calllua function=transfer]
+[stop]
+[lua]
+function transfer(e)
+    assert(not entered)
+    entered = true
+    local src = 'save/' .. 'Source'
+    local _, _, invalid = e:file{command='copy', src=src, dst='../outside'}
+    assert(invalid == 'denied')
+    local _, message, kind = e:file{command='move', src=src, dst='denied'}
+    assert(message == 'denied' and kind == 'denied')
+    local _, copy_error = e:file{command='copy', src=src, dst='backup'}
+    assert(not copy_error)
+    local _, move_error = e:file{command='move', src=src, dst='final'}
+    assert(not move_error)
+    local _, alias_error = e:file{command='move', src='final', dst='save/FINAL'}
+    assert(not alias_error)
+    finished = true
+end
+[/lua]
+"#,
+    );
+    let save_key = |key: &str| ("save".into(), key.into());
+    host.files.insert(save_key("source"), (17, vec![0, 255]));
+    host.asset("source", b"asset bytes");
+    drive_playback_boot(&mut session, &mut host);
+
+    let frame = playback_frame(2, 20);
+    let mut mutations = Vec::new();
+    for turn in 0..32 {
+        match session.step_queued_frame(frame).unwrap() {
+            ScriptIoProgress::Event => break,
+            ScriptIoProgress::Waiting => {}
+            progress => panic!("unexpected Lua transfer progress: {progress:?}"),
+        }
+        assert!(turn < 31, "Lua transfers did not finish");
+        let mut outgoing = requests(&mut session);
+        assert_eq!(outgoing.len(), 1);
+        let request = outgoing.pop().unwrap();
+        assert_eq!(request.metadata["namespace"], "save");
+        let key = request.metadata["key"].as_str().unwrap();
+        let service = request.identity.service;
+        if matches!(service, IO_WRITE_ATOMIC | IO_DELETE) {
+            mutations.push((service, key.to_owned()));
+        }
+        let result = if key == "denied" {
+            assert_eq!(service, IO_WRITE_ATOMIC);
+            assert_eq!(
+                session.step_queued_frame(playback_frame(3, 30)).unwrap(),
+                ScriptIoProgress::WouldBlock
+            );
+            reply(&request, json!({"status":"denied"}), vec![])
+        } else {
+            if service == IO_DELETE {
+                assert_eq!(host.files[&save_key("source")].1, [0, 255]);
+                assert_eq!(host.files[&save_key("final")].1, [0, 255]);
+            }
+            host.complete(&request)
+        };
+        session.submit_replies(&[result]).unwrap();
+        assert!(
+            !session
+                .interpreter()
+                .lua()
+                .globals()
+                .contains_key("finished")
+                .unwrap()
+        );
+    }
+    assert!(
+        session
+            .interpreter()
+            .lua()
+            .globals()
+            .get::<bool>("finished")
+            .unwrap()
+    );
+    assert_eq!(
+        mutations,
+        [
+            (IO_WRITE_ATOMIC, "denied".into()),
+            (IO_WRITE_ATOMIC, "backup".into()),
+            (IO_WRITE_ATOMIC, "final".into()),
+            (IO_DELETE, "source".into()),
+        ]
+    );
+    assert_eq!(host.files[&save_key("backup")].1, [0, 255]);
+    assert_eq!(host.files[&save_key("final")].1, [0, 255]);
+    assert!(!host.files.contains_key(&save_key("source")));
+}
+
+#[test]
 fn translation_preserves_original_text_and_retires_results_from_previous_pages() {
     use crate::text::BacklogTag;
 

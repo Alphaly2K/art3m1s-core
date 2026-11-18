@@ -13,9 +13,21 @@ v2 预览已提供独立构建、C 内存 Host 和 Dart 封装；Linux、Windows
 生产 Flutter 已接入 macOS Artemis v2 可选预览和脚本截图。下一步接通媒体和网络服务，并用
 实际游戏验证存档兼容、帧时序和前后台切换，再决定默认切换条件。
 
-着色器编译与执行分开评估。Artemis Host 已生成 SPIR-V；想在 Apple 平台复用 Vulkan Host
-时，先用 MoltenVK 验证像素、资源绑定及 IOSurface 共享。DXVK 适用于规划 Direct3D Host 时
-评估。glslang 的 HLSL 前端已弃用，另行验证 DXC 对旧语法归一化后的着色器与反射布局的兼容性。
+当前 HLSL 转换仅覆盖已验证样本，保留为试验路径。生产候选使用兼容的 HLSL 编译器生成原引擎
+目标的 Direct3D 字节码，再由 DXVK 执行；Apple 平台优先验证 DXVK + MoltenVK。该组合已有
+macOS 运行经验；Artemis 仍需确认原版采用的编译 profile、所选 DXVK 构建支持的 Direct3D
+版本、采样和混合行为，以及 Flutter 所需的 IOSurface 共享。原型先在独立 Host 验证单帧，
+与原引擎对照后再决定是否接入生产。Core 的帧协议不增加 Direct3D 或平台对象。
+
+## 已完成：Luau 文件复制与移动
+
+`e:file` 的复制与移动共用场景标签的可靠 IO 流程。目标确认后才允许删除源文件；失败沿原
+Lua 调用点返回，后续操作继续使用原帧。回归覆盖拒绝写入后继续、同名归一化、save/asset 隔离
+及脚本副作用只执行一次。
+
+独立 v2 通过 278 项测试，默认构建通过 434 项、跳过 2 项，C ABI 与 macOS Swift/Metal 冒烟
+通过。Swift 验证从动态路径短读、写入失败后用新请求 ID 重试，以及重复回复和跨会话回复被拒绝。
+两个构建均只启用 Luau；v1 继续使用同步文件接口。
 
 ## 已完成：macOS Flutter 脚本截图
 

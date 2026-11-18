@@ -7,11 +7,27 @@ use mlua::{AnyUserData, Lua, MultiValue, Thread, ThreadStatus, UserData, Value};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IoRequest {
-    Read { path: String },
-    Exists { path: String },
-    ModifiedTime { path: String },
-    Write { path: String, data: Vec<u8> },
-    DeleteSave { path: String },
+    Read {
+        path: String,
+    },
+    Exists {
+        path: String,
+    },
+    ModifiedTime {
+        path: String,
+    },
+    Write {
+        path: String,
+        data: Vec<u8>,
+    },
+    DeleteSave {
+        path: String,
+    },
+    TransferSave {
+        source: String,
+        destination: String,
+        remove_source: bool,
+    },
 }
 
 impl UserData for IoRequest {}
@@ -46,6 +62,7 @@ pub enum IoResponse {
     ModifiedTime(Option<i64>),
     Written,
     Deleted,
+    Transferred,
     Failed { kind: IoFailure, message: String },
 }
 
@@ -170,7 +187,8 @@ impl IoTask {
                         ])
                     }
                     (IoRequest::Write { .. }, IoResponse::Written)
-                    | (IoRequest::DeleteSave { .. }, IoResponse::Deleted) => {
+                    | (IoRequest::DeleteSave { .. }, IoResponse::Deleted)
+                    | (IoRequest::TransferSave { .. }, IoResponse::Transferred) => {
                         MultiValue::from_vec(vec![Value::Boolean(true), Value::Boolean(true)])
                     }
                     _ => {
@@ -319,6 +337,18 @@ pub fn install(interpreter: &Interpreter) -> Result<()> {
     helpers.set(
         "delete_save",
         lua.create_function(|_, path: String| Ok(IoRequest::DeleteSave { path }))?,
+    )?;
+    helpers.set(
+        "transfer_save",
+        lua.create_function(
+            |_, (source, destination, remove_source): (String, String, bool)| {
+                Ok(IoRequest::TransferSave {
+                    source,
+                    destination,
+                    remove_source,
+                })
+            },
+        )?,
     )?;
     let delete_context = interpreter.engine_context().clone();
     helpers.set(

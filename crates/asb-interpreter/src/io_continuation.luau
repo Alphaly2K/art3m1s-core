@@ -119,8 +119,18 @@ return {
         return h.tag(self, params, ...)
     end,
     file = function(self, path)
-        if type(path) == 'table' and path.command == 'delete' then
-            return delete_save(path.target)
+        if type(path) == 'table' then
+            local command = path.command
+            if command == 'delete' then return delete_save(path.target) end
+            if command == 'copy' or command == 'move' then
+                local src, dst = path.src, path.dst
+                if type(src) ~= 'string' or type(dst) ~= 'string' then
+                    return nil, 'missing source or destination', 'denied'
+                end
+                local ok, message, kind = yield(h.transfer_save(src, dst, command == 'move'))
+                if not ok then return nil, message, kind end
+                return nil
+            end
         end
         if type(path) ~= "string" then error("resumable e:file requires a path", 2) end
         local data = read(path)
