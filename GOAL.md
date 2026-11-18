@@ -11,6 +11,13 @@
 继续核对剩余快照字段、实机画面对照和生产 Host 接入。
 v2 预览已提供独立构建、C 内存 Host 和 Dart 封装；Linux、Windows 原生 CI 和生产 Host 切换待完成。
 
+## 已完成：Rust Host 解码并绘制 ARFP 帧
+
+`FramePacket::decode` 校验 ARFP 记录；`SpriteRenderer::render_packet` 在 Host 的目标上绘制，
+只在缓存未命中时读取借用像素。类型化帧和帧包共用绘制路径。Metal 探针通过帧包绘制并核对转场、
+HLSL、E-Mote、组和缩略图像素，还验证错误像素长度、缓存复用和原调用路径。独立 Core 277 项
+通过，默认构建单测 433 项通过、2 项既有测试跳过；C Host 冒烟和格式检查通过。
+
 ## 已完成：Dart 文件服务适配器
 
 `ArtemisFileIo` 对接 Host 资源读取回调和物理存档目录，处理读版本、空文件、原子写入与删除。

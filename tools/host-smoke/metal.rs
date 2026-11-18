@@ -1,7 +1,7 @@
 #[cfg(target_os = "macos")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use art3m1s_core::host::{
-        frame::FrameLease,
+        frame::{FrameLease, FramePacket},
         protocol::{Domain, HostReply, MessageBody, MessageKind, RequestIdentity, TransportLimits},
         renderer::SpriteRenderer,
         runtime,
@@ -194,14 +194,36 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
         renderer: &mut SpriteRenderer<MetalBackend>,
         frame: &FrameLease,
     ) -> Result<Vec<u8>, String> {
+        let packet = FramePacket::decode(frame.packet()).map_err(|error| error.to_string())?;
+        draw_target(renderer, |renderer| {
+            renderer.render_packet(
+                frame.runtime(),
+                &packet,
+                |index| {
+                    frame
+                        .texture(index)
+                        .map(|image| image.rgba())
+                        .ok_or_else(|| "missing frame texture".into())
+                },
+                [0.0, 0.0, 0.0, 1.0],
+            )
+        })
+    }
+
+    fn draw_target(
+        renderer: &mut SpriteRenderer<MetalBackend>,
+        draw: impl FnOnce(
+            &mut SpriteRenderer<MetalBackend>,
+        ) -> Result<art3m1s_render::backend::RenderRegion, String>,
+    ) -> Result<Vec<u8>, String> {
         let target = FrameTarget::Main;
         renderer.backend_mut().begin_access();
         let result = (|| {
             renderer.backend_mut().begin_frame(target)?;
             renderer.backend_mut().clear([0.0, 0.0, 0.0, 1.0]);
-            let draw = renderer.render(frame);
+            let rendered = draw(renderer);
             renderer.backend_mut().end_frame();
-            draw?;
+            rendered?;
             renderer
                 .backend_mut()
                 .readback_owned(target, Extent2D::new(4, 4))
@@ -223,7 +245,26 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
     }
 
     let old = runtime::acquire_latest(handle, 0)?.expect("group frame");
-    check(&draw(&mut renderer, &old)?, |_, _| [128, 0, 0, 255]);
+    let packet = FramePacket::decode(old.packet())?;
+    let bad_pixels = draw_target(&mut renderer, |renderer| {
+        renderer.render_packet(handle, &packet, |_| Ok(&[]), [0.0, 0.0, 0.0, 1.0])
+    });
+    assert!(bad_pixels.unwrap_err().contains("texture byte length"));
+    let pixels = draw(&mut renderer, &old)?;
+    check(&pixels, |_, _| [128, 0, 0, 255]);
+    let cached = draw_target(&mut renderer, |renderer| {
+        renderer.render_packet(
+            handle,
+            &packet,
+            |_| Err("unexpected pixel request".into()),
+            [0.0, 0.0, 0.0, 1.0],
+        )
+    })?;
+    assert_eq!(cached, pixels);
+    assert_eq!(
+        draw_target(&mut renderer, |renderer| renderer.render(&old))?,
+        pixels
+    );
     drop(old);
     for (id, ms, expected) in [
         (2, 10, [128, 0, 0, 255]),

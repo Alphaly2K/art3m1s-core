@@ -1,7 +1,8 @@
 //! Host-owned rendering adapter for draft Artemis sprite frames.
 
 use super::frame::{
-    FrameGroup, FrameLease, FrameShaderEffect, FrameSprite, FrameTexture, SpriteBlend,
+    FrameGroup, FrameLease, FramePacket, FrameShaderEffect, FrameSprite, FrameTextureDescriptor,
+    FrameTransition, SpriteBlend,
 };
 use super::runtime::RuntimeHandle;
 use art3m1s_render::backend::{FrameCapture, GpuBackend, RenderRegion, TextureData, TextureDesc};
@@ -19,6 +20,16 @@ struct TextureKey {
     epoch: u64,
     revision: u64,
     mask_revision: Option<u64>,
+}
+
+struct RenderPlan<'a> {
+    runtime: RuntimeHandle,
+    epoch: u64,
+    stage_size: [u32; 2],
+    sprites: &'a [FrameSprite],
+    groups: &'a [FrameGroup],
+    masks: &'a [FrameSprite],
+    transition: Option<&'a FrameTransition>,
 }
 
 /// Draws CPU sprites with a backend supplied and configured by the Host.
@@ -55,19 +66,91 @@ impl<B: GpuBackend> SpriteRenderer<B> {
         frame: &FrameLease,
         clear_color: [f32; 4],
     ) -> Result<RenderRegion, String> {
-        let shaders = self.prepare_shaders(frame);
-        let mut live = HashSet::new();
-        let mut uploaded = Vec::new();
-        let mut upload = |image: &FrameTexture, mask: Option<&FrameTexture>| {
-            let key = TextureKey {
+        self.render_plan(
+            RenderPlan {
                 runtime: frame.runtime(),
                 epoch: frame.session_epoch,
+                stage_size: frame.stage_size,
+                sprites: &frame.sprites,
+                groups: &frame.groups,
+                masks: &frame.masks,
+                transition: frame.transition.as_ref(),
+            },
+            |index| {
+                frame.texture(index).map(|image| FrameTextureDescriptor {
+                    revision: image.revision,
+                    width: image.width,
+                    height: image.height,
+                })
+            },
+            |index| {
+                frame
+                    .texture(index)
+                    .map(|image| image.rgba())
+                    .ok_or_else(|| "missing frame texture".into())
+            },
+            clear_color,
+        )
+    }
+
+    /// Draw an ABI packet in the Host's active target. Pixel borrows must be
+    /// from this packet's frame token, which must remain live for this call.
+    pub fn render_packet<'a>(
+        &mut self,
+        runtime: RuntimeHandle,
+        packet: &FramePacket,
+        pixels: impl FnMut(usize) -> Result<&'a [u8], String>,
+        clear_color: [f32; 4],
+    ) -> Result<RenderRegion, String> {
+        self.render_plan(
+            RenderPlan {
+                runtime,
+                epoch: packet.session_epoch,
+                stage_size: packet.stage_size,
+                sprites: &packet.sprites,
+                groups: &packet.groups,
+                masks: &packet.masks,
+                transition: packet.transition.as_ref(),
+            },
+            |index| packet.textures().get(index).copied(),
+            pixels,
+            clear_color,
+        )
+    }
+
+    fn render_plan<'a>(
+        &mut self,
+        frame: RenderPlan<'_>,
+        descriptor: impl Fn(usize) -> Option<FrameTextureDescriptor>,
+        mut pixels: impl FnMut(usize) -> Result<&'a [u8], String>,
+        clear_color: [f32; 4],
+    ) -> Result<RenderRegion, String> {
+        let shaders = self.prepare_shaders(&frame);
+        let mut live = HashSet::new();
+        let mut uploaded = Vec::new();
+        let mut upload = |index,
+                          mask_index: Option<usize>|
+         -> Result<(TextureId, TextureInfo), String> {
+            let image = descriptor(index).ok_or("missing frame texture descriptor")?;
+            let mask = mask_index
+                .map(|index| descriptor(index).ok_or("missing frame mask descriptor"))
+                .transpose()?;
+            if mask.is_some_and(|mask| (image.width, image.height) != (mask.width, mask.height)) {
+                return Err("sprite mask dimensions do not match its image".into());
+            }
+            let size = TextureInfo {
+                width: image.width,
+                height: image.height,
+            };
+            let key = TextureKey {
+                runtime: frame.runtime,
+                epoch: frame.epoch,
                 revision: image.revision,
                 mask_revision: mask.map(|mask| mask.revision),
             };
             live.insert(key);
             if let Some(&texture) = self.textures.get(&key) {
-                return Ok(texture);
+                return Ok((texture, size));
             }
             let name = format!(
                 "artemis-frame-{:016x}-{}-{}-{}",
@@ -76,31 +159,34 @@ impl<B: GpuBackend> SpriteRenderer<B> {
                 key.revision,
                 key.mask_revision.unwrap_or(0)
             );
-            let pixels = masked_pixels(image, mask)?;
+            let rgba = pixels(index)?;
+            let expected = image.rgba_len().ok_or("frame texture size overflow")?;
+            if rgba.len() != expected {
+                return Err("frame texture byte length does not match its descriptor".into());
+            }
+            let mask = mask_index.map(&mut pixels).transpose()?;
+            let rgba = masked_pixels(rgba, mask)?;
             let texture = self.backend.create_texture(
                 &name,
                 TextureDesc::sampled_rgba8(image.width, image.height),
-                TextureData::Rgba8(pixels.as_ref()),
+                TextureData::Rgba8(rgba.as_ref()),
             )?;
             self.textures.insert(key, texture);
             uploaded.push(key);
-            Ok(texture)
+            Ok((texture, size))
         };
         let prepared = (|| {
             let draw = prepare_draw_list(
-                frame,
-                &frame.sprites,
-                &frame.groups,
-                &frame.masks,
+                frame.sprites,
+                frame.groups,
+                frame.masks,
                 &shaders,
                 &mut upload,
             )?;
             let source = frame
                 .transition
-                .as_ref()
                 .map(|transition| -> Result<_, String> {
                     let source = prepare_draw_list(
-                        frame,
                         &transition.source,
                         &transition.source_groups,
                         &transition.source_masks,
@@ -110,10 +196,7 @@ impl<B: GpuBackend> SpriteRenderer<B> {
                     let shader = transition
                         .rule
                         .map(|rule| -> Result<_, String> {
-                            let image = frame
-                                .texture(rule)
-                                .ok_or("invalid transition rule texture")?;
-                            let texture = upload(image, None)?;
+                            let (texture, _) = upload(rule, None)?;
                             Ok(ShaderEffect {
                                 name: art3m1s_render::shader::RULE_TRANS_SHADER.into(),
                                 uniforms: [
@@ -166,12 +249,12 @@ impl<B: GpuBackend> SpriteRenderer<B> {
         }
     }
 
-    fn prepare_shaders(&mut self, frame: &FrameLease) -> HashMap<u64, String> {
+    fn prepare_shaders(&mut self, frame: &RenderPlan<'_>) -> HashMap<u64, String> {
         let mut live = HashSet::new();
         let mut names = HashMap::new();
         let mut prepare = |effect: &FrameShaderEffect| {
             let revision = effect.shader.revision;
-            let key = (frame.runtime(), frame.session_epoch, revision);
+            let key = (frame.runtime, frame.epoch, revision);
             if !live.insert(key) {
                 return;
             }
@@ -205,8 +288,8 @@ impl<B: GpuBackend> SpriteRenderer<B> {
                 prepare(effect);
             }
         };
-        scene(&frame.sprites, &frame.groups, &mut prepare);
-        if let Some(old) = &frame.transition {
+        scene(frame.sprites, frame.groups, &mut prepare);
+        if let Some(old) = frame.transition {
             scene(&old.source, &old.source_groups, &mut prepare);
         }
         self.shaders.retain(|key, name| {
@@ -302,50 +385,37 @@ impl<B: GpuBackend> SpriteRenderer<B> {
     }
 }
 
-fn masked_pixels<'a>(
-    image: &'a FrameTexture,
-    mask: Option<&FrameTexture>,
-) -> Result<Cow<'a, [u8]>, String> {
+fn masked_pixels<'a>(image: &'a [u8], mask: Option<&[u8]>) -> Result<Cow<'a, [u8]>, String> {
     let Some(mask) = mask else {
-        return Ok(Cow::Borrowed(image.rgba()));
+        return Ok(Cow::Borrowed(image));
     };
-    if (image.width, image.height) != (mask.width, mask.height) {
-        return Err("sprite mask dimensions do not match its image".into());
+    if image.len() != mask.len() {
+        return Err("frame mask byte length does not match its descriptor".into());
     }
     let mut pixels = Vec::new();
     pixels
-        .try_reserve_exact(image.rgba().len())
+        .try_reserve_exact(image.len())
         .map_err(|_| "cannot allocate masked pixels")?;
-    pixels.extend_from_slice(image.rgba());
-    for (dst, mask) in pixels.chunks_exact_mut(4).zip(mask.rgba().chunks_exact(4)) {
+    pixels.extend_from_slice(image);
+    for (dst, mask) in pixels.chunks_exact_mut(4).zip(mask.chunks_exact(4)) {
         dst[3] = (u16::from(dst[3]) * u16::from(mask[0]) / 255) as u8;
     }
     Ok(Cow::Owned(pixels))
 }
 
 fn prepare_draw_list(
-    frame: &FrameLease,
     sprites: &[FrameSprite],
     groups: &[FrameGroup],
     masks: &[FrameSprite],
     shaders: &HashMap<u64, String>,
-    mut texture: impl FnMut(&FrameTexture, Option<&FrameTexture>) -> Result<TextureId, String>,
+    mut texture: impl FnMut(usize, Option<usize>) -> Result<(TextureId, TextureInfo), String>,
 ) -> Result<DrawList, String> {
     let mut draw = DrawList::new();
     let mut draw_sprite = |sprite: &FrameSprite| -> Result<DrawCommand, String> {
-        let image = frame
-            .texture(sprite.texture)
-            .ok_or("invalid sprite texture")?;
-        let mask = sprite
-            .mask
-            .map(|index| frame.texture(index).ok_or("invalid sprite mask"))
-            .transpose()?;
+        let (handle, size) = texture(sprite.texture, sprite.mask)?;
         Ok(DrawCommand {
-            texture: texture(image, mask)?,
-            size: TextureInfo {
-                width: image.width,
-                height: image.height,
-            },
+            texture: handle,
+            size,
             transform: glam::Affine2::from_cols_array(&sprite.transform),
             opacity: sprite.opacity,
             blend: match sprite.blend {
@@ -372,7 +442,7 @@ fn prepare_draw_list(
             shader: sprite
                 .shader
                 .as_ref()
-                .map(|effect| resolved_effect(frame, effect, shaders, &mut texture))
+                .map(|effect| resolved_effect(effect, shaders, &mut texture))
                 .transpose()?
                 .flatten(),
             mesh: sprite.mesh.clone().map(|vertices| DrawMesh { vertices }),
@@ -394,7 +464,7 @@ fn prepare_draw_list(
         .collect::<Result<_, _>>()?;
     for group in groups {
         if let Some(effect) = &group.shader {
-            if let Some(effect) = resolved_effect(frame, effect, shaders, &mut texture)? {
+            if let Some(effect) = resolved_effect(effect, shaders, &mut texture)? {
                 draw.push_shader_group(ShaderGroup {
                     key: None,
                     start: group.sprites.start,
@@ -424,10 +494,7 @@ fn prepare_draw_list(
         }
         let mask_texture = group
             .mask
-            .map(|index| {
-                let image = frame.texture(index).ok_or("invalid group mask texture")?;
-                texture(image, None)
-            })
+            .map(|index| texture(index, None).map(|(texture, _)| texture))
             .transpose()?;
         let blend = match group.blend {
             SpriteBlend::Alpha => 0.0,
@@ -462,16 +529,14 @@ fn prepare_draw_list(
 }
 
 fn resolved_effect(
-    frame: &FrameLease,
     effect: &FrameShaderEffect,
     shaders: &HashMap<u64, String>,
-    texture: &mut impl FnMut(&FrameTexture, Option<&FrameTexture>) -> Result<TextureId, String>,
+    texture: &mut impl FnMut(usize, Option<usize>) -> Result<(TextureId, TextureInfo), String>,
 ) -> Result<Option<ShaderEffect>, String> {
     let Some(name) = shaders.get(&effect.shader.revision) else {
         return Ok(None);
     };
-    let mut resolve =
-        |index: usize| texture(frame.texture(index).ok_or("invalid shader texture")?, None);
+    let mut resolve = |index| texture(index, None).map(|(texture, _)| texture);
     Ok(Some(ShaderEffect {
         name: name.clone(),
         uniforms: effect.uniforms.clone(),

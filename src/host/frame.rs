@@ -7,7 +7,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 mod packet;
-pub use packet::FRAME_PACKET_VERSION;
+pub use packet::{FRAME_PACKET_VERSION, FramePacket, FrameTextureDescriptor};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpriteBlend {

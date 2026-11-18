@@ -2,6 +2,9 @@ use super::{FrameShaderEffect, FrameSnapshot, FrameSprite, SpriteBlend};
 use crate::host::protocol::ProtocolError;
 use std::collections::BTreeMap;
 
+mod decode;
+pub use decode::{FramePacket, FrameTextureDescriptor};
+
 pub const FRAME_PACKET_VERSION: u16 = 1;
 const HEADER: usize = 56;
 const TEXTURE: usize = 24;
@@ -407,3 +410,6 @@ fn put_u32(out: &mut Vec<u8>, value: u32) {
 fn put_u64(out: &mut Vec<u8>, value: u64) {
     out.extend_from_slice(&value.to_le_bytes());
 }
+
+#[cfg(test)]
+mod tests;

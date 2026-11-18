@@ -508,10 +508,11 @@ Core 在提交读档前通过 Host IO 预读这些源码和采样纹理；源码
 恢复后的帧使用新的 shader revision，旧帧仍使用其借用的版本。缺少此映射的旧档沿用当前会话
 已注册的 shader。
 
-Rust Host 可使用 `host::renderer::SpriteRenderer` 在已开启的目标上绘制基础帧。适配器使用
-同一帧借用的类型化视图，维护会话和资源版本对应的后端纹理。Host 控制 backend 的访问、
-目标、帧开始与结束及呈现；转场需要后端支持从当前目标捕获画面。新设备可以用仍有效的帧借用
-重新上传。
+Rust Host 可使用 `host::renderer::SpriteRenderer` 在已开启的目标上绘制。`render` 接收 Rust
+帧借用；使用 ABI 的 Host 可用 `FramePacket::decode` 解码帧包，再向 `render_packet` 提供
+runtime 身份和同一个帧 token 的纹理读取函数。像素只在缓存未命中时读取，长度须与描述符一致；
+借用须保持到调用结束。Host 控制 backend 的访问、目标、帧开始与结束及呈现；转场需要后端
+支持捕获当前目标。新设备可以用仍有效的帧借用重新上传。
 
 `acquire_latest(after_render_frame_id)` 返回不可变快照和 lease token；无新帧为 NO_DATA。
 快照及所有引用的 CPU 资源版本在 release 前跨 step/reload 保持有效；默认至多两个
