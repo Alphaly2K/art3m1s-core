@@ -132,6 +132,41 @@ The baseline is 320×200 opaque white; the effect is 320×200 opaque `#204080`.
 This fixture uses a constant-color effect. The independent D3D11 pixel probe
 exercises texture and constant-buffer bindings.
 
+## D3D11 Host Worker
+
+The optional worker in `tools/host-bindings/d3d11` compiles unmodified
+`main`/`ps_5_0` HLSL and draws an offscreen quad. It binds up to four 2D BGRA
+textures (`t0` through `t3`), one sampler (`s0`), and float scalars or vectors
+in `b0`. The compiler's reflection supplies uniform offsets. Other resources
+are rejected; the engine's frame packet and the default renderer are unchanged.
+
+Run `CX_BOTTLE=DedicatedTestBottle bash scripts/test-host-dxvk.sh dxvk --d3d11 --worker`
+to exercise the Windows worker from a macOS process. The probe also accepts
+`wined3d`. It requires Python 3 in addition to the Direct3D probe prerequisites.
+
+Every request uses a little-endian `ADX1` header: four bytes of magic, then
+`u32 operation`, `u32 request_id`, and `u32 payload_bytes`. IDs are nonzero
+after startup. Responses echo the operation and request ID and begin with a
+signed 32-bit HRESULT counted in their payload length. The startup response
+has zero operation and ID. EOF on stdin closes and releases the worker.
+
+- Operation 1 compiles its raw HLSL payload (up to 1 MiB) and uses the request
+  ID as its program ID. A failure can carry compiler diagnostics.
+- Operation 2 draws a program. The payload starts with four `u32` values:
+  program ID, width, height, and flags (bit 0 alpha blend, bit 1 point sampler).
+  Next are four clear-color `f32` values, four vertices of six `f32` values
+  (`xy`, `uv0`, `uv1`), and a `u32` uniform count. Each uniform is a `u32`
+  name length, its non-NUL name bytes, a `u32` component count and one to four
+  `f32` values. Four textures follow in register order: width and height as
+  `u32`, then tightly packed BGRA bytes; two zero dimensions leave a slot
+  unbound. Success returns tightly packed BGRA pixels at the requested size.
+- Operation 3 releases the program ID in its `u32` payload.
+
+One worker keeps up to 64 programs. Requests and output images are capped at
+64 MiB. Invalid framing ends the process; a framed request with invalid fields
+returns an error and leaves the next frame readable. The transport does not
+bundle a Direct3D implementation or choose the Host's Wine/Vulkan configuration.
+
 `scripts/test-host-mvk-surface.sh` checks the native presentation boundary.
 Set `ARTEMIS_MOLTENVK_DYLIB` and `ARTEMIS_VULKAN_INCLUDE` from the public
 MoltenVK distribution. The probe imports the IOSurface of a BGRA

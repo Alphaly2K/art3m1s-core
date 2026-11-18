@@ -7,18 +7,21 @@ if [[ $(uname -s) != Darwin ]]; then
   exit 2
 fi
 backend=${1:-dxvk}
-usage() { printf '%s\n' 'Usage: test-host-dxvk.sh [dxvk|wined3d] [--d3d11] [--iosurface]' >&2; exit 2; }
+usage() { printf '%s\n' 'Usage: test-host-dxvk.sh [dxvk|wined3d] [--d3d11] [--iosurface|--worker]' >&2; exit 2; }
 [[ $backend == dxvk || $backend == wined3d ]] || usage
 if [[ $# -gt 0 ]]; then shift; fi
 api=d3d9
 iosurface=0
+worker=0
 for option; do
   case $option in
     --d3d11) api=d3d11 ;;
     --iosurface) iosurface=1 ;;
+    --worker) worker=1 ;;
     *) usage ;;
   esac
 done
+if [[ $worker == 1 && ( $api != d3d11 || $iosurface != 0 ) ]]; then usage; fi
 crossover=${CROSSOVER_ROOT:-/Applications/CrossOver.app/Contents/SharedSupport/CrossOver}
 : "${CX_BOTTLE:?Set CX_BOTTLE to a dedicated CrossOver test bottle}"
 cc=${ARTEMIS_D3D_CC:-${ARTEMIS_D3D9_CC:-x86_64-w64-mingw32-gcc}}
@@ -51,8 +54,15 @@ if [[ -n $candidate || -n $moltenvk ]]; then
 fi
 scratch=$(mktemp -d)
 trap 'rm -rf -- "$scratch"' EXIT
-"$cc" -std=c11 -O2 -Wall -Wextra -Werror "tools/host-smoke/artemis_$api.c" \
-  -o "$scratch/artemis-$api.exe" "-l$api" -ld3dcompiler_47 -luser32
+sources=("tools/host-smoke/artemis_$api.c")
+libraries=("-l$api" -ld3dcompiler_47 -luser32)
+if [[ $api == d3d11 ]]; then
+  if [[ $worker == 1 ]]; then sources=(tools/host-bindings/d3d11/artemis_shader_worker.c); fi
+  sources+=(tools/host-bindings/d3d11/artemis_shader_pass.c)
+  libraries+=(-ldxguid)
+fi
+"$cc" -std=c11 -O2 -Wall -Wextra -Werror "${sources[@]}" \
+  -o "$scratch/artemis-$api.exe" "${libraries[@]}"
 if [[ -n $candidate ]]; then
   if [[ $api == d3d11 ]]; then
     cp "$candidate/d3d11.dll" "$candidate/dxgi.dll" "$scratch/"
@@ -75,14 +85,20 @@ run_wine() (
     "$crossover/bin/wine" "${wine_args[@]}" "artemis-$api.exe" "$@"
 )
 status=0
-if [[ $iosurface == 1 ]]; then
+if [[ $worker == 1 ]]; then
+  client="$PWD/tools/host-smoke/artemis_d3d11_worker.py"
+  (cd "$scratch"
+   CX_GRAPHICS_BACKEND=$graphics_backend DXVK_LOG_LEVEL=info MVK_CONFIG_LOG_LEVEL=3 \
+     python3 "$client" "$crossover/bin/wine" "${wine_args[@]}" "artemis-$api.exe") \
+     2> "$scratch/result.log" || status=$?
+elif [[ $iosurface == 1 ]]; then
   run_wine --stream-bgra 2> "$scratch/result.log" | "$scratch/readback-texture" || status=$?
 else
   run_wine > "$scratch/result.log" 2>&1 || status=$?
 fi
 
 awk '/^info: +DXVK: / && !dxvk++ || /MoltenVK version/ && !mvk++ ||
-     /Created VkDevice|D3D9 adapter:|D3D11 device:|^[pv]s_[235]_0|failed:|cannot reserve|^err:/' \
+     /Created VkDevice|D3D9 adapter:|D3D11 device:|^[pv]s_[235]_0|failed:|cannot reserve|^err:|AssertionError|Traceback/' \
      "$scratch/result.log"
 if [[ $backend == dxvk ]]; then
   if ! grep -Eq '^info: +DXVK: ' "$scratch/result.log" ||
