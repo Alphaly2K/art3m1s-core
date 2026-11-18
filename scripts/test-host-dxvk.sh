@@ -7,10 +7,12 @@ if [[ $(uname -s) != Darwin ]]; then
   exit 2
 fi
 backend=${1:-dxvk}
-case "$backend" in
-  dxvk|wined3d) ;;
-  *) printf '%s\n' 'Usage: test-host-dxvk.sh [dxvk|wined3d]' >&2; exit 2 ;;
-esac
+presentation=${2:-}
+if [[ $# -gt 2 || ( $backend != dxvk && $backend != wined3d ) ||
+      ( -n $presentation && $presentation != --iosurface ) ]]; then
+  printf '%s\n' 'Usage: test-host-dxvk.sh [dxvk|wined3d] [--iosurface]' >&2
+  exit 2
+fi
 crossover=${CROSSOVER_ROOT:-/Applications/CrossOver.app/Contents/SharedSupport/CrossOver}
 : "${CX_BOTTLE:?Set CX_BOTTLE to a dedicated CrossOver test bottle}"
 cc=${ARTEMIS_D3D9_CC:-x86_64-w64-mingw32-gcc}
@@ -34,13 +36,26 @@ trap 'rm -rf -- "$scratch"' EXIT
 if [[ -n $candidate ]]; then
   cp "$candidate" "$scratch/d3d9.dll"
 fi
+if [[ $presentation == --iosurface ]]; then
+  : "${FLUTTER_MACOS_FRAMEWORK_DIR:?Set this to the directory containing FlutterMacOS.framework}"
+  framework_dir=$(cd "$FLUTTER_MACOS_FRAMEWORK_DIR" && pwd)
+  MACOSX_DEPLOYMENT_TARGET=12.0 xcrun swiftc -parse-as-library -swift-version 5 \
+    -strict-concurrency=complete -warnings-as-errors -module-cache-path "$scratch/swift-modules" \
+    -F "$framework_dir" -Xlinker -rpath -Xlinker "$framework_dir" \
+    tools/host-smoke/ArtemisDXVKTextureSmoke.swift -o "$scratch/readback-texture"
+fi
 
-status=0
-(
+run_wine() (
   cd "$scratch"
   CX_GRAPHICS_BACKEND=$graphics_backend DXVK_LOG_LEVEL=info MVK_CONFIG_LOG_LEVEL=3 \
-    "$crossover/bin/wine" "${wine_args[@]}" artemis-d3d9.exe
-) > "$scratch/result.log" 2>&1 || status=$?
+    "$crossover/bin/wine" "${wine_args[@]}" artemis-d3d9.exe "$@"
+)
+status=0
+if [[ $presentation == --iosurface ]]; then
+  run_wine --stream-bgra 2> "$scratch/result.log" | "$scratch/readback-texture" || status=$?
+else
+  run_wine > "$scratch/result.log" 2>&1 || status=$?
+fi
 
 awk '/^info: +DXVK: / && !dxvk++ || /MoltenVK version/ && !mvk++ ||
      /Created VkDevice|D3D9 adapter:|^ps_[23]_0|failed:|cannot reserve|^err: +DxvkGraphicsPipeline:/' \

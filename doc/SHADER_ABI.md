@@ -110,6 +110,22 @@ textures and render state for both captures, and compare the resulting pixels.
 Set `ARTEMIS_MOLTENVK_DYLIB` and `ARTEMIS_VULKAN_INCLUDE` from the public
 MoltenVK distribution. The probe imports the IOSurface of a BGRA
 `CVPixelBuffer`, writes two frames with Vulkan and checks each in the same
-buffer after GPU completion. It runs in a native process. A Wine backend
-must still produce or transfer into that surface, signal completion, and
-respect the Flutter texture consumer's lifetime on resize and teardown.
+buffer after GPU completion. This probe creates a native Vulkan device
+with `VK_EXT_metal_objects` enabled. The tested Wine/DXVK device did not
+enable that extension.
+
+To test transfer from Wine to a Flutter texture, set
+`FLUTTER_MACOS_FRAMEWORK_DIR` to the directory containing
+`FlutterMacOS.framework`, set the bottle and candidate variables above, and run:
+
+```sh
+bash scripts/test-host-dxvk.sh dxvk --iosurface
+```
+
+The DXVK probe reads back three frames and streams BGRA pixels to a native
+Host process. The Host copies rows into its own IOSurfaces and returns the
+buffers through `FlutterTexture.copyPixelBuffer()`. The passing candidate
+preserved retained pixels across an update, a resize, and a detach. This run
+uses a CPU copy and calls the texture directly. Flutter engine presentation,
+shared GPU surfaces from Wine, and full-size frame throughput need separate
+validation.

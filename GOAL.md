@@ -33,8 +33,10 @@ Metal argument buffers 的复跑仍有该错误。该发行组合的 D3D9 着色
 
 独立原生探针启用 `VK_EXT_metal_objects`，把 Host 分配的 7×5 BGRA IOSurface 导入 MoltenVK，
 验证连续两帧的像素在同一个 CoreVideo 缓冲区中可见。当前 Wine/DXVK 设备未启用该扩展；
-原生测试不经过 Wine。下一步验证 Wine 渲染目标的共享或拷贝路径及 Flutter 的同步和重建。
-原版游戏的实际编译调用、profile、采样器与常量布局尚缺对照输入，继续保留生产接入门槛。
+原生测试不经过 Wine。已通过 DXVK 读回、进程管道、CPU 拷贝到 Host IOSurface 的独立探针；
+三帧通过 `FlutterTexture.copyPixelBuffer()` 的内容、尺寸变化、detach 和旧缓冲区生命周期检查。
+Flutter 引擎实际呈现、Wine 侧 GPU 共享及真实分辨率吞吐仍待验证。
+原版游戏的编译入口、profile、采样器与常量布局尚缺原始调用记录和可归属的画面对照。
 
 ## 已完成：macOS Flutter 脚本 HTTP
 
