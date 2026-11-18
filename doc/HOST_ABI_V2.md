@@ -667,6 +667,17 @@ Swift 应用可使用 [ArtemisMacSession](../tools/host-bindings/swift/ArtemisMa
 `bash scripts/test-host-v2-swift.sh` 使用真实的 Core 和 Metal 动态库验证上述 Swift 接入，
 需要 macOS 和 Metal 设备，无需 Flutter 或外部游戏文件。
 
+macOS Flutter Runner 可将 [ArtemisFlutterHost](../tools/host-bindings/swift/ArtemisFlutterHost.swift)
+注册到平台线程上的 messenger，并提供打包后的 v2 Core 和 Metal 库路径。Dart 端通过
+[ArtemisFlutterSession](../tools/host-bindings/flutter/artemis_flutter_session.dart) 调用；会话 ID 由
+原生端分配，事件的请求 ID 和 epoch 以十进制字符串传输，metadata 和 blob 以字节传输。应用
+决定何时推进和处理服务，原生端只在成功呈现时通知纹理消费者。应用退出玩家视图时调用
+`session.close()`，Runner 离开时调用 `host.close()` 注销通道并释放剩余会话。
+
+将 `FLUTTER_MACOS_FRAMEWORK_DIR` 指向包含 `FlutterMacOS.framework` 的目录后运行
+`bash scripts/test-host-v2-flutter.sh`，可以验证标准方法编解码器、真实 Core 和 Metal 设备的
+接线。探针独立运行并检查纹理注册、像素和关闭，无需启动游戏应用。
+
 在 `tools/host-bindings/dart` 目录运行 `dart pub get --enforce-lockfile` 后，使用
 `dart run bin/smoke.dart <纯 Core 动态库路径>` 可验证 Dart 接入。`artemis_host.dart` 的
 `ArtemisSession` 负责协商接口、推进帧以及收发消息。同一会话的创建、调用与关闭须在同一

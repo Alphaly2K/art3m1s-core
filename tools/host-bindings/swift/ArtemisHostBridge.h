@@ -11,6 +11,8 @@ enum {
     ArtSwiftStale = ART_E_STALE,
     ArtSwiftMajor = ART_ABI_V2_MAJOR,
     ArtSwiftRuntime = ART_INTERFACE_RUNTIME,
+    ArtSwiftSessionChanged = ART_RUNTIME_SESSION_CHANGED,
+    ArtSwiftRuntimeClosed = ART_RUNTIME_CLOSED_EVENT,
     ArtSwiftFrame = ART_INTERFACE_FRAME,
     ArtSwiftSubmitVersion = ART_SUBMIT_SCHEMA_VERSION,
     ArtSwiftIo = ART_DOMAIN_IO,

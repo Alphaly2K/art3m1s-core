@@ -10,8 +10,15 @@
 
 继续核对剩余快照字段、实机画面对照和生产 Host 接入。
 v2 预览已提供独立构建、C 内存 Host 和 Dart 封装；Linux、Windows 原生 CI 和生产 Host 切换待完成。
-生产 Flutter 先接 Artemis 的 Metal 共享纹理路径。Core 和 Metal 动态库已通过 Swift 主线程
-会话联调。下一步将会话接入 Flutter 帧循环和纹理注册，接通实际资源、存档和媒体。
+生产 Flutter 先接 Artemis 的 Metal 共享纹理路径。Swift 与 Dart 的方法通道及纹理注册适配器
+已联调。下一步把它接入应用 Runner、打包和玩家帧循环，并接通实际资源、存档和媒体。
+
+## 已完成：Flutter 方法通道与共享纹理适配
+
+macOS Runner 适配器负责调用 v2 会话并管理 Flutter 纹理。Swift 与 Dart 通过方法通道交换事件
+和二进制资源，回复受理后才消费原请求。探针使用 Flutter 标准编解码器和真实 Core、Metal
+动态库，验证两个会话本地请求 ID 相同时不会串线，以及纹理 ID 为零、连续通知、重建和注销。
+生产应用尚未注册此通道。
 
 ## 已完成：Swift 主线程会话与异步 IO 联调
 
