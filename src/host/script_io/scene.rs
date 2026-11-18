@@ -521,6 +521,10 @@ impl SceneIo {
                 [
                     layer.file.as_deref(),
                     layer.mask.as_deref(),
+                    props
+                        .custom
+                        .get("intermediate_render_mask")
+                        .map(String::as_str),
                     custom_shader.then(|| binding("mask")).flatten(),
                     custom_shader
                         .then(|| user.and_then(|name| binding(name)))

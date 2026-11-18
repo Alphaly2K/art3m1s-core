@@ -4353,8 +4353,10 @@ fn numbered_save_restores_scene_text_and_audio_in_a_fresh_runtime() {
     let mut host = MemoryHost::default();
     let pixels = [20, 40, 60, 190];
     let mask = [128, 128, 128, 255];
+    let group_mask = [255, 64, 32, 128];
     host.asset("hero.png", &png_bytes(1, 1, &pixels));
     host.asset("mask.png", &png_bytes(1, 1, &mask));
+    host.asset("viewport-mask.png", &png_bytes(1, 1, &group_mask));
     host.asset("font/fixture-regular.ttf", &test_font());
     host.asset(
         "store.iet",
@@ -4365,6 +4367,8 @@ fn numbered_save_restores_scene_text_and_audio_in_a_fresh_runtime() {
 [voice id=line file=voice.ogg]
 [lyc id=1.80 file=hero mask=mask]
 [lytween id=1.80 param=left from=0 to=20 time=10 ease=linear]
+[lyprop id=2 intermediate_render=1 intermediate_render_mask=viewport-mask]
+[lyc id=2.0 width=1 height=1 color=ffffff]
 [chgmsg id=dialog layered=1]
 [font face=font/fixture-medium.ttf]
 AB
@@ -4463,7 +4467,12 @@ AB
     );
     runtime::destroy(saver).unwrap();
 
-    for cancel_key in [Some("mask.png"), Some("font/fixture-regular.ttf"), None] {
+    for cancel_key in [
+        Some("mask.png"),
+        Some("viewport-mask.png"),
+        Some("font/fixture-regular.ttf"),
+        None,
+    ] {
         host.reads.clear();
         let loader = create("load.iet");
         let initial = drive(loader, start, &mut host, None);
@@ -4519,6 +4528,15 @@ AB
             let restored = runtime::acquire_latest(loader, original.render_frame_id)
                 .unwrap()
                 .unwrap();
+            assert!(host.reads.contains(&("viewport-mask.png".into(), 0)));
+            assert_eq!(restored.groups.len(), 1);
+            assert_eq!(
+                restored
+                    .texture(restored.groups[0].mask.unwrap())
+                    .unwrap()
+                    .rgba(),
+                group_mask
+            );
             assert!(host.reads.contains(&("font/fixture-regular.ttf".into(), 0)));
             let restored_text: Vec<_> = restored
                 .sprites
