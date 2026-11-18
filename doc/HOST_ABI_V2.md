@@ -646,8 +646,16 @@ OS 线程上执行；Host 自行调度 IO 与设备操作，在该线程提交�
 请求身份，`submit` 返回 `false` 表示整批未受理，Host 可以稍后重试。
 
 `withLatestFrame` 在同步回调结束时释放帧；`copyPacket` 和 `copyTextureRgba` 取得可在回调外
-继续使用的字节。样例用内存资源启动，覆盖大记录、输入、翻译回填、帧借用及临时文件的
-分块原子写入。需要直接读取
-借用像素或在原生线程绘制的 Host 可使用生成的 C ABI 绑定。
+继续使用的字节。需要直接读取借用像素或在原生线程绘制的 Host 可使用生成的 C ABI 绑定。
+
+`artemis_file_io.dart` 提供 `ArtemisFileIo`，通过 `readAsset` 接入 Host 的现有资源查找，
+可返回原始字节和可选修改时间。`saveRoot` 是该会话使用的实际存档目录；Host 确定与旧存档
+兼容的目录布局。IO 消息中的 save key 相对于该目录；适配器优先匹配精确名称，缺失时匹配
+唯一的 ASCII 大小写变体。存档目录结构须由 Host 管理。
+
+创建运行时可声明 `ArtemisFileIo.capabilities`。按轮询顺序将事件传给 `handle`，包括会话
+切换和关闭事件。该方法执行同步 IO 并返回可选回复；`submit` 背压时重试同一个回复。运行时
+销毁时调用 `close` 清理未提交事务。样例覆盖真实临时文件的空文件、分块提交、写入拒绝、
+重载清理及会话隔离，也覆盖输入、翻译与帧借用。
 
 实施阶段与进度见 [GOAL.md](../GOAL.md)。

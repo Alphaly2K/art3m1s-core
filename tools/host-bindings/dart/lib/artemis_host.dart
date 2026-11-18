@@ -69,6 +69,9 @@ final class ArtemisEvent {
 
   bool get requiresReply => requestId != 0;
 
+  bool belongsTo(ArtemisSession session) =>
+      identical(_sessionKey, session._sessionKey);
+
   ArtemisMessage reply(
     Map<String, Object?> metadata, {
     List<int> blob = const [],

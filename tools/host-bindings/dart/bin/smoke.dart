@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 
+import 'package:artemis_host_v2/artemis_file_io.dart';
 import 'package:artemis_host_v2/artemis_host.dart';
 
 void require(bool condition, String message) {
@@ -153,121 +154,137 @@ void exerciseHost(ArtemisSession session, ArtemisSession other) {
   require(rejectedAccess, 'Released frame memory can still be accessed');
 }
 
-void exerciseChunkedWrite(ArtemisSession session, Directory dir) {
+void exerciseChunkedWrite(
+  ArtemisSession session,
+  ArtemisSession other,
+  Directory dir,
+) {
   const prefix = 'previous:';
   const repeats = 524300;
   const total = prefix.length + 2 * repeats;
-  final saved = File('${dir.path}/slot');
-  final temporary = File('${dir.path}/slot.pending');
+  final saved = File('${dir.path}/Sub/Slot')..createSync(recursive: true);
   saved.writeAsStringSync(prefix, flush: true);
+  final protected = File('${dir.path}/blocked/keep')
+    ..createSync(recursive: true);
+  protected.writeAsStringSync('keep');
   final boot = utf8.encode('''
 *top
 [calllua function=extend]
+[file command=delete target=sub/empty]
 [caption data=committed]
 [stop]
 [lua]
 function extend(e)
-  local f = assert(io.open('save/slot', 'a'))
+  local denied, reason = io.open('save/blocked', 'w')
+  assert(denied == nil and string.find(reason, 'denied'))
+  local f = assert(io.open('save/sub/slot', 'a'))
   f:write(string.rep('Az', $repeats))
   assert(f:close())
-  assert(e:file('save/slot') == '$prefix' .. string.rep('Az', $repeats))
+  assert(e:file('save/sub/slot') == '$prefix' .. string.rep('Az', $repeats))
+  local empty = assert(io.open('save/sub/empty', 'w'))
+  assert(empty:close() and e:isFileExists('save/sub/empty'))
+  assert(e:file('save/sub/empty') == '')
 end
 [/lua]
 ''');
-  session.openProject(
+  final io = ArtemisFileIo(
+    session: session,
+    saveRoot: dir,
+    readAsset: (key) =>
+        key == 'boot.iet' ? (bytes: boot, modified: null) : null,
+  );
+  void open(ArtemisSession run) => run.openProject(
     utf8.encode('[WINDOWS]\nWIDTH=320\nHEIGHT=200\nBOOT=boot.iet\n'),
     platform: 'windows',
   );
-  var revision = 1;
-  String? transactionId;
-  var bytesWritten = 0;
-  var chunks = 0;
-  var completed = false;
-  for (var turn = 0; !completed && turn < 64; turn++) {
-    session.step(frameId: 1, monotonicNs: 0, utcUnixMs: 0, utcOffsetMinutes: 0);
-    for (
-      var events = session.pollEvents();
-      events.isNotEmpty;
-      events = session.pollEvents()
-    ) {
-      for (final event in events) {
-        final metadata = event.metadata;
-        final asset =
-            metadata['namespace'] == 'asset' && metadata['key'] == 'boot.iet';
-        final save =
-            metadata['namespace'] == 'save' && metadata['key'] == 'slot';
-        ArtemisMessage? reply;
-        switch ((event.domain, event.kind)) {
-          case (ART_DOMAIN_IO, ART_IO_STAT):
-            reply = event.reply({
-              'status': 'ok',
-              'found': asset || save,
-              if (asset || save)
-                'size': '${asset ? boot.length : saved.lengthSync()}',
-              if (asset || save) 'revision': '${asset ? 1 : revision}',
-            });
-          case (ART_DOMAIN_IO, ART_IO_READ):
-            require(asset || save, 'Unexpected file read: $metadata');
-            final data = asset ? boot : saved.readAsBytesSync();
-            final offset = int.parse(metadata['offset'] as String);
-            final length = int.parse(metadata['length'] as String);
-            final end = (offset + length).clamp(offset, data.length);
-            reply = event.reply({
-              'status': 'ok',
-              'revision': '${asset ? 1 : revision}',
-              'eof': end == data.length,
-            }, blob: data.sublist(offset, end));
-          case (ART_DOMAIN_IO, ART_IO_WRITE_ATOMIC):
-            require(
-              save && metadata['size'] == '$total',
-              'Unexpected write: $metadata',
-            );
-            require(
-              metadata['offset'] == '$bytesWritten',
-              'Noncontiguous write',
-            );
-            final id = metadata['transaction_id'] as String;
-            require(
-              saved.readAsStringSync() == prefix,
-              'A partial write changed the live file',
-            );
-            transactionId ??= id;
-            require(id == transactionId, 'Transaction changed during a write');
-            chunks++;
-            bytesWritten += event.blob.length;
-            final last = bytesWritten == total;
-            temporary.writeAsBytesSync(
-              event.blob,
-              mode: FileMode.append,
-              flush: last,
-            );
-            if (last) {
-              temporary.renameSync(saved.path);
-              revision++;
+  bool pendingExists() =>
+      saved.parent.listSync(followLinks: false).any((e) => e is Directory);
+  ArtemisEvent? abandoned;
+  void pump({required bool abandonAfterStaging}) {
+    for (var turn = 0; turn < 64; turn++) {
+      session.step(
+        frameId: 1,
+        monotonicNs: 0,
+        utcUnixMs: 0,
+        utcOffsetMinutes: 0,
+      );
+      for (
+        var events = session.pollEvents();
+        events.isNotEmpty;
+        events = session.pollEvents()
+      ) {
+        for (final event in events) {
+          final reply = io.handle(event);
+          if (reply != null) {
+            require(session.submit([reply]), 'File IO reply did not fit');
+            if (reply.metadata['status'] == 'staged') {
+              require(
+                saved.readAsStringSync() == prefix && pendingExists(),
+                'A partial write changed the live file',
+              );
+              if (abandonAfterStaging) {
+                abandoned = event;
+                return;
+              }
             }
-            reply = event.reply({
-              'status': last ? 'ok' : 'staged',
-              'transaction_id': id,
-              'next_offset': '$bytesWritten',
-            });
-          case (ART_DOMAIN_UI, ART_UI_CAPTION):
-            require(metadata['text'] == 'committed', 'Unexpected caption');
-            completed = true;
-          default:
+          } else if (event.domain == ART_DOMAIN_RUNTIME &&
+              event.kind == ART_RUNTIME_SESSION_CHANGED &&
+              abandoned != null) {
+            require(
+              !pendingExists() && io.handle(abandoned!) == null,
+              'Reload did not retire the old write',
+            );
+          } else if (event.domain == ART_DOMAIN_UI &&
+              event.kind == ART_UI_CAPTION) {
+            require(
+              !abandonAfterStaging && event.metadata['text'] == 'committed',
+              'Unexpected caption',
+            );
+            return;
+          } else {
             require(
               !event.requiresReply,
               'Unexpected request ${event.domain}/${event.kind}',
             );
+          }
         }
-        if (reply != null)
-          require(session.submit([reply]), 'Write smoke reply did not fit');
       }
     }
+    throw StateError('File IO smoke did not finish');
   }
-  require(
-    completed && chunks > 1 && saved.lengthSync() == total,
-    'Chunked write did not complete',
-  );
+
+  try {
+    open(session);
+    pump(abandonAfterStaging: true);
+    require(abandoned != null && pendingExists(), 'No transaction to abandon');
+    do {
+      open(other);
+    } while (other.state.epoch <= session.state.epoch);
+    try {
+      io.handle(other.pollEvents().single);
+      throw StateError(
+        'The file service accepted an event from another session',
+      );
+    } on ArgumentError {
+      require(pendingExists(), 'A foreign session discarded the staged file');
+    }
+    open(session);
+    pump(abandonAfterStaging: false);
+    require(
+      saved.lengthSync() == total && !pendingExists(),
+      'Chunked write did not complete',
+    );
+    require(
+      !File('${saved.parent.path}/empty').existsSync(),
+      'Delete was not applied',
+    );
+    require(
+      protected.readAsStringSync() == 'keep',
+      'A rejected write modified the directory',
+    );
+  } finally {
+    io.close();
+  }
 }
 
 void main(List<String> arguments) {
@@ -276,10 +293,7 @@ void main(List<String> arguments) {
   final library = DynamicLibrary.open(arguments.single);
   ArtemisSession create() => ArtemisSession.create(
     library,
-    hostCapabilities:
-        ART_HOST_CAP_IO |
-        ART_HOST_CAP_TRANSLATION |
-        ART_HOST_CAP_CHUNKED_WRITES,
+    hostCapabilities: ArtemisFileIo.capabilities | ART_HOST_CAP_TRANSLATION,
     rendererCapabilities: ART_RENDERER_CAP_SPRITE,
   );
   final session = create();
@@ -298,7 +312,7 @@ void main(List<String> arguments) {
       exerciseHost(session, other);
       final dir = Directory.systemTemp.createTempSync('artemis-v2-write-');
       try {
-        exerciseChunkedWrite(session, dir);
+        exerciseChunkedWrite(session, other, dir);
       } finally {
         dir.deleteSync(recursive: true);
       }
