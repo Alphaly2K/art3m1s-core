@@ -1,5 +1,7 @@
 use super::*;
-use crate::host::frame::{FrameGroup, FrameShader, FrameTexture, FrameTransition};
+use crate::host::frame::{
+    FrameGroup, FramePacket, FrameShader, FrameTexture, FrameTextureDescriptor, FrameTransition,
+};
 use art3m1s_render::draw::NativeEmoteMaterial;
 use std::sync::Arc;
 
@@ -141,10 +143,10 @@ fn decoded_packet_preserves_scene_and_resource_indices() {
             },
         ]
     );
-    assert_eq!(packet.sprites, frame.sprites);
-    assert_eq!(packet.groups, frame.groups);
-    assert_eq!(packet.masks, frame.masks);
-    assert_eq!(packet.transition, frame.transition);
+    assert_eq!(packet.sprites(), &*frame.sprites);
+    assert_eq!(packet.groups(), &*frame.groups);
+    assert_eq!(packet.masks(), &*frame.masks);
+    assert_eq!(packet.transition(), frame.transition.as_ref());
 }
 
 #[test]

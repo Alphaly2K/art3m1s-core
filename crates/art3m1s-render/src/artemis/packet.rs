@@ -1,9 +1,29 @@
-use super::*;
-use crate::host::frame::{FrameGroup, FrameShader, FrameTransition};
-use art3m1s_render::draw::NativeEmoteMaterial;
-use std::collections::HashSet;
+use super::frame::{
+    FrameGroup, FrameShader, FrameShaderEffect, FrameSprite, FrameTransition, SpriteBlend,
+};
+use super::wire::*;
+use crate::draw::NativeEmoteMaterial;
+use std::collections::{BTreeMap, HashSet};
+use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FramePacketError {
+    Invalid,
+    Limit,
+}
+
+impl fmt::Display for FramePacketError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Invalid => "invalid ARFP frame packet",
+            Self::Limit => "ARFP frame packet exceeds the size limit",
+        })
+    }
+}
+
+impl std::error::Error for FramePacketError {}
 
 /// A texture in an ARFP packet. Pixel bytes are supplied separately by the Host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,10 +48,10 @@ pub struct FramePacket {
     pub render_frame_id: u64,
     pub host_frame_id: u64,
     pub stage_size: [u32; 2],
-    pub(in crate::host) sprites: Box<[FrameSprite]>,
-    pub(in crate::host) groups: Box<[FrameGroup]>,
-    pub(in crate::host) masks: Box<[FrameSprite]>,
-    pub(in crate::host) transition: Option<FrameTransition>,
+    pub(super) sprites: Box<[FrameSprite]>,
+    pub(super) groups: Box<[FrameGroup]>,
+    pub(super) masks: Box<[FrameSprite]>,
+    pub(super) transition: Option<FrameTransition>,
     textures: Box<[FrameTextureDescriptor]>,
 }
 
@@ -40,9 +60,25 @@ impl FramePacket {
         &self.textures
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+    pub fn sprites(&self) -> &[FrameSprite] {
+        &self.sprites
+    }
+
+    pub fn groups(&self) -> &[FrameGroup] {
+        &self.groups
+    }
+
+    pub fn masks(&self) -> &[FrameSprite] {
+        &self.masks
+    }
+
+    pub fn transition(&self) -> Option<&FrameTransition> {
+        self.transition.as_ref()
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, FramePacketError> {
         if bytes.len() > MAX_PACKET_BYTES {
-            return Err(ProtocolError::Limit);
+            return Err(FramePacketError::Limit);
         }
         let mut packet = Reader(bytes);
         if packet.take(4)? != b"ARFP"
@@ -288,11 +324,11 @@ fn default_group(sprites: Range<usize>) -> FrameGroup {
     }
 }
 
-fn invalid() -> ProtocolError {
-    ProtocolError::Argument("invalid ARFP frame packet")
+fn invalid() -> FramePacketError {
+    FramePacketError::Invalid
 }
 
-fn check_flags(flags: u16, allowed: u16) -> Result<(), ProtocolError> {
+fn check_flags(flags: u16, allowed: u16) -> Result<(), FramePacketError> {
     if flags & !allowed != 0 {
         Err(invalid())
     } else {
@@ -303,13 +339,13 @@ fn check_flags(flags: u16, allowed: u16) -> Result<(), ProtocolError> {
 struct Reader<'a>(&'a [u8]);
 
 impl<'a> Reader<'a> {
-    fn take(&mut self, size: usize) -> Result<&'a [u8], ProtocolError> {
+    fn take(&mut self, size: usize) -> Result<&'a [u8], FramePacketError> {
         let (value, rest) = self.0.split_at_checked(size).ok_or_else(invalid)?;
         self.0 = rest;
         Ok(value)
     }
 
-    fn finish(self) -> Result<(), ProtocolError> {
+    fn finish(self) -> Result<(), FramePacketError> {
         if self.0.is_empty() {
             Ok(())
         } else {
@@ -317,28 +353,28 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn u16(&mut self) -> Result<u16, ProtocolError> {
+    fn u16(&mut self) -> Result<u16, FramePacketError> {
         Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
     }
 
-    fn u32(&mut self) -> Result<u32, ProtocolError> {
+    fn u32(&mut self) -> Result<u32, FramePacketError> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
     }
 
-    fn u64(&mut self) -> Result<u64, ProtocolError> {
+    fn u64(&mut self) -> Result<u64, FramePacketError> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
     }
 
-    fn index(&mut self) -> Result<usize, ProtocolError> {
+    fn index(&mut self) -> Result<usize, FramePacketError> {
         Ok(self.u32()? as usize)
     }
 
-    fn float(&mut self) -> Result<f32, ProtocolError> {
+    fn float(&mut self) -> Result<f32, FramePacketError> {
         let value = f32::from_bits(self.u32()?);
         value.is_finite().then_some(value).ok_or_else(invalid)
     }
 
-    fn floats<const N: usize>(&mut self) -> Result<[f32; N], ProtocolError> {
+    fn floats<const N: usize>(&mut self) -> Result<[f32; N], FramePacketError> {
         let mut values = [0.0; N];
         for value in &mut values {
             *value = self.float()?;
@@ -346,12 +382,12 @@ impl<'a> Reader<'a> {
         Ok(values)
     }
 
-    fn clip(&mut self, flags: u16) -> Result<Option<[f32; 4]>, ProtocolError> {
+    fn clip(&mut self, flags: u16) -> Result<Option<[f32; 4]>, FramePacketError> {
         let clip = self.floats()?;
         Ok((flags & 1 != 0).then_some(clip))
     }
 
-    fn texture(&mut self, count: usize) -> Result<Option<usize>, ProtocolError> {
+    fn texture(&mut self, count: usize) -> Result<Option<usize>, FramePacketError> {
         let index = self.u32()?;
         if index == NO_TEXTURE {
             Ok(None)
@@ -362,7 +398,7 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn blend(&mut self, emote: bool) -> Result<SpriteBlend, ProtocolError> {
+    fn blend(&mut self, emote: bool) -> Result<SpriteBlend, FramePacketError> {
         Ok(match self.u32()? {
             0 => SpriteBlend::Alpha,
             1 => SpriteBlend::Add,
@@ -376,7 +412,7 @@ impl<'a> Reader<'a> {
         })
     }
 
-    fn range(&mut self, len: usize) -> Result<Range<usize>, ProtocolError> {
+    fn range(&mut self, len: usize) -> Result<Range<usize>, FramePacketError> {
         let start = self.index()?;
         let end = self.index()?;
         if start >= end || end > len {
@@ -386,7 +422,7 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn string(&mut self, size: usize) -> Result<String, ProtocolError> {
+    fn string(&mut self, size: usize) -> Result<String, FramePacketError> {
         let string = std::str::from_utf8(self.take(size)?).map_err(|_| invalid())?;
         if string.contains('\0') {
             return Err(invalid());
@@ -394,7 +430,7 @@ impl<'a> Reader<'a> {
         Ok(string.to_owned())
     }
 
-    fn uniforms(&mut self, count: usize) -> Result<BTreeMap<String, Vec<f32>>, ProtocolError> {
+    fn uniforms(&mut self, count: usize) -> Result<BTreeMap<String, Vec<f32>>, FramePacketError> {
         let mut uniforms = BTreeMap::new();
         for _ in 0..count {
             let name_len = self.u16()? as usize;
@@ -416,7 +452,7 @@ impl<'a> Reader<'a> {
         opcode: u16,
         flags: u16,
         textures: usize,
-    ) -> Result<FrameSprite, ProtocolError> {
+    ) -> Result<FrameSprite, FramePacketError> {
         check_flags(flags, if opcode == 4 { 63 } else { 7 })?;
         let texture = self.texture(textures)?.ok_or_else(invalid)?;
         let mask = self.texture(textures)?;

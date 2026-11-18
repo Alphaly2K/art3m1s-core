@@ -1,0 +1,12 @@
+pub const FRAME_PACKET_VERSION: u16 = 1;
+pub const HEADER: usize = 56;
+pub const TEXTURE: usize = 24;
+pub const SPRITE: usize = 104;
+pub const TRANSITION: usize = 24;
+pub const GROUP: usize = 56;
+pub const STENCIL: usize = 40;
+pub const EMOTE_MATERIAL: usize = 112;
+pub const SHADER: usize = 16;
+pub const EFFECT: usize = 52;
+pub const MAX_PACKET_BYTES: usize = 16 * 1024 * 1024;
+pub const NO_TEXTURE: u32 = u32::MAX;

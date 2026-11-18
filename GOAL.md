@@ -10,6 +10,16 @@
 
 继续核对剩余快照字段、实机画面对照和生产 Host 接入。
 v2 预览已提供独立构建、C 内存 Host 和 Dart 封装；Linux、Windows 原生 CI 和生产 Host 切换待完成。
+生产 Flutter 先接 Artemis 的 Metal 共享纹理路径：验证 Host 将 v2 帧绘制到 Flutter 所用的
+共享表面，再接入实际帧循环、资源和媒体。创建 runtime、推进与释放帧须由同一 OS 线程执行。
+
+## 已完成：独立 Metal Host 通过 C ABI 绘制
+
+独立 `art3m1s-render` 的 `artemis` 模块可解码和绘制 ARFP。探针没有 Rust Core 依赖，通过
+预览 C 头查询动态库的 Runtime 和 Frame 表，并保持 token 到同步上传结束。macOS 离屏像素对照
+通过，覆盖 E-Mote、组、两类转场、HLSL、缩略图、像素长度校验和缓存命中。独立 Core 277 项和
+默认构建 433 项单测通过、2 项既有测试跳过；C 冒烟通过，独立 Core 的动态导出仍只有
+`art3m1s_get_api_v2`，依赖图无 GPU 后端。
 
 ## 已完成：Rust Host 解码并绘制 ARFP 帧
 

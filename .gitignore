@@ -6,3 +6,4 @@
 /crates/*/target/
 /example/docs/
 /tools/host-bindings/dart/.dart_tool/
+/tools/host-smoke/target/

@@ -1,0 +1,18 @@
+[package]
+name = "artemis-metal-smoke"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+publish = false
+
+[[bin]]
+name = "artemis-metal-smoke"
+path = "metal.rs"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+art3m1s-render = { path = "../../crates/art3m1s-render", features = ["artemis", "metal"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde_json = "1.0"
+
+[build-dependencies]
+cc = "1"

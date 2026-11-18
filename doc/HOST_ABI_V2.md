@@ -508,11 +508,13 @@ Core 在提交读档前通过 Host IO 预读这些源码和采样纹理；源码
 恢复后的帧使用新的 shader revision，旧帧仍使用其借用的版本。缺少此映射的旧档沿用当前会话
 已注册的 shader。
 
-Rust Host 可使用 `host::renderer::SpriteRenderer` 在已开启的目标上绘制。`render` 接收 Rust
-帧借用；使用 ABI 的 Host 可用 `FramePacket::decode` 解码帧包，再向 `render_packet` 提供
-runtime 身份和同一个帧 token 的纹理读取函数。像素只在缓存未命中时读取，长度须与描述符一致；
-借用须保持到调用结束。Host 控制 backend 的访问、目标、帧开始与结束及呈现；转场需要后端
-支持捕获当前目标。新设备可以用仍有效的帧借用重新上传。
+Rust Host 可启用 `art3m1s-render` 的 `artemis` feature，并自行启用所需的 GPU 后端；该包
+可独立构建。用 `art3m1s_render::artemis::FramePacket::decode` 解码帧包，再向
+`SpriteRenderer::render_packet` 提供 runtime 身份和同一个帧 token 的纹理读取函数。像素只在
+缓存未命中时读取，长度须与描述符一致；借用须保持到调用结束。Host 控制 backend 的访问、
+目标、帧开始与结束及呈现；转场需要后端支持捕获当前目标。新设备可以用仍有效的帧借用重新上传。
+直接使用 Core Rust 接口的 Host 仍可通过 `host::renderer::SpriteRenderer::render` 绘制
+`FrameLease`。
 
 `acquire_latest(after_render_frame_id)` 返回不可变快照和 lease token；无新帧为 NO_DATA。
 快照及所有引用的 CPU 资源版本在 release 前跨 step/reload 保持有效；默认至多两个
@@ -640,6 +642,8 @@ Flutter 的最小 Host 样例。平台 IO/render/media 适配器可以复用，�
 不用在每种语言里手写第二份函数顺序、长度类型和 magic。
 
 独立 C Host 可用 `bash scripts/test-host-v2.sh` 或 `scripts/test-host-v2.ps1` 构建并验证。
+macOS 上可用 `bash scripts/test-host-v2-metal.sh` 运行独立 Metal Host，验证从 C ABI 借用
+ARFP 和纹理像素后的绘制结果。该检查需要 Metal 设备；不需要窗口或外部游戏文件。
 在 `tools/host-bindings/dart` 目录运行 `dart pub get --enforce-lockfile` 后，使用
 `dart run bin/smoke.dart <纯 Core 动态库路径>` 可验证 Dart 接入。`artemis_host.dart` 的
 `ArtemisSession` 负责协商接口、推进帧以及收发消息。同一会话的创建、调用与关闭须在同一

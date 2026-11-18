@@ -1,22 +1,7 @@
 use super::{FrameShaderEffect, FrameSnapshot, FrameSprite, SpriteBlend};
 use crate::host::protocol::ProtocolError;
+use art3m1s_render::artemis::wire::*;
 use std::collections::BTreeMap;
-
-mod decode;
-pub use decode::{FramePacket, FrameTextureDescriptor};
-
-pub const FRAME_PACKET_VERSION: u16 = 1;
-const HEADER: usize = 56;
-const TEXTURE: usize = 24;
-const SPRITE: usize = 104;
-const TRANSITION: usize = 24;
-const GROUP: usize = 56;
-const STENCIL: usize = 40;
-const EMOTE_MATERIAL: usize = 112;
-const SHADER: usize = 16;
-const EFFECT: usize = 52;
-const MAX_PACKET_BYTES: usize = 16 * 1024 * 1024;
-const NO_TEXTURE: u32 = u32::MAX;
 
 pub(super) fn encode(frame: &FrameSnapshot) -> Result<Box<[u8]>, ProtocolError> {
     let texture_bytes = frame

@@ -1,19 +1,20 @@
 #[cfg(target_os = "macos")]
+mod metal_abi;
+
+#[cfg(target_os = "macos")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use art3m1s_core::host::{
-        frame::{FrameLease, FramePacket},
-        protocol::{Domain, HostReply, MessageBody, MessageKind, RequestIdentity, TransportLimits},
-        renderer::SpriteRenderer,
-        runtime,
-        script_io::{
-            HostFrame, IO_READ, IO_STAT, RENDER_CAPTURE, RENDER_SAVE_CAPTURE, ScriptIoProgress,
-        },
-    };
+    use crate::metal_abi::{Frame, Session};
+    use art3m1s_render::artemis::SpriteRenderer;
     use art3m1s_render::backend::{FrameTarget, GpuBackend, metal::MetalBackend};
     use art3m1s_render::types::Extent2D;
     use image::{ImageFormat, RgbaImage, imageops::FilterType};
     use serde_json::{Value, json};
-    use std::{fs, path::PathBuf};
+    use std::{ffi::CString, fs, os::unix::ffi::OsStrExt, path::PathBuf};
+
+    const IO_STAT: (u16, u32) = (3, 1);
+    const IO_READ: (u16, u32) = (3, 2);
+    const RENDER_CAPTURE: (u16, u32) = (6, 1);
+    const RENDER_SAVE_CAPTURE: (u16, u32) = (6, 2);
 
     struct SaveDirectory(PathBuf);
     impl Drop for SaveDirectory {
@@ -69,24 +70,10 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
     result = float4(tint, alpha);
 }
 "#;
-    let handle = runtime::create(0, TransportLimits::default(), 4096)?;
-    runtime::open_project(
-        handle,
-        b"[WINDOWS]\nWIDTH=4\nHEIGHT=4\nBOOT=boot.iet\n",
-        "windows",
-        None,
-    )?;
-    let step = |id, ms: u64| {
-        runtime::step(
-            handle,
-            HostFrame {
-                id,
-                monotonic_ns: ms * 1_000_000,
-                utc_unix_ms: 0,
-                utc_offset_minutes: 0,
-            },
-        )
-    };
+    let library = std::env::args_os()
+        .nth(1)
+        .ok_or("expected the Core dylib path")?;
+    let session = Session::open(&CString::new(library.as_bytes())?)?;
     let mut renderer = SpriteRenderer::new(MetalBackend::new(4, 4)?);
     let mut capture = None;
     let mut service_until_event = |renderer: &mut SpriteRenderer<MetalBackend>,
@@ -94,29 +81,16 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
                                    ms|
      -> Result<(), Box<dyn std::error::Error>> {
         for turn in 0..32 {
-            match step(id, ms)? {
-                ScriptIoProgress::Event => break,
-                ScriptIoProgress::Waiting => {}
-                progress => panic!("unexpected boot progress: {progress:?}"),
-            }
-            assert!(turn < 31, "Host did not finish booting");
+            let waiting = session.step(id, ms)?;
             let mut bytes = [0; 4096];
-            let poll = runtime::poll_events(handle, &mut bytes)?;
-            let mut remaining = &bytes[..poll.written_bytes];
+            let mut remaining = session.poll(&mut bytes)?;
             while !remaining.is_empty() {
                 let u32_at = |i| u32::from_le_bytes(remaining[i..i + 4].try_into().unwrap());
                 let u64_at = |i| u64::from_le_bytes(remaining[i..i + 8].try_into().unwrap());
                 let length = u32_at(0) as usize;
                 let request_id = u64_at(40);
                 if request_id != 0 {
-                    let service = MessageKind {
-                        domain: match u16::from_le_bytes([remaining[6], remaining[7]]) {
-                            domain if domain == Domain::Io as u16 => Domain::Io,
-                            domain if domain == Domain::Render as u16 => Domain::Render,
-                            domain => panic!("unexpected request domain: {domain}"),
-                        },
-                        kind: u32_at(8),
-                    };
+                    let service = (u16::from_le_bytes([remaining[6], remaining[7]]), u32_at(8));
                     let args: Value =
                         serde_json::from_slice(&remaining[64..64 + u32_at(56) as usize])?;
                     let bytes = match args["key"].as_str() {
@@ -139,9 +113,8 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
                         (RENDER_CAPTURE, _) => {
                             let expected_id =
                                 args["render_frame_id"].as_str().unwrap().parse::<u64>()?;
-                            let frame = runtime::acquire_latest(handle, expected_id - 1)?
-                                .expect("capture frame");
-                            assert_eq!(frame.render_frame_id, expected_id);
+                            let frame = session.frame(expected_id - 1)?;
+                            assert_eq!(frame.decode()?.render_frame_id, expected_id);
                             let pixels = draw(renderer, &frame)?;
                             check(&pixels, |_, y| if y < 2 { GREEN } else { YELLOW });
                             capture = Some((request_id, pixels));
@@ -166,21 +139,20 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
                         }
                         _ => panic!("unexpected service: {service:?}"),
                     };
-                    runtime::submit_replies(
-                        handle,
-                        &[HostReply {
-                            identity: RequestIdentity {
-                                runtime: handle.as_raw(),
-                                epoch: u64_at(24),
-                                request_id,
-                                service,
-                            },
-                            body: MessageBody::new(metadata.to_string(), blob)?,
-                        }],
+                    session.reply(
+                        service,
+                        u64_at(24),
+                        request_id,
+                        &metadata.to_string(),
+                        &blob,
                     )?;
                 }
                 remaining = &remaining[length..];
             }
+            if !waiting {
+                return Ok(());
+            }
+            assert!(turn < 31, "Host did not settle");
         }
         Ok(())
     };
@@ -192,19 +164,14 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
 
     fn draw(
         renderer: &mut SpriteRenderer<MetalBackend>,
-        frame: &FrameLease,
+        frame: &Frame<'_>,
     ) -> Result<Vec<u8>, String> {
-        let packet = FramePacket::decode(frame.packet()).map_err(|error| error.to_string())?;
+        let packet = frame.decode()?;
         draw_target(renderer, |renderer| {
             renderer.render_packet(
                 frame.runtime(),
                 &packet,
-                |index| {
-                    frame
-                        .texture(index)
-                        .map(|image| image.rgba())
-                        .ok_or_else(|| "missing frame texture".into())
-                },
+                |index| frame.pixels(index),
                 [0.0, 0.0, 0.0, 1.0],
             )
         })
@@ -244,27 +211,23 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
         }
     }
 
-    let old = runtime::acquire_latest(handle, 0)?.expect("group frame");
-    let packet = FramePacket::decode(old.packet())?;
+    let old = session.frame(0)?;
+    let packet = old.decode()?;
     let bad_pixels = draw_target(&mut renderer, |renderer| {
-        renderer.render_packet(handle, &packet, |_| Ok(&[]), [0.0, 0.0, 0.0, 1.0])
+        renderer.render_packet(session.id(), &packet, |_| Ok(&[]), [0.0, 0.0, 0.0, 1.0])
     });
     assert!(bad_pixels.unwrap_err().contains("texture byte length"));
     let pixels = draw(&mut renderer, &old)?;
     check(&pixels, |_, _| [128, 0, 0, 255]);
     let cached = draw_target(&mut renderer, |renderer| {
         renderer.render_packet(
-            handle,
+            session.id(),
             &packet,
             |_| Err("unexpected pixel request".into()),
             [0.0, 0.0, 0.0, 1.0],
         )
     })?;
     assert_eq!(cached, pixels);
-    assert_eq!(
-        draw_target(&mut renderer, |renderer| renderer.render(&old))?,
-        pixels
-    );
     drop(old);
     for (id, ms, expected) in [
         (2, 10, [128, 0, 0, 255]),
@@ -272,16 +235,16 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
         (4, 110, BLUE),
     ] {
         service_until_event(&mut renderer, id, ms)?;
-        let frame = runtime::acquire_latest(handle, 0)?.expect("transition frame");
+        let frame = session.frame(0)?;
         check(&draw(&mut renderer, &frame)?, |_, _| expected);
     }
     service_until_event(&mut renderer, 5, 120)?;
-    let start = runtime::acquire_latest(handle, 0)?.expect("rule frame");
-    assert!(start.transition.as_ref().unwrap().rule.is_some());
+    let start = session.frame(0)?;
+    assert!(start.decode()?.transition().unwrap().rule.is_some());
     check(&draw(&mut renderer, &start)?, |_, _| BLUE);
     drop(start);
     service_until_event(&mut renderer, 6, 170)?;
-    let middle = runtime::acquire_latest(handle, 0)?.expect("rule frame");
+    let middle = session.frame(0)?;
     check(&draw(&mut renderer, &middle)?, |x, y| match (x, y < 2) {
         (0, true) => GREEN,
         (0, false) => YELLOW,
@@ -291,7 +254,7 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
     });
     drop(middle);
     service_until_event(&mut renderer, 7, 220)?;
-    let menu = runtime::acquire_latest(handle, 0)?.expect("menu frame");
+    let menu = session.frame(0)?;
     check(&draw(&mut renderer, &menu)?, |_, _| [255, 0, 0, 255]);
     drop(menu);
     let thumbnail = image::open(save_dir.0.join("thumb.png"))?.into_rgba8();
@@ -304,7 +267,6 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
     renderer.clear_cached_textures();
     renderer.clear_cached_shaders();
     renderer.backend_mut().end_access();
-    runtime::destroy(handle)?;
     println!("Artemis v2 Metal pixels passed (E-Mote, groups, transitions, HLSL and thumbnails)");
     Ok(())
 }

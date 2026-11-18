@@ -2,93 +2,18 @@
 
 use super::protocol::ProtocolError;
 use super::runtime::RuntimeHandle;
-use art3m1s_render::draw::NativeEmoteMaterial;
 use std::ops::Deref;
 use std::sync::Arc;
 
 mod packet;
-pub use packet::{FRAME_PACKET_VERSION, FramePacket, FrameTextureDescriptor};
+pub use art3m1s_render::artemis::{
+    FRAME_PACKET_VERSION, FrameGroup, FramePacket, FramePacketError, FrameShader,
+    FrameShaderEffect, FrameSprite, FrameTextureDescriptor, FrameTransition, SpriteBlend,
+};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SpriteBlend {
-    Alpha,
-    Add,
-    Screen,
-    Multiply,
-    EmoteAdd,
-    EmoteReverseSubtract,
-    EmoteMultiply,
-    EmoteScreen,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct FrameSprite {
-    pub layer_id: String,
-    pub texture: usize,
-    /// If present, set each source texel's alpha to `alpha * mask_red / 255` before sampling.
-    pub mask: Option<usize>,
-    /// Two affine basis vectors (columns), followed by the translation.
-    pub transform: [f32; 6],
-    pub quad_size: [f32; 2],
-    pub uv_offset: [f32; 2],
-    pub uv_scale: [f32; 2],
-    /// Stage coordinates (left, top, width, height).
-    pub clip_bounds: Option<[f32; 4]>,
-    pub opacity: f32,
-    pub color_multiply: [f32; 3],
-    pub grayscale: bool,
-    pub negative: bool,
-    pub blend: SpriteBlend,
-    pub mesh: Option<Arc<[[f32; 4]]>>,
-    pub emote_material: Option<NativeEmoteMaterial>,
-    pub shader: Option<FrameShaderEffect>,
-}
-
-#[derive(Debug, PartialEq)]
-pub struct FrameTransition {
-    /// Draw this scene into the transition source target before blending it over `sprites`.
-    pub source: Box<[FrameSprite]>,
-    pub source_groups: Box<[FrameGroup]>,
-    pub source_masks: Box<[FrameSprite]>,
-    pub progress: f32,
-    pub rule: Option<usize>,
-    pub vague: f32,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct FrameGroup {
-    pub sprites: std::ops::Range<usize>,
-    pub mask: Option<usize>,
-    pub clip_bounds: Option<[f32; 4]>,
-    pub opacity: f32,
-    pub color_multiply: [f32; 3],
-    pub grayscale: bool,
-    pub negative: bool,
-    pub opaque: bool,
-    pub blend: SpriteBlend,
-    pub stencil: Option<std::ops::Range<usize>>,
-    pub shader: Option<FrameShaderEffect>,
-}
-
-#[derive(Debug, PartialEq)]
-pub struct FrameShader {
-    pub revision: u64,
-    pub source: Box<[u8]>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct FrameShaderEffect {
-    pub shader: Arc<FrameShader>,
-    pub uniforms: std::collections::BTreeMap<String, Vec<f32>>,
-    pub mask: Option<usize>,
-    pub user: Option<usize>,
-}
-
-impl FrameShaderEffect {
-    fn remap(&mut self, textures: &[usize]) {
-        self.mask = self.mask.map(|index| textures[index]);
-        self.user = self.user.map(|index| textures[index]);
-    }
+fn remap_effect(effect: &mut FrameShaderEffect, textures: &[usize]) {
+    effect.mask = effect.mask.map(|index| textures[index]);
+    effect.user = effect.user.map(|index| textures[index]);
 }
 
 #[derive(Debug)]
@@ -173,7 +98,7 @@ impl FrameSnapshot {
             sprite.texture = remap[sprite.texture];
             sprite.mask = sprite.mask.map(|index| remap[index]);
             if let Some(effect) = &mut sprite.shader {
-                effect.remap(&remap);
+                remap_effect(effect, &remap);
             }
             sprite
         };
@@ -186,7 +111,7 @@ impl FrameSnapshot {
             .map(|mut group| {
                 group.mask = group.mask.map(|index| remap[index]);
                 if let Some(effect) = &mut group.shader {
-                    effect.remap(&remap);
+                    remap_effect(effect, &remap);
                 }
                 group
             })

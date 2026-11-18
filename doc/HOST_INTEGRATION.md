@@ -52,10 +52,11 @@ dart run ffigen --config ffigen.yaml
 dart run bin/smoke.dart ../../../target/host-v2/debug/libart3m1s_core.dylib
 ```
 
-macOS Host 可单独运行离屏像素探针。它需要可访问的 Metal 设备，不需要窗口或游戏素材：
+Rust Host 可用 `art3m1s-render` 的 `artemis` feature 解码和绘制 v2 帧。macOS 离屏示例
+通过 C ABI 借用帧并用 Metal 绘制，需要可访问的 Metal 设备，不需要窗口或游戏素材：
 
 ```sh
-cargo run --no-default-features --features metal-backend --example host_v2_metal
+bash scripts/test-host-v2-metal.sh
 ```
 
 Rust Host 通过 `host::ResourceProvider` 提供逻辑资源，通过

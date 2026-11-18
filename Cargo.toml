@@ -17,16 +17,11 @@ name = "probe_caption_test"
 path = "tools/game-probes/src/bin/probe_caption_test.rs"
 required-features = ["game-probes"]
 
-[[example]]
-name = "host_v2_metal"
-path = "tools/host-smoke/metal.rs"
-required-features = ["metal-backend"]
-
 [dependencies]
 asb-interpreter = { path = "crates/asb-interpreter" }
 art3m1s-emote = { path = "crates/art3m1s-emote" }
 art3m1s-log = { path = "crates/art3m1s-log" }
-art3m1s-render = { path = "crates/art3m1s-render" }
+art3m1s-render = { path = "crates/art3m1s-render", features = ["artemis"] }
 pfs-upk-rust = { path = "crates/pfs-upk-rust", optional = true }
 art3m1s-media = { path = "crates/art3m1s-media", optional = true }
 art3m1s-native-render = { path = "crates/art3m1s-native-render", optional = true }
