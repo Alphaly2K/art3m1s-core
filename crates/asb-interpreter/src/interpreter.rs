@@ -3171,6 +3171,22 @@ impl Interpreter {
         stack: Vec<CallFrame>,
     ) -> Result<()> {
         self.check_io_idle()?;
+        let last_line = stack
+            .iter()
+            .filter(|frame| frame.script == name)
+            .map(|frame| frame.return_line)
+            .fold(line, usize::max);
+        let script = self.prepare_host_restore_script(name, data, last_line)?;
+        self.restore_position_with_host_scripts(name, line, stack, vec![script])
+    }
+
+    /// Decode a saved script and validate all requested positions without running Lua.
+    pub fn prepare_host_restore_script(
+        &self,
+        name: &str,
+        data: &[u8],
+        line: usize,
+    ) -> Result<Script> {
         if !self.resumable_io {
             return Err(Error::RuntimeError {
                 line,
@@ -3178,19 +3194,43 @@ impl Interpreter {
             });
         }
         let script = self.parse_file(name, data)?;
-        if line > script.len()
-            || stack
-                .iter()
-                .any(|frame| frame.script == name && frame.return_line > script.len())
-        {
+        if line > script.len() {
             return Err(Error::RuntimeError {
                 line,
                 message: "save position is beyond the script".into(),
             });
         }
-        self.insert_script(name.to_string(), script);
+        Ok(script)
+    }
+
+    /// Install prepared files with the saved position, then schedule their load-time Lua.
+    pub fn restore_position_with_host_scripts(
+        &mut self,
+        name: &str,
+        line: usize,
+        stack: Vec<CallFrame>,
+        scripts: Vec<Script>,
+    ) -> Result<()> {
+        self.check_io_idle()?;
+        if !self.resumable_io {
+            return Err(Error::RuntimeError {
+                line,
+                message: "restoring Host scripts requires resumable IO".into(),
+            });
+        }
+        if !self.scripts.contains_key(name) && !scripts.iter().any(|script| script.name == name) {
+            return Err(Error::ScriptNotFound(name.into()));
+        }
+        let mut loaded = Vec::with_capacity(scripts.len());
+        for script in scripts {
+            loaded.push(script.name.clone());
+            self.insert_script(script.name.clone(), script);
+        }
         self.restore_position(name, line, stack)?;
-        self.run_lua_blocks_at_load(name)
+        for script in loaded {
+            self.run_lua_blocks_at_load(&script)?;
+        }
+        Ok(())
     }
 
     /// Split off `enqueueTag` commands, leaving only the current `e:tag()` prefix.

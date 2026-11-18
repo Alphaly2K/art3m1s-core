@@ -584,12 +584,45 @@ end
     snapshot.current_script = "target".into();
     snapshot.current_line = 0;
     snapshot.waiting_for_input = Some(true);
+    snapshot.call_stack = ["outer", "middle"]
+        .into_iter()
+        .map(|script| crate::save::CallFrameSnapshot {
+            script: script.into(),
+            return_line: 0,
+        })
+        .collect();
     snapshot.variables.set(
         "memsave.status",
         asb_interpreter::Value::String("saved".into()),
     );
 
     let mut host = MemoryHost::default();
+    host.asset(
+        "outer",
+        br#"*main
+[caption data=outer-return]
+[return]
+[lua]
+assert(order==nil)
+order='outer'
+assert(__engine:file('outer-init')=='ok')
+[/lua]
+"#,
+    );
+    host.asset(
+        "middle",
+        br#"*main
+[caption data=middle-return]
+[return]
+[lua]
+assert(order=='outer')
+order..=';middle'
+assert(__engine:file('middle-init')=='ok')
+[/lua]
+"#,
+    );
+    host.asset("outer-init", b"ok");
+    host.asset("middle-init", b"ok");
     host.asset(
         "target",
         br#"
@@ -602,6 +635,7 @@ assert(__engine:file('boot-data')=='')
 function load_slot(e,p)
     loads=(loads or 0)+1
     local status=e:var('memsave.status')
+    assert(order=='outer;middle')
     assert(p.file=='slot' and status=='saved' and e:file('hook-data')=='')
     e:enqueueTag{'var', name='memsave.hook', data=status..'-loaded'}
 end
@@ -640,11 +674,20 @@ __engine:setEventHandler{onLoad='load_slot'}
     );
     session.resume_scenario().unwrap();
     host.run(&mut session);
-    assert_eq!(host.captions, ["restored"]);
+    assert_eq!(host.captions, ["restored", "middle-return", "outer-return"]);
+    for path in ["outer", "middle", "target", "outer-init", "middle-init"] {
+        assert_eq!(
+            host.reads
+                .iter()
+                .filter(|(key, offset)| key == path && *offset == 0)
+                .count(),
+            1
+        );
+    }
 }
 
 #[test]
-fn invalid_numbered_load_position_keeps_the_old_save_point_and_queue() {
+fn invalid_numbered_load_call_frame_keeps_the_old_save_point_and_queue() {
     let mut session = session(1, TransportLimits::default(), 8192);
     session
         .open_scenario(
@@ -667,9 +710,18 @@ end
     let line = session.interpreter().current_line();
     let mut save = crate::save::SaveData::from_interpreter(session.interpreter());
     save.current_script = "target".into();
-    save.current_line = 1000;
+    save.current_line = 0;
+    save.call_stack = [("prepared", 0), ("invalid-caller", 1000)]
+        .into_iter()
+        .map(|(script, return_line)| crate::save::CallFrameSnapshot {
+            script: script.into(),
+            return_line,
+        })
+        .collect();
     let mut host = MemoryHost::default();
-    host.asset("target", b"*main\n[lua]\ninvalid_init=true\n[/lua]");
+    host.asset("prepared", b"*main\n[lua]\nprepared_init=true\n[/lua]");
+    host.asset("invalid-caller", b"*main\n[return]\n");
+    host.asset("target", b"*main\n[return]\n");
     host.files.insert(
         ("save".into(), "slot".into()),
         (1, serde_json::to_vec(&save).unwrap()),
@@ -681,6 +733,17 @@ end
     );
     assert_eq!(session.interpreter().current_script(), Some("menu"));
     assert_eq!(session.interpreter().current_line(), line);
+    assert!(host.reads.iter().any(|(key, _)| key == "prepared"));
+    assert!(session.interpreter().get_script("prepared").is_none());
+    assert!(
+        session
+            .interpreter()
+            .lua()
+            .globals()
+            .get::<Option<bool>>("prepared_init")
+            .unwrap()
+            .is_none()
+    );
     assert!(session.interpreter().get_script("target").is_none());
     assert!(matches!(
         session.pending_event(),
