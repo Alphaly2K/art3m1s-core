@@ -21,6 +21,7 @@ use std::sync::{Arc, Once};
 use std::time::Duration;
 
 const AVIO_BUFFER_SIZE: usize = 64 * 1024;
+const HOST_MAX_PIXELS: i64 = 16 * 1024 * 1024;
 
 static INIT: Once = Once::new();
 
@@ -158,12 +159,8 @@ fn duration_from_stream(stream: &ffmpeg::format::stream::Stream<'_>) -> Duration
     Duration::from_micros(micros.clamp(0, u64::MAX as i128) as u64)
 }
 
-fn frame_rate(stream: &ffmpeg::format::stream::Stream<'_>) -> Option<(u32, u32)> {
-    let rate = stream.avg_frame_rate();
-    if rate.numerator() <= 0 || rate.denominator() <= 0 {
-        return None;
-    }
-    Some((rate.numerator() as u32, rate.denominator() as u32))
+fn valid_rate(rate: Rational) -> bool {
+    rate.numerator() > 0 && rate.denominator() > 0
 }
 
 fn pts_micros(pts: Option<i64>, time_base: Rational) -> Option<i64> {
@@ -177,7 +174,7 @@ fn pts_micros(pts: Option<i64>, time_base: Rational) -> Option<i64> {
 }
 
 pub struct FfmpegVideoDecoder {
-    input: format::context::Input,
+    source: SourceInput,
     decoder: ffmpeg::decoder::Video,
     rgba_scaler: scaling::Context,
     yuv_scaler: Option<scaling::Context>,
@@ -186,10 +183,6 @@ pub struct FfmpegVideoDecoder {
     frame_rate: Option<Rational>,
     info: VideoStreamInfo,
     eof: bool,
-    // Fields drop in declaration order: input must close before its custom IO.
-    _avio: OwnedAvio,
-    _source: Box<Arc<dyn MediaSource>>,
-    _io_state: Box<SourceIoState>,
 }
 
 unsafe impl Send for FfmpegVideoDecoder {}
@@ -203,10 +196,16 @@ impl std::fmt::Debug for FfmpegVideoDecoder {
     }
 }
 
-impl FfmpegVideoDecoder {
-    pub fn open(source: Arc<dyn MediaSource>) -> Result<Self, String> {
+struct SourceInput {
+    // The demuxer must close before its custom IO.
+    input: format::context::Input,
+    _avio: OwnedAvio,
+    _io_state: Box<SourceIoState>,
+}
+
+impl SourceInput {
+    fn open(source: Arc<dyn MediaSource>, legacy_host: bool) -> Result<Self, String> {
         initialize();
-        let source_box = Box::new(Arc::clone(&source));
         let mut io_state = Box::new(SourceIoState { source, offset: 0 });
         let io_pointer = (&mut *io_state as *mut SourceIoState).cast::<c_void>();
 
@@ -238,16 +237,38 @@ impl FfmpegVideoDecoder {
         unsafe {
             (*format).pb = avio;
             (*format).flags |= ffmpeg::ffi::AVFMT_FLAG_CUSTOM_IO;
+            if legacy_host {
+                (*format).io_open = Some(reject_secondary_io);
+            }
         }
 
+        let mut options = ptr::null_mut();
+        if legacy_host {
+            let result = unsafe {
+                ffmpeg::ffi::av_dict_set(
+                    &mut options,
+                    c"format_whitelist".as_ptr(),
+                    c"asf,ogg".as_ptr(),
+                    0,
+                )
+            };
+            if result < 0 {
+                unsafe {
+                    ffmpeg::ffi::av_dict_free(&mut options);
+                    ffmpeg::ffi::avformat_free_context(format);
+                }
+                return Err(Error::from(result).to_string());
+            }
+        }
         let open_result = unsafe {
             ffmpeg::ffi::avformat_open_input(
                 &mut format,
                 ptr::null(),
                 ptr::null_mut(),
-                ptr::null_mut(),
+                &mut options,
             )
         };
+        unsafe { ffmpeg::ffi::av_dict_free(&mut options) };
         if open_result < 0 {
             return Err(Error::from(open_result).to_string());
         }
@@ -259,16 +280,55 @@ impl FfmpegVideoDecoder {
             return Err(Error::from(stream_info_result).to_string());
         }
 
-        let input = unsafe { format::context::Input::wrap(format) };
-        let stream = input
+        Ok(Self {
+            input: unsafe { format::context::Input::wrap(format) },
+            _avio: avio_owner,
+            _io_state: io_state,
+        })
+    }
+}
+
+unsafe extern "C" fn reject_secondary_io(
+    _context: *mut ffmpeg::ffi::AVFormatContext,
+    _io: *mut *mut ffmpeg::ffi::AVIOContext,
+    _url: *const std::ffi::c_char,
+    _flags: c_int,
+    _options: *mut *mut ffmpeg::ffi::AVDictionary,
+) -> c_int {
+    -libc::EACCES
+}
+
+impl FfmpegVideoDecoder {
+    pub fn open(source: Arc<dyn MediaSource>) -> Result<Self, String> {
+        Self::open_video(source, false)
+    }
+
+    pub fn open_legacy_host_video(source: Arc<dyn MediaSource>) -> Result<Self, String> {
+        Self::open_video(source, true)
+    }
+
+    fn open_video(source: Arc<dyn MediaSource>, legacy_host: bool) -> Result<Self, String> {
+        let source = SourceInput::open(source, legacy_host)?;
+        let stream = source
+            .input
             .streams()
             .best(Type::Video)
             .ok_or_else(|| "no video stream".to_string())?;
         let stream_index = stream.index();
         let time_base = stream.time_base();
-        let rate = stream.avg_frame_rate();
-        let decoder_context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
-            .map_err(|error| error.to_string())?;
+        let average = stream.avg_frame_rate();
+        let rate = if legacy_host && !valid_rate(average) {
+            stream.rate()
+        } else {
+            average
+        };
+        let rate = valid_rate(rate).then_some(rate);
+        let mut decoder_context =
+            ffmpeg::codec::context::Context::from_parameters(stream.parameters())
+                .map_err(|error| error.to_string())?;
+        if legacy_host {
+            unsafe { (*decoder_context.as_mut_ptr()).max_pixels = HOST_MAX_PIXELS };
+        }
         let decoder = decoder_context
             .decoder()
             .video()
@@ -276,7 +336,7 @@ impl FfmpegVideoDecoder {
         let info = VideoStreamInfo {
             width: decoder.width(),
             height: decoder.height(),
-            frame_rate: frame_rate(&stream),
+            frame_rate: rate.map(|rate| (rate.numerator() as u32, rate.denominator() as u32)),
             duration: duration_from_stream(&stream),
         };
         let rgba_scaler = scaling::Context::get(
@@ -291,18 +351,15 @@ impl FfmpegVideoDecoder {
         .map_err(|error| error.to_string())?;
 
         Ok(Self {
-            input,
+            source,
             decoder,
             rgba_scaler,
             yuv_scaler: None,
             stream_index,
             time_base,
-            frame_rate: (rate.numerator() > 0 && rate.denominator() > 0).then_some(rate),
+            frame_rate: rate,
             info,
             eof: false,
-            _avio: avio_owner,
-            _source: source_box,
-            _io_state: io_state,
         })
     }
 
@@ -325,7 +382,10 @@ impl FfmpegVideoDecoder {
     }
 
     pub fn seek_start(&mut self) -> Result<(), String> {
-        self.input.seek(0, ..).map_err(|error| error.to_string())?;
+        self.source
+            .input
+            .seek(0, ..)
+            .map_err(|error| error.to_string())?;
         self.decoder.flush();
         self.eof = false;
         Ok(())
@@ -342,7 +402,7 @@ impl FfmpegVideoDecoder {
                         return Ok(None);
                     }
                     let mut packet = Packet::empty();
-                    match packet.read(&mut self.input) {
+                    match packet.read(&mut self.source.input) {
                         Ok(()) if packet.stream() != self.stream_index => continue,
                         Ok(()) => {
                             self.decoder
@@ -567,6 +627,169 @@ fn checked_plane_len(width: u32, height: u32) -> Result<usize, String> {
     (width as usize)
         .checked_mul(height as usize)
         .ok_or_else(|| "video plane size overflow".to_string())
+}
+
+pub struct HostPcmBlock {
+    pub pts_us: u64,
+    pub stereo_i16: Vec<i16>,
+}
+
+pub struct LegacyHostAudioDecoder {
+    source: SourceInput,
+    decoder: ffmpeg::decoder::Audio,
+    stream_index: usize,
+    time_base: Rational,
+    resampler: Option<resampling::Context>,
+    origin_us: Option<u64>,
+    frames: u64,
+    eof: bool,
+    drained: bool,
+}
+
+impl LegacyHostAudioDecoder {
+    const RATE: u32 = 48_000;
+    const FORMAT: format::Sample = format::Sample::I16(format::sample::Type::Packed);
+    const MAX_FRAMES: usize = 131_072;
+
+    pub fn open(source: Arc<dyn MediaSource>) -> Result<Option<Self>, String> {
+        let source = SourceInput::open(source, true)?;
+        let Some(stream) = source.input.streams().best(Type::Audio) else {
+            return Ok(None);
+        };
+        let stream_index = stream.index();
+        let time_base = stream.time_base();
+        let mut context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
+            .map_err(|error| error.to_string())?;
+        unsafe { (*context.as_mut_ptr()).max_samples = Self::MAX_FRAMES as i64 * 8 };
+        let decoder = context
+            .decoder()
+            .audio()
+            .map_err(|error| error.to_string())?;
+        Ok(Some(Self {
+            source,
+            decoder,
+            stream_index,
+            time_base,
+            resampler: None,
+            origin_us: None,
+            frames: 0,
+            eof: false,
+            drained: false,
+        }))
+    }
+
+    pub fn next_pcm(&mut self) -> Result<Option<HostPcmBlock>, String> {
+        while !self.drained {
+            let mut input = ffmpeg::frame::Audio::empty();
+            match self.decoder.receive_frame(&mut input) {
+                Ok(()) => {
+                    if let Some(block) = self.resample(input)? {
+                        return Ok(Some(block));
+                    }
+                }
+                Err(Error::Eof) => break,
+                Err(Error::Other { errno }) if errno == libc::EAGAIN => {
+                    if self.eof {
+                        break;
+                    }
+                    let mut packet = Packet::empty();
+                    match packet.read(&mut self.source.input) {
+                        Ok(()) if packet.stream() != self.stream_index => continue,
+                        Ok(()) => self
+                            .decoder
+                            .send_packet(&packet)
+                            .map_err(|err| err.to_string())?,
+                        Err(Error::Eof) => {
+                            self.eof = true;
+                            self.decoder.send_eof().map_err(|err| err.to_string())?;
+                        }
+                        Err(error) => return Err(error.to_string()),
+                    }
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        if self.drained {
+            return Ok(None);
+        }
+        self.drained = true;
+        let Some(resampler) = self.resampler.as_mut() else {
+            return Ok(None);
+        };
+        if resampler.delay().is_none() {
+            return Ok(None);
+        }
+        let mut tail = ffmpeg::frame::Audio::new(Self::FORMAT, 4096, ChannelLayout::STEREO);
+        resampler
+            .flush(&mut tail)
+            .map_err(|error| error.to_string())?;
+        Ok(self.block(&tail))
+    }
+
+    fn resample(
+        &mut self,
+        mut input: ffmpeg::frame::Audio,
+    ) -> Result<Option<HostPcmBlock>, String> {
+        let rate = input.rate();
+        if !(8_000..=192_000).contains(&rate) || !(1..=8).contains(&input.channels()) {
+            return Err("unsupported audio layout or rate".into());
+        }
+        let layout = normalized_audio_layout(input.channel_layout(), input.channels());
+        input.set_channel_layout(layout);
+        let capacity = (input.samples() as u64)
+            .saturating_mul(Self::RATE.into())
+            .div_ceil(rate.into())
+            .saturating_add(256);
+        if capacity > Self::MAX_FRAMES as u64 {
+            return Err("decoded audio block is too large".into());
+        }
+        if self.resampler.as_ref().is_none_or(|resampler| {
+            let previous = resampler.input();
+            previous.format != input.format()
+                || previous.channel_layout != layout
+                || previous.rate != rate
+        }) {
+            self.resampler = Some(
+                resampling::Context::get(
+                    input.format(),
+                    layout,
+                    rate,
+                    Self::FORMAT,
+                    ChannelLayout::STEREO,
+                    Self::RATE,
+                )
+                .map_err(|error| error.to_string())?,
+            );
+        }
+        self.origin_us.get_or_insert_with(|| {
+            pts_micros(input.timestamp().or_else(|| input.pts()), self.time_base)
+                .unwrap_or(0)
+                .max(0) as u64
+        });
+        let mut output =
+            ffmpeg::frame::Audio::new(Self::FORMAT, capacity as usize, ChannelLayout::STEREO);
+        self.resampler
+            .as_mut()
+            .unwrap()
+            .run(&input, &mut output)
+            .map_err(|error| error.to_string())?;
+        Ok(self.block(&output))
+    }
+
+    fn block(&mut self, frame: &ffmpeg::frame::Audio) -> Option<HostPcmBlock> {
+        if frame.samples() == 0 {
+            return None;
+        }
+        let pts_us = self
+            .origin_us
+            .unwrap_or(0)
+            .saturating_add(self.frames.saturating_mul(1_000_000) / u64::from(Self::RATE));
+        self.frames = self.frames.saturating_add(frame.samples() as u64);
+        Some(HostPcmBlock {
+            pts_us,
+            stereo_i16: frame.plane::<i16>(0).to_vec(),
+        })
+    }
 }
 
 /// Decodes the best audio stream from `source` into a canonical stereo PCM WAV.

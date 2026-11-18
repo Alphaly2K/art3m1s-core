@@ -1,0 +1,13 @@
+[package]
+name = "art3m1s-artemis-media-host"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+publish = false
+
+[lib]
+name = "art3m1s_artemis_media_host"
+crate-type = ["cdylib"]
+
+[dependencies]
+art3m1s-media = { path = "../art3m1s-media", features = ["ffmpeg"] }

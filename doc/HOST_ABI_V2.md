@@ -678,6 +678,13 @@ macOS Flutter Runner 可将 [ArtemisFlutterHost](../tools/host-bindings/swift/Ar
 决定何时推进和处理服务，原生端只在成功呈现时通知纹理消费者。应用退出玩家视图时调用
 `session.close()`，Runner 离开时调用 `host.close()` 注销通道并释放剩余会话。
 
+可选提供 `mediaPath` 加载独立的 [媒体 Host](abi/art3m1s_media_host_v1.h)，用于 ASF/WMV 和
+Ogg 视频。该库用现有 FFmpeg 动态库构建，提供时间戳、RGBA 帧和 48 kHz 双声道 PCM；调用者
+串行使用每个解码句柄，并在下一次拉取或关闭前消费借用数据。Flutter Runner 可使用
+[ArtemisLegacyMedia](../tools/host-bindings/swift/ArtemisLegacyMedia.swift) 调度播放；解码库无需链接 Core。
+设置 `FFMPEG_DIR` 指向 FFmpeg SDK 后运行 `bash scripts/test-host-v2-media.sh` 可验证独立解码库。
+该检查会生成 WMV；`FFMPEG_CLI` 可指定额外支持 `libtheora` 的 FFmpeg CLI，以同时验证 Ogg 视频。
+
 将 `FLUTTER_MACOS_FRAMEWORK_DIR` 指向包含 `FlutterMacOS.framework` 的目录后运行
 `bash scripts/test-host-v2-flutter.sh`，可以验证标准方法编解码器、真实 Core 和 Metal 设备的
 接线。探针独立运行并检查纹理注册、像素和关闭，无需启动游戏应用。
