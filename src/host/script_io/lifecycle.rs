@@ -51,6 +51,7 @@ impl ScriptIoSession {
             return Err(ProtocolError::WouldBlock);
         }
         self.frame_handler_due = false;
+        self.translations.clear(&mut self.transport);
         self.shutdown = Shutdown::Saving;
         self.save_work = Some(SaveWork::Queued { key: None });
         Ok(())

@@ -24,7 +24,7 @@ void exerciseHost(ArtRuntimeApiV2 runtime, ArtFrameApiV2 frames, int handle) {
   final boot = utf8.encode(
     '*top\n[lyc id=1 width=2 height=1 color=ff112233]\n'
     '[setonwindowbutton button=1 label=window call=1]\n'
-    '[exec command=fullscreen]\n[wt0]\n[caption data=advanced]\n[stop]\n'
+    '[exec command=fullscreen]\noriginal text\n[wt0]\n[caption data=advanced]\n[stop]\n'
     '*window\n[caption data=window]\n[return]\n',
   );
   final open = runtime.open_project
@@ -135,6 +135,18 @@ void exerciseHost(ArtRuntimeApiV2 runtime, ArtFrameApiV2 frames, int handle) {
           effects.add(metadata['text'] as String);
         } else if (domain == ART_DOMAIN_UI && kind == ART_UI_WINDOW_ACTION) {
           effects.add(metadata['command'] as String);
+        } else if (domain == ART_DOMAIN_UI && kind == ART_UI_TRANSLATE) {
+          if (metadata['text'] != 'original text' || request == 0) {
+            throw StateError('Unexpected translation request: $metadata');
+          }
+          if ((result.ref.flags & ART_WAIT_UI) != 0) {
+            throw StateError('Translation blocked the scenario');
+          }
+          send(domain, kind, epoch, request, {
+            'status': 'ok',
+            'text': 'translated text',
+          });
+          effects.add('translated');
         } else if (request != 0) {
           throw StateError('Unexpected request $domain/$kind');
         }
@@ -174,7 +186,7 @@ void exerciseHost(ArtRuntimeApiV2 runtime, ArtFrameApiV2 frames, int handle) {
         'down': true,
       });
       pump(3);
-      if (effects.join(',') != 'fullscreen,window,advanced') {
+      if (effects.join(',') != 'fullscreen,translated,window,advanced') {
         throw StateError('Unexpected Host effects: $effects');
       }
     } finally {
@@ -225,7 +237,7 @@ void main(List<String> arguments) {
     final destroy = runtime.destroy.asFunction<int Function(int)>();
     final config = arena<ArtCreateInfo>();
     config.ref.struct_size = sizeOf<ArtCreateInfo>();
-    config.ref.host_service_caps = ART_HOST_CAP_IO;
+    config.ref.host_service_caps = ART_HOST_CAP_IO | ART_HOST_CAP_TRANSLATION;
     config.ref.renderer_caps = ART_RENDERER_CAP_SPRITE;
     final handle = arena<Uint64>();
     expectStatus(create(config, handle), ART_OK);

@@ -1985,6 +1985,72 @@ __engine:setEventHandler{onEnterFrame='tick'}
 }
 
 #[test]
+fn translation_preserves_original_text_and_retires_results_from_previous_pages() {
+    use crate::text::BacklogTag;
+
+    let (mut session, epoch, mut host) =
+        playback_project(b"*top\nfirst page\n[wt0]\n[rp]\nsecond page\n[wt0]\n");
+    session.translation_enabled = true;
+    drive_playback_boot(&mut session, &mut host);
+    let get_request = |session: &mut ScriptIoSession| {
+        let mut pending = requests(session);
+        assert_eq!(pending.len(), 1);
+        let request = pending.pop().unwrap();
+        assert_eq!(request.identity.service, UI_TRANSLATE);
+        assert!(request.blob.is_empty());
+        request
+    };
+    let text = |session: &ScriptIoSession| {
+        let snapshot = session.scene.as_ref().unwrap().capture_text().unwrap();
+        snapshot
+            .layers
+            .into_iter()
+            .flat_map(|page| page.tags)
+            .filter_map(|tag| {
+                if let BacklogTag::Text(text) = tag {
+                    Some(text)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let first = get_request(&mut session);
+    assert_eq!(first.metadata, json!({"text":"first page","ruby":null}));
+    assert_eq!(text(&session), ["first page"]);
+    assert!(!session.runtime_state().waiting_for_ui);
+
+    submit_playback_keys(&mut session, epoch, &[(13, true)]);
+    let frame = playback_frame(2, 20);
+    assert_eq!(
+        session.step_queued_frame(frame).unwrap(),
+        ScriptIoProgress::Event
+    );
+    let second = get_request(&mut session);
+    assert_eq!(second.metadata["text"], "second page");
+    assert_eq!(text(&session), ["second page"]);
+    let translated = |request, text| reply(request, json!({"status":"ok","text":text}), vec![]);
+    assert_eq!(
+        session.submit_replies(&[translated(&first, "outdated")]),
+        Err(ProtocolError::Stale)
+    );
+    session
+        .submit_replies(&[translated(&second, "current translation")])
+        .unwrap();
+    assert_eq!(text(&session), ["second page"]);
+    assert_eq!(
+        session.step_queued_frame(frame).unwrap(),
+        ScriptIoProgress::Event
+    );
+    assert_eq!(text(&session), ["current translation"]);
+    assert_eq!(
+        session.submit_replies(&[translated(&second, "duplicate")]),
+        Err(ProtocolError::Stale)
+    );
+    assert!(requests(&mut session).is_empty());
+}
+
+#[test]
 fn global_push_claims_its_press_and_dummy_decide_is_not_physical_input() {
     let (mut session, epoch, mut host) = playback_project(
         br#"*top

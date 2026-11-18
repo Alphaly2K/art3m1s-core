@@ -9,6 +9,7 @@ mod persistence;
 mod scene;
 mod screenshot;
 mod transition;
+mod translation;
 mod ui;
 mod video;
 mod wait;
@@ -19,6 +20,7 @@ use lifecycle::Shutdown;
 pub use lifecycle::{RUNTIME_CLOSED, RUNTIME_EXIT_REQUESTED};
 pub use persistence::RUNTIME_PERSISTENCE_RESULT;
 pub use screenshot::{RENDER_CAPTURE, RENDER_SAVE_CAPTURE};
+pub use translation::UI_TRANSLATE;
 pub use ui::{UI_AVOID, UI_CAPTION, UI_DIALOG, UI_WINDOW_ACTION};
 pub use video::MEDIA_VIDEO_COMMAND;
 
@@ -289,6 +291,8 @@ pub struct ScriptIoSession {
     dialog_request: Option<RequestIdentity>,
     http: http::Http,
     pub(super) http_enabled: bool,
+    translations: translation::Translations,
+    pub(super) translation_enabled: bool,
     pub(super) shutdown: Shutdown,
     audio: audio::Audio,
     control: control::PlaybackControl,
@@ -348,6 +352,8 @@ impl ScriptIoSession {
             dialog_request: None,
             http: http::Http::default(),
             http_enabled: true,
+            translations: Default::default(),
+            translation_enabled: false,
             shutdown: Shutdown::default(),
             audio: Default::default(),
             control: Default::default(),
@@ -469,6 +475,7 @@ impl ScriptIoSession {
         self.project_loading = false;
         self.dialog_request = None;
         self.http = Default::default();
+        self.translations = Default::default();
         self.shutdown = Shutdown::default();
         self.audio = Default::default();
         self.control = Default::default();
@@ -579,6 +586,7 @@ impl ScriptIoSession {
         self.project_loading = false;
         self.dialog_request = None;
         self.http = Default::default();
+        self.translations = Default::default();
         self.shutdown = Shutdown::default();
         self.audio = Default::default();
         self.control = Default::default();
@@ -758,6 +766,8 @@ impl ScriptIoSession {
                 ui::decode_dialog_reply(reply)?;
             } else if Some(reply.identity) == self.http.identity() {
                 http::decode_reply(reply)?;
+            } else if self.translations.accepts(reply.identity) {
+                translation::decode_reply(reply)?;
             } else if Some(reply.identity) == self.screenshot.pending_request() {
                 screenshot::decode_screenshot_reply(reply)?;
             } else {
@@ -803,6 +813,9 @@ impl ScriptIoSession {
         // A reply can arrive while onEnterFrame awaits IO. Release its queue
         // slot now and apply the HTTP result only after the handler returns.
         self.collect_http_reply();
+        if let Some(scene) = &self.scene {
+            self.translations.advance(scene, &mut self.transport)?;
+        }
         let dispatch_scene =
             self.scene_handlers_ready() || self.pointer_ready() || self.control.avoid_pending();
         if self.completed && !self.shutdown.is_closing_or_closed() && !dispatch_scene {
@@ -1823,6 +1836,7 @@ impl ScriptIoSession {
             scene.restore_snapshot(save.scene, shaders, edits, self.frame);
             scene.restore_text(save.message_text);
         }
+        self.translations.clear(&mut self.transport);
         self.audio.commit_restore(audio, &mut self.transport)?;
         self.gameplay_checkpoint = None;
         self.clear_control_modes();

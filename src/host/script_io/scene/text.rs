@@ -1,8 +1,8 @@
 use super::*;
 use crate::save::MessageTextSnapshot;
 use crate::text::{
-    BacklogTag, FontDesc, GlyphTextRenderer, ScetweenConfig, TextRenderer, capture_message_text,
-    font_fallback_candidates, message_layer_scene_id,
+    BacklogTag, FontDesc, GlyphTextRenderer, ScetweenConfig, TextRenderer, TextSpanToken,
+    capture_message_text, font_fallback_candidates, message_layer_scene_id,
 };
 use std::collections::HashSet;
 
@@ -76,8 +76,38 @@ impl ScriptIoSession {
         let (Some(scene), Some(event)) = (&self.scene, &self.scenario_event) else {
             return Ok(false);
         };
-        if !scene.scene.lock().unwrap().apply_text(event) {
-            return Ok(false);
+        {
+            let mut scene = scene.scene.lock().unwrap();
+            let identity = match event {
+                Event::ScenarioText { content, .. } if self.translation_enabled => {
+                    let state = scene.text.renderer.font_state();
+                    let active = state
+                        .active_layer
+                        .as_deref()
+                        .unwrap_or(crate::text::glyph::DEFAULT_MESSAGE_LAYER);
+                    let ruby = state
+                        .layers
+                        .get(active)
+                        .and_then(|layer| layer.open_ruby.as_ref());
+                    self.translations.request(
+                        &mut self.transport,
+                        content,
+                        ruby.map(|(_, text)| text.as_str()),
+                    )?
+                }
+                _ => None,
+            };
+            let mut span = None;
+            if !scene.apply_text_tracking(event, identity.is_some().then_some(&mut span)) {
+                return Ok(false);
+            }
+            if let Some(identity) = identity {
+                if let Some(span) = span {
+                    self.translations.track(identity, span);
+                } else {
+                    self.transport.cancel(identity)?;
+                }
+            }
         }
         self.resume_scenario()?;
         Ok(true)
@@ -85,6 +115,32 @@ impl ScriptIoSession {
 }
 
 impl SceneIo {
+    pub(in crate::host::script_io) fn translation_span_ready(
+        &self,
+        span: &TextSpanToken,
+    ) -> Option<bool> {
+        let scene = self.scene.lock().unwrap();
+        let layer = scene
+            .text
+            .renderer
+            .font_state()
+            .layers
+            .get(&span.layer_id)?;
+        (layer.generation == span.generation && layer.font.face == span.font_face)
+            .then_some(!layer.reveal_pending)
+    }
+
+    pub(in crate::host::script_io) fn replace_translation(
+        &self,
+        span: &TextSpanToken,
+        text: &str,
+    ) -> Option<isize> {
+        let mut scene = self.scene.lock().unwrap();
+        let delta = scene.text.renderer.replace_text_span(span, text)?;
+        scene.dirty = true;
+        Some(delta)
+    }
+
     pub(in crate::host::script_io) fn hide_message_layers(
         &self,
         windows: &[String],
@@ -343,10 +399,24 @@ impl SceneProjection {
     }
 
     fn apply_text(&mut self, event: &Event) -> bool {
+        self.apply_text_tracking(event, None)
+    }
+
+    fn apply_text_tracking(
+        &mut self,
+        event: &Event,
+        span: Option<&mut Option<TextSpanToken>>,
+    ) -> bool {
         let renderer = &mut self.text.renderer;
         let old_layer = renderer.font_state().active_layer.clone();
         match event {
-            Event::ScenarioText { content, inline } => renderer.push_text(content, *inline),
+            Event::ScenarioText { content, inline } => {
+                if let Some(span) = span {
+                    *span = renderer.push_text_tracked(content, *inline);
+                } else {
+                    renderer.push_text(content, *inline);
+                }
+            }
             Event::FontSettings(settings) => renderer.apply_font_settings(settings),
             Event::FontDefault(settings) => renderer.font_default(settings),
             Event::FontInit => renderer.font_init(),

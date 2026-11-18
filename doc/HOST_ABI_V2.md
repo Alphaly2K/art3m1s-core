@@ -222,7 +222,7 @@ C 预览版 `ArtMessage.schema_version=1`、`flags=0`。一个批次可包含一
 | Media (5) | 16 | `playback_id`、`status`（`started`、`ended`、`failed`、`cancelled`） |
 | Media (5) | 17 | `playback_id`、`frame_id`、`width`、`height`；blob 为 RGBA8 |
 
-`ArtCreateInfo` 的 Host 能力位分别为 IO=1、UI=2、Media=4、HTTP=8。Renderer 位分别为 sprite=1、
+`ArtCreateInfo` 的 Host 能力位分别为 IO=1、UI=2、Media=4、HTTP=8、Translation=16。Renderer 位分别为 sprite=1、
 transition=2、screenshot=4、group=8、emote=16、HLSL=32。
 预览版检查未知位；Host 仍须处理收到的服务请求，缺少可选服务时返回相应失败。
 
@@ -270,6 +270,7 @@ UI domain=4 的通知与请求不携带 blob。HTTP 完成回复可携带正文�
 | 4 `ui.avoid` | 可靠通知，`visible`、`mute` 为布尔值；开启时包括 asset 命名空间下的逻辑 `asset` 和 `windowbutton` | 无回复 |
 | 5 `ui.http_request` | 请求，`method`（`get`、`post`）、`url`、有序二元组数组 `headers`、`data`、`file_data`，以及十进制字符串 `max_response_bytes` | `{"status":"ok","status_code":200}`，blob 为正文；也可回复失败状态 |
 | 6 `ui.http_cancel` | 可靠通知，被取消请求的 `request_id`（十进制字符串） | 无回复 |
+| 7 `ui.translate` | 后台请求，`text` 为原文，`ruby` 为当前注音字符串或 `null` | `{"status":"ok","text":"译文"}`；也可回复失败状态，始终无 blob |
 
 Host 按同一条 `ui.avoid` 记录更新遮罩和静音；解除静音时沿用原音量。`windowbutton=0` 忽略
 窗口按钮，`1` 使用平台默认动作，`2` 把按钮提交给 Core。Core 先交付退出回避通知，再派发
@@ -584,7 +585,13 @@ Media kind=2 交付视频命令。`op=play` 带有十进制字符串 `playback_i
 正文默认按 UTF-8 转成字符串，无效字节替换。若指定 `filename`，Core 通过已有 `io.write_atomic`
 保存原始字节到 save 命名空间，并等到写入确认后继续脚本；写入结果不改变 HTTP 状态码。
 
-翻译允许非阻塞热替换，过期页面或文本的结果不再应用。callnative、浏览器、剪贴板等行为由 Host
+Host 声明 `ART_HOST_CAP_TRANSLATION` 后可收到后台翻译请求。Core 立即显示原文，目标消息层
+结束逐字显示后才替换文本。翻页、编号读档或重新打开项目会使对应结果过期，迟到时返回 `Stale`。
+失败状态 `cancelled`、`denied`、`unsupported`、`io_error`、`timeout`、`limit` 保留原文。
+单段原文连同注音、单段译文分别以 64 KiB UTF-8 为上限；达到队列或请求预算时可跳过翻译，
+剧情继续。Host 可缓存结果，并在会话结束时停止该会话的翻译任务。
+
+callnative、浏览器、剪贴板等行为由 Host
 决定支持情况，未实现时必须有明确的反馈规则。
 
 窗口状态、字体列表/字体 blob、文本替换、reported OS、音量等作为 runtime 配置消息。

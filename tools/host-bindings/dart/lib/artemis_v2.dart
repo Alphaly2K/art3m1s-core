@@ -402,6 +402,8 @@ const int ART_HOST_CAP_MEDIA = 4;
 
 const int ART_HOST_CAP_HTTP = 8;
 
+const int ART_HOST_CAP_TRANSLATION = 16;
+
 const int ART_RENDERER_CAP_SPRITE = 1;
 
 const int ART_RENDERER_CAP_TRANSITION = 2;
@@ -471,6 +473,8 @@ const int ART_UI_AVOID = 4;
 const int ART_UI_HTTP_REQUEST = 5;
 
 const int ART_UI_HTTP_CANCEL = 6;
+
+const int ART_UI_TRANSLATE = 7;
 
 const int ART_IO_STAT = 1;
 
