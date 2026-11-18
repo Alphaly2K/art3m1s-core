@@ -11,6 +11,12 @@
 继续核对剩余快照字段、实机画面对照和生产 Host 接入。
 v2 预览已提供独立构建、C 内存 Host 和 Dart 绑定；Linux/Windows 运行验证和生产 Host 切换待完成。
 
+## 已完成：Windows x64 兼容层验证
+
+独立 Core 使用 Windows GNU 工具链构建，PE 导出表仅有 `art3m1s_get_api_v2`。同一 C Host
+冒烟与 273 项纯 Core 测试在 Windows 兼容层运行通过。Windows MSVC 原生 CI 和 Linux 验证
+仍待执行。
+
 ## 已完成：Host 后台翻译
 
 声明翻译能力的 Host 通过可靠队列领取原文与注音。原文先显示，译文在当前消息层逐字显示结束后
@@ -111,7 +117,8 @@ Host 尚未切换。
 Mach-O、ELF 和 PE 的导出及独立 C Host。
 
 在仅含 Artemis 源码及其依赖清单的目录中，macOS C Host 冒烟和 258 项纯 Core 测试通过；
-预览库仅导出 `art3m1s_get_api_v2`。Linux 和 Windows 的 CI 运行结果待核实。
+预览库仅导出 `art3m1s_get_api_v2`。Windows GNU 构建及兼容层结果见上方；Linux 和 Windows
+原生 CI 仍待核实。
 
 ## 已完成：HLSL 帧源码与绑定
 
