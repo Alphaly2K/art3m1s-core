@@ -3204,6 +3204,111 @@ fn hlsl_source_replacement_keeps_old_frames_and_prefetches_shader_bindings() {
 }
 
 #[test]
+fn numbered_load_restores_captured_shader_sources_and_texture_bindings() {
+    let first = b"saved shader source";
+    let second = b"menu shader source";
+    let mask = [128, 0, 0, 192];
+    let user = [16, 32, 64, 255];
+    let (mut saver, _, mut host) = playback_project(
+        br#"*top
+[lyshader id=paint file=:effects/original.hlsl]
+[lyc id=tile width=4 height=4 color=ffffff]
+[lyprop id=tile shader=paint shadertexture=textureUser textureUser=user mask=mask]
+[takess]
+[lyshader id=paint file=menu.hlsl]
+[save file=slot]
+[stop]
+[lua]
+__engine:setMagicPath{'effects', 'shaders'}
+[/lua]
+"#,
+    );
+    host.asset("shaders/original.hlsl", first);
+    host.asset("menu.hlsl", second);
+    host.asset("mask.png", &png_bytes(1, 1, &mask));
+    host.asset("user.png", &png_bytes(1, 1, &user));
+    let drive = |session: &mut ScriptIoSession, host: &mut MemoryHost, frame| {
+        for _ in 0..2048 {
+            let progress = session.step_queued_frame(frame).unwrap();
+            session.publish_frame(progress).unwrap();
+            for request in requests(session) {
+                let response = if request.identity.service == RENDER_CAPTURE {
+                    reply(&request, json!({"status":"ok"}), vec![])
+                } else {
+                    host.complete(&request)
+                };
+                session.submit_replies(&[response]).unwrap();
+            }
+            match progress {
+                ScriptIoProgress::Event => return,
+                ScriptIoProgress::Waiting => {}
+                other => panic!("unexpected shader restore progress: {other:?}"),
+            }
+        }
+        panic!("shader scenario did not reach a wait");
+    };
+    drive(&mut saver, &mut host, playback_frame(1, 0));
+    let bytes = &host.files[&("save".into(), "slot".into())].1;
+    let file: HostSaveFile = serde_json::from_slice(bytes).unwrap();
+    assert_eq!(
+        file.shader_assets.unwrap()["paint"],
+        "shaders/original.hlsl"
+    );
+    assert!(serde_json::from_slice::<crate::save::SaveData>(bytes).is_ok());
+
+    host.asset(
+        "load.iet",
+        br#"*top
+[lyshader id=paint file=menu.hlsl]
+[lyc id=menu width=4 height=4 color=ffffff]
+[lyprop id=menu shader=paint]
+[flip]
+[load file=slot type=1]
+[wait time=0 input=0]
+[load file=slot type=1]
+[stop]
+"#,
+    );
+    let mut loader = session(2, TransportLimits::default(), 4096);
+    loader
+        .open_queued_project(
+            b"[WINDOWS]\nWIDTH=4\nHEIGHT=4\nBOOT=load.iet\n",
+            "windows",
+            None,
+        )
+        .unwrap();
+    drive(&mut loader, &mut host, playback_frame(1, 0));
+    let menu = loader.frames.latest_snapshot().unwrap();
+    let menu_shader = &menu.sprites[0].shader.as_ref().unwrap().shader;
+    assert_eq!(menu_shader.source.as_ref(), second);
+
+    host.files
+        .remove(&("asset".into(), "shaders/original.hlsl".into()));
+    drive(&mut loader, &mut host, playback_frame(2, 1));
+    assert_eq!(loader.interpreter().current_script(), Some("load.iet"));
+    assert_eq!(
+        loader.frames.latest_snapshot().unwrap().render_frame_id,
+        menu.render_frame_id
+    );
+
+    host.asset("shaders/original.hlsl", first);
+    drive(&mut loader, &mut host, playback_frame(3, 2));
+    let frame = loader.frames.latest_snapshot().unwrap();
+    assert_eq!(frame.sprites[0].layer_id, "tile");
+    let effect = frame.sprites[0].shader.as_ref().unwrap();
+    assert_eq!(effect.shader.source.as_ref(), first);
+    assert!(effect.shader.revision > menu_shader.revision);
+    assert_eq!(frame.texture(effect.mask.unwrap()).unwrap().rgba(), mask);
+    assert_eq!(frame.texture(effect.user.unwrap()).unwrap().rgba(), user);
+    let outgoing = frame.transition.as_ref().unwrap().source[0]
+        .shader
+        .as_ref()
+        .unwrap();
+    assert_eq!(outgoing.shader.revision, menu_shader.revision);
+    assert_eq!(outgoing.shader.source.as_ref(), second);
+}
+
+#[test]
 fn emote_models_load_through_host_io_and_publish_the_cpu_atlas() {
     let mut session = session(1, TransportLimits::default(), 4096);
     let mut host = MemoryHost::default();

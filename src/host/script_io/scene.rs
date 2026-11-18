@@ -15,6 +15,7 @@ mod frames;
 mod pointer;
 mod shader;
 mod text;
+pub(super) use shader::SceneShaders;
 pub(super) use text::FontRead;
 
 const MAX_TEXTURES: usize = 4096;
@@ -286,7 +287,7 @@ pub(super) struct SceneIo {
     scene: Arc<Mutex<SceneProjection>>,
     pending: Option<PendingAsset>,
     pending_font: Option<(Event, FontRead)>,
-    pending_shader: Option<String>,
+    pending_shader: Option<(String, String)>,
     clock_origin_ns: Option<u64>,
     clock_base_ms: u64,
     tween_handlers: Vec<TweenHandler>,
@@ -471,6 +472,7 @@ impl SceneIo {
     pub(super) fn restore_snapshot(
         &mut self,
         snapshot: Option<crate::compositor::Scene>,
+        shaders: Option<SceneShaders>,
         frame: Option<HostFrame>,
     ) {
         let mut scene = self.scene.lock().unwrap();
@@ -484,6 +486,9 @@ impl SceneIo {
         scene.pending_video_frames.clear();
         scene.edited.clear();
         scene.emote.clear();
+        if let Some(shaders) = shaders {
+            scene.shaders = shaders;
+        }
         self.tween_handlers.clear();
         self.pointer = Default::default();
         scene.dirty = true;
@@ -496,7 +501,32 @@ impl SceneIo {
         let scene = self.scene.lock().unwrap();
         snapshot
             .all_layers()
-            .flat_map(|layer| [layer.file.as_deref(), layer.mask.as_deref()])
+            .flat_map(|layer| {
+                let props = &layer.props;
+                let custom_shader = scene.shaders_enabled
+                    && props.shader.as_deref().is_some_and(|id| !id.is_empty());
+                let binding = |name: &str| {
+                    let reference = props.custom.get(name)?;
+                    Some(
+                        snapshot
+                            .get(reference)
+                            .and_then(|layer| layer.file.as_deref())
+                            .unwrap_or(reference),
+                    )
+                };
+                let user = props
+                    .shader_textures
+                    .iter()
+                    .find(|name| name.eq_ignore_ascii_case("textureUser"));
+                [
+                    layer.file.as_deref(),
+                    layer.mask.as_deref(),
+                    custom_shader.then(|| binding("mask")).flatten(),
+                    custom_shader
+                        .then(|| user.and_then(|name| binding(name)))
+                        .flatten(),
+                ]
+            })
             .flatten()
             .chain(snapshot.anime_states.values().flat_map(|state| {
                 state

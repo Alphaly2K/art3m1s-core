@@ -1,6 +1,7 @@
 use super::*;
 use crate::compositor::Scene;
 use crate::save::MessageTextSnapshot;
+use std::collections::BTreeMap;
 
 pub const RENDER_CAPTURE: MessageKind = MessageKind {
     domain: Domain::Render,
@@ -26,6 +27,7 @@ pub(super) struct CapturedScene {
     id: u64,
     pub(super) scene: Scene,
     pub(super) text: Option<MessageTextSnapshot>,
+    pub(super) shaders: Option<BTreeMap<String, String>>,
 }
 
 impl Screenshot {
@@ -85,6 +87,7 @@ impl ScriptIoSession {
                                 id: identity.request_id,
                                 scene: self.capture_scene_snapshot(scene),
                                 text: scene.capture_text(),
+                                shaders: scene.capture_shader_assets(),
                             })),
                         ));
                         return Ok(Some(ScriptIoProgress::Waiting));

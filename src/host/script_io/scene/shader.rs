@@ -1,20 +1,31 @@
 use super::*;
 use crate::host::frame::{FrameShader, FrameShaderEffect};
 use crate::render_pipeline::draw::ShaderEffect;
+use std::collections::BTreeMap;
 
 const MAX_SOURCE_BYTES: usize = 256 * 1024;
 const MAX_SHADER_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SHADERS: usize = 256;
 
 #[derive(Default)]
-pub(super) struct SceneShaders {
-    sources: HashMap<String, Arc<FrameShader>>,
+pub(in crate::host::script_io) struct SceneShaders {
+    sources: HashMap<String, RegisteredShader>,
     bytes: usize,
     revision: u64,
 }
 
+struct RegisteredShader {
+    asset: String,
+    frame: Arc<FrameShader>,
+}
+
 impl SceneShaders {
-    fn register(&mut self, id: String, source: Vec<u8>) -> bool {
+    pub(in crate::host::script_io) fn register(
+        &mut self,
+        id: String,
+        asset: String,
+        source: Vec<u8>,
+    ) -> bool {
         let previous = self.sources.get(&id);
         if id.is_empty()
             || source.is_empty()
@@ -23,7 +34,8 @@ impl SceneShaders {
         {
             return false;
         }
-        let bytes = self.bytes - previous.map_or(0, |shader| shader.source.len()) + source.len();
+        let bytes =
+            self.bytes - previous.map_or(0, |shader| shader.frame.source.len()) + source.len();
         let Some(revision) = self
             .revision
             .checked_add(1)
@@ -33,10 +45,13 @@ impl SceneShaders {
         };
         self.sources.insert(
             id,
-            Arc::new(FrameShader {
-                revision,
-                source: source.into_boxed_slice(),
-            }),
+            RegisteredShader {
+                asset,
+                frame: Arc::new(FrameShader {
+                    revision,
+                    source: source.into_boxed_slice(),
+                }),
+            },
         );
         self.revision = revision;
         self.bytes = bytes;
@@ -45,7 +60,7 @@ impl SceneShaders {
 
     pub(super) fn effect(&self, effect: &ShaderEffect) -> Option<FrameShaderEffect> {
         Some(FrameShaderEffect {
-            shader: self.sources.get(&effect.name)?.clone(),
+            shader: self.sources.get(&effect.name)?.frame.clone(),
             uniforms: effect
                 .uniforms
                 .iter()
@@ -62,6 +77,42 @@ impl SceneShaders {
 }
 
 impl SceneIo {
+    pub(in crate::host::script_io) fn capture_shader_assets(
+        &self,
+    ) -> Option<BTreeMap<String, String>> {
+        let scene = self.scene.lock().unwrap();
+        scene.shaders_enabled.then(|| {
+            scene
+                .shaders
+                .sources
+                .iter()
+                .map(|(id, shader)| (id.clone(), shader.asset.clone()))
+                .collect()
+        })
+    }
+
+    pub(in crate::host::script_io) fn prepare_saved_shaders(
+        &self,
+        assets: &BTreeMap<String, String>,
+    ) -> Result<Option<SceneShaders>, ProtocolError> {
+        let scene = self.scene.lock().unwrap();
+        if !scene.shaders_enabled {
+            return Ok(None);
+        }
+        if assets.len() > MAX_SHADERS {
+            return Err(ProtocolError::Limit);
+        }
+        for (id, path) in assets {
+            if id.is_empty() || logical_key(path)? != *path {
+                return Err(ProtocolError::Argument("invalid saved shader id or asset"));
+            }
+        }
+        Ok(Some(SceneShaders {
+            revision: scene.shaders.revision,
+            ..Default::default()
+        }))
+    }
+
     pub(in crate::host::script_io) fn shader_pending(&self) -> bool {
         self.pending_shader.is_some()
     }
@@ -72,17 +123,17 @@ impl SceneIo {
         path: &str,
     ) -> Option<IoRequest> {
         let path = self.resolve_media_asset(path).ok()?;
-        self.pending_shader = Some(id.into());
+        self.pending_shader = Some((id.into(), path.clone()));
         Some(IoRequest::Read { path })
     }
 
     pub(in crate::host::script_io) fn complete_shader(&mut self, response: IoResponse) {
-        let Some(id) = self.pending_shader.take() else {
+        let Some((id, asset)) = self.pending_shader.take() else {
             return;
         };
         if let IoResponse::Read(source) = response {
             let mut scene = self.scene.lock().unwrap();
-            scene.dirty |= scene.shaders.register(id, source);
+            scene.dirty |= scene.shaders.register(id, asset, source);
         }
     }
 }

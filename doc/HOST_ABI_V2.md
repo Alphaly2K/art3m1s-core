@@ -476,6 +476,11 @@ C Host 通过 `ART_RENDERER_CAP_HLSL` 启用 `[lyshader]` 读取和 HLSL 记录�
 随帧借用；重载不会修改旧帧的源码。源码缺失或编译失败时直接绘制精灵，组内已有的其他效果
 继续执行。着色器语言的约定见 [Runtime Shader ABI](SHADER_ABI.md)。
 
+编号存档可记录 shader ID 到逻辑源码键的映射。使用截图时记录捕获时的映射。支持 HLSL 的
+Core 在提交读档前通过 Host IO 预读这些源码和采样纹理；源码不可读时，读档失败并保留原场景。
+恢复后的帧使用新的 shader revision，旧帧仍使用其借用的版本。缺少此映射的旧档沿用当前会话
+已注册的 shader。
+
 Rust Host 可使用 `host::renderer::SpriteRenderer` 在已开启的目标上绘制基础帧。适配器使用
 同一帧借用的类型化视图，维护会话和资源版本对应的后端纹理。Host 控制 backend 的访问、
 目标、帧开始与结束及呈现；转场需要后端支持从当前目标捕获画面。新设备可以用仍有效的帧借用
