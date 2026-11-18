@@ -68,7 +68,7 @@ runtime. Vertex shaders, techniques, arbitrary sampler states, geometry or
 compute stages, UAVs, structured buffers, tessellation, and unsupported HLSL
 intrinsics remain outside the ABI.
 
-## D3D9 backend probe
+## Direct3D backend probes
 
 On macOS with CrossOver and MinGW, select a dedicated 64-bit Windows test
 bottle and run:
@@ -76,19 +76,25 @@ bottle and run:
 ```sh
 CX_BOTTLE=DedicatedTestBottle bash scripts/test-host-dxvk.sh wined3d
 CX_BOTTLE=DedicatedTestBottle bash scripts/test-host-dxvk.sh dxvk
+CX_BOTTLE=DedicatedTestBottle bash scripts/test-host-dxvk.sh wined3d --d3d11
+CX_BOTTLE=DedicatedTestBottle bash scripts/test-host-dxvk.sh dxvk --d3d11
 ```
 
 Set `CROSSOVER_ROOT` for an alternate CrossOver installation and
-`ARTEMIS_D3D9_CC` for an alternate Windows C compiler. The DXVK run requires
-both a DXVK version line and MoltenVK device creation. Both modes compile
-synthetic HLSL and check a 4×4 GPU readback for each shader profile. A pixel
-mismatch fails the run even when the draw call itself succeeded. The probe
-does not need game files and is outside the default test suite.
+`ARTEMIS_D3D_CC` for an alternate Windows C compiler. The DXVK run requires
+both a DXVK version line and MoltenVK device creation. The default D3D9 probe
+checks `ps_2_0` and `ps_3_0`. The D3D11 probe requests feature level `11_0`,
+compiles `main` to `vs_5_0` and `ps_5_0`, and checks BGRA readback for two
+texture coordinates, a constant buffer, and alpha blending. A pixel mismatch
+fails the run even when the draw call itself succeeded. These probes do not
+need game files and are outside the default test suite.
 
 To test a candidate instead of CrossOver's bundled DXVK, set both
 `ARTEMIS_DXVK_D3D9_DLL` to a native Windows DLL of the same architecture
 as the probe and `ARTEMIS_MOLTENVK_DYLIB` to the absolute path to its
-MoltenVK library. The script reports the loaded version of each.
+MoltenVK library. With `--d3d11`, use `ARTEMIS_DXVK_D3D11_DIR` containing
+`d3d11.dll` and `dxgi.dll` instead of the D3D9 DLL. The script reports the
+loaded backend and checks native DLL loading for an alternate candidate.
 
 On Apple Silicon the passing candidate used Swingby DXVK (`1c15610`, based
 on DXVK 2.4.1) and public MoltenVK 1.4.2. Build the candidate from that
@@ -100,7 +106,7 @@ meson setup build --cross-file build-win64.txt --buildtype release \
 ninja -C build src/d3d9/d3d9.dll
 ```
 
-Record the original runtime's observed compiler entry point, profile,
+For the original runtime comparison, record the compiler entry point, profile,
 sampler assignments and constants before comparing a game effect. A D3D9
 bytecode header identifies shader model and stage; it cannot distinguish
 compiler profiles that emit the same version token. Use the same effect,
