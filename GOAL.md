@@ -19,6 +19,18 @@ macOS 运行经验；Artemis 仍需确认原版采用的编译 profile、所选 
 版本、采样和混合行为，以及 Flutter 所需的 IOSurface 共享。原型先在独立 Host 验证单帧，
 与原引擎对照后再决定是否接入生产。Core 的帧协议不增加 Direct3D 或平台对象。
 
+### DXVK D3D9 像素验证
+
+独立探针以 `D3DCompile` 编译合成的 `ps()`，检查 `ps_2_0`、`ps_3_0` 的 D3D9 字节码头，
+再检查双采样器、两套 UV、常量和 alpha 混合的 4×4 读回。macOS Apple Silicon 上，WineD3D
+对照的两个 profile 都通过。CrossOver 26.3 的 DXVK 分支与 MoltenVK 1.2.10 能创建设备，
+两个 profile 均编译出预期字节码；生成的 MSL 资源槽位有重叠，绘制后仍是清屏色。关闭
+Metal argument buffers 的复跑仍有该错误。该发行组合的 D3D9 着色器路径暂不接入生产。
+
+后续先用真实游戏的着色器数据或原版编译调用确认 profile 和资源布局，再用支持 D3D9 的候选
+组合重跑双采样器对照。IOSurface 验证需要在合成像素通过后取得可共享渲染目标，并验证宿主的
+同步、尺寸和重建。实测发行版声明 `VK_EXT_metal_objects`，设备创建日志未启用它。
+
 ## 已完成：Luau 文件复制与移动
 
 `e:file` 的复制与移动共用场景标签的可靠 IO 流程。目标确认后才允许删除源文件；失败沿原

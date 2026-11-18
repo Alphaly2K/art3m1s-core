@@ -67,3 +67,20 @@ and the `ps()` return value. It does not promise a complete Direct3D HLSL
 runtime. Vertex shaders, techniques, arbitrary sampler states, geometry or
 compute stages, UAVs, structured buffers, tessellation, and unsupported HLSL
 intrinsics remain outside the ABI.
+
+## D3D9 backend probe
+
+On macOS with CrossOver and MinGW, select a dedicated 64-bit Windows test
+bottle and run:
+
+```sh
+CX_BOTTLE=<test-bottle> bash scripts/test-host-dxvk.sh wined3d
+CX_BOTTLE=<test-bottle> bash scripts/test-host-dxvk.sh dxvk
+```
+
+Set `CROSSOVER_ROOT` for an alternate CrossOver installation and
+`ARTEMIS_D3D9_CC` for an alternate Windows C compiler. The DXVK run requires
+both a DXVK version line and MoltenVK device creation. Both modes compile
+synthetic HLSL and check a 4×4 GPU readback for each shader profile. A pixel
+mismatch fails the run even when the draw call itself succeeded. The probe
+does not need game files and is outside the default test suite.
