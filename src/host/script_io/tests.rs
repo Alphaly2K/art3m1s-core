@@ -5908,6 +5908,140 @@ fn malformed_reply_batches_preserve_requests_and_enforce_revision_and_eof() {
 }
 
 #[test]
+fn chunked_write_failure_and_cancellation_resume_the_same_lua_file() {
+    let mut limits = TransportLimits::default();
+    limits.blob_bytes = 3;
+    limits.control.records = 1;
+    let mut session = session(1, limits, 128);
+    session.chunked_writes = true;
+    session
+        .open_chunk(
+            br#"
+        count = (count or 0) + 1
+        local f = assert(io.open('save/slot', 'w'))
+        f:write('abcdefg')
+        local ok, message = pcall(function() f:close() end)
+        assert(not ok and string.find(message, 'denied'))
+        ok, message = pcall(function() f:close() end)
+        assert(not ok and string.find(message, 'cancelled'))
+        assert(f:close())
+        done = count
+        "#,
+            "chunked write",
+        )
+        .unwrap();
+    let next = |session: &mut ScriptIoSession| {
+        assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
+        let mut batch = requests(session);
+        assert_eq!(batch.len(), 1);
+        batch.pop().unwrap()
+    };
+    let ack = |request: &Request, status, end: usize| {
+        reply(
+            request,
+            json!({
+                "status": status, "transaction_id": request.metadata["transaction_id"],
+                "next_offset": end.to_string(),
+            }),
+            vec![],
+        )
+    };
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::WouldBlock);
+    requests(&mut session);
+    let truncate = next(&mut session);
+    assert_eq!(truncate.identity.service, IO_WRITE_ATOMIC);
+    assert!(truncate.blob.is_empty());
+    assert!(truncate.metadata.get("transaction_id").is_none());
+    session
+        .submit_replies(&[reply(&truncate, json!({"status":"ok"}), vec![])])
+        .unwrap();
+
+    let mut transactions = Vec::new();
+    for attempt in 0..3 {
+        let first = next(&mut session);
+        assert_eq!(first.metadata["size"], "7");
+        assert_eq!(first.metadata["offset"], "0");
+        assert_eq!(first.blob, b"abc");
+        let id = first.metadata["transaction_id"]
+            .as_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert!(transactions.last().is_none_or(|previous| *previous < id));
+        transactions.push(id);
+        for invalid in [ack(&first, "ok", 3), ack(&first, "staged", 2)] {
+            assert_eq!(session.submit_replies(&[invalid]), Err(invalid_reply()));
+        }
+        session.submit_replies(&[ack(&first, "staged", 3)]).unwrap();
+
+        assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
+        if attempt == 1 {
+            // Neither the queued chunk nor its identity is retired until abort can be queued.
+            assert_eq!(session.cancel_pending(), Err(ProtocolError::WouldBlock));
+        }
+        let second = requests(&mut session).pop().unwrap();
+        assert_eq!(second.metadata["transaction_id"], id.to_string());
+        assert_eq!(second.metadata["offset"], "3");
+        assert_eq!(second.blob, b"def");
+        match attempt {
+            0 => session
+                .submit_replies(&[reply(&second, json!({"status":"denied"}), vec![])])
+                .unwrap(),
+            1 => {
+                session.cancel_pending().unwrap();
+                assert_eq!(
+                    session.submit_replies(&[ack(&second, "staged", 6)]),
+                    Err(ProtocolError::Stale)
+                );
+                let mut bytes = vec![0; session.state().control.bytes];
+                assert_eq!(session.poll_events(&mut bytes).record_count, 1);
+                assert_eq!(
+                    u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+                    IO_WRITE_ABORT.kind
+                );
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&bytes[64..]).unwrap(),
+                    json!({"transaction_id": id.to_string()})
+                );
+            }
+            _ => {
+                session
+                    .submit_replies(&[ack(&second, "staged", 6)])
+                    .unwrap();
+                let last = next(&mut session);
+                assert_eq!(last.metadata["transaction_id"], id.to_string());
+                assert_eq!(last.metadata["offset"], "6");
+                assert_eq!(last.blob, b"g");
+                assert_eq!(
+                    session.submit_replies(&[ack(&last, "staged", 7)]),
+                    Err(invalid_reply())
+                );
+                session.submit_replies(&[ack(&last, "ok", 7)]).unwrap();
+            }
+        }
+        assert!(
+            !session
+                .interpreter()
+                .lua()
+                .globals()
+                .contains_key("done")
+                .unwrap()
+        );
+    }
+    assert_eq!(session.step().unwrap(), ScriptIoProgress::Completed);
+    assert_eq!(
+        session
+            .interpreter()
+            .lua()
+            .globals()
+            .get::<i32>("done")
+            .unwrap(),
+        1
+    );
+    assert!(requests(&mut session).is_empty());
+}
+
+#[test]
 fn backpressure_cancel_reload_and_interleaved_sessions_never_replay_a_chunk() {
     let mut limits = TransportLimits::default();
     limits.control.records = 1;

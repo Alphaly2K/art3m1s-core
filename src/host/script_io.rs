@@ -14,6 +14,7 @@ mod translation;
 mod ui;
 mod video;
 mod wait;
+mod write_chunks;
 
 pub use audio::MEDIA_AUDIO_COMMAND;
 pub use http::{UI_HTTP_CANCEL, UI_HTTP_REQUEST};
@@ -24,6 +25,7 @@ pub use screenshot::{RENDER_CAPTURE, RENDER_SAVE_CAPTURE};
 pub use translation::UI_TRANSLATE;
 pub use ui::{UI_AVOID, UI_CAPTION, UI_DIALOG, UI_WINDOW_ACTION};
 pub use video::MEDIA_VIDEO_COMMAND;
+pub use write_chunks::IO_WRITE_ABORT;
 
 use super::protocol::*;
 use crate::save::read_history::{AREAD_FILE, ReadHistory};
@@ -238,6 +240,7 @@ enum Operation {
         key: String,
         data: Vec<u8>,
     },
+    ChunkedWrite(write_chunks::ChunkedWrite),
     Delete {
         key: String,
     },
@@ -257,6 +260,7 @@ enum Completion {
         modified_utc_ms: Option<i64>,
     },
     Read,
+    WriteStaged,
     Written,
     Deleted,
     Failed(IoFailure, String),
@@ -273,6 +277,8 @@ pub struct ScriptIoSession {
     identity: Option<RequestIdentity>,
     save_prefix: String,
     max_file_bytes: usize,
+    pub(super) chunked_writes: bool,
+    last_write_transaction: u64,
     completed: bool,
     faulted: bool,
     cancelled: bool,
@@ -335,6 +341,8 @@ impl ScriptIoSession {
             identity: None,
             save_prefix,
             max_file_bytes,
+            chunked_writes: false,
+            last_write_transaction: 0,
             completed: false,
             faulted: false,
             cancelled: false,
@@ -787,8 +795,15 @@ impl ScriptIoSession {
         if self.operation.is_none() {
             return Err(ProtocolError::State);
         }
+        let abort = self.pending_write_abort()?;
+        if let Some(body) = &abort {
+            self.transport.check_notify(IO_WRITE_ABORT, body)?;
+        }
         if let Some(identity) = self.identity {
             self.transport.cancel(identity)?;
+        }
+        if let Some(body) = abort {
+            self.transport.notify(IO_WRITE_ABORT, body)?;
         }
         self.identity = None;
         self.operation = None;
@@ -926,6 +941,10 @@ impl ScriptIoSession {
             self.identity = None;
         }
         loop {
+            if let Err(error) = self.prepare_write() {
+                self.operation = None;
+                response = Some(failed(IoFailure::Limit, error.to_string()));
+            }
             if let Some(operation) = &self.operation {
                 let (service, metadata, blob) = self.message(operation);
                 let limits = self.transport.limits();
@@ -1406,7 +1425,7 @@ impl ScriptIoSession {
             Ok(files) => files,
             Err(error) => return self.fail_save_hook(error),
         };
-        let byte_limit = self.max_file_bytes.min(self.limits().blob_bytes);
+        let byte_limit = self.write_file_limit();
         if files.iter().any(|(_, data)| data.len() > byte_limit) {
             return Ok(self.finish_save(SaveResult::Failed {
                 kind: IoFailure::Limit,
@@ -1996,7 +2015,8 @@ impl ScriptIoSession {
                 json!({"namespace":namespace,"key":key,"revision":revision.to_string(),
                     "offset":data.len().to_string(),"length":(size-data.len()).min(self.limits().blob_bytes).to_string()}).to_string(), vec![]),
             Operation::Write { key, data } => (IO_WRITE_ATOMIC,
-                json!({"namespace":"save","key":key}).to_string(), data.clone()),
+                write_chunks::write_metadata(key), data.clone()),
+            Operation::ChunkedWrite(write) => write.message(),
             Operation::Delete { key } => (IO_DELETE,
                 json!({"namespace":"save","key":key}).to_string(), vec![]),
         }
@@ -2009,6 +2029,12 @@ impl ScriptIoSession {
             .get("status")
             .and_then(Value::as_str)
             .ok_or_else(invalid_reply)?;
+        let operation = self.operation.as_ref().ok_or(ProtocolError::State)?;
+        if matches!(status, "ok" | "staged")
+            && let Operation::ChunkedWrite(write) = operation
+        {
+            return write.decode(status, &metadata, reply.body.blob());
+        }
         if status != "ok" {
             if !reply.body.blob().is_empty() {
                 return Err(invalid_reply());
@@ -2027,7 +2053,7 @@ impl ScriptIoSession {
             };
             return Ok(Completion::Failed(kind, message));
         }
-        match self.operation.as_ref().ok_or(ProtocolError::State)? {
+        match operation {
             Operation::Stat { .. } => {
                 if !reply.body.blob().is_empty() {
                     return Err(invalid_reply());
@@ -2079,6 +2105,7 @@ impl ScriptIoSession {
                 }
                 Ok(Completion::Written)
             }
+            Operation::ChunkedWrite(_) => Err(invalid_reply()),
             Operation::Delete { .. } => {
                 if !reply.body.blob().is_empty() {
                     return Err(invalid_reply());
@@ -2161,7 +2188,14 @@ impl ScriptIoSession {
                 });
                 Ok(None)
             }
-            (Operation::Write { .. }, Completion::Written) => Ok(Some(IoResponse::Written)),
+            (Operation::ChunkedWrite(mut write), Completion::WriteStaged) => {
+                write.advance();
+                self.operation = Some(Operation::ChunkedWrite(write));
+                Ok(None)
+            }
+            (Operation::Write { .. } | Operation::ChunkedWrite(_), Completion::Written) => {
+                Ok(Some(IoResponse::Written))
+            }
             (Operation::Delete { .. }, Completion::Deleted) => Ok(Some(IoResponse::Deleted)),
             _ => Err(invalid_reply()),
         }

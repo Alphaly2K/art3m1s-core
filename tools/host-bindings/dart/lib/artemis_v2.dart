@@ -404,6 +404,8 @@ const int ART_HOST_CAP_HTTP = 8;
 
 const int ART_HOST_CAP_TRANSLATION = 16;
 
+const int ART_HOST_CAP_CHUNKED_WRITES = 32;
+
 const int ART_RENDERER_CAP_SPRITE = 1;
 
 const int ART_RENDERER_CAP_TRANSITION = 2;
@@ -483,6 +485,8 @@ const int ART_IO_READ = 2;
 const int ART_IO_WRITE_ATOMIC = 4;
 
 const int ART_IO_DELETE = 5;
+
+const int ART_IO_WRITE_ABORT = 6;
 
 const int ART_RUNTIME_SHUTDOWN = 16;
 

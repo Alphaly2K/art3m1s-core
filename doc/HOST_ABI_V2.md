@@ -222,8 +222,9 @@ C 预览版 `ArtMessage.schema_version=1`、`flags=0`。一个批次可包含一
 | Media (5) | 16 | `playback_id`、`status`（`started`、`ended`、`failed`、`cancelled`） |
 | Media (5) | 17 | `playback_id`、`frame_id`、`width`、`height`；blob 为 RGBA8 |
 
-`ArtCreateInfo` 的 Host 能力位分别为 IO=1、UI=2、Media=4、HTTP=8、Translation=16。Renderer 位分别为 sprite=1、
-transition=2、screenshot=4、group=8、emote=16、HLSL=32。
+`ArtCreateInfo` 的 Host 能力位分别为 IO=1、UI=2、Media=4、HTTP=8、Translation=16、
+ChunkedWrites=32。Renderer 位分别为 sprite=1、transition=2、screenshot=4、group=8、
+emote=16、HLSL=32。
 预览版检查未知位；Host 仍须处理收到的服务请求，缺少可选服务时返回相应失败。
 
 `poll_events` 按以下固定小端格式写入完整记录，不直接 memcpy C struct：
@@ -317,7 +318,7 @@ Host 按同一条 `ui.avoid` 记录更新遮罩和静音；解除静音时沿用
 | `io.list` | namespace、prefix、cursor | 一页逻辑条目、revision、下一 cursor；目录枚举不暴露物理路径 |
 | `io.write_atomic` | save key、transaction ID、分块描述和 blob | Host 接受全部数据并原子提交后确认；受理不等于落盘 |
 | `io.delete` | save key | 明确 deleted/not_found/denied/io_error |
-| `io.cancel` | 原 request ID | 取消尽力而为；之后到达的旧完成消息仍按 STALE 处理 |
+| `io.write_abort` | 写入事务 ID | 可靠通知；Host 丢弃尚未提交的暂存内容 |
 
 ### stat、read、单 blob 原子写入与 delete payload
 
@@ -345,9 +346,25 @@ modified_utc_ms 为规范十进制 i64 字符串，表示 UTC Unix 毫秒；缺�
 脚本进入原有失败分支。空文件在 stat 后即可完成读取。
 
 单 blob 写入以 `(runtime, epoch, request_id)` 作为事务身份；Host 原子持久化后确认。
-超出 blob 预算时不受理；多 blob 事务需要另行定义分块/提交 schema，不能将部分成功表示为
-文件写入完成。删除只适用于 save 文件，目标不存在返回 not_found；完成前脚本不能继续。
-完整服务能力由 facade 协商。
+未声明 `ART_HOST_CAP_CHUNKED_WRITES` 的 Host 只接收该形式；超过消息预算的文件写入失败。
+删除只适用于 save 文件，目标不存在返回 not_found；完成前脚本不能继续。
+
+### 分块原子写入
+
+声明 `ART_HOST_CAP_CHUNKED_WRITES` 后，超出单条消息预算的写入仍使用 `io.write_atomic`，
+每块增加 `transaction_id`、`size`（总字节数）、`offset` 三个十进制 u64 字符串。事务身份为
+`(runtime, epoch, transaction_id)`，同一事务保持相同逻辑 key 和总大小。每条消息有独立
+request ID，首块从偏移零开始，每次只等待一块的确认。可写整文件大小在 C 预览版上限为 64 MiB；
+单块仍受原 blob 和队列预算限制。能在一条内交付的文件继续使用原单 blob 格式。
+
+Host 依偏移连续暂存字节。在 `offset + blob_bytes < size` 时返回 `status:"staged"`，
+且目标文件仍可读到旧内容；最后一块达到 `size` 时，Host 完成原子替换后返回 `status:"ok"`。
+这两种回复均带 `transaction_id` 和 `next_offset`（已处理的累计字节数），且 blob 为空。
+Core 只在最后一块得到合法确认后恢复脚本。失败回复沿用上表，Host 先丢弃临时事务并保留旧文件。
+
+`io.write_abort` 是 IO kind=6 的可靠通知，metadata 为 `{"transaction_id":"…"}`，无 blob 和回复。
+Host 收到通知后停止并清理该事务尚未提交的内容。迟到的分块确认返回 `STALE`，已完成的原子
+替换不可撤销。Host 还应在会话替换或销毁时清理旧事务。
 
 `[file]` 的 `copy`、`move` 和 `delete` 使用 save 命名空间。复制和移动通过 `stat/read`
 读取源文件，并按写入预算提交 `write_atomic`；移动只在写入成功后删除源文件。归一化后同名
@@ -629,7 +646,8 @@ OS 线程上执行；Host 自行调度 IO 与设备操作，在该线程提交�
 请求身份，`submit` 返回 `false` 表示整批未受理，Host 可以稍后重试。
 
 `withLatestFrame` 在同步回调结束时释放帧；`copyPacket` 和 `copyTextureRgba` 取得可在回调外
-继续使用的字节。样例用内存资源运行，覆盖大记录、输入、翻译回填与帧借用。需要直接读取
+继续使用的字节。样例用内存资源启动，覆盖大记录、输入、翻译回填、帧借用及临时文件的
+分块原子写入。需要直接读取
 借用像素或在原生线程绘制的 Host 可使用生成的 C ABI 绑定。
 
 实施阶段与进度见 [GOAL.md](../GOAL.md)。
