@@ -12,6 +12,7 @@ _Static_assert(offsetof(ArtStepInfo, monotonic_ns) == 16, "step clock");
 static const char ini[] = "[WINDOWS]\nWIDTH=640\nHEIGHT=480\nBOOT=boot.iet\n";
 static const char boot[] = "*top\n[lyc id=1 width=2 height=1 color=ff112233]\n"
                            "[takess]\n[savess file=thumb]\n"
+                           "[httpget url=https://example.invalid/status varname_code=t.http]\n"
                            "[caption data=ready]\n[@]\n[caption data=advanced]\n[stop]\n";
 
 static ArtBytes bytes(const void *data, size_t size) {
@@ -97,6 +98,13 @@ static unsigned pump(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt, uint64_t f
                 ArtMessage reply = message(domain, kind, epoch, request,
                     kind == ART_RENDER_CAPTURE ? "{\"status\":\"ok\"}" : "{\"status\":\"denied\"}");
                 assert(api->submit(rt, &reply, 1) == ART_OK);
+            } else if (domain == ART_DOMAIN_UI && kind == ART_UI_HTTP_REQUEST) {
+                assert(result.flags & ART_WAIT_UI);
+                assert(strstr(metadata, "\"method\":\"get\""));
+                ArtMessage reply = message(domain, kind, epoch, request,
+                                           "{\"status\":\"ok\",\"status_code\":204}");
+                assert(api->submit(rt, &reply, 1) == ART_OK);
+                captions |= 16;
             } else if (domain == ART_DOMAIN_UI && kind == ART_UI_CAPTION) {
                 if (strstr(metadata, "\"ready\"")) captions |= 1;
                 if (strstr(metadata, "\"advanced\"")) captions |= 2;
@@ -104,7 +112,7 @@ static unsigned pump(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt, uint64_t f
             offset += size;
         }
         assert(offset == poll.written_bytes);
-        if (result.flags & (ART_WAIT_IO | ART_WAIT_RENDER)) continue;
+        if (result.flags & (ART_WAIT_IO | ART_WAIT_UI | ART_WAIT_RENDER)) continue;
         return captions;
     }
     assert(!"Host fixture did not settle");
@@ -127,7 +135,7 @@ int main(void) {
     assert(root->query_interface(ART_INTERFACE_FRAME, ART_ABI_V2_MAJOR, sizeof(ArtFrameApiV2), &table) == ART_OK);
     const ArtFrameApiV2 *frames = table;
 
-    ArtCreateInfo info = { .struct_size = sizeof(info), .host_service_caps = ART_HOST_CAP_IO,
+    ArtCreateInfo info = { .struct_size = sizeof(info), .host_service_caps = ART_HOST_CAP_IO | ART_HOST_CAP_HTTP,
                            .renderer_caps = ART_RENDERER_CAP_SPRITE | ART_RENDERER_CAP_SCREENSHOT };
     ArtRuntimeHandle rt = 0;
     assert(api->create(&info, &rt) == ART_OK && rt != 0);
@@ -137,7 +145,7 @@ int main(void) {
     ArtPollResult short_poll = { .struct_size = sizeof(short_poll) };
     assert(api->poll_events(rt, NULL, 0, &short_poll) == ART_E_BUFFER);
     assert(short_poll.required_next_bytes > 0 && short_poll.record_count == 0);
-    assert(pump(api, rt, 1) == (1 | 4 | 8));
+    assert(pump(api, rt, 1) == (1 | 4 | 8 | 16));
 
     struct { ArtRuntimeState prefix; uint64_t tail; } state = {
         .prefix.struct_size = sizeof(state), .tail = UINT64_C(0x123456789abcdef0)
@@ -170,6 +178,11 @@ int main(void) {
     assert(frames->release(rt, view.token) == ART_E_HANDLE);
     assert(api->destroy(rt) == ART_OK);
     assert(api->destroy(rt) == ART_E_HANDLE);
+    info.host_service_caps = ART_HOST_CAP_IO;
+    assert(api->create(&info, &rt) == ART_OK);
+    assert(api->open_project(rt, &project) == ART_OK);
+    assert(pump(api, rt, 1) == (1 | 4 | 8));
+    assert(api->destroy(rt) == ART_OK);
     puts("Artemis v2 Host smoke passed");
     return 0;
 }

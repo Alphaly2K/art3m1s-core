@@ -125,6 +125,8 @@ pub(super) const CAP_EMOTE: u64 = 16;
 pub(super) const CAP_HLSL: u64 = 32;
 pub(super) const RENDERER_CAPS: u64 =
     CAP_SPRITES | CAP_TRANSITIONS | CAP_SCREENSHOTS | CAP_GROUPS | CAP_EMOTE | CAP_HLSL;
+pub(super) const HOST_CAP_HTTP: u64 = 8;
+pub(super) const HOST_CAPS: u64 = 0b111 | HOST_CAP_HTTP;
 
 /// Create a runtime owned by the calling thread. Destroy it before that thread exits.
 pub fn create(
@@ -132,13 +134,20 @@ pub fn create(
     limits: TransportLimits,
     max_file_bytes: usize,
 ) -> Result<RuntimeHandle, RuntimeError> {
-    create_with_renderer(random_seed, limits, max_file_bytes, RENDERER_CAPS)
+    create_with_caps(
+        random_seed,
+        limits,
+        max_file_bytes,
+        HOST_CAPS,
+        RENDERER_CAPS,
+    )
 }
 
-pub(super) fn create_with_renderer(
+pub(super) fn create_with_caps(
     random_seed: u64,
     limits: TransportLimits,
     max_file_bytes: usize,
+    host_caps: u64,
     renderer_caps: u64,
 ) -> Result<RuntimeHandle, RuntimeError> {
     let handle = RUNTIMES.lock().unwrap().allocate()?;
@@ -146,6 +155,7 @@ pub(super) fn create_with_renderer(
         let mut session =
             ScriptIoSession::new(handle.0, Default::default(), limits, max_file_bytes)?;
         session.set_random_seed(random_seed)?;
+        session.http_enabled = host_caps & HOST_CAP_HTTP != 0;
         session.transitions_enabled = renderer_caps & CAP_TRANSITIONS != 0;
         session.screenshots_enabled = renderer_caps & CAP_SCREENSHOTS != 0;
         session.groups_enabled = renderer_caps & CAP_GROUPS != 0;

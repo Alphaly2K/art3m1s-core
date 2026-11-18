@@ -37,6 +37,7 @@ impl ScriptIoSession {
             return Err(ProtocolError::State);
         }
         if self.dialog_request.is_some()
+            || self.http.is_pending()
             || self.screenshot.pending_request().is_some()
             || self.operation.is_some()
             || self.cancelled
@@ -91,6 +92,7 @@ impl ScriptIoSession {
                 ScriptIoProgress::Event if self.has_screenshot_event() => {
                     self.dispatch_screenshot()
                 }
+                ScriptIoProgress::Event if self.has_http_event() => self.dispatch_http(),
                 ScriptIoProgress::Event if self.has_persistence_event() => {
                     self.start_persistence().map(|()| None)
                 }

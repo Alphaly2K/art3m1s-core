@@ -599,6 +599,16 @@ impl SessionTransport {
         Some(reply)
     }
 
+    pub(super) fn take_reply(&mut self, identity: RequestIdentity) -> Option<HostReply> {
+        let index = self
+            .replies
+            .iter()
+            .position(|reply| reply.identity == identity)?;
+        let reply = self.replies.remove(index)?;
+        self.reply_bytes -= reply.body.record_bytes().unwrap();
+        Some(reply)
+    }
+
     /// Retire locally; the Host still needs a service-specific cancellation
     /// notification if work has already been dispatched outside this transport.
     pub fn cancel(&mut self, identity: RequestIdentity) -> Result<(), ProtocolError> {

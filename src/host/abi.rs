@@ -30,7 +30,6 @@ const PANIC: i32 = -9;
 const MAGIC: u64 = 0x415254334D324150;
 const MAJOR: u32 = 2;
 const MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
-const HOST_CAPS: u64 = 0b111;
 
 type AbiResult = Result<i32, Failure>;
 
@@ -386,7 +385,7 @@ unsafe extern "C" fn create(info: *const CreateInfo, out: *mut u64) -> i32 {
         }
         let info = unsafe { &*info };
         if info.flags != 0
-            || info.host_service_caps & !HOST_CAPS != 0
+            || info.host_service_caps & !runtime::HOST_CAPS != 0
             || info.renderer_caps & !runtime::RENDERER_CAPS != 0
         {
             return Err(Failure::new(
@@ -394,10 +393,11 @@ unsafe extern "C" fn create(info: *const CreateInfo, out: *mut u64) -> i32 {
                 "unknown create flag or capability",
             ));
         }
-        let handle = runtime::create_with_renderer(
+        let handle = runtime::create_with_caps(
             info.random_seed,
             TransportLimits::default(),
             MAX_FILE_BYTES,
+            info.host_service_caps,
             info.renderer_caps,
         )?;
         unsafe { out.write(handle.as_raw()) };

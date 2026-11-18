@@ -3,6 +3,7 @@
 
 mod audio;
 mod control;
+mod http;
 mod lifecycle;
 mod persistence;
 mod scene;
@@ -13,6 +14,7 @@ mod video;
 mod wait;
 
 pub use audio::MEDIA_AUDIO_COMMAND;
+pub use http::{UI_HTTP_CANCEL, UI_HTTP_REQUEST};
 use lifecycle::Shutdown;
 pub use lifecycle::{RUNTIME_CLOSED, RUNTIME_EXIT_REQUESTED};
 pub use persistence::RUNTIME_PERSISTENCE_RESULT;
@@ -285,6 +287,8 @@ pub struct ScriptIoSession {
     boot_restore: Option<BootRestore>,
     project_loading: bool,
     dialog_request: Option<RequestIdentity>,
+    http: http::Http,
+    pub(super) http_enabled: bool,
     pub(super) shutdown: Shutdown,
     audio: audio::Audio,
     control: control::PlaybackControl,
@@ -342,6 +346,8 @@ impl ScriptIoSession {
             boot_restore: None,
             project_loading: false,
             dialog_request: None,
+            http: http::Http::default(),
+            http_enabled: true,
             shutdown: Shutdown::default(),
             audio: Default::default(),
             control: Default::default(),
@@ -395,7 +401,8 @@ impl ScriptIoSession {
             latest_render_frame_id: self.frames.latest_id(),
             stage_size: (transport.epoch != 0).then_some([config.stage_width, config.stage_height]),
             waiting_for_io: self.operation.is_some(),
-            waiting_for_ui: matches!(self.scenario_event, Some(Event::ShowDialog { .. })),
+            waiting_for_ui: matches!(self.scenario_event, Some(Event::ShowDialog { .. }))
+                || self.http.waits_for_host(),
             waiting_for_render: self.screenshot.pending_request().is_some(),
             waiting_for_scenario: self.scenario_event.is_some(),
             exit_requested: matches!(self.scenario_event, Some(Event::Exit)),
@@ -461,6 +468,7 @@ impl ScriptIoSession {
         self.boot_restore = None;
         self.project_loading = false;
         self.dialog_request = None;
+        self.http = Default::default();
         self.shutdown = Shutdown::default();
         self.audio = Default::default();
         self.control = Default::default();
@@ -570,6 +578,7 @@ impl ScriptIoSession {
         self.boot_restore = None;
         self.project_loading = false;
         self.dialog_request = None;
+        self.http = Default::default();
         self.shutdown = Shutdown::default();
         self.audio = Default::default();
         self.control = Default::default();
@@ -691,6 +700,7 @@ impl ScriptIoSession {
         if self.faulted
             || self.interpreter.pending_host_io().is_some()
             || self.event_filter.is_some()
+            || self.http.is_pending()
             || self.screenshot.pending_request().is_some()
             || self
                 .save_work
@@ -746,6 +756,8 @@ impl ScriptIoSession {
                 self.decode(reply)?;
             } else if Some(reply.identity) == self.dialog_request {
                 ui::decode_dialog_reply(reply)?;
+            } else if Some(reply.identity) == self.http.identity() {
+                http::decode_reply(reply)?;
             } else if Some(reply.identity) == self.screenshot.pending_request() {
                 screenshot::decode_screenshot_reply(reply)?;
             } else {
@@ -788,6 +800,9 @@ impl ScriptIoSession {
         if matches!(self.shutdown, Shutdown::Reporting(_)) {
             return Ok(ScriptIoProgress::SaveReady);
         }
+        // A reply can arrive while onEnterFrame awaits IO. Release its queue
+        // slot now and apply the HTTP result only after the handler returns.
+        self.collect_http_reply();
         let dispatch_scene =
             self.scene_handlers_ready() || self.pointer_ready() || self.control.avoid_pending();
         if self.completed && !self.shutdown.is_closing_or_closed() && !dispatch_scene {
@@ -799,6 +814,7 @@ impl ScriptIoSession {
             && self.event_filter.is_none()
             && self.save_work.is_none()
             && self.numbered_load.is_none()
+            && !matches!(self.http, http::Http::Writing(_))
             && !dispatch_scene
         {
             return Ok(ScriptIoProgress::Event);
@@ -882,8 +898,8 @@ impl ScriptIoSession {
         } else {
             None
         };
-        if self.identity.is_some() {
-            let Some(reply) = self.transport.pop_reply() else {
+        if let Some(identity) = self.identity {
+            let Some(reply) = self.transport.take_reply(identity) else {
                 return Ok(ScriptIoProgress::Waiting);
             };
             response = self.apply(reply)?;
@@ -949,6 +965,9 @@ impl ScriptIoSession {
         &mut self,
         mut response: Option<IoResponse>,
     ) -> Result<ScenarioStep, ScriptIoError> {
+        if matches!(self.http, http::Http::Writing(_)) {
+            self.complete_http_write(response.take().ok_or(ProtocolError::State)?)?;
+        }
         if let Some(scene) = self.scene.as_mut()
             && scene.shader_pending()
         {

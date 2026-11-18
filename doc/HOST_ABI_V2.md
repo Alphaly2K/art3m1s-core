@@ -222,7 +222,7 @@ C 预览版 `ArtMessage.schema_version=1`、`flags=0`。一个批次可包含一
 | Media (5) | 16 | `playback_id`、`status`（`started`、`ended`、`failed`、`cancelled`） |
 | Media (5) | 17 | `playback_id`、`frame_id`、`width`、`height`；blob 为 RGBA8 |
 
-`ArtCreateInfo` 的 Host 能力位分别为 IO=1、UI=2、Media=4。Renderer 位分别为 sprite=1、
+`ArtCreateInfo` 的 Host 能力位分别为 IO=1、UI=2、Media=4、HTTP=8。Renderer 位分别为 sprite=1、
 transition=2、screenshot=4、group=8、emote=16、HLSL=32。
 预览版检查未知位；Host 仍须处理收到的服务请求，缺少可选服务时返回相应失败。
 
@@ -260,7 +260,7 @@ Runtime kind=5 为 `persistence_result`，request_id=0、blob 为空。`operatio
 body，由 flags/kind 唯一标识。JSON 中的 u64/i64 使用十进制字符串，避免宿主 Number 精度丢失。
 禁止把图片/存档/HTTP body 转成 JSON 数组或 base64 作为常规传输。
 
-UI domain=4 的记录不携带 blob：
+UI domain=4 的通知与请求不携带 blob。HTTP 完成回复可携带正文：
 
 | kind | 请求或通知 | 结果 |
 |---|---|---|
@@ -268,6 +268,8 @@ UI domain=4 的记录不携带 blob：
 | 2 `ui.dialog` | 请求，`title`、`message` 为字符串，`allow_cancel` 为布尔值，`initial_text` 为字符串或 null，`max_characters` 为十进制字符串或 null | `{"status":"ok","accepted":true,"text":"…"}`；`text` 可省略。`cancelled`、`denied`、`unsupported`、`io_error` 按取消完成 |
 | 3 `ui.window_action` | 可靠通知，`command` 为 `fullscreen`（切换全屏）或 `minimize` | 无回复 |
 | 4 `ui.avoid` | 可靠通知，`visible`、`mute` 为布尔值；开启时包括 asset 命名空间下的逻辑 `asset` 和 `windowbutton` | 无回复 |
+| 5 `ui.http_request` | 请求，`method`（`get`、`post`）、`url`、有序二元组数组 `headers`、`data`、`file_data`，以及十进制字符串 `max_response_bytes` | `{"status":"ok","status_code":200}`，blob 为正文；也可回复失败状态 |
+| 6 `ui.http_cancel` | 可靠通知，被取消请求的 `request_id`（十进制字符串） | 无回复 |
 
 Host 按同一条 `ui.avoid` 记录更新遮罩和静音；解除静音时沿用原音量。`windowbutton=0` 忽略
 窗口按钮，`1` 使用平台默认动作，`2` 把按钮提交给 Core。Core 先交付退出回避通知，再派发
@@ -571,9 +573,18 @@ Media kind=2 交付视频命令。`op=play` 带有十进制字符串 `playback_i
 和终态后的帧返回 `Stale`。单张帧最多 64 MiB，当前和待用数据合计最多 128 MiB；已借出的
 帧有自己的有效期。图层视频随场景帧绘制；旧借用不因新画面或播放完成而改变。
 
-HTTP/dialog/翻译各有请求 kind 和结果 schema。HTTP 保留 headers/data/file_data 的
-现有多值顺序语义，响应必须匹配请求 ID；取消、失败、超时均完成一次。翻译继续允许非阻塞
-热替换，过期页面/文本 revision 的结果不再应用。callnative、浏览器、剪贴板等行为由 Host
+`[httpget]` 和 `[httppost]` 在声明 `ART_HOST_CAP_HTTP` 后发出 `ui.http_request`。
+`file_data` 的每组是字段名与 asset 逻辑 key，由 Host 读取字节。服务结果沿用原请求身份。
+`status_code` 接受 100–599，包括 HTTP 错误状态码。网络失败用 `cancelled`、`denied`、
+`unsupported`、`io_error`、`timeout` 或 `limit`，正文为空，脚本看到状态码 0。未声明能力
+时也走状态码 0。Host 负责设置超时、应用网络策略并限制正文长度。
+
+脚本在 `ART_WAIT_UI` 期间等待请求结束，`onEnterFrame` 仍可运行。`s.http.cancel=1` 会退役
+未完成请求并发送取消通知，后续回复返回 `Stale`；重载或销毁时 Host 停止旧会话的任务。
+正文默认按 UTF-8 转成字符串，无效字节替换。若指定 `filename`，Core 通过已有 `io.write_atomic`
+保存原始字节到 save 命名空间，并等到写入确认后继续脚本；写入结果不改变 HTTP 状态码。
+
+翻译允许非阻塞热替换，过期页面或文本的结果不再应用。callnative、浏览器、剪贴板等行为由 Host
 决定支持情况，未实现时必须有明确的反馈规则。
 
 窗口状态、字体列表/字体 blob、文本替换、reported OS、音量等作为 runtime 配置消息。

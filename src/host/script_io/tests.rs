@@ -1823,6 +1823,168 @@ fn drive_playback_boot(session: &mut ScriptIoSession, host: &mut MemoryHost) {
 }
 
 #[test]
+fn http_requests_resume_once_across_frame_io_cancellation_and_save() {
+    let mut limits = TransportLimits::default();
+    limits.replies.records = 1;
+    let mut session = session(1, limits, 4096);
+    let epoch = session
+        .open_queued_project(
+            b"[WINDOWS]\nWIDTH=320\nHEIGHT=200\nBOOT=boot.iet\n",
+            "windows",
+            None,
+        )
+        .unwrap();
+    let mut host = MemoryHost::default();
+    host.asset("boot.iet",
+        br#"*top
+[flip]
+[httpget url="https://example.invalid/status" varname_code=t.code varname_data=t.body]
+[httppost url="https://example.invalid/form" header_key0=X-Test header_value0=one header_key1=X-Test header_value1=two key0=first value0=a key1=second file1="Data\Form.txt" filename=download.bin varname_code=t.post_code varname_data=t.body]
+[httpget url="https://example.invalid/cancel" varname_code=t.cancel_code varname_data=t.cancel_body]
+[stop]
+[lua]
+function tick(e)
+    ticks = (ticks or 0) + 1
+    if ticks == 3 then assert(e:file('tick') == 'once') end
+end
+__engine:setEventHandler{onEnterFrame='tick'}
+[/lua]
+"#,
+    );
+    host.asset("tick", b"once");
+    drive_playback_boot(&mut session, &mut host);
+    let frame = |id| playback_frame(id, id);
+    let pop = |session: &mut ScriptIoSession| {
+        let mut requests = requests(session);
+        assert_eq!(requests.len(), 1);
+        requests.pop().unwrap()
+    };
+    let step = |session: &mut ScriptIoSession, id, expected| {
+        assert_eq!(session.step_queued_frame(frame(id)).unwrap(), expected);
+    };
+    step(&mut session, 2, ScriptIoProgress::Waiting);
+    let get = pop(&mut session);
+    assert_eq!(get.identity.service, UI_HTTP_REQUEST);
+    assert_eq!(get.identity.epoch, epoch);
+    assert_eq!(get.metadata["method"], "get");
+    assert!(session.runtime_state().waiting_for_ui);
+    assert_eq!(
+        session.submit_replies(&[reply(&get, json!({"status":"ok","status_code":0}), vec![])]),
+        Err(ProtocolError::Argument("invalid HTTP reply"))
+    );
+
+    step(&mut session, 3, ScriptIoProgress::Waiting);
+    let tick = pop(&mut session);
+    assert_eq!(tick.metadata["key"], "tick");
+    session
+        .submit_replies(&[reply(
+            &get,
+            json!({"status":"ok","status_code":404}),
+            b"missing".to_vec(),
+        )])
+        .unwrap();
+    step(&mut session, 3, ScriptIoProgress::Waiting);
+    assert!(requests(&mut session).is_empty());
+    session.submit_replies(&[host.complete(&tick)]).unwrap();
+    for turn in 0..=4 {
+        step(&mut session, 3, ScriptIoProgress::Waiting);
+        let request = pop(&mut session);
+        if request.identity.service == UI_HTTP_REQUEST {
+            assert_eq!(request.metadata["method"], "post");
+            assert_eq!(
+                request.metadata["headers"],
+                json!([["X-Test", "one"], ["X-Test", "two"]])
+            );
+            assert_eq!(request.metadata["data"], json!([["first", "a"]]));
+            assert_eq!(
+                request.metadata["file_data"],
+                json!([["second", "data/form.txt"]])
+            );
+            session
+                .submit_replies(&[reply(
+                    &request,
+                    json!({"status":"ok","status_code":201}),
+                    vec![0, 255],
+                )])
+                .unwrap();
+            break;
+        }
+        assert!(
+            turn < 4,
+            "HTTP POST did not follow the completed frame read"
+        );
+        assert_eq!(request.identity.service, IO_READ);
+        session.submit_replies(&[host.complete(&request)]).unwrap();
+    }
+
+    step(&mut session, 3, ScriptIoProgress::Waiting);
+    let write = pop(&mut session);
+    assert_eq!(write.identity.service, IO_WRITE_ATOMIC);
+    assert_eq!(
+        write.metadata,
+        json!({"namespace":"save","key":"download.bin"})
+    );
+    assert_eq!(write.blob, [0, 255]);
+    assert!(!session.runtime_state().waiting_for_ui);
+    assert!(session.runtime_state().waiting_for_io);
+    step(&mut session, 4, ScriptIoProgress::WouldBlock);
+    session.submit_replies(&[host.complete(&write)]).unwrap();
+    step(&mut session, 3, ScriptIoProgress::Waiting);
+    let cancelled = pop(&mut session);
+    assert_eq!(cancelled.identity.service, UI_HTTP_REQUEST);
+    assert_eq!(
+        host.files[&("save".into(), "download.bin".into())].1,
+        [0, 255]
+    );
+    let vars = session.interpreter();
+    assert_eq!(vars.get_variable("t.code").unwrap().as_int(), Some(404));
+    assert_eq!(vars.get_variable("t.body").unwrap().as_string(), "missing");
+    assert_eq!(
+        vars.get_variable("t.post_code").unwrap().as_int(),
+        Some(201)
+    );
+    assert_eq!(vars.lua().globals().get::<i64>("ticks").unwrap(), 3);
+
+    session
+        .interpreter
+        .set_variable("s.http.cancel", 1_i64.into());
+    step(&mut session, 4, ScriptIoProgress::Event);
+    let mut events = [0; 4096];
+    let polled = session.poll_events(&mut events);
+    assert_eq!(polled.record_count, 1);
+    assert_eq!(
+        u32::from_le_bytes(events[8..12].try_into().unwrap()),
+        UI_HTTP_CANCEL.kind
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&events[64..polled.written_bytes]).unwrap(),
+        json!({
+            "request_id": cancelled.identity.request_id.to_string(),
+        })
+    );
+    assert_eq!(
+        session
+            .interpreter()
+            .get_variable("t.cancel_code")
+            .unwrap()
+            .as_int(),
+        Some(0)
+    );
+    assert_eq!(
+        session
+            .interpreter()
+            .get_variable("t.cancel_body")
+            .unwrap()
+            .as_string(),
+        ""
+    );
+    assert_eq!(
+        session.submit_replies(&[reply(&cancelled, json!({"status":"timeout"}), vec![])]),
+        Err(ProtocolError::Stale)
+    );
+}
+
+#[test]
 fn global_push_claims_its_press_and_dummy_decide_is_not_physical_input() {
     let (mut session, epoch, mut host) = playback_project(
         br#"*top
