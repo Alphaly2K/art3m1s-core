@@ -9,7 +9,13 @@
 ## 当前阶段
 
 继续核对剩余快照字段、实机画面对照和生产 Host 接入。
-v2 预览已提供独立构建、C 内存 Host 和 Dart 绑定；Linux/Windows 运行验证和生产 Host 切换待完成。
+v2 预览已提供独立构建、C 内存 Host 和 Dart 封装；Linux、Windows 原生 CI 和生产 Host 切换待完成。
+
+## 已完成：Dart Host 接入入口
+
+`ArtemisSession` 封装 C 接口协商、受理状态、队列读写和帧借用。Host 继续维护自己的资源、媒体
+和 GPU；回包绑定原请求所属的会话。Dart 冒烟覆盖超过 4 KiB 的记录、两个会话、输入、后台翻译、
+跨帧借用与释放后的访问检查，静态分析和动态库冒烟通过。生产 Flutter 尚未切换。
 
 ## 已完成：Windows x64 兼容层验证
 

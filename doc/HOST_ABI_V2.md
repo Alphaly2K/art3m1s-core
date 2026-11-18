@@ -619,7 +619,13 @@ Flutter 的最小 Host 样例。平台 IO/render/media 适配器可以复用，�
 
 独立 C Host 可用 `bash scripts/test-host-v2.sh` 或 `scripts/test-host-v2.ps1` 构建并验证。
 在 `tools/host-bindings/dart` 目录运行 `dart pub get --enforce-lockfile` 后，使用
-`dart run bin/smoke.dart <纯 Core 动态库路径>` 可验证 Dart 接入。样例用内存资源启动场景，
-提交输入并校验通知、帧数据与纹理借用。
+`dart run bin/smoke.dart <纯 Core 动态库路径>` 可验证 Dart 接入。`artemis_host.dart` 的
+`ArtemisSession` 负责协商接口、推进帧以及收发消息。同一会话的创建、调用与关闭须在同一
+OS 线程上执行；Host 自行调度 IO 与设备操作，在该线程提交完成结果。`event.reply` 沿用原
+请求身份，`submit` 返回 `false` 表示整批未受理，Host 可以稍后重试。
+
+`withLatestFrame` 在同步回调结束时释放帧；`copyPacket` 和 `copyTextureRgba` 取得可在回调外
+继续使用的字节。样例用内存资源运行，覆盖大记录、输入、翻译回填与帧借用。需要直接读取
+借用像素或在原生线程绘制的 Host 可使用生成的 C ABI 绑定。
 
 实施阶段与进度见 [GOAL.md](../GOAL.md)。
