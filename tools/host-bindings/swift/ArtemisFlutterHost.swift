@@ -154,6 +154,9 @@ private enum ArtemisFlutterError: Error {
             guard let metadata = bytes(args["metadata"]) else { throw ArtemisFlutterError.invalidArguments }
             let blob = bytes(args["blob"]) ?? Data()
             if request == 0 {
+                if let source = args["owner"] as? String, source != owner {
+                    throw ArtemisFlutterError.staleReply
+                }
                 return ArtemisMacMessage(domain: domain, kind: kind, epoch: epoch, metadata: metadata, blob: blob)
             }
             guard args["owner"] as? String == owner,

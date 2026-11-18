@@ -572,7 +572,9 @@ RGBA8 字形图集，将字形四边形按消息层顺序放进帧包；图集�
 可以重复。Host 回报 started/ended/failed/cancelled 和可选播放时钟；旧播放完成不得停止
 新声音。视频音轨由 Host 解码，不经 core 临时 WAV 路径。
 
-Rust 句柄当前输出 Media domain=5、kind=1 的可靠音频命令，blob 为空。
+声明 `ART_HOST_CAP_MEDIA` 后，Core 通过 Media domain=5、kind=1 输出可靠音频命令，blob
+为空。未声明时，Core 跳过音视频播放及读档后的音频恢复，不触发自然播完回调；脚本中的
+媒体等待会继续推进。
 
 | `op` | metadata |
 |---|---|
@@ -696,6 +698,13 @@ OS 线程上执行；Host 自行调度 IO 与设备操作，在该线程提交�
 
 Dart 直连绑定和 Flutter 通道可复用 `ArtemisFileService`。每个会话创建一份服务，按轮询顺序
 传入原会话的事件，再用原事件构造回复。传输层负责会话归属及请求身份；文件服务只处理逻辑文件。
+
+Dart 直连与 Flutter 通道共用 `artemis_media.dart`。Host 开启 `ArtemisMediaCommand.capability`
+后，按轮询顺序读取 `event.mediaCommand`，通过现有资产服务和设备实现播放。调用
+`event.playbackStatus(playbackId, status)` 或 `event.videoFrame(frameId, width, height, rgba)`
+构造回报；每条回报应单独提交。播放 ID 保留为十进制字符串，回报绑定原事件的会话和 epoch。
+FFI 的 `ART_E_STALE` 与 Flutter 通道的 `stale_reply` 表示该回报已过期，应丢弃。重载、关闭
+或收到停止命令时由 Host 停止对应的播放器。Flutter 端和会话绑定需同时引入媒体类型文件。
 
 创建运行时可声明 `ArtemisFileIo.capabilities`。按轮询顺序将事件传给 `handle`，包括会话
 切换和关闭事件。该方法执行同步 IO 并返回可选回复；`submit` 背压时重试同一个回复。运行时

@@ -2,6 +2,10 @@ import 'dart:convert';
 
 import 'package:flutter/services.dart';
 
+import 'artemis_media.dart';
+
+export 'artemis_media.dart';
+
 typedef ArtemisFlutterState = ({
   String epoch,
   int width,
@@ -55,6 +59,44 @@ final class ArtemisFlutterEvent {
   final Uint8List blob;
 
   bool get requiresReply => request != '0';
+
+  late final mediaCommand = ArtemisMediaCommand.decode(domain, kind, metadata);
+
+  ArtemisFlutterMessage playbackStatus(
+    String playbackId,
+    ArtemisPlaybackStatus status,
+  ) => _mediaMessage(
+    ArtemisMediaCommand.statusKind,
+    _media.status(playbackId, status),
+  );
+
+  ArtemisFlutterMessage videoFrame(
+    int frame,
+    int width,
+    int height,
+    Uint8List rgba,
+  ) => _mediaMessage(
+    ArtemisMediaCommand.frameKind,
+    _media.videoFrame(frame, width, height, rgba),
+    rgba,
+  );
+
+  ArtemisMediaCommand get _media =>
+      mediaCommand ?? (throw StateError('This event is not a media command'));
+
+  ArtemisFlutterMessage _mediaMessage(
+    int kind,
+    Map<String, Object?> metadata, [
+    Uint8List? blob,
+  ]) => ArtemisFlutterMessage._({
+    'owner': _owner,
+    'domain': ArtemisMediaCommand.domain,
+    'kind': kind,
+    'epoch': epoch,
+    'request': '0',
+    'metadata': _encode(metadata),
+    'blob': ?blob,
+  });
 
   ArtemisFlutterMessage reply(
     Map<String, Object?> metadata, {
@@ -163,7 +205,7 @@ final class ArtemisFlutterSession {
     for (final message in batch) {
       final owner = message._wire['owner'];
       if (owner != null && owner != _id) {
-        throw ArgumentError('The reply belongs to another Artemis session');
+        throw ArgumentError('The message belongs to another Artemis session');
       }
     }
     return (await _call<bool>('submit', {

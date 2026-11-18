@@ -260,6 +260,7 @@ impl ScriptIoSession {
         let (Some(scene), Some(event)) = (&self.scene, &self.scenario_event) else {
             return Ok(false);
         };
+        let media_scene = self.media_enabled.then_some(scene);
         match event {
             Event::BgmPlay {
                 file,
@@ -280,7 +281,7 @@ impl ScriptIoSession {
                     crossfade: false,
                 };
                 self.audio
-                    .play(&mut self.transport, scene, Channel::Bgm, spec)?;
+                    .play(&mut self.transport, media_scene, Channel::Bgm, spec)?;
             }
             Event::BgmCrossFade {
                 file,
@@ -300,7 +301,7 @@ impl ScriptIoSession {
                     crossfade: true,
                 };
                 self.audio
-                    .play(&mut self.transport, scene, Channel::Bgm, spec)?;
+                    .play(&mut self.transport, media_scene, Channel::Bgm, spec)?;
             }
             Event::SePlay {
                 id,
@@ -321,8 +322,12 @@ impl ScriptIoSession {
                     skippable: *skippable,
                     crossfade: false,
                 };
-                self.audio
-                    .play(&mut self.transport, scene, Channel::Se(id.clone()), spec)?;
+                self.audio.play(
+                    &mut self.transport,
+                    media_scene,
+                    Channel::Se(id.clone()),
+                    spec,
+                )?;
             }
             Event::VoicePlay {
                 id,
@@ -351,8 +356,8 @@ impl ScriptIoSession {
                     crossfade: false,
                 };
                 self.audio
-                    .play(&mut self.transport, scene, Channel::Voice(id), spec)?;
-                if auto_id {
+                    .play(&mut self.transport, media_scene, Channel::Voice(id), spec)?;
+                if auto_id && self.media_enabled {
                     self.audio.voice_serial = next_voice;
                 }
             }
@@ -385,10 +390,12 @@ impl ScriptIoSession {
                 Control::Pan(*pan, time.unwrap_or(0)),
             )?,
             Event::StopAllSounds { duration } => {
-                emit(
-                    &mut self.transport,
-                    json!({"op":"stop_all","fade_ms":duration.to_string()}),
-                )?;
+                if self.media_enabled {
+                    emit(
+                        &mut self.transport,
+                        json!({"op":"stop_all","fade_ms":duration.to_string()}),
+                    )?;
+                }
                 if *duration == 0 {
                     self.audio.active.clear();
                 }
@@ -451,10 +458,13 @@ impl Audio {
     fn play(
         &mut self,
         transport: &mut SessionTransport,
-        scene: &scene::SceneIo,
+        scene: Option<&scene::SceneIo>,
         channel: Channel,
         spec: Play<'_>,
     ) -> Result<(), ProtocolError> {
+        let Some(scene) = scene else {
+            return Ok(());
+        };
         let id = next_audio_id(self.serial)?;
         let replaces = self.active.get(&channel).map(|track| track.id);
         if replaces.is_none() && self.active.len() >= MAX_PLAYBACKS {

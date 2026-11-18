@@ -38,6 +38,15 @@ Metal argument buffers 的复跑仍有该错误。该发行组合的 D3D9 着色
 Flutter 引擎实际呈现、Wine 侧 GPU 共享及真实分辨率吞吐仍待验证。
 原版游戏的编译入口、profile、采样器与常量布局尚缺原始调用记录和可归属的画面对照。
 
+## 已完成：媒体能力协商与 Dart 媒体接口
+
+独立 Core 只在 Host 声明媒体能力后下发音视频命令。省略能力时，脚本跳过播放和读档音频恢复，
+媒体等待仍会推进。Dart FFI 和 Flutter 绑定共用类型化命令；回报保留原会话、epoch 和完整播放 ID。
+两种媒体能力配置的内存冒烟分别验证了无设备时脚本继续、音频完成、图层视频像素和迟到回报。
+70 项脚本 Host 回归、C ABI、Dart 静态分析和 macOS Flutter 通道冒烟通过；通道拒绝了错误会话
+的媒体回报。生产 Flutter 尚需将命令接到实际播放器，验证 BGM/SE/voice、视频解码和呈现、
+存档恢复及前后台切换。
+
 ## 已完成：macOS Flutter 脚本 HTTP
 
 应用仓库的 `3d7f930` 启用 v2 HTTP 服务并复用现有客户端。等待 HTTP 时保留 `onEnterFrame`

@@ -132,6 +132,7 @@ impl ScriptIoSession {
             return Ok(false);
         };
         match event {
+            Event::VideoPlay { .. } if !self.media_enabled => {}
             Event::VideoPlay {
                 id,
                 file,

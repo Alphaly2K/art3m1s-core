@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:artemis_host_v2/artemis_file_io.dart';
 import 'package:artemis_host_v2/artemis_host.dart';
@@ -9,13 +10,20 @@ void require(bool condition, String message) {
   if (!condition) throw StateError(message);
 }
 
-void exerciseHost(ArtemisSession session, ArtemisSession other) {
+void exerciseHost(
+  ArtemisSession session,
+  ArtemisSession other, {
+  required bool mediaEnabled,
+}) {
   const ini = '[WINDOWS]\nWIDTH=320\nHEIGHT=200\nBOOT=boot.iet\n';
   final boot = utf8.encode(
     '*top\n[lyc id=1 width=2 height=1 color=ff112233]\n'
     '[setonwindowbutton button=1 label=window call=1]\n'
     '[exec command=fullscreen]\n[caption data=${'x' * 5000}]\n'
-    'original text\n[wt0]\n[caption data=advanced]\n[stop]\n'
+    'original text\n[wt0]\n[caption data=advanced]\n'
+    '[seplay id=fx file=ping.ogg gain=450]\n[wait se=fx]\n'
+    '[lyc id=1.80]\n[video id=1.80 file=overlay.ogv]\n'
+    '[wait video=1.80]\n[caption data=media_done]\n[stop]\n'
     '*window\n[caption data=window]\n[return]\n',
   );
   session.openProject(utf8.encode(ini), platform: 'windows');
@@ -26,6 +34,7 @@ void exerciseHost(ArtemisSession session, ArtemisSession other) {
 
   final epoch = session.state.epoch;
   final effects = <String>[];
+  ArtemisEvent? audioEvent, videoEvent;
   var checkedReplyOwner = false;
   void pump(int frame) {
     for (var turn = 0; turn < 64; turn++) {
@@ -91,6 +100,10 @@ void exerciseHost(ArtemisSession session, ArtemisSession other) {
               );
               send(event.reply({'status': 'ok', 'text': 'translated text'}));
               effects.add('translated');
+            case (ART_DOMAIN_MEDIA, ART_MEDIA_AUDIO_COMMAND):
+              audioEvent = event;
+            case (ART_DOMAIN_MEDIA, ART_MEDIA_VIDEO_COMMAND):
+              videoEvent = event;
             default:
               require(
                 !event.requiresReply,
@@ -152,6 +165,63 @@ void exerciseHost(ArtemisSession session, ArtemisSession other) {
     rejectedAccess = true;
   }
   require(rejectedAccess, 'Released frame memory can still be accessed');
+
+  if (!mediaEnabled) {
+    pump(4);
+    pump(5);
+    require(
+      audioEvent == null && videoEvent == null && effects.last == 'media_done',
+      'A Host without media capability received commands or stalled',
+    );
+    return;
+  }
+  final audio = audioEvent?.mediaCommand;
+  if (audio is! ArtemisAudioPlay ||
+      audio.channel != ArtemisAudioChannel.se ||
+      audio.scriptId != 'fx' ||
+      audio.key != 'ping.ogg' ||
+      audio.gain != 450) {
+    throw StateError('Unexpected audio play command');
+  }
+  final complete = audioEvent!.playbackStatus(
+    audio.id,
+    ArtemisPlaybackStatus.ended,
+  );
+  try {
+    other.submit([complete]);
+    throw StateError('A foreign session accepted playback feedback');
+  } on ArgumentError {
+    send(audioEvent!.playbackStatus(audio.id, ArtemisPlaybackStatus.started));
+    send(complete);
+  }
+  pump(4);
+  final video = videoEvent?.mediaCommand;
+  if (video is! ArtemisVideoPlay ||
+      video.layer != '1.80' ||
+      BigInt.parse(video.id) <= (BigInt.one << 63)) {
+    throw StateError('Unexpected layer video command or truncated playback ID');
+  }
+  final pixels = Uint8List.fromList([8, 16, 32, 255]);
+  final frame = videoEvent!.videoFrame(1, 1, 1, pixels);
+  send(frame);
+  pump(5);
+  require(
+    session.withLatestFrame(0, (f) => f.copyTextureRgba(1).join(',')) ==
+        pixels.join(','),
+    'Layer video pixels did not reach the Core frame',
+  );
+  try {
+    send(frame);
+    throw StateError('Core accepted a duplicate video frame');
+  } on ArtemisError catch (error) {
+    if (error.status != ART_E_STALE) rethrow;
+  }
+  send(videoEvent!.playbackStatus(video.id, ArtemisPlaybackStatus.ended));
+  pump(6);
+  require(
+    effects.last == 'media_done',
+    'Video feedback did not resume the script',
+  );
 }
 
 void exerciseChunkedWrite(
@@ -291,14 +361,17 @@ void main(List<String> arguments) {
   if (arguments.length != 1)
     throw ArgumentError('Pass the path to the standalone Artemis library');
   final library = DynamicLibrary.open(arguments.single);
-  ArtemisSession create() => ArtemisSession.create(
+  ArtemisSession create({required bool media}) => ArtemisSession.create(
     library,
-    hostCapabilities: ArtemisFileIo.capabilities | ART_HOST_CAP_TRANSLATION,
+    hostCapabilities:
+        ArtemisFileIo.capabilities |
+        ART_HOST_CAP_TRANSLATION |
+        (media ? ArtemisMediaCommand.capability : 0),
     rendererCapabilities: ART_RENDERER_CAP_SPRITE,
   );
-  final session = create();
+  final session = create(media: true);
   try {
-    final other = create();
+    final other = create(media: false);
     try {
       final state = session.state;
       require(
@@ -309,7 +382,8 @@ void main(List<String> arguments) {
         session.withLatestFrame(0, (frame) => frame.id) == null,
         'Unexpected initial frame',
       );
-      exerciseHost(session, other);
+      exerciseHost(session, other, mediaEnabled: true);
+      exerciseHost(other, session, mediaEnabled: false);
       final dir = Directory.systemTemp.createTempSync('artemis-v2-write-');
       try {
         exerciseChunkedWrite(session, other, dir);

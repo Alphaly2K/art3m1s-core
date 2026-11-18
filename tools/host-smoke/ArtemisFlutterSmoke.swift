@@ -65,8 +65,15 @@ private final class Registry: NSObject, FlutterTextureRegistry {
         defer { host.close() }
 
         let ini = Data("[WINDOWS]\nWIDTH=4\nHEIGHT=4\nBOOT=boot.iet\n".utf8)
-        let boot = Data("*top\n[lyc id=1 width=4 height=4 color=ffff0000]\n[caption data=ready]\n[stop]\n".utf8)
-        let open: [String: Any] = ["ini": FlutterStandardTypedData(bytes: ini), "platform": "windows", "hostCaps": 1]
+        let boot = Data("""
+        *top
+        [lyc id=1 width=4 height=4 color=ffff0000]
+        [seplay id=fx file=tone.ogg]
+        [caption data=ready]
+        [stop]
+        """.utf8)
+        let open: [String: Any] = ["ini": FlutterStandardTypedData(bytes: ini), "platform": "windows",
+                                   "hostCaps": art_swift_io_cap() | UInt64(ArtSwiftMediaCapability)]
         guard let firstState = try messenger.call("open", open) as? [String: Any],
               let secondState = try messenger.call("open", open) as? [String: Any],
               let firstSession = firstState["session"] as? String,
@@ -79,6 +86,7 @@ private final class Registry: NSObject, FlutterTextureRegistry {
         let tick: [String: Any] = ["frame": 1, "monotonicNS": 1, "unixMS": 0, "utcOffsetMinutes": 0]
         var ready = false
         var checkedIdentity = false
+        var checkedPlayback = false
         for _ in 0..<24 where !ready {
             try expect(messenger.call("step", tick) is [String: Any], "Could not step")
             guard let events = try messenger.call("poll") as? [[String: Any]] else { throw Failure(detail: "Could not poll") }
@@ -86,6 +94,22 @@ private final class Registry: NSObject, FlutterTextureRegistry {
                 let bytes = (event["metadata"] as? FlutterStandardTypedData)?.data ?? Data()
                 let args = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] ?? [:]
                 if args["text"] as? String == "ready" { ready = true }
+                if event["domain"] as? Int == Int(ArtSwiftMedia),
+                   event["kind"] as? Int == Int(ArtSwiftAudioCommand),
+                   let playback = args["playback_id"] as? String {
+                    var feedback = event
+                    feedback["kind"] = Int(ArtSwiftPlaybackStatus)
+                    feedback["metadata"] = FlutterStandardTypedData(bytes: try JSONSerialization.data(withJSONObject: [
+                        "playback_id": playback, "status": "ended",
+                    ]))
+                    feedback["owner"] = secondSession
+                    let error = try messenger.call("submit", ["batch": [feedback]]) as? FlutterError
+                    try expect(error?.code == "stale_reply", "Accepted playback feedback with another session's owner")
+                    feedback["owner"] = firstSession
+                    try expect(messenger.call("submit", ["batch": [feedback]]) as? Bool == true,
+                               "Current playback feedback was rejected")
+                    checkedPlayback = true
+                }
                 if event["request"] as? String == "0" { continue }
                 var reply = event
                 let metadata: [String: Any]
@@ -114,7 +138,7 @@ private final class Registry: NSObject, FlutterTextureRegistry {
                 try expect(error?.code == "stale_reply", "Accepted duplicate reply")
             }
         }
-        try expect(ready && checkedIdentity, "Project did not reach the final caption")
+        try expect(ready && checkedIdentity && checkedPlayback, "Project did not complete the channel checks")
         try expect(messenger.call("present") is String, "Frame not presented")
         try expect(messenger.call("present") == nil && registry.notifications == [0], "Notified twice for the same frame")
         guard let buffer = registry.textures[0]?.copyPixelBuffer()?.takeRetainedValue() else {

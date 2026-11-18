@@ -4,8 +4,10 @@ import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 
+import 'artemis_media.dart';
 import 'artemis_v2.dart';
 
+export 'artemis_media.dart';
 export 'artemis_v2.dart';
 
 final class ArtemisError implements Exception {
@@ -36,6 +38,16 @@ final class ArtemisMessage {
       epoch = event.epoch,
       requestId = event.requestId,
       _sessionKey = event._sessionKey;
+
+  ArtemisMessage._media(
+    ArtemisEvent event,
+    this.kind,
+    this.metadata, [
+    this.blob = const [],
+  ]) : domain = ArtemisMediaCommand.domain,
+       epoch = event.epoch,
+       requestId = 0,
+       _sessionKey = event._sessionKey;
 
   final int domain;
   final int kind;
@@ -68,6 +80,28 @@ final class ArtemisEvent {
   final Object _sessionKey;
 
   bool get requiresReply => requestId != 0;
+
+  late final mediaCommand = ArtemisMediaCommand.decode(domain, kind, metadata);
+
+  ArtemisMessage playbackStatus(
+    String playbackId,
+    ArtemisPlaybackStatus status,
+  ) => ArtemisMessage._media(
+    this,
+    ArtemisMediaCommand.statusKind,
+    _media.status(playbackId, status),
+  );
+
+  ArtemisMessage videoFrame(int frame, int width, int height, Uint8List rgba) =>
+      ArtemisMessage._media(
+        this,
+        ArtemisMediaCommand.frameKind,
+        _media.videoFrame(frame, width, height, rgba),
+        rgba,
+      );
+
+  ArtemisMediaCommand get _media =>
+      mediaCommand ?? (throw StateError('This event is not a media command'));
 
   bool belongsTo(ArtemisSession session) =>
       identical(_sessionKey, session._sessionKey);
@@ -257,7 +291,7 @@ final class ArtemisSession {
       final record = messages[i];
       final message = batch[i];
       if (message._sessionKey != null && message._sessionKey != _sessionKey) {
-        throw ArgumentError('The request belongs to another Artemis session');
+        throw ArgumentError('The message belongs to another Artemis session');
       }
       record
         ..struct_size = sizeOf<ArtMessage>()

@@ -298,6 +298,7 @@ pub struct ScriptIoSession {
     project_loading: bool,
     dialog_request: Option<RequestIdentity>,
     http: http::Http,
+    pub(super) media_enabled: bool,
     pub(super) http_enabled: bool,
     translations: translation::Translations,
     pub(super) translation_enabled: bool,
@@ -362,6 +363,7 @@ impl ScriptIoSession {
             project_loading: false,
             dialog_request: None,
             http: http::Http::default(),
+            media_enabled: true,
             http_enabled: true,
             translations: Default::default(),
             translation_enabled: false,
@@ -1817,7 +1819,9 @@ impl ScriptIoSession {
             self.numbered_load = Some(NumberedLoadWork::ReadingSavedFont { load, pending });
             return Ok(ScenarioStep::Request(request));
         }
-        let audio = if let Some(scene) = &self.scene {
+        let audio = if self.media_enabled
+            && let Some(scene) = &self.scene
+        {
             match self.audio.prepare_restore(
                 scene,
                 load.file.save.audio.as_ref(),

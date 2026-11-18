@@ -125,11 +125,12 @@ pub(super) const CAP_EMOTE: u64 = 16;
 pub(super) const CAP_HLSL: u64 = 32;
 pub(super) const RENDERER_CAPS: u64 =
     CAP_SPRITES | CAP_TRANSITIONS | CAP_SCREENSHOTS | CAP_GROUPS | CAP_EMOTE | CAP_HLSL;
+pub(super) const HOST_CAP_MEDIA: u64 = 4;
 pub(super) const HOST_CAP_HTTP: u64 = 8;
 pub(super) const HOST_CAP_TRANSLATION: u64 = 16;
 pub(super) const HOST_CAP_CHUNKED_WRITES: u64 = 32;
 pub(super) const HOST_CAPS: u64 =
-    0b111 | HOST_CAP_HTTP | HOST_CAP_TRANSLATION | HOST_CAP_CHUNKED_WRITES;
+    0b11 | HOST_CAP_MEDIA | HOST_CAP_HTTP | HOST_CAP_TRANSLATION | HOST_CAP_CHUNKED_WRITES;
 
 /// Create a runtime owned by the calling thread. Destroy it before that thread exits.
 pub fn create(
@@ -158,6 +159,7 @@ pub(super) fn create_with_caps(
         let mut session =
             ScriptIoSession::new(handle.0, Default::default(), limits, max_file_bytes)?;
         session.set_random_seed(random_seed)?;
+        session.media_enabled = host_caps & HOST_CAP_MEDIA != 0;
         session.http_enabled = host_caps & HOST_CAP_HTTP != 0;
         session.translation_enabled = host_caps & HOST_CAP_TRANSLATION != 0;
         session.chunked_writes = host_caps & HOST_CAP_CHUNKED_WRITES != 0;
