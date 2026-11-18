@@ -10,8 +10,14 @@
 
 继续核对剩余快照字段、实机画面对照和生产 Host 接入。
 v2 预览已提供独立构建、C 内存 Host 和 Dart 封装；Linux、Windows 原生 CI 和生产 Host 切换待完成。
-生产 Flutter 先接 Artemis 的 Metal 共享纹理路径。共享表面已独立验过，下一步接入应用帧循环、
-资源和媒体。创建 runtime、推进与释放帧须由同一 OS 线程执行。
+生产 Flutter 先接 Artemis 的 Metal 共享纹理路径。原生绘制和截图入口已可独立构建；下一步由应用
+在同一 OS 线程管理 v2 runtime 与绘制，接入应用帧循环、资源和媒体。
+
+## 已完成：macOS 原生应用绘制入口
+
+独立 Metal Host 动态库接收 v2 Frame 表和宿主提供的 IOSurface，支持无新帧、表面重建后重绘、
+线程检查和按帧号截图。C 与 Swift 均可导入头文件；动态库没有 Core 链接依赖。真实像素探针通过，
+覆盖表面尺寸大于逻辑舞台时的完整截图、截图前后共享像素一致，以及释放令牌后呈现。
 
 ## 已完成：Metal Host 呈现到共享 IOSurface
 

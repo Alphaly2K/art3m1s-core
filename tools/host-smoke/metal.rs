@@ -3,7 +3,7 @@ mod metal_abi;
 
 #[cfg(target_os = "macos")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use crate::metal_abi::{Frame, Session, SharedSurface};
+    use crate::metal_abi::{Frame, NativeHost, Session, SharedSurface};
     use art3m1s_render::artemis::{FramePacket, SpriteRenderer};
     use art3m1s_render::backend::{FrameTarget, GpuBackend, RenderRegion, metal::MetalBackend};
     use art3m1s_render::types::Extent2D;
@@ -70,14 +70,20 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
     result = float4(tint, alpha);
 }
 "#;
-    let library = std::env::args_os()
-        .nth(1)
-        .ok_or("expected the Core dylib path")?;
+    let mut args = std::env::args_os().skip(1);
+    let library = args.next().ok_or("expected the Core dylib path")?;
+    let adapter = args.next().ok_or("expected the Metal Host dylib path")?;
     let session = Session::open(&CString::new(library.as_bytes())?)?;
     let shared = SharedSurface::new(Extent2D::new(4, 4))?;
+    let replacement = SharedSurface::new(Extent2D::new(8, 8))?;
+    let mut native = NativeHost::open(&CString::new(adapter.as_bytes())?, &session)?;
+    assert_eq!(native.present(0), Err(-6));
+    assert_eq!(native.wrong_thread_status(), -3);
+    native.set_surface(Some(&shared))?;
+    assert_eq!(native.present(0), Ok(None));
     let mut renderer = SpriteRenderer::new(MetalBackend::new(4, 4)?);
     let mut capture = None;
-    let mut service_until_event = |renderer: &mut SpriteRenderer<MetalBackend>,
+    let mut service_until_event = |native: &NativeHost<'_>,
                                    id,
                                    ms|
      -> Result<(), Box<dyn std::error::Error>> {
@@ -114,9 +120,19 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
                         (RENDER_CAPTURE, _) => {
                             let expected_id =
                                 args["render_frame_id"].as_str().unwrap().parse::<u64>()?;
-                            let frame = session.frame(expected_id - 1)?;
-                            assert_eq!(frame.decode()?.render_frame_id, expected_id);
-                            let pixels = draw(renderer, &frame)?;
+                            let mut pixels = vec![0; 4 * 4 * 4];
+                            let extent = Extent2D::new(4, 4);
+                            assert_eq!(
+                                native.capture(expected_id, extent, &mut pixels[..63]),
+                                Err(-5)
+                            );
+                            assert_eq!(
+                                native.capture(expected_id - 1, extent, &mut pixels),
+                                Err(-7)
+                            );
+                            native
+                                .capture(expected_id, extent, &mut pixels)
+                                .map_err(|code| format!("Metal capture returned {code}"))?;
                             check(&pixels, |_, y| if y < 2 { GREEN } else { YELLOW });
                             capture = Some((request_id, pixels));
                             (json!({"status":"ok"}), Vec::new())
@@ -157,7 +173,7 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
         }
         Ok(())
     };
-    service_until_event(&mut renderer, 1, 0)?;
+    service_until_event(&native, 1, 0)?;
 
     const BLUE: [u8; 4] = [0, 0, 255, 255];
     const GREEN: [u8; 4] = [0, 255, 0, 255];
@@ -209,21 +225,6 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
         result
     }
 
-    fn present(
-        renderer: &mut SpriteRenderer<MetalBackend>,
-        frame: Frame<'_>,
-        shared: &SharedSurface,
-    ) -> Result<Vec<u8>, String> {
-        let packet = frame.decode()?;
-        renderer.backend_mut().begin_access();
-        let result = render_scene(renderer, |renderer| draw_packet(renderer, &frame, &packet));
-        drop(frame);
-        let result = result.and_then(|()| renderer.backend_mut().present(None));
-        renderer.backend_mut().end_access();
-        result?;
-        shared.pixels()
-    }
-
     fn check(pixels: &[u8], expected: impl Fn(usize, usize) -> [u8; 4]) {
         assert_eq!(pixels.len(), 4 * 4 * 4);
         for (i, pixel) in pixels.chunks_exact(4).enumerate() {
@@ -259,34 +260,52 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
         (3, 60, [64, 0, 128, 255]),
         (4, 110, BLUE),
     ] {
-        service_until_event(&mut renderer, id, ms)?;
+        service_until_event(&native, id, ms)?;
         let frame = session.frame(0)?;
         check(&draw(&mut renderer, &frame)?, |_, _| expected);
     }
-    service_until_event(&mut renderer, 5, 120)?;
+    service_until_event(&native, 5, 120)?;
     let start = session.frame(0)?;
     assert!(start.decode()?.transition().unwrap().rule.is_some());
     check(&draw(&mut renderer, &start)?, |_, _| BLUE);
     drop(start);
-    renderer
-        .backend_mut()
-        .set_native_surface(shared.target()?)?;
-    service_until_event(&mut renderer, 6, 170)?;
-    let middle = session.frame(0)?;
-    check(&present(&mut renderer, middle, &shared)?, |x, y| {
-        match (x, y < 2) {
-            (0, true) => GREEN,
-            (0, false) => YELLOW,
-            (1, true) => [0, 125, 130, 255],
-            (1, false) => [125, 125, 130, 255],
-            _ => BLUE,
-        }
+    service_until_event(&native, 6, 170)?;
+    let middle = native.present(0).expect("present rule frame").unwrap();
+    assert_eq!(native.present(middle), Ok(None));
+    let middle_pixels = shared.pixels()?;
+    check(&middle_pixels, |x, y| match (x, y < 2) {
+        (0, true) => GREEN,
+        (0, false) => YELLOW,
+        (1, true) => [0, 125, 130, 255],
+        (1, false) => [125, 125, 130, 255],
+        _ => BLUE,
     });
-    service_until_event(&mut renderer, 7, 220)?;
-    let menu = session.frame(0)?;
-    check(&present(&mut renderer, menu, &shared)?, |_, _| {
-        [255, 0, 0, 255]
-    });
+    native.set_surface(None)?;
+    assert_eq!(native.present(0), Err(-6));
+    native.set_surface(Some(&replacement))?;
+    assert_eq!(native.present(middle), Ok(None));
+    assert_eq!(native.present(0), Ok(Some(middle)));
+    let before_capture = replacement.pixels()?;
+    service_until_event(&native, 7, 220)?;
+    assert_eq!(
+        replacement.pixels()?,
+        before_capture,
+        "capture updated the shared surface"
+    );
+    assert_eq!(
+        shared.pixels()?,
+        middle_pixels,
+        "present repainted the detached surface"
+    );
+    let menu = native.present(middle).expect("present menu frame").unwrap();
+    assert_eq!(native.present(menu), Ok(None));
+    let pixels = replacement.pixels()?;
+    assert_eq!(pixels.len(), 8 * 8 * 4);
+    assert!(
+        pixels
+            .chunks_exact(4)
+            .all(|pixel| pixel == [255, 0, 0, 255])
+    );
     let thumbnail = image::open(save_dir.0.join("thumb.png"))?.into_rgba8();
     assert_eq!(thumbnail.dimensions(), (2, 2));
     assert_eq!(thumbnail.get_pixel(0, 0).0, [36, 255, 0, 255]);
@@ -296,7 +315,6 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
     renderer.backend_mut().begin_access();
     renderer.clear_cached_textures();
     renderer.clear_cached_shaders();
-    renderer.backend_mut().clear_native_surface();
     renderer.backend_mut().end_access();
     println!(
         "Artemis v2 Metal pixels passed (E-Mote, groups, transitions, HLSL, thumbnails and IOSurface)"

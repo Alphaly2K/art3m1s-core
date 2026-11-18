@@ -1,4 +1,4 @@
-#include "art3m1s_core_v2.draft.h"
+#include "art3m1s_metal_host_v1.h"
 
 #include <CoreVideo/CoreVideo.h>
 #include <dlfcn.h>
@@ -8,6 +8,11 @@
 static void *library;
 static const ArtRuntimeApiV2 *runtime;
 static const ArtFrameApiV2 *frame;
+static void *native_library;
+static __typeof__(art3m1s_metal_host_v1_destroy) *native_destroy;
+static __typeof__(art3m1s_metal_host_v1_set_surface) *native_surface;
+static __typeof__(art3m1s_metal_host_v1_present) *native_present;
+static __typeof__(art3m1s_metal_host_v1_capture) *native_capture;
 
 void metal_disconnect(void) {
     dlclose(library);
@@ -47,9 +52,7 @@ ArtStatus metal_create(ArtRuntimeHandle *out) {
     ArtCreateInfo create = {
         .struct_size = sizeof(create),
         .host_service_caps = ART_HOST_CAP_IO,
-        .renderer_caps = ART_RENDERER_CAP_SPRITE | ART_RENDERER_CAP_TRANSITION |
-                         ART_RENDERER_CAP_SCREENSHOT | ART_RENDERER_CAP_GROUP |
-                         ART_RENDERER_CAP_EMOTE | ART_RENDERER_CAP_HLSL,
+        .renderer_caps = ART_METAL_HOST_V1_RENDERER_CAPS,
     };
     ArtStatus status = runtime->create(&create, out);
     if (status != ART_OK) return status;
@@ -114,6 +117,44 @@ ArtStatus metal_pixels(ArtRuntimeHandle rt, ArtFrameToken token, uint32_t index,
 
 ArtStatus metal_release(ArtRuntimeHandle rt, ArtFrameToken token) {
     return frame->release(rt, token);
+}
+
+ArtStatus metal_native_open(const char *path, ArtRuntimeHandle rt, ArtMetalHost **out) {
+    native_library = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (!native_library) {
+        fprintf(stderr, "%s\n", dlerror());
+        return ART_E_UNSUPPORTED;
+    }
+    __typeof__(art3m1s_metal_host_v1_create) *create =
+        dlsym(native_library, "art3m1s_metal_host_v1_create");
+    native_destroy = dlsym(native_library, "art3m1s_metal_host_v1_destroy");
+    native_surface = dlsym(native_library, "art3m1s_metal_host_v1_set_surface");
+    native_present = dlsym(native_library, "art3m1s_metal_host_v1_present");
+    native_capture = dlsym(native_library, "art3m1s_metal_host_v1_capture");
+    ArtStatus status = ART_E_UNSUPPORTED;
+    if (create && native_destroy && native_surface && native_present && native_capture) {
+        status = create(frame, rt, out);
+    }
+    if (status != ART_OK) dlclose(native_library);
+    return status;
+}
+
+void metal_native_close(ArtMetalHost *host) {
+    native_destroy(host);
+    dlclose(native_library);
+}
+
+ArtStatus metal_native_surface(ArtMetalHost *host, IOSurfaceRef surface) {
+    return native_surface(host, surface);
+}
+
+ArtStatus metal_native_present(ArtMetalHost *host, uint64_t after, uint64_t *out) {
+    return native_present(host, after, out);
+}
+
+ArtStatus metal_native_capture(ArtMetalHost *host, uint64_t id, uint32_t width, uint32_t height,
+                              uint8_t *rgba, uint64_t size) {
+    return native_capture(host, id, width, height, rgba, size);
 }
 
 void *metal_create_pixel_buffer(uint32_t width, uint32_t height) {

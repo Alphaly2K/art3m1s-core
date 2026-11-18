@@ -1,0 +1,16 @@
+[package]
+name = "art3m1s-artemis-metal-host"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+publish = false
+
+[lib]
+name = "art3m1s_artemis_metal_host"
+crate-type = ["cdylib"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+art3m1s-render = { path = "../art3m1s-render", features = ["artemis", "metal"] }
+
+[build-dependencies]
+cc = "1"

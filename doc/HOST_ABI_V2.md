@@ -645,6 +645,18 @@ Flutter 的最小 Host 样例。平台 IO/render/media 适配器可以复用，�
 macOS 上可用 `bash scripts/test-host-v2-metal.sh` 运行独立 Metal Host，验证从 C ABI 借用
 ARFP 和纹理像素后的绘制结果，包含向共享 IOSurface 连续呈现。该检查需要 Metal 设备；
 不需要窗口或外部游戏文件。
+
+macOS 应用可按 [Metal Host C 头文件](abi/art3m1s_metal_host_v1.h) 单独构建和链接渲染库。
+先在原生线程创建 Core runtime，再在同一线程向渲染库传入 Frame 函数表和 runtime 句柄。
+Host 保持 Core 动态库、runtime 和绑定的 BGRA IOSurface 存活，释放顺序是渲染器、runtime、库。
+Host 每次推进逻辑并处理请求后可尝试呈现；只在 `present` 返回 `ART_OK` 时更新已呈现帧号并通知
+纹理消费者。`ART_NO_DATA` 保留前一张画面。重建共享纹理时，先解绑再释放旧表面，绑定新表面后
+传 `after_frame_id = 0` 重绘，下一次逻辑推进无需等待重绘。
+
+收到截图请求时，Host 可调用 `capture` 读取指定帧的舞台尺寸 RGBA8。该调用不改变共享表面；
+应用保留截图、写入缩略图并提交请求结果。只有同时接入读取和保存流程才声明
+`ART_RENDERER_CAP_SCREENSHOT`。渲染库不负责调度、资源 IO、媒体或 Flutter 纹理注册。
+
 在 `tools/host-bindings/dart` 目录运行 `dart pub get --enforce-lockfile` 后，使用
 `dart run bin/smoke.dart <纯 Core 动态库路径>` 可验证 Dart 接入。`artemis_host.dart` 的
 `ArtemisSession` 负责协商接口、推进帧以及收发消息。同一会话的创建、调用与关闭须在同一

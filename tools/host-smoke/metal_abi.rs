@@ -1,5 +1,5 @@
+use art3m1s_render::Extent2D;
 use art3m1s_render::artemis::FramePacket;
-use art3m1s_render::{Extent2D, NativeSurface, NativeSurfaceKind};
 use std::{
     ffi::{CStr, c_void},
     os::raw::c_char,
@@ -50,6 +50,18 @@ unsafe extern "C" {
     fn metal_acquire(rt: u64, after: u64, token: *mut u64, packet: *mut Bytes) -> i32;
     fn metal_pixels(rt: u64, token: u64, index: u32, pixels: *mut Bytes) -> i32;
     fn metal_release(rt: u64, token: u64) -> i32;
+    fn metal_native_open(path: *const c_char, rt: u64, out: *mut *mut c_void) -> i32;
+    fn metal_native_close(host: *mut c_void);
+    fn metal_native_surface(host: *mut c_void, surface: *mut c_void) -> i32;
+    fn metal_native_present(host: *mut c_void, after: u64, out: *mut u64) -> i32;
+    fn metal_native_capture(
+        host: *mut c_void,
+        id: u64,
+        width: u32,
+        height: u32,
+        rgba: *mut u8,
+        size: u64,
+    ) -> i32;
     fn metal_create_pixel_buffer(width: u32, height: u32) -> *mut c_void;
     fn metal_pixel_buffer_surface(buffer: *mut c_void) -> *mut c_void;
     fn metal_free_pixel_buffer(buffer: *mut c_void);
@@ -210,14 +222,9 @@ impl SharedSurface {
         Ok(Self { buffer, extent })
     }
 
-    pub fn target(&self) -> Result<NativeSurface, String> {
-        let handle = NonNull::new(unsafe { metal_pixel_buffer_surface(self.buffer.as_ptr()) })
-            .ok_or("pixel buffer has no IOSurface")?;
-        Ok(NativeSurface {
-            kind: NativeSurfaceKind::AppleIoSurface,
-            handle: handle.as_ptr(),
-            extent: self.extent,
-        })
+    fn handle(&self) -> Result<NonNull<c_void>, String> {
+        NonNull::new(unsafe { metal_pixel_buffer_surface(self.buffer.as_ptr()) })
+            .ok_or_else(|| "pixel buffer has no IOSurface".into())
     }
 
     pub fn pixels(&self) -> Result<Vec<u8>, String> {
@@ -235,5 +242,86 @@ impl SharedSurface {
 impl Drop for SharedSurface {
     fn drop(&mut self) {
         unsafe { metal_free_pixel_buffer(self.buffer.as_ptr()) };
+    }
+}
+
+pub struct NativeHost<'a> {
+    handle: NonNull<c_void>,
+    _session: &'a Session,
+    surface: Option<&'a SharedSurface>,
+}
+
+impl<'a> NativeHost<'a> {
+    pub fn open(path: &CStr, session: &'a Session) -> Result<Self, String> {
+        let mut handle = std::ptr::null_mut();
+        check(
+            unsafe { metal_native_open(path.as_ptr(), session.id(), &mut handle) },
+            "open native host",
+        )?;
+        Ok(Self {
+            handle: NonNull::new(handle).ok_or("no native host")?,
+            _session: session,
+            surface: None,
+        })
+    }
+
+    pub fn set_surface(&mut self, surface: Option<&'a SharedSurface>) -> Result<(), String> {
+        let handle = surface.map(SharedSurface::handle).transpose()?;
+        self.surface = None;
+        check(
+            unsafe {
+                metal_native_surface(
+                    self.handle.as_ptr(),
+                    handle.map_or(std::ptr::null_mut(), NonNull::as_ptr),
+                )
+            },
+            "set shared surface",
+        )?;
+        self.surface = surface;
+        Ok(())
+    }
+
+    pub fn present(&self, after: u64) -> Result<Option<u64>, i32> {
+        let mut id = u64::MAX;
+        let status = unsafe { metal_native_present(self.handle.as_ptr(), after, &mut id) };
+        if status == 0 {
+            assert!(id > after);
+            Ok(Some(id))
+        } else {
+            assert_eq!(id, 0);
+            if status == 1 { Ok(None) } else { Err(status) }
+        }
+    }
+
+    pub fn capture(&self, id: u64, extent: Extent2D, rgba: &mut [u8]) -> Result<(), i32> {
+        let status = unsafe {
+            metal_native_capture(
+                self.handle.as_ptr(),
+                id,
+                extent.width,
+                extent.height,
+                rgba.as_mut_ptr(),
+                rgba.len() as u64,
+            )
+        };
+        if status == 0 { Ok(()) } else { Err(status) }
+    }
+
+    pub fn wrong_thread_status(&self) -> i32 {
+        let handle = self.handle.as_ptr() as usize;
+        std::thread::spawn(move || {
+            let mut id = u64::MAX;
+            let status = unsafe { metal_native_present(handle as *mut c_void, 0, &mut id) };
+            assert_eq!(id, 0);
+            status
+        })
+        .join()
+        .unwrap()
+    }
+}
+
+impl Drop for NativeHost<'_> {
+    fn drop(&mut self) {
+        unsafe { metal_native_close(self.handle.as_ptr()) };
     }
 }

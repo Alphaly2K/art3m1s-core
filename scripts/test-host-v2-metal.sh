@@ -10,5 +10,6 @@ fi
 bash scripts/test-host-v2.sh "$@"
 build_dir="${ART3M1S_V2_TARGET_DIR:-target/host-v2}"
 lib_dir="$(cd "$build_dir/debug" && pwd)"
+cargo build --locked --manifest-path crates/artemis-metal-host/Cargo.toml --target-dir target "$@"
 cargo run --locked --manifest-path tools/host-smoke/Cargo.toml --target-dir target "$@" \
-  -- "$lib_dir/libart3m1s_core.dylib"
+  -- "$lib_dir/libart3m1s_core.dylib" "$PWD/target/debug/libart3m1s_artemis_metal_host.dylib"
