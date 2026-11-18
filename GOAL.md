@@ -27,9 +27,14 @@ macOS 运行经验；Artemis 仍需确认原版采用的编译 profile、所选 
 两个 profile 均编译出预期字节码；生成的 MSL 资源槽位有重叠，绘制后仍是清屏色。关闭
 Metal argument buffers 的复跑仍有该错误。该发行组合的 D3D9 着色器路径暂不接入生产。
 
-后续先用真实游戏的着色器数据或原版编译调用确认 profile 和资源布局，再用支持 D3D9 的候选
-组合重跑双采样器对照。IOSurface 验证需要在合成像素通过后取得可共享渲染目标，并验证宿主的
-同步、尺寸和重建。实测发行版声明 `VK_EXT_metal_objects`，设备创建日志未启用它。
+另行构建 Swingby DXVK (`1c15610`，基于 2.4.1) 并搭配官方 MoltenVK 1.4.2。装载日志确认
+测试使用指定的 DLL 与 Vulkan 库，两个 profile 均通过原有 16 个像素的逐通道检查。
+该 DXVK 分支明确面向二维普通纹理采样，候选的兼容范围仍需用真实着色器对照。
+
+独立原生探针启用 `VK_EXT_metal_objects`，把 Host 分配的 7×5 BGRA IOSurface 导入 MoltenVK，
+验证连续两帧的像素在同一个 CoreVideo 缓冲区中可见。当前 Wine/DXVK 设备未启用该扩展；
+原生测试不经过 Wine。下一步验证 Wine 渲染目标的共享或拷贝路径及 Flutter 的同步和重建。
+原版游戏的实际编译调用、profile、采样器与常量布局尚缺对照输入，继续保留生产接入门槛。
 
 ## 已完成：macOS Flutter 脚本 HTTP
 

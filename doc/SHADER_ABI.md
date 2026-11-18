@@ -74,8 +74,8 @@ On macOS with CrossOver and MinGW, select a dedicated 64-bit Windows test
 bottle and run:
 
 ```sh
-CX_BOTTLE=<test-bottle> bash scripts/test-host-dxvk.sh wined3d
-CX_BOTTLE=<test-bottle> bash scripts/test-host-dxvk.sh dxvk
+CX_BOTTLE=DedicatedTestBottle bash scripts/test-host-dxvk.sh wined3d
+CX_BOTTLE=DedicatedTestBottle bash scripts/test-host-dxvk.sh dxvk
 ```
 
 Set `CROSSOVER_ROOT` for an alternate CrossOver installation and
@@ -84,3 +84,32 @@ both a DXVK version line and MoltenVK device creation. Both modes compile
 synthetic HLSL and check a 4×4 GPU readback for each shader profile. A pixel
 mismatch fails the run even when the draw call itself succeeded. The probe
 does not need game files and is outside the default test suite.
+
+To test a candidate instead of CrossOver's bundled DXVK, set both
+`ARTEMIS_DXVK_D3D9_DLL` to a native Windows DLL of the same architecture
+as the probe and `ARTEMIS_MOLTENVK_DYLIB` to the absolute path to its
+MoltenVK library. The script reports the loaded version of each.
+
+On Apple Silicon the passing candidate used Swingby DXVK (`1c15610`, based
+on DXVK 2.4.1) and public MoltenVK 1.4.2. Build the candidate from that
+source revision with its initialized submodules, Meson, MinGW and glslang:
+
+```sh
+meson setup build --cross-file build-win64.txt --buildtype release \
+  -Denable_dxgi=false -Denable_d3d8=false -Denable_d3d10=false -Denable_d3d11=false
+ninja -C build src/d3d9/d3d9.dll
+```
+
+Record the original runtime's observed compiler entry point, profile,
+sampler assignments and constants before comparing a game effect. A D3D9
+bytecode header identifies shader model and stage; it cannot distinguish
+compiler profiles that emit the same version token. Use the same effect,
+textures and render state for both captures, and compare the resulting pixels.
+
+`scripts/test-host-mvk-surface.sh` checks the native presentation boundary.
+Set `ARTEMIS_MOLTENVK_DYLIB` and `ARTEMIS_VULKAN_INCLUDE` from the public
+MoltenVK distribution. The probe imports the IOSurface of a BGRA
+`CVPixelBuffer`, writes two frames with Vulkan and checks each in the same
+buffer after GPU completion. It runs in a native process. A Wine backend
+must still produce or transfer into that surface, signal completion, and
+respect the Flutter texture consumer's lifetime on resize and teardown.
