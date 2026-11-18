@@ -15,6 +15,8 @@ mod frames;
 mod pointer;
 mod shader;
 mod text;
+pub(super) use edit::EditSnapshot;
+pub(super) use edit::LayerEdits;
 pub(super) use shader::SceneShaders;
 pub(super) use text::FontRead;
 
@@ -473,6 +475,7 @@ impl SceneIo {
         &mut self,
         snapshot: Option<crate::compositor::Scene>,
         shaders: Option<SceneShaders>,
+        edits: LayerEdits,
         frame: Option<HostFrame>,
     ) {
         let mut scene = self.scene.lock().unwrap();
@@ -484,7 +487,7 @@ impl SceneIo {
         scene.group_sync_layers.clear();
         scene.video_frames.clear();
         scene.pending_video_frames.clear();
-        scene.edited.clear();
+        scene.edited = edits;
         scene.emote.clear();
         if let Some(shaders) = shaders {
             scene.shaders = shaders;
@@ -497,9 +500,14 @@ impl SceneIo {
     pub(super) fn missing_snapshot_textures(
         &self,
         snapshot: &crate::compositor::Scene,
-    ) -> VecDeque<String> {
+        edits: &EditSnapshot,
+    ) -> Result<VecDeque<String>, ProtocolError> {
         let scene = self.scene.lock().unwrap();
-        snapshot
+        let required = LayerEdits::required_assets(snapshot, edits)?;
+        let missing_edits = required
+            .into_iter()
+            .filter(|file| scene.textures.get(*file).and_then(Option::as_ref).is_none());
+        Ok(snapshot
             .all_layers()
             .flat_map(|layer| {
                 let props = &layer.props;
@@ -540,10 +548,33 @@ impl SceneIo {
                     .flatten()
             }))
             .filter(|file| !file.is_empty() && !scene.textures.contains_key(*file))
+            .chain(missing_edits)
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .map(str::to_owned)
-            .collect()
+            .collect())
+    }
+
+    pub(super) fn capture_layer_edits(&self) -> Result<EditSnapshot, ProtocolError> {
+        let scene = self.scene.lock().unwrap();
+        scene.edited.capture(&scene.textures)
+    }
+
+    pub(super) fn prepare_restored_edits(
+        &self,
+        snapshot: Option<&crate::compositor::Scene>,
+        edits: EditSnapshot,
+    ) -> Result<LayerEdits, IoFailure> {
+        let scene = self.scene.lock().unwrap();
+        if let Some(snapshot) = snapshot {
+            return scene.edited.restore(snapshot, edits, &scene.textures);
+        }
+        if !edits.is_empty() {
+            return Err(IoFailure::IoError);
+        }
+        scene
+            .edited
+            .restore(&crate::compositor::Scene::default(), edits, &scene.textures)
     }
 
     pub(super) fn prepare_asset(&mut self, event: &Event) -> Option<IoRequest> {

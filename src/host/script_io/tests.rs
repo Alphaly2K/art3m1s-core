@@ -3227,27 +3227,7 @@ __engine:setMagicPath{'effects', 'shaders'}
     host.asset("menu.hlsl", second);
     host.asset("mask.png", &png_bytes(1, 1, &mask));
     host.asset("user.png", &png_bytes(1, 1, &user));
-    let drive = |session: &mut ScriptIoSession, host: &mut MemoryHost, frame| {
-        for _ in 0..2048 {
-            let progress = session.step_queued_frame(frame).unwrap();
-            session.publish_frame(progress).unwrap();
-            for request in requests(session) {
-                let response = if request.identity.service == RENDER_CAPTURE {
-                    reply(&request, json!({"status":"ok"}), vec![])
-                } else {
-                    host.complete(&request)
-                };
-                session.submit_replies(&[response]).unwrap();
-            }
-            match progress {
-                ScriptIoProgress::Event => return,
-                ScriptIoProgress::Waiting => {}
-                other => panic!("unexpected shader restore progress: {other:?}"),
-            }
-        }
-        panic!("shader scenario did not reach a wait");
-    };
-    drive(&mut saver, &mut host, playback_frame(1, 0));
+    drive_display_snapshot(&mut saver, &mut host, playback_frame(1, 0));
     let bytes = &host.files[&("save".into(), "slot".into())].1;
     let file: HostSaveFile = serde_json::from_slice(bytes).unwrap();
     assert_eq!(
@@ -3277,14 +3257,14 @@ __engine:setMagicPath{'effects', 'shaders'}
             None,
         )
         .unwrap();
-    drive(&mut loader, &mut host, playback_frame(1, 0));
+    drive_display_snapshot(&mut loader, &mut host, playback_frame(1, 0));
     let menu = loader.frames.latest_snapshot().unwrap();
     let menu_shader = &menu.sprites[0].shader.as_ref().unwrap().shader;
     assert_eq!(menu_shader.source.as_ref(), second);
 
     host.files
         .remove(&("asset".into(), "shaders/original.hlsl".into()));
-    drive(&mut loader, &mut host, playback_frame(2, 1));
+    drive_display_snapshot(&mut loader, &mut host, playback_frame(2, 1));
     assert_eq!(loader.interpreter().current_script(), Some("load.iet"));
     assert_eq!(
         loader.frames.latest_snapshot().unwrap().render_frame_id,
@@ -3292,7 +3272,7 @@ __engine:setMagicPath{'effects', 'shaders'}
     );
 
     host.asset("shaders/original.hlsl", first);
-    drive(&mut loader, &mut host, playback_frame(3, 2));
+    drive_display_snapshot(&mut loader, &mut host, playback_frame(3, 2));
     let frame = loader.frames.latest_snapshot().unwrap();
     assert_eq!(frame.sprites[0].layer_id, "tile");
     let effect = frame.sprites[0].shader.as_ref().unwrap();
@@ -3306,6 +3286,108 @@ __engine:setMagicPath{'effects', 'shaders'}
         .unwrap();
     assert_eq!(outgoing.shader.revision, menu_shader.revision);
     assert_eq!(outgoing.shader.source.as_ref(), second);
+}
+
+fn drive_display_snapshot(session: &mut ScriptIoSession, host: &mut MemoryHost, frame: HostFrame) {
+    for _ in 0..2048 {
+        let progress = session.step_queued_frame(frame).unwrap();
+        session.publish_frame(progress).unwrap();
+        for request in requests(session) {
+            let response = if request.identity.service == RENDER_CAPTURE {
+                reply(&request, json!({"status":"ok"}), vec![])
+            } else {
+                host.complete(&request)
+            };
+            session.submit_replies(&[response]).unwrap();
+        }
+        match progress {
+            ScriptIoProgress::Event => return,
+            ScriptIoProgress::Waiting => {}
+            other => panic!("unexpected snapshot progress: {other:?}"),
+        }
+    }
+    panic!("snapshot scenario did not reach a wait");
+}
+
+#[test]
+fn numbered_load_rebuilds_captured_edits_through_host_assets() {
+    let base = [0, 50, 200, 255, 71, 24, 8, 255];
+    let overlay = [8, 30, 60, 255];
+    let expected = [255, 205, 55, 255, 8, 30, 60, 255];
+    let (mut saver, _, mut host) = playback_project(
+        br#"*top
+[lyc id=image file=base]
+[lyedit id=image mode=negative]
+[lyedit id=image mode=blend file=overlay left=1]
+[takess]
+[lyc id=image file=base]
+[save file=slot]
+[wt0]
+[lyedit id=image mode=negative]
+[stop]
+"#,
+    );
+    host.asset("base.png", &png_bytes(2, 1, &base));
+    host.asset("overlay.png", &png_bytes(1, 1, &overlay));
+    drive_display_snapshot(&mut saver, &mut host, playback_frame(1, 0));
+    let bytes = &host.files[&("save".into(), "slot".into())].1;
+    let file: HostSaveFile = serde_json::from_slice(bytes).unwrap();
+    assert_eq!(file.layer_edits["image"].len(), 2);
+
+    host.asset(
+        "load.iet",
+        br#"*top
+[lyc id=image file=base]
+[lyedit id=image mode=gray]
+[flip]
+[load file=slot]
+[wait time=0 input=0]
+[load file=slot]
+[stop]
+"#,
+    );
+    let mut loader = session(2, TransportLimits::default(), 4096);
+    let epoch = loader
+        .open_queued_project(
+            b"[WINDOWS]\nWIDTH=4\nHEIGHT=4\nBOOT=load.iet\n",
+            "windows",
+            None,
+        )
+        .unwrap();
+    drive_display_snapshot(&mut loader, &mut host, playback_frame(1, 0));
+    let menu = loader.frames.latest_snapshot().unwrap();
+    let menu_texture = menu.texture(menu.sprites[0].texture).unwrap();
+    let gray = [52, 52, 52, 255, 36, 36, 36, 255];
+    assert_eq!(menu_texture.rgba(), gray);
+
+    host.files.remove(&("asset".into(), "overlay.png".into()));
+    drive_display_snapshot(&mut loader, &mut host, playback_frame(2, 1));
+    assert_eq!(loader.interpreter().current_script(), Some("load.iet"));
+    assert_eq!(
+        loader.frames.latest_snapshot().unwrap().render_frame_id,
+        menu.render_frame_id
+    );
+
+    host.asset("overlay.png", &png_bytes(1, 1, &overlay));
+    host.reads.clear();
+    drive_display_snapshot(&mut loader, &mut host, playback_frame(3, 2));
+    assert!(host.reads.contains(&("overlay.png".into(), 0)));
+    let restored = loader.frames.latest_snapshot().unwrap();
+    let pixels = restored.texture(restored.sprites[0].texture).unwrap();
+    assert_ne!(pixels.revision, menu_texture.revision);
+    assert_eq!(pixels.rgba(), expected);
+    submit_playback_keys(&mut loader, epoch, &[(13, true)]);
+    drive_display_snapshot(&mut loader, &mut host, playback_frame(4, 3));
+    let modified = loader.frames.latest_snapshot().unwrap();
+    assert_eq!(
+        modified
+            .texture(modified.sprites[0].texture)
+            .unwrap()
+            .rgba(),
+        &[0, 50, 200, 255, 247, 225, 195, 255]
+    );
+    assert_eq!(pixels.rgba(), expected);
+    assert_eq!(menu_texture.rgba(), gray);
 }
 
 #[test]

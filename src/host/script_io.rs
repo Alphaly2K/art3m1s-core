@@ -206,6 +206,8 @@ struct HostSaveFile {
     save: crate::save::SaveData,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     shader_assets: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    layer_edits: scene::EditSnapshot,
 }
 
 enum ScenarioStep {
@@ -1294,21 +1296,39 @@ impl ScriptIoSession {
             save = save.with_gameplay_checkpoint(checkpoint);
         }
         let mut shader_assets = None;
+        let mut layer_edits = Ok(scene::EditSnapshot::new());
         if let Some(scene) = &self.scene {
             if let Some(capture) = &self.screenshot.captured {
                 save.scene = Some(capture.scene.clone());
                 save.message_text = capture.text.clone();
                 shader_assets = capture.shaders.clone();
+                layer_edits = capture.edits.clone();
             } else {
                 save.scene = Some(self.capture_scene_snapshot(scene));
                 save.message_text = scene.capture_text();
                 shader_assets = scene.capture_shader_assets();
+                layer_edits = scene.capture_layer_edits();
             }
             save.audio = Some(self.audio.snapshot());
         }
+        let layer_edits = match layer_edits {
+            Ok(edits) => edits,
+            Err(error) => {
+                return Ok(self.finish_save(SaveResult::Failed {
+                    kind: if error == ProtocolError::Limit {
+                        IoFailure::Limit
+                    } else {
+                        IoFailure::IoError
+                    },
+                    message: error.to_string(),
+                    files_written: 0,
+                }));
+            }
+        };
         let data = match serde_json::to_vec(&HostSaveFile {
             save,
             shader_assets,
+            layer_edits,
         }) {
             Ok(data) => data,
             Err(error) => return self.fail_save_hook(error),
@@ -1412,7 +1432,8 @@ impl ScriptIoSession {
                     || ((save.scene.is_some()
                         || save.audio.is_some()
                         || save.message_text.is_some()
-                        || file.shader_assets.is_some())
+                        || file.shader_assets.is_some()
+                        || !file.layer_edits.is_empty())
                         && self.scene.is_none())
                 {
                     return Ok(self.fail_numbered_load(
@@ -1666,7 +1687,18 @@ impl ScriptIoSession {
             if !snapshot.valid_host_snapshot() {
                 return Ok(self.fail_numbered_load(IoFailure::IoError, "invalid saved scene tree"));
             }
-            let mut remaining = scene.missing_snapshot_textures(snapshot);
+            let mut remaining =
+                match scene.missing_snapshot_textures(snapshot, &load.file.layer_edits) {
+                    Ok(files) => files,
+                    Err(error) => {
+                        let kind = if error == ProtocolError::Limit {
+                            IoFailure::Limit
+                        } else {
+                            IoFailure::IoError
+                        };
+                        return Ok(self.fail_numbered_load(kind, error.to_string()));
+                    }
+                };
             if remaining.iter().any(|file| logical_key(file).is_err()) {
                 return Ok(self.fail_numbered_load(IoFailure::Denied, "invalid saved texture path"));
             }
@@ -1733,10 +1765,22 @@ impl ScriptIoSession {
             None
         };
         let PreparedLoad {
-            file: HostSaveFile { save, .. },
+            file: HostSaveFile {
+                save, layer_edits, ..
+            },
             scripts,
             shaders,
         } = *load;
+        let edits = if let Some(scene) = &self.scene {
+            match scene.prepare_restored_edits(save.scene.as_ref(), layer_edits) {
+                Ok(edits) => edits,
+                Err(kind) => {
+                    return Ok(self.fail_numbered_load(kind, "could not restore saved layer edits"));
+                }
+            }
+        } else {
+            scene::LayerEdits::default()
+        };
         let stack = save.call_stack.into_iter().map(Into::into).collect();
         let result = self.interpreter.restore_position_with_host_scripts(
             &save.current_script,
@@ -1757,7 +1801,7 @@ impl ScriptIoSession {
             self.interpreter.hold_queued_input_wait();
         }
         if let Some(scene) = &mut self.scene {
-            scene.restore_snapshot(save.scene, shaders, self.frame);
+            scene.restore_snapshot(save.scene, shaders, edits, self.frame);
             scene.restore_text(save.message_text);
         }
         self.audio.commit_restore(audio, &mut self.transport)?;

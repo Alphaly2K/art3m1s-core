@@ -28,6 +28,7 @@ pub(super) struct CapturedScene {
     pub(super) scene: Scene,
     pub(super) text: Option<MessageTextSnapshot>,
     pub(super) shaders: Option<BTreeMap<String, String>>,
+    pub(super) edits: Result<scene::EditSnapshot, ProtocolError>,
 }
 
 impl Screenshot {
@@ -88,6 +89,7 @@ impl ScriptIoSession {
                                 scene: self.capture_scene_snapshot(scene),
                                 text: scene.capture_text(),
                                 shaders: scene.capture_shader_assets(),
+                                edits: scene.capture_layer_edits(),
                             })),
                         ));
                         return Ok(Some(ScriptIoProgress::Waiting));
