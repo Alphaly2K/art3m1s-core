@@ -62,6 +62,8 @@ bash scripts/test-host-v2-metal.sh
 macOS 应用也可以用 `cargo build --locked --manifest-path crates/artemis-metal-host/Cargo.toml`
 构建独立渲染库，通过 [Metal Host C 接口](abi/art3m1s_metal_host_v1.h) 接收 v2 帧并呈现到
 应用提供的 IOSurface。Core 和渲染库分别打包；调用顺序见 [v2 契约](HOST_ABI_V2.md#9-rust-公开面与-sdk)。
+Swift 应用可使用同一契约中的 `ArtemisMacSession` 管理主线程上的 v2 会话与绘制，应用自行处理
+资源、媒体及纹理注册。使用 `bash scripts/test-host-v2-swift.sh` 运行合成项目的异步 IO 与呈现检查。
 
 Rust Host 通过 `host::ResourceProvider` 提供逻辑资源，通过
 `CoreRuntime::with_host_backend` 提供 renderer，入口不自行选择平台 GPU：

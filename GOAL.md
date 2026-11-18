@@ -10,8 +10,14 @@
 
 继续核对剩余快照字段、实机画面对照和生产 Host 接入。
 v2 预览已提供独立构建、C 内存 Host 和 Dart 封装；Linux、Windows 原生 CI 和生产 Host 切换待完成。
-生产 Flutter 先接 Artemis 的 Metal 共享纹理路径。原生绘制和截图入口已可独立构建；下一步由应用
-在同一 OS 线程管理 v2 runtime 与绘制，接入应用帧循环、资源和媒体。
+生产 Flutter 先接 Artemis 的 Metal 共享纹理路径。Core 和 Metal 动态库已通过 Swift 主线程
+会话联调。下一步将会话接入 Flutter 帧循环和纹理注册，接通实际资源、存档和媒体。
+
+## 已完成：Swift 主线程会话与异步 IO 联调
+
+Swift 会话在主线程管理 v2 runtime、事件、截图和 IOSurface。真机验证使用后台任务执行短读和
+原子写入；Lua 从原帧恢复，写入拒绝后以新的请求身份重试，已执行的 Lua 副作用不重放。探针还
+验证大事件、重复回复、串会话回复、截图和纹理重建后的重绘。生产 Flutter 暂未接入该会话。
 
 ## 已完成：macOS 原生应用绘制入口
 

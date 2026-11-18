@@ -657,6 +657,16 @@ Host 每次推进逻辑并处理请求后可尝试呈现；只在 `present` 返�
 应用保留截图、写入缩略图并提交请求结果。只有同时接入读取和保存流程才声明
 `ART_RENDERER_CAP_SCREENSHOT`。渲染库不负责调度、资源 IO、媒体或 Flutter 纹理注册。
 
+Swift 应用可使用 [ArtemisMacSession](../tools/host-bindings/swift/ArtemisMacSession.swift)，通过
+[桥接头](../tools/host-bindings/swift/ArtemisHostBridge.h) 导入 `doc/abi` 的 C 类型。会话在
+主线程管理 runtime 与渲染器；`pollEvents` 返回可交给后台任务的自有数据，`event.reply` 保留
+原请求身份。应用在主线程提交完成结果；批次未受理时保留原批次重试。等待 IO 时使用原 Host
+帧号和时钟继续推进。`setSurface` 持有应用提供的 `CVPixelBuffer`；`present` 只有实际提交
+共享画面时才返回帧 ID。应用应在卸载库或退出玩家视图前显式关闭会话。
+
+`bash scripts/test-host-v2-swift.sh` 使用真实的 Core 和 Metal 动态库验证上述 Swift 接入，
+需要 macOS 和 Metal 设备，无需 Flutter 或外部游戏文件。
+
 在 `tools/host-bindings/dart` 目录运行 `dart pub get --enforce-lockfile` 后，使用
 `dart run bin/smoke.dart <纯 Core 动态库路径>` 可验证 Dart 接入。`artemis_host.dart` 的
 `ArtemisSession` 负责协商接口、推进帧以及收发消息。同一会话的创建、调用与关闭须在同一
