@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 pub(crate) mod read_history;
 pub(crate) mod system;
 
+pub(crate) const AUTOSAVE_FILE: &str = "__Autosave.dat";
+
 pub(crate) fn sanitize_savepath(raw: Option<&str>) -> String {
     let normalized = raw.unwrap_or_default().replace('\\', "/");
     let cleaned = normalized

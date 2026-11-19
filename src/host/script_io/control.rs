@@ -38,6 +38,7 @@ pub(super) struct PlaybackControl {
     avoid: bool,
     avoid_dirty: bool,
     check_read: bool,
+    pub(super) autosave_allow: i32,
     ready_since: Option<u64>,
     input_frame: Option<u64>,
     blocked_click: Option<u64>,
@@ -76,6 +77,7 @@ impl Default for PlaybackControl {
             avoid: false,
             avoid_dirty: false,
             check_read: true,
+            autosave_allow: 0,
             ready_since: None,
             input_frame: None,
             blocked_click: None,
@@ -405,6 +407,7 @@ impl ScriptIoSession {
                 }
             }
             Some(Event::AlreadyReadConfig { mode }) => self.control.check_read = mode != 0,
+            Some(Event::AutoSaveConfig { allow }) => self.control.autosave_allow = allow,
             Some(Event::HideConfig { allow, window }) => {
                 self.control.hide_allowed = allow;
                 if let Some(window) = window {

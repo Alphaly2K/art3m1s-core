@@ -151,12 +151,17 @@ enum EventFilterWork {
     Ready(EventFilterDecision),
 }
 
+enum SaveTarget {
+    System,
+    Named { key: String, file: String },
+    Automatic,
+}
+
 enum SaveWork {
-    Queued {
-        key: Option<String>,
-    },
+    Queued(SaveTarget),
     Hook {
         key: String,
+        automatic: bool,
     },
     Writing {
         remaining: VecDeque<(String, Vec<u8>)>,
@@ -684,10 +689,15 @@ impl ScriptIoSession {
         if self.event_filter.is_some() || self.operation.is_some() || self.cancelled {
             return Err(ProtocolError::WouldBlock);
         }
-        let key = (!file.is_empty())
-            .then(|| self.save_key(file))
-            .transpose()?;
-        self.save_work = Some(SaveWork::Queued { key });
+        let target = if file.is_empty() {
+            SaveTarget::System
+        } else {
+            SaveTarget::Named {
+                key: self.save_key(file)?,
+                file: file.clone(),
+            }
+        };
+        self.save_work = Some(SaveWork::Queued(target));
         Ok(())
     }
 
@@ -902,7 +912,7 @@ impl ScriptIoSession {
                 || self.save_work.as_ref().is_some_and(|work| {
                     !matches!(
                         (&self.shutdown, work),
-                        (Shutdown::Saving, SaveWork::Queued { .. })
+                        (Shutdown::Saving, SaveWork::Queued(_))
                     )
                 })
                 || self.numbered_load.is_some()
@@ -1303,24 +1313,29 @@ impl ScriptIoSession {
         work: SaveWork,
         response: Option<IoResponse>,
     ) -> Result<ScenarioStep, ScriptIoError> {
-        let key = match work {
-            SaveWork::Queued { key: None } => return self.start_save_writes(None),
-            SaveWork::Queued { key: Some(key) } => {
-                let Some(Event::SaveGame { file }) = &self.scenario_event else {
-                    return Err(ProtocolError::State.into());
+        let (key, automatic) = match work {
+            SaveWork::Queued(target) => {
+                let (key, file, automatic) = match target {
+                    SaveTarget::System => return self.start_save_writes(None),
+                    SaveTarget::Named { key, file } => (key, file, false),
+                    SaveTarget::Automatic => (
+                        crate::save::AUTOSAVE_FILE.into(),
+                        crate::save::AUTOSAVE_FILE.into(),
+                        true,
+                    ),
                 };
-                if let Err(error) = self.interpreter.start_host_save_hook(file) {
+                if let Err(error) = self.interpreter.start_host_save_hook(&file) {
                     return self.fail_save_hook(error);
                 }
-                key
+                (key, automatic)
             }
-            SaveWork::Hook { key } => {
+            SaveWork::Hook { key, automatic } => {
                 if let Some(response) = response
                     && let Err(error) = self.interpreter.resume_host_io(response)
                 {
                     return self.fail_save_hook(error);
                 }
-                key
+                (key, automatic)
             }
             SaveWork::Writing {
                 mut remaining,
@@ -1364,14 +1379,16 @@ impl ScriptIoSession {
         match self.interpreter.finish_host_save_hook() {
             Ok(IoProgress::Completed) => {}
             Ok(IoProgress::Waiting) => {
-                self.save_work = Some(SaveWork::Hook { key });
+                self.save_work = Some(SaveWork::Hook { key, automatic });
                 return self.interpreter_request();
             }
             Err(error) => return self.fail_save_hook(error),
         }
         let mut save = crate::save::SaveData::from_interpreter(&self.interpreter);
-        save.current_line = self.interpreter.position_after_event();
-        save.waiting_for_input = Some(false);
+        if self.scenario_event.is_some() {
+            save.current_line = self.interpreter.position_after_event();
+        }
+        save.waiting_for_input = Some(automatic && self.at_input_wait());
         if let Some(checkpoint) = &self.gameplay_checkpoint
             && checkpoint.is_ancestor_of(&save.current_script, &save.call_stack)
             && save.call_stack[checkpoint.call_stack.len()].return_line == checkpoint.line
@@ -1381,7 +1398,7 @@ impl ScriptIoSession {
         let mut shader_assets = None;
         let mut layer_edits = Ok(scene::EditSnapshot::new());
         if let Some(scene) = &self.scene {
-            if let Some(capture) = &self.screenshot.captured {
+            if !automatic && let Some(capture) = &self.screenshot.captured {
                 save.scene = Some(capture.scene.clone());
                 save.message_text = capture.text.clone();
                 shader_assets = capture.shaders.clone();

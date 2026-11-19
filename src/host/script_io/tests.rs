@@ -1312,13 +1312,15 @@ fn shutdown_waits_for_confirmations_and_reports_partial_persistence() {
         utc_unix_ms: 0,
         utc_offset_minutes: 0,
     };
-    for fail_final_write in [false, true] {
+    for (autosave, fail_final_write) in [(false, false), (false, true), (true, false), (true, true)]
+    {
         let handle = runtime::create(0, TransportLimits::default(), 4096).unwrap();
         let mut host = MemoryHost::default();
-        host.asset(
-            "boot.iet",
-            b"*top\n[var name=g.saved data=hello]\n[exit]\n[caption data=unreachable]\n",
+        let script = format!(
+            "*top\n[autosave allow={}]\n[var name=g.saved data=hello]\n[exit]\n[caption data=unreachable]\n",
+            i32::from(autosave)
         );
+        host.asset("boot.iet", script.as_bytes());
         let epoch = runtime::open_project(handle, ini, "windows", None).unwrap();
         let poll = || {
             let mut bytes = vec![0; 4096];
@@ -1374,7 +1376,11 @@ fn shutdown_waits_for_confirmations_and_reports_partial_persistence() {
             )))
         ));
 
-        for key in ["saveg.dat", "system.dat"] {
+        let files = autosave
+            .then_some("__autosave.dat")
+            .into_iter()
+            .chain(["saveg.dat", "system.dat"]);
+        for key in files {
             assert_eq!(
                 runtime::step(handle, frame).unwrap(),
                 ScriptIoProgress::Waiting
@@ -1407,7 +1413,7 @@ fn shutdown_waits_for_confirmations_and_reports_partial_persistence() {
         if fail_final_write {
             assert_eq!(
                 saved,
-                json!({"save_status":"failed","reason":"denied","files_written":1})
+                json!({"save_status":"failed","reason":"denied","files_written":1 + u8::from(autosave)})
             );
         } else {
             assert_eq!(saved, json!({"save_status":"written"}));
@@ -1824,6 +1830,62 @@ fn drive_playback_boot(session: &mut ScriptIoSession, host: &mut MemoryHost) {
         }
     }
     panic!("project did not reach its first wait");
+}
+
+#[test]
+fn autosave_writes_once_per_input_wait_and_preserves_the_wait() {
+    let (mut session, epoch, mut host) = playback_project(
+        br#"*top
+[lua]
+function save_hook(e, p)
+    e:tag{"var", name="memsave.saved_file", data=p.file}
+end
+__engine:setEventHandler{onSave="save_hook"}
+[/lua]
+[autosave allow=2]
+[wt0]
+[var name=t.advanced data=1]
+[wt0]
+"#,
+    );
+    let key = ("save".into(), "__autosave.dat".into());
+    drive_playback_boot(&mut session, &mut host);
+    let (revision, bytes) = &host.files[&key];
+    let saved: HostSaveFile = serde_json::from_slice(bytes).unwrap();
+    assert_eq!(*revision, 1);
+    assert_eq!(saved.save.waiting_for_input, Some(true));
+    assert_eq!(
+        saved.save.variables.get("memsave.saved_file"),
+        Some(&asb_interpreter::Value::from(crate::save::AUTOSAVE_FILE))
+    );
+    let saved_line = saved.save.current_line;
+    assert_eq!(
+        session.step_queued_frame(playback_frame(2, 16)).unwrap(),
+        ScriptIoProgress::Event
+    );
+    assert!(requests(&mut session).is_empty());
+    assert_eq!(session.interpreter.get_variable("t.advanced"), None);
+
+    submit_playback_keys(&mut session, epoch, &[(1, true)]);
+    let frame = playback_frame(3, 32);
+    for expected in ["__autosave.dat", "saveg.dat", "system.dat"] {
+        assert_eq!(
+            session.step_queued_frame(frame).unwrap(),
+            ScriptIoProgress::Waiting
+        );
+        let request = requests(&mut session).pop().unwrap();
+        assert_eq!(request.metadata["key"], expected);
+        session.submit_replies(&[host.complete(&request)]).unwrap();
+    }
+    assert_eq!(
+        session.step_queued_frame(frame).unwrap(),
+        ScriptIoProgress::Event
+    );
+    let (revision, bytes) = &host.files[&key];
+    let saved: HostSaveFile = serde_json::from_slice(bytes).unwrap();
+    assert_eq!(*revision, 2);
+    assert!(saved.save.current_line > saved_line);
+    assert_eq!(saved.save.waiting_for_input, Some(true));
 }
 
 #[test]

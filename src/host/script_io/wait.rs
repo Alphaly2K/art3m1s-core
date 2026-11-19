@@ -36,6 +36,15 @@ impl ScriptIoSession {
         )
     }
 
+    pub(super) fn at_input_wait(&self) -> bool {
+        matches!(
+            self.scenario_event,
+            Some(Event::Wait {
+                reason: WaitReason::Generic | WaitReason::Generic0 | WaitReason::KeyWait { .. }
+            })
+        )
+    }
+
     pub(super) fn advance_frame_wait(
         &mut self,
         frame: HostFrame,
@@ -44,12 +53,14 @@ impl ScriptIoSession {
             return Err(ProtocolError::State);
         };
         let reason = reason.clone();
-        let interactive = matches!(
-            reason,
-            WaitReason::Generic | WaitReason::Generic0 | WaitReason::KeyWait { .. }
-        );
+        let interactive = self.at_input_wait();
         if interactive && self.wait_start.is_none() {
             self.capture_gameplay_wait();
+            if self.control.autosave_allow == 2 {
+                self.wait_start = Some((frame.id, frame.monotonic_ns));
+                self.save_work = Some(SaveWork::Queued(SaveTarget::Automatic));
+                return Ok(None);
+            }
         }
         let auto = interactive && self.auto_ready(frame);
         let skipping = self.control.skipping()

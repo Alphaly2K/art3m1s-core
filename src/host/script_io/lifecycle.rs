@@ -53,7 +53,11 @@ impl ScriptIoSession {
         self.frame_handler_due = false;
         self.translations.clear(&mut self.transport);
         self.shutdown = Shutdown::Saving;
-        self.save_work = Some(SaveWork::Queued { key: None });
+        self.save_work = Some(SaveWork::Queued(if self.control.autosave_allow == 1 {
+            SaveTarget::Automatic
+        } else {
+            SaveTarget::System
+        }));
         Ok(())
     }
 
@@ -143,6 +147,9 @@ impl ScriptIoSession {
                 ScriptIoProgress::SaveReady if self.shutdown.is_closing_or_closed() => {
                     self.notify_closed().map(Some)
                 }
+                ScriptIoProgress::SaveReady if !self.has_persistence_event() => self
+                    .finish_wait_autosave()
+                    .map(|()| Some(ScriptIoProgress::Event)),
                 ScriptIoProgress::SaveReady | ScriptIoProgress::LoadReady => {
                     self.finish_persistence(progress).map(|()| None)
                 }

@@ -38,6 +38,16 @@ impl ScriptIoSession {
         )
     }
 
+    pub(super) fn finish_wait_autosave(&mut self) -> Result<(), ProtocolError> {
+        if let SaveResult::Failed { kind, .. } =
+            self.take_save_result().ok_or(ProtocolError::State)?
+        {
+            crate::core_warn!("automatic save failed: {}", kind.as_str());
+        }
+        self.save_work = None;
+        Ok(())
+    }
+
     pub(super) fn start_persistence(&mut self) -> Result<(), ProtocolError> {
         let saving = matches!(self.scenario_event, Some(Event::SaveGame { .. }));
         let result = if saving {

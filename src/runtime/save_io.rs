@@ -1,15 +1,12 @@
 use super::CoreRuntime;
 use crate::backend::{TextureData, TextureDesc};
-use crate::save::AudioSnapshot;
 use crate::save::read_history::AREAD_FILE;
 use crate::save::system::{
     SAVEG_FILE, SYSTEM_FILE, apply_persistent_variables, persistent_system_snapshot,
 };
+use crate::save::{AUTOSAVE_FILE, AudioSnapshot};
 use image::ImageEncoder;
 use std::collections::HashMap;
-
-/// [autosave] 自动保存的存档文件名。
-const AUTOSAVE_FILE: &str = "__Autosave.dat";
 
 #[derive(Clone)]
 pub(super) struct ScreenshotBuffer {
