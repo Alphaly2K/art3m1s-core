@@ -170,6 +170,22 @@ uint32_t art_d3d11_constant_bytes(const ArtD3D11Program *program) {
     return program ? program->constant_bytes : 0;
 }
 
+HRESULT art_d3d11_texture_binding(const ArtD3D11Program *program, const char *name,
+                                  uint32_t *slot, uint32_t *count) {
+    if (!program || !name || !slot || !count) return E_INVALIDARG;
+    ID3D11ShaderReflection *reflection = program->reflection;
+    D3D11_SHADER_INPUT_BIND_DESC binding;
+    HRESULT result = reflection->lpVtbl->GetResourceBindingDescByName(reflection, name, &binding);
+    if (FAILED(result) || binding.Type != D3D_SIT_TEXTURE || binding.Dimension != D3D_SRV_DIMENSION_TEXTURE2D) {
+        *slot = UINT32_MAX;
+        *count = 0;
+        return S_FALSE;
+    }
+    *slot = binding.BindPoint;
+    *count = binding.BindCount;
+    return S_OK;
+}
+
 HRESULT art_d3d11_set_uniform(const ArtD3D11Program *program, const char *name,
                               const float *values, uint32_t count, void *block, size_t bytes) {
     if (!program || !name || !values || !block) return E_INVALIDARG;

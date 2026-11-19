@@ -95,6 +95,15 @@ if [[ $worker == 1 ]]; then
   cargo build --quiet --locked --manifest-path crates/artemis-shader-host/Cargo.toml \
     --target-dir target/shader-host --example smoke
   client="$PWD/target/shader-host/debug/examples/smoke"
+  if [[ ${ARTEMIS_D3D11_ARFP:-0} == 1 ]]; then
+    core_build=${ART3M1S_V2_TARGET_DIR:-target/host-v2}
+    cargo build --quiet --locked --lib --manifest-path crates/artemis-core/Cargo.toml --target-dir "$core_build"
+    core_lib=$(cd "$core_build/debug" && pwd)
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -pedantic -Idoc/abi tools/host-smoke/artemis_v2.c \
+      -L"$core_lib" -lart3m1s_core -Wl,-rpath,"$core_lib" -o "$scratch/arfp"
+    "$scratch/arfp" --shader-frame > "$scratch/frame"
+    export ARTEMIS_D3D11_FRAME="$scratch/frame"
+  fi
   (cd "$scratch"
    CX_GRAPHICS_BACKEND=$graphics_backend DXVK_LOG_LEVEL=info MVK_CONFIG_LOG_LEVEL=3 \
      "$client" "$crossover/bin/wine" "${wine_args[@]}" "artemis-$api.exe") \
@@ -106,7 +115,8 @@ else
 fi
 
 awk '/^info: +DXVK: / && !dxvk++ || /MoltenVK version/ && !mvk++ ||
-     /Created VkDevice|D3D9 adapter:|D3D11 device:|D3D11 interop:|^[pv]s_[235]_0|failed:|cannot reserve|^err:|^Error:|panicked at/' \
+     /Created VkDevice|D3D9 adapter:|D3D11 device:|D3D11 interop:|^[pv]s_[235]_0|^\[mvk-error\]|failed:|cannot reserve|^err:|^Error:/ ||
+     /panicked at/ { print; if (/panicked at/ && getline > 0) print }' \
      "$scratch/result.log"
 if [[ $backend == dxvk ]]; then
   if ! grep -Eq '^info: +DXVK: ' "$scratch/result.log" ||

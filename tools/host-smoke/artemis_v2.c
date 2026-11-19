@@ -17,19 +17,20 @@ static const char boot[] = "*top\n[lyc id=1 width=2 height=1 color=ff112233]\n"
                            "[caption data=ready]\n[@]\n[caption data=advanced]\n[stop]\n";
 #define SHADER_SCENE \
     "[lyc id=1 width=4 height=4 color=ff112233]\n"
-#define SHADER_EFFECT \
-    "[lyprop id=1 shader=paint shaderconstant=tint tint=\"0,1,0.5,1\"]\n"
-static const char shader_boot[] = "*top\n[lyshader id=paint file=paint.hlsl]\n"
-    SHADER_SCENE SHADER_EFFECT "[flip]\n[caption data=ready]\n[stop]\n";
-static const char glsl_boot[] = "*top\n[lyshader id=paint file=paint.Frag]\n"
-    SHADER_SCENE
-    "[lyprop id=1 shader=paint shaderconstant=\"tint,param\" tint=\"0,1,0.5,1\" param=1 "
+#define SHADER_BINDINGS \
+    "[lyprop id=1 shader=paint shaderconstant=\"tint,param\" tint=\"0,1,0.5,1\" param=1 " \
     "mask=mask shadertexture=textureUser textureUser=user]\n"
-    "[flip]\n[caption data=ready]\n[stop]\n";
+static const char shader_boot[] = "*top\n[lyshader id=paint file=paint.hlsl]\n"
+    SHADER_SCENE SHADER_BINDINGS "[flip]\n[caption data=ready]\n[stop]\n";
+static const char glsl_boot[] = "*top\n[lyshader id=paint file=paint.Frag]\n"
+    SHADER_SCENE SHADER_BINDINGS "[flip]\n[caption data=ready]\n[stop]\n";
 static const char shader_ini[] = "[WINDOWS]\nWIDTH=4\nHEIGHT=4\nBOOT=boot.iet\n";
-static const char shader[] = "Texture2D textureFore : register(t2); SamplerState sam : register(s0); "
-    "cbuffer Params : register(b0) { float4 tint; }; "
-    "float4 main(float2 uv : TEXCOORD0) : SV_Target { return textureFore.Sample(sam, uv) * tint; }";
+static const char shader[] = "Texture2D textureFore : register(t2); Texture2D textureMask : register(t3); "
+    "Texture2D textureUser : register(t0); SamplerState sam : register(s0); "
+    "cbuffer Params : register(b0) { float4 tint; float param; }; "
+    "float4 main(float2 uv : TEXCOORD0) : SV_Target { "
+    "float4 fore = textureFore.Sample(sam, uv) * tint; "
+    "return float4(fore.rgb * textureMask.Sample(sam, uv).r + textureUser.Sample(sam, uv).rgb * param, fore.a); }";
 #define GLSL_BODY \
     "uniform sampler2D textureFore; uniform sampler2D samplerMask;" \
     "uniform sampler2D textureUser; uniform vec4 tint;\n" \

@@ -1,4 +1,5 @@
-use art3m1s_artemis_shader_host::{Draw, Error, Image, Worker};
+use art3m1s_artemis_shader_host::{Draw, Error, Image, TextureBinding, Worker};
+use art3m1s_render::artemis::{FramePacket, FrameShaderLanguage};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
@@ -32,8 +33,12 @@ fn smoke<R: std::io::Read, W: std::io::Write>(mut worker: Worker<R, W>) -> Resul
     ))?;
     let adjustable = worker.compile(
         b"cbuffer Params : register(b0) { float gain; float4 color; }; \
-                                    float4 main() : SV_Target { return gain * color; }",
+          Texture2D textureUser : register(t3); SamplerState sampleState : register(s0); \
+          float4 main() : SV_Target { return gain * color * textureUser.Sample(sampleState, float2(0.5, 0.5)); }",
     )?;
+    let binding = worker.texture_binding(adjustable, "textureUser")?;
+    assert_eq!(binding, Some(TextureBinding { slot: 3, count: 1 }));
+    assert_eq!(worker.texture_binding(adjustable, "unused")?, None);
     let mut draw = Draw {
         width: 4,
         height: 4,
@@ -52,6 +57,11 @@ fn smoke<R: std::io::Read, W: std::io::Write>(mut worker: Worker<R, W>) -> Resul
     assert_eq!(worker.draw(original, &draw)?, [128, 64, 32, 255].repeat(16));
     draw.width = 6;
     draw.height = 8;
+    draw.textures[binding.unwrap().slot as usize] = Some(Image {
+        width: 1,
+        height: 1,
+        bgra: &[255; 4],
+    });
     draw.uniforms = &[("gain", &[1.0, 1.0])];
     assert!(matches!(
         worker.draw(adjustable, &draw),
@@ -72,7 +82,87 @@ fn smoke<R: std::io::Read, W: std::io::Write>(mut worker: Worker<R, W>) -> Resul
     if std::env::var_os("ARTEMIS_D3D11_MEASURE").is_some() {
         measure(&mut worker)?;
     }
+    if let Some(path) = std::env::var_os("ARTEMIS_D3D11_FRAME") {
+        draw_frame(&mut worker, &std::fs::read(path)?)?;
+    }
     Ok(())
+}
+
+fn draw_frame<R: std::io::Read, W: std::io::Write>(
+    worker: &mut Worker<R, W>,
+    bytes: &[u8],
+) -> Result<(), Error> {
+    let length = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let (packet, mut rgba) = bytes.split_at(length);
+    let frame = FramePacket::decode(packet).expect("expected an ARFP packet from Core");
+    let sprite = frame
+        .sprites()
+        .iter()
+        .find(|sprite| sprite.layer_id == "1")
+        .unwrap();
+    let effect = sprite
+        .shader
+        .as_ref()
+        .expect("fixture's shader did not reach the frame");
+    assert_eq!(effect.shader.language, FrameShaderLanguage::Hlsl);
+    let program = worker.compile(&effect.shader.source)?;
+    let mut sources = Vec::with_capacity(frame.textures().len());
+    for texture in frame.textures() {
+        let (pixels, rest) = rgba.split_at(texture.rgba_len().unwrap());
+        rgba = rest;
+        sources.push((texture, pixels));
+    }
+    assert!(rgba.is_empty());
+    let mut pixels_by_slot = [const { None }; 4];
+    for (name, slot, texture) in [
+        ("textureFore", 2, sprite.texture),
+        ("textureMask", 3, effect.mask.expect("missing effect mask")),
+        ("textureUser", 0, effect.user.expect("missing user texture")),
+    ] {
+        let binding = worker.texture_binding(program, name)?.unwrap();
+        assert_eq!(binding, TextureBinding { slot, count: 1 });
+        let (texture, rgba) = sources[texture];
+        let mut bgra = rgba.to_vec();
+        bgra.chunks_exact_mut(4).for_each(|pixel| pixel.swap(0, 2));
+        pixels_by_slot[binding.slot as usize] = Some((texture, bgra));
+    }
+    let textures = std::array::from_fn(|slot| {
+        let (texture, bgra) = pixels_by_slot[slot].as_ref()?;
+        Some(Image {
+            width: texture.width,
+            height: texture.height,
+            bgra,
+        })
+    });
+    let uniforms = effect
+        .uniforms
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_slice()))
+        .collect::<Vec<_>>();
+    let draw = Draw {
+        width: 4,
+        height: 4,
+        alpha_blend: false,
+        point_sampler: true,
+        clear_rgba: [0.0; 4],
+        quad: [
+            [-1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0, 0.0, 1.0, 0.0],
+            [-1.0, -1.0, 0.0, 1.0, 0.0, 1.0],
+            [1.0, -1.0, 1.0, 1.0, 1.0, 1.0],
+        ],
+        uniforms: &uniforms,
+        textures,
+    };
+    let expected = [24, 24, 5, 255];
+    for (index, pixel) in worker.draw(program, &draw)?.chunks_exact(4).enumerate() {
+        assert!(
+            pixel == expected,
+            "D3D11 ARFP pixel {index}: expected {expected:?}, got {pixel:?}"
+        );
+    }
+    println!("D3D11 drew the ARFP effect with foreground, mask, user texture, and named uniforms");
+    worker.release(program)
 }
 
 fn measure<R: std::io::Read, W: std::io::Write>(worker: &mut Worker<R, W>) -> Result<(), Error> {

@@ -41,6 +41,9 @@ HRESULT art_d3d11_pass_compile(ArtD3D11Pass *pass, const void *source, size_t by
                                ArtD3D11Program **program, ID3DBlob **diagnostics);
 void art_d3d11_program_destroy(ArtD3D11Program *program);
 uint32_t art_d3d11_constant_bytes(const ArtD3D11Program *program);
+/* S_FALSE means the name is not a bound 2D image. */
+HRESULT art_d3d11_texture_binding(const ArtD3D11Program *program, const char *name,
+                                  uint32_t *slot, uint32_t *count);
 /* Fill a zero-initialized b0 block by name. S_FALSE means no such uniform. */
 HRESULT art_d3d11_set_uniform(const ArtD3D11Program *program, const char *name,
                               const float *values, uint32_t count, void *block, size_t bytes);

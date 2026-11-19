@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { MAGIC = 0x31584441, COMPILE = 1, DRAW = 2, RELEASE = 3, MAX_PROGRAMS = 64,
+enum { MAGIC = 0x31584441, COMPILE = 1, DRAW = 2, RELEASE = 3, TEXTURE_BINDING = 4, MAX_PROGRAMS = 64,
        MAX_BYTES = 64 * 1024 * 1024, MAX_NAME = 256 };
 
 typedef struct Header { uint32_t magic, op, id, bytes; } Header;
@@ -75,6 +75,19 @@ static int release(Program *programs, const Header *request, Bytes body) {
     art_d3d11_program_destroy(program->value);
     *program = (Program){0};
     return reply(request, S_OK, NULL, 0);
+}
+
+static int texture_binding(Program *programs, const Header *request, Bytes body) {
+    uint32_t id, binding[2];
+    char name[MAX_NAME + 1];
+    if (!extract(&body, &id, sizeof(id)) || !id || !body.size || body.size > MAX_NAME ||
+        memchr(body.data, 0, body.size)) return reply(request, E_INVALIDARG, NULL, 0);
+    Program *program = find_program(programs, id);
+    if (!program) return reply(request, E_INVALIDARG, NULL, 0);
+    memcpy(name, body.data, body.size);
+    name[body.size] = 0;
+    HRESULT status = art_d3d11_texture_binding(program->value, name, &binding[0], &binding[1]);
+    return FAILED(status) ? reply(request, status, NULL, 0) : reply(request, S_OK, binding, sizeof(binding));
 }
 
 static int draw(ArtD3D11Pass *pass, Program *programs, const Header *request, Bytes body) {
@@ -166,6 +179,7 @@ int main(void) {
             case COMPILE: sent = compile(pass, programs, &request, body); break;
             case DRAW: sent = draw(pass, programs, &request, body); break;
             case RELEASE: sent = release(programs, &request, body); break;
+            case TEXTURE_BINDING: sent = texture_binding(programs, &request, body); break;
             default: sent = reply(&request, E_NOTIMPL, NULL, 0); break;
         }
         free(payload);

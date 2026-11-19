@@ -5,6 +5,7 @@ const MAGIC: [u8; 4] = *b"ADX1";
 const COMPILE: u32 = 1;
 const DRAW: u32 = 2;
 const RELEASE: u32 = 3;
+const TEXTURE_BINDING: u32 = 4;
 const MAX_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SOURCE_BYTES: usize = 1024 * 1024;
 
@@ -38,6 +39,12 @@ impl std::error::Error for Error {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Program(u32);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextureBinding {
+    pub slot: u32,
+    pub count: u32,
+}
 
 #[derive(Clone, Copy)]
 pub struct Image<'a> {
@@ -122,6 +129,30 @@ impl<R: Read, W: Write> Worker<R, W> {
             writer.write_all(&program.0.to_le_bytes())
         })
         .map(|_| ())
+    }
+
+    pub fn texture_binding(
+        &mut self,
+        program: Program,
+        name: &str,
+    ) -> Result<Option<TextureBinding>, Error> {
+        if name.is_empty() || name.len() > 256 || name.contains('\0') {
+            return Err(Error::Argument("invalid shader texture name"));
+        }
+        let (_, data) = self.exchange(TEXTURE_BINDING, 4 + name.len(), 8, |writer| {
+            writer.write_all(&program.0.to_le_bytes())?;
+            writer.write_all(name.as_bytes())
+        })?;
+        let slot = u32::from_le_bytes(data[..4].try_into().unwrap());
+        let count = u32::from_le_bytes(data[4..].try_into().unwrap());
+        if slot == u32::MAX && count == 0 {
+            Ok(None)
+        } else if slot < 4 && (1..=4 - slot).contains(&count) {
+            Ok(Some(TextureBinding { slot, count }))
+        } else {
+            self.usable = false;
+            Err(Error::Protocol("invalid worker texture binding"))
+        }
     }
 
     fn exchange(

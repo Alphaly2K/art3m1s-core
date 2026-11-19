@@ -202,6 +202,11 @@ Run `CX_BOTTLE=DedicatedTestBottle bash scripts/test-host-dxvk.sh dxvk --d3d11 -
 to exercise the Windows worker from a macOS process. The probe also accepts
 `wined3d`. The Rust SDK in `crates/artemis-shader-host` uses the worker's
 stdout and stdin; the Host owns process launch, timeouts and configuration.
+Set `ARTEMIS_D3D11_ARFP=1` to also draw a Core frame packet's HLSL effect
+with its foreground, mask, user texture and named constants. The probe
+verifies the readback pixels and resolves texture slots by reflected name.
+Use the `dxvk` mode for this check. The tested WineD3D configuration rejects
+the fixture's pixel shader input when linking the graphics pipeline.
 Set `ARTEMIS_D3D11_MEASURE=1` to measure a 1920×1080 draw with two full-size
 inputs and one full-size output across the pipe. It excludes the Host's scene
 rendering and final presentation.
@@ -223,6 +228,9 @@ has zero operation and ID. EOF on stdin closes and releases the worker.
   `u32`, then tightly packed BGRA bytes; two zero dimensions leave a slot
   unbound. Success returns tightly packed BGRA pixels at the requested size.
 - Operation 3 releases the program ID in its `u32` payload.
+- Operation 4 looks up a texture resource by name. Its payload is a `u32`
+  program ID and up to 256 non-NUL name bytes. Success returns `u32 slot`
+  and `u32 count`; an absent resource has slot `UINT32_MAX` and count zero.
 
 One worker keeps up to 64 programs. Requests and output images are capped at
 64 MiB. Invalid framing ends the process; a framed request with invalid fields
