@@ -55,6 +55,7 @@ static const char shader_sequence_source[] = HLSL_RESOURCES
     "float4 main(float2 uv : TEXCOORD0) : SV_Target { " HLSL_BODY;
 #ifdef ARTEMIS_DXVK_HOST_SMOKE
 static int shader_host_sprites;
+static int shader_host_legacy_alpha;
 static const char shader_host_sprites_boot[] = "*top\n[lyshader id=paint file=paint.hlsl]\n"
     "[lyc id=1 width=2 height=4 color=ff112233]\n"
     SHADER_BINDINGS
@@ -63,6 +64,20 @@ static const char shader_host_sprites_boot[] = "*top\n[lyshader id=paint file=pa
     "param=0 mask=mask shadertexture=textureUser textureUser=user]\n"
     "[lyc id=3 width=1 height=1 color=ffabcdef]\n"
     "[flip]\n[caption data=ready]\n[stop]\n";
+static const char shader_host_legacy_alpha_boot[] = "*top\n[lyshader id=paint file=paint.hlsl]\n"
+    "[lyc id=0 width=4 height=4 color=ff204060]\n"
+    "[lyc id=fx.child width=2 height=2 color=80ff0000]\n"
+    "[lyprop id=fx shader=paint]\n"
+    "[lyc id=overlay width=2 height=2 color=80ff0000]\n"
+    "[lyprop id=overlay left=2 shader=paint]\n"
+    "[flip]\n[caption data=ready]\n[stop]\n";
+static const char shader_host_legacy_alpha_source[] =
+    "texture textureFore; sampler samplerFore = sampler_state { Texture = <textureFore>; };\n"
+    "float alpha;\n"
+    "void ps(float2 uv : TEXCOORD0, out float4 color : COLOR0) {\n"
+    "    float4 fore = tex2D(samplerFore, uv);\n"
+    "    color = float4(1.0 - fore.rgb, fore.a * alpha);\n"
+    "}\n";
 #endif
 #define GLSL_BODY \
     "uniform sampler2D textureFore; uniform sampler2D samplerMask;" \
@@ -95,8 +110,8 @@ static const uint8_t user_png[] = { // RGBA (5, 7, 11, 255)
 };
 static enum { NO_SHADER, HLSL, GLSL, GLES, GLES100 } shader_frame;
 static int shader_sequence;
-static uint8_t external_glsl[256 * 1024];
-static size_t external_glsl_len;
+static uint8_t external_shader[256 * 1024];
+static size_t external_shader_len;
 
 static ArtBytes bytes(const void *data, size_t size) {
     return (ArtBytes){ data, size };
@@ -128,6 +143,10 @@ static void service_io(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt,
         asset = shader_sequence ? shader_sequence_source : shader;
 #ifdef ARTEMIS_DXVK_HOST_SMOKE
     if (shader_host_sprites && strstr(metadata, "\"key\":\"boot.iet\"")) asset = shader_host_sprites_boot;
+    if (shader_host_legacy_alpha) {
+        if (strstr(metadata, "\"key\":\"boot.iet\"")) asset = shader_host_legacy_alpha_boot;
+        if (strstr(metadata, "\"key\":\"paint.hlsl\"")) asset = shader_host_legacy_alpha_source;
+    }
 #endif
     if (strstr(metadata, "\"key\":\"paint.frag\"")) {
         if (shader_frame == GLSL) asset = glsl;
@@ -135,8 +154,8 @@ static void service_io(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt,
         if (shader_frame == GLES100) asset = gles100;
     }
     ArtBytes payload = asset ? text(asset) : bytes(NULL, 0);
-    if (external_glsl_len && strstr(metadata, "\"key\":\"paint.frag\""))
-        payload = bytes(external_glsl, external_glsl_len);
+    if (external_shader_len && strstr(metadata, shader_frame == HLSL ? "\"key\":\"paint.hlsl\"" : "\"key\":\"paint.frag\""))
+        payload = bytes(external_shader, external_shader_len);
     if (strstr(metadata, "\"key\":\"mask.png\"")) payload = bytes(mask_png, sizeof(mask_png));
     if (strstr(metadata, "\"key\":\"user.png\"")) payload = bytes(user_png, sizeof(user_png));
     if (kind == ART_IO_STAT) {
@@ -231,7 +250,9 @@ static int shader_host_smoke(const ArtRuntimeApiV2 *api, const ArtFrameApiV2 *fr
     assert(length > 0 && fseek(file, 0, SEEK_SET) == 0);
     uint8_t *ade = malloc((size_t)length);
     assert(ade && fread(ade, 1, (size_t)length, file) == (size_t)length && fclose(file) == 0);
-    assert(art3m1s_metal_host_v1_prepare_ade2(host, text(shader_sequence_source),
+    ArtBytes source = shader_host_legacy_alpha ? text(shader_host_legacy_alpha_source) : text(shader_sequence_source);
+    if (shader_host_legacy_alpha && external_shader_len) source = bytes(external_shader, external_shader_len);
+    assert(art3m1s_metal_host_v1_prepare_ade2(host, source,
                                              (ArtBytes){ ade, (uint64_t)length }) == ART_OK);
     free(ade);
 
@@ -243,7 +264,8 @@ static int shader_host_smoke(const ArtRuntimeApiV2 *api, const ArtFrameApiV2 *fr
         {{0, 34, 26, 255}, {0, 17, 13, 255}},
     };
     const uint8_t overlay[] = {0xab, 0xcd, 0xef, 255};
-    const unsigned frame_count = shader_host_sprites ? 1 : 3;
+    const uint8_t cyan_over_bg[] = {16, 160, 176, 255}, bg[] = {32, 64, 96, 255};
+    const unsigned frame_count = shader_host_sprites || shader_host_legacy_alpha ? 1 : 3;
     unsigned turn = 0;
     uint64_t after = 0;
     for (uint64_t id = 1; id <= 16 && turn < frame_count; ++id) {
@@ -259,8 +281,11 @@ static int shader_host_smoke(const ArtRuntimeApiV2 *api, const ArtFrameApiV2 *fr
             const uint8_t *color = shader_host_sprites
                 ? (pixel == 0 ? overlay : pixel % 4 < 2 ? expected[0][0] : expected[1][1])
                 : expected[turn][pixel / 8];
-            if (memcmp(presentation + pixel * 4, color, 4)) {
-                const uint8_t *actual = presentation + pixel * 4;
+            const uint8_t *actual = presentation + pixel * 4;
+            if (shader_host_legacy_alpha) color = pixel / 4 < 2 ? cyan_over_bg : bg;
+            const int tolerance = shader_host_legacy_alpha ? 1 : 0;
+            if (abs(actual[0] - color[0]) > tolerance || abs(actual[1] - color[1]) > tolerance ||
+                abs(actual[2] - color[2]) > tolerance || actual[3] != color[3]) {
                 fprintf(stderr, "DXVK Host frame %u pixel %zu: RGBA %u,%u,%u,%u\n",
                         turn, pixel, actual[0], actual[1], actual[2], actual[3]);
                 return 1;
@@ -273,7 +298,8 @@ static int shader_host_smoke(const ArtRuntimeApiV2 *api, const ArtFrameApiV2 *fr
     assert(art3m1s_metal_host_v1_destroy(host) == ART_OK);
     metal_free_pixel_buffer(surface);
     assert(api->destroy(rt) == ART_OK);
-    puts(shader_host_sprites ? "Metal Host DXVK composited two sprite effects and an overlay in order"
+    puts(shader_host_legacy_alpha ? "Metal Host DXVK composited a legacy shader over transparent and translucent regions"
+         : shader_host_sprites ? "Metal Host DXVK composited two sprite effects and an overlay in order"
                             : "Metal Host DXVK presentation and capture matched three Core frames");
     return 0;
 }
@@ -289,19 +315,27 @@ int main(int argc, char **argv) {
     else if (argc == 2 && !strcmp(argv[1], "--gles-frame")) shader_frame = GLES;
     else if (argc == 2 && !strcmp(argv[1], "--gles100-frame")) shader_frame = GLES100;
 #ifdef ARTEMIS_DXVK_HOST_SMOKE
-    else if (argc == 4 && (!strcmp(argv[1], "--shader-host") || !strcmp(argv[1], "--shader-host-sprites"))) {
+    else if (argc == 2 && !strcmp(argv[1], "--shader-host-legacy-alpha-source")) {
+        return fputs(shader_host_legacy_alpha_source, stdout) < 0;
+    }
+    else if (argc == 4 && (!strcmp(argv[1], "--shader-host") || !strcmp(argv[1], "--shader-host-sprites") ||
+                         !strcmp(argv[1], "--shader-host-legacy-alpha"))) {
         shader_frame = HLSL;
         shader_sequence = 1;
         shader_host_sprites = !strcmp(argv[1], "--shader-host-sprites");
+        shader_host_legacy_alpha = !strcmp(argv[1], "--shader-host-legacy-alpha");
     }
 #endif
     else if (argc != 1) return 2;
-    const char *source = getenv("ARTEMIS_GL_SMOKE_SOURCE");
-    if (source && shader_frame == GLES100) {
+    const char *source = shader_frame == GLES100 ? getenv("ARTEMIS_GL_SMOKE_SOURCE") : NULL;
+#ifdef ARTEMIS_DXVK_HOST_SMOKE
+    if (shader_host_legacy_alpha) source = getenv("ARTEMIS_DXVK_SMOKE_LEGACY_ALPHA_SOURCE");
+#endif
+    if (source && *source) {
         FILE *shader_file = fopen(source, "rb");
         if (!shader_file) return 2;
-        external_glsl_len = fread(external_glsl, 1, sizeof(external_glsl), shader_file);
-        int valid = external_glsl_len && feof(shader_file) && !ferror(shader_file);
+        external_shader_len = fread(external_shader, 1, sizeof(external_shader), shader_file);
+        int valid = external_shader_len && feof(shader_file) && !ferror(shader_file);
         if (fclose(shader_file) || !valid) return 2;
     }
     const ArtRootApiV2 *root = NULL;

@@ -337,8 +337,11 @@ Use all three objects on the owner thread and destroy the programs and
 targets before destroying the context. The pass binds foreground, mask,
 user textures, and parameters by reflected name. Combined legacy samplers
 use linear filtering with clamped coordinates; separate samplers use point
-filtering. The Host restores reflected initial values before applying the
-current frame's overrides. Legacy `alpha` and `colorMultiply` default to
+filtering. Combined legacy effects use straight alpha. The Metal Host
+converts offscreen groups before sampling and applies the output alpha
+when compositing into the parent. The Host restores reflected initial
+values before applying the current frame's overrides. Legacy `alpha`
+and `colorMultiply` default to
 the multiplicative identity when the source gives no initial value.
 Metal writes the foreground into a separate IOSurface on the same GPU.
 The probe transitions the imported foreground image before the first Metal
@@ -359,6 +362,12 @@ texture, and named constants. The final Metal texture is checked pixel by
 pixel after both a uniform change and a layer move. The fixture's pixel
 shader declares `TEXCOORD0` without `SV_Position`, so a vertex shader with
 position first would put the texture coordinates in the wrong register.
+The packaged runtime check also compares translucent sprite and group pixels
+over an opaque background. To use an original combined-sampler inversion
+effect in that fixture, set `ARTEMIS_DXVK_SMOKE_LEGACY_ALPHA_SOURCE` to its
+absolute path. The effect must invert foreground RGB and preserve the
+foreground alpha with a neutral mask and parameters. The default check
+uses only its bundled synthetic source.
 
 To assemble the macOS effect runtime, apply
 [the adjacent library patch](../tools/host-bindings/d3d11/dxvk-macos-runtime.patch)
@@ -376,7 +385,8 @@ and sign the dylibs with the app's signing identity when packaging them.
 The runtime consumes ADE2 bytes and needs no Wine or compiler to draw.
 Package the compiler and bridge from the same revision when distributing
 effects with reflected initial values or array constants. The updated
-bridge still accepts existing ADE2 artifacts.
+bridge still accepts existing ADE2 artifacts. Use the matching Metal Host
+and DXVK bridge for straight-alpha group composition.
 Set `ARTEMIS_DXVK_RUNTIME_DIR` to the assembled directory and run
 `bash scripts/test-host-dxvk-native.sh --arfp` to check the packaged libraries.
 To generate the fixture's ADE2 without CrossOver, set

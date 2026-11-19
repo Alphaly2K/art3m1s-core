@@ -44,9 +44,16 @@ impl Drop for Resource {
 }
 
 type CreateProgram = unsafe extern "C" fn(Handle, *const u8, usize) -> Option<Handle>;
+type ProgramStraightAlpha = unsafe extern "C" fn(Handle) -> i32;
 type CreateTargets = unsafe extern "C" fn(Handle, &IOSurfaceRef, &IOSurfaceRef) -> Option<Handle>;
 type DrawEffect =
     unsafe extern "C" fn(Handle, Handle, Handle, Image, Image, *const Uniform, usize) -> i32;
+
+#[derive(Clone, Copy)]
+struct EffectProgram {
+    raw: Handle,
+    straight_alpha: bool,
+}
 
 pub(super) struct Targets {
     handle: Resource,
@@ -57,13 +64,14 @@ pub(super) struct Targets {
 pub(super) struct Effects {
     // Programs and targets must drop before the context, and all before the library.
     targets: Option<Targets>,
-    programs: HashMap<Box<[u8]>, Resource>,
-    active: ShaderRegistry<Handle>,
+    programs: HashMap<Box<[u8]>, (Resource, EffectProgram)>,
+    active: ShaderRegistry<EffectProgram>,
     context: OnceCell<Result<Resource, String>>,
     create_context: CreateContext,
     destroy_context: Destroy,
     metal_device: MetalDevice,
     create_program: CreateProgram,
+    program_straight_alpha: Option<ProgramStraightAlpha>,
     destroy_program: Destroy,
     create_targets: CreateTargets,
     destroy_targets: Destroy,
@@ -92,6 +100,10 @@ impl Effects {
             let create_program = *library
                 .get::<CreateProgram>(b"art_dxvk_program_create")
                 .map_err(|e| e.to_string())?;
+            let program_straight_alpha = library
+                .get::<ProgramStraightAlpha>(b"art_dxvk_program_straight_alpha")
+                .ok()
+                .map(|symbol| *symbol);
             let destroy_program = *library
                 .get::<Destroy>(b"art_dxvk_program_destroy")
                 .map_err(|e| e.to_string())?;
@@ -113,6 +125,7 @@ impl Effects {
                 destroy_context,
                 metal_device,
                 create_program,
+                program_straight_alpha,
                 destroy_program,
                 create_targets,
                 destroy_targets,
@@ -149,19 +162,28 @@ impl Effects {
             let context = self.context()?;
             let raw = unsafe { (self.create_program)(context, artifact.as_ptr(), artifact.len()) }
                 .ok_or("cannot prepare ADE2 shader")?;
+            let straight_alpha = self
+                .program_straight_alpha
+                .is_some_and(|query| unsafe { query(raw) != 0 });
             self.programs.insert(
                 source.into(),
-                Resource {
-                    raw,
-                    destroy: self.destroy_program,
-                },
+                (
+                    Resource {
+                        raw,
+                        destroy: self.destroy_program,
+                    },
+                    EffectProgram {
+                        raw,
+                        straight_alpha,
+                    },
+                ),
             );
         }
         Ok(())
     }
 
     pub fn register(&mut self, name: &str, source: &[u8]) -> Option<ShaderId> {
-        let program = self.programs.get(source)?.raw;
+        let (_, program) = *self.programs.get(source)?;
         Some(self.active.insert_or_replace(name, program).0)
     }
 
@@ -171,6 +193,12 @@ impl Effects {
 
     pub fn contains(&self, name: &str) -> bool {
         self.active.id(name).is_some()
+    }
+
+    pub fn straight_alpha(&self, name: &str) -> bool {
+        self.active
+            .get_by_name(name)
+            .is_some_and(|program| program.straight_alpha)
     }
 
     pub fn foreground(
@@ -231,7 +259,7 @@ impl Effects {
         let code = unsafe {
             (self.draw)(
                 context,
-                program,
+                program.raw,
                 targets.handle.raw,
                 mask.as_image(),
                 user.as_image(),

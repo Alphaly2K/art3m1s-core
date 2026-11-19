@@ -34,6 +34,8 @@ ART_DXVK_API void art_dxvk_context_destroy(ArtDxvkContext *context);
 
 /* Load an ADE2 shader pair from caller-owned bytes. No byte borrow survives the call. */
 ART_DXVK_API ArtDxvkProgram *art_dxvk_program_create(ArtDxvkContext *context, const uint8_t *ade, size_t size);
+/* Legacy combined-sampler effects consume and produce straight-alpha pixels. */
+ART_DXVK_API int art_dxvk_program_straight_alpha(const ArtDxvkProgram *program);
 ART_DXVK_API void art_dxvk_program_destroy(ArtDxvkProgram *program);
 
 /* Import distinct BGRA IOSurfaces of equal size. Call before the first foreground write. */

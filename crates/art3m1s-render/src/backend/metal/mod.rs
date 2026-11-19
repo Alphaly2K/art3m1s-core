@@ -300,11 +300,14 @@ enum MetalSurface {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ShaderKind {
     Sprite,
+    Unpremultiply,
     AlphaMask,
     GroupComposite,
     RuleTransition,
     Custom(ShaderId),
 }
+
+const DXVK_STRAIGHT_ALPHA_INPUT: &str = "__art3m1s_dxvk_straight_alpha_input";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum PipelineBlend {
@@ -2705,10 +2708,26 @@ impl MetalBackend {
                 native_emote: None,
             };
             #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
-            let group_source =
-                self.apply_dxvk(command_buffer, Some(&group.effect), &group_target.texture);
+            let (group_source, blend_override) = {
+                let straight = self
+                    .dxvk
+                    .as_ref()
+                    .is_some_and(|dxvk| dxvk.straight_alpha(&group.effect.name));
+                let output = self.apply_dxvk(
+                    command_buffer,
+                    Some(&group.effect),
+                    &group_target.texture,
+                    straight,
+                );
+                let blend =
+                    (straight && output.is_some()).then_some(PipelineBlend::Draw(BlendMode::Alpha));
+                (output, blend)
+            };
             #[cfg(not(all(target_os = "macos", feature = "metal-dxvk")))]
-            let group_source: Option<Texture> = None;
+            let (group_source, blend_override): (
+                Option<Texture>,
+                Option<PipelineBlend>,
+            ) = (None, None);
             self.encode_draw(
                 command_buffer,
                 target,
@@ -2716,7 +2735,7 @@ impl MetalBackend {
                 damage,
                 Some(group_source.as_ref().unwrap_or(&group_target.texture)),
                 mask_texture.as_ref(),
-                None,
+                blend_override,
                 None,
             )?;
             index = group.end;
@@ -2744,7 +2763,8 @@ impl MetalBackend {
                     .get(&command.texture)
                     .map(|t| t.raw.clone())
                     .ok_or("missing DXVK sprite texture")?;
-                let output = self.apply_dxvk(command_buffer, command.shader.as_ref(), &source);
+                let output =
+                    self.apply_dxvk(command_buffer, command.shader.as_ref(), &source, false);
                 self.encode_draw(
                     command_buffer,
                     target,
@@ -2775,9 +2795,10 @@ impl MetalBackend {
         command_buffer: &mut CommandBuffer,
         effect: Option<&ShaderEffect>,
         source: &Texture,
+        unpremultiply_input: bool,
     ) -> Option<Texture> {
         let effect = effect.filter(|effect| self.is_dxvk_effect(Some(effect)))?;
-        match self.run_dxvk(command_buffer, effect, source) {
+        match self.run_dxvk(command_buffer, effect, source, unpremultiply_input) {
             Ok(output) => Some(output),
             Err(error) => {
                 log::warn!("[MetalBackend] DXVK effect {} failed: {error}", effect.name);
@@ -2792,6 +2813,7 @@ impl MetalBackend {
         command_buffer: &mut CommandBuffer,
         effect: &ShaderEffect,
         source: &Texture,
+        unpremultiply_input: bool,
     ) -> Result<Texture, String> {
         let extent = Extent2D::new(source.width() as u32, source.height() as u32);
         let foreground = self
@@ -2816,7 +2838,12 @@ impl MetalBackend {
                 quad_size: [extent.width as f32, extent.height as f32],
             },
             clip_bounds: None,
-            shader: None,
+            shader: unpremultiply_input.then(|| ShaderEffect {
+                name: DXVK_STRAIGHT_ALPHA_INPUT.to_owned(),
+                uniforms: Default::default(),
+                mask_texture: None,
+                user_texture: None,
+            }),
             mesh: None,
             stencil: None,
             native_emote: None,
@@ -3209,6 +3236,7 @@ impl MetalBackend {
         let vertex_name = NSString::from_str("sprite_vertex");
         let fragment_name = NSString::from_str(match key.shader {
             ShaderKind::Sprite => "sprite_fragment",
+            ShaderKind::Unpremultiply => "unpremultiply_fragment",
             ShaderKind::AlphaMask => "alpha_mask_fragment",
             ShaderKind::GroupComposite => "group_composite_fragment",
             ShaderKind::RuleTransition => "rule_transition_fragment",
@@ -3247,6 +3275,7 @@ impl MetalBackend {
     fn shader_kind(&self, effect: Option<&ShaderEffect>) -> ShaderKind {
         match effect.map(|effect| effect.name.as_str()) {
             Some(crate::shader::SPRITE_NEAREST_SHADER) => ShaderKind::Sprite,
+            Some(DXVK_STRAIGHT_ALPHA_INPUT) => ShaderKind::Unpremultiply,
             Some(crate::shader::ALPHA_MASK_SHADER) => ShaderKind::AlphaMask,
             Some(crate::shader::GROUP_COMPOSITE_SHADER) => ShaderKind::GroupComposite,
             Some(crate::shader::RULE_TRANS_SHADER) => ShaderKind::RuleTransition,

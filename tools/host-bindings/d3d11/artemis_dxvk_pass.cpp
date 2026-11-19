@@ -136,6 +136,8 @@ ArtDxvkProgram *art_dxvk_program_create(ArtDxvkContext *context, const uint8_t *
     return nullptr;
 }
 
+int art_dxvk_program_straight_alpha(const ArtDxvkProgram *program) { return program->combined_samplers; }
+
 void art_dxvk_program_destroy(ArtDxvkProgram *program) { delete program; }
 
 ArtDxvkTargets *art_dxvk_targets_create(ArtDxvkContext *context, IOSurfaceRef foreground, IOSurfaceRef output) try {

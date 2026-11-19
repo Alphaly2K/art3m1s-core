@@ -105,6 +105,14 @@ fragment float4 sprite_fragment(
     return color;
 }
 
+fragment float4 unpremultiply_fragment(
+    RasterData in [[stage_in]],
+    texture2d<float> source [[texture(0)]],
+    sampler linear_sampler [[sampler(0)]]) {
+    float4 color = source.sample(linear_sampler, in.uv);
+    return float4(color.a > 0.0 ? clamp(color.rgb / color.a, 0.0, 1.0) : float3(0.0), color.a);
+}
+
 fragment float4 alpha_mask_fragment(
     RasterData in [[stage_in]],
     texture2d<float> source [[texture(0)]],
