@@ -101,7 +101,11 @@ impl InputFrame {
         {
             return Err(ProtocolError::Argument("invalid Artemis window button"));
         }
-        if self.pending.len() + events.len() > MAX_PENDING_INPUTS {
+        let queued = events
+            .iter()
+            .filter(|event| !matches!(event, HostInput::WindowState { .. }))
+            .count();
+        if self.pending.len() + queued > MAX_PENDING_INPUTS {
             return Err(ProtocolError::WouldBlock);
         }
         for &event in events {
@@ -302,5 +306,41 @@ impl InputFrame {
 
     pub fn unclaimed_decide(&self, code: u32) -> bool {
         self.unclaimed_press(code) && self.frame_bits(code) & OVERRIDE_IS_DECIDE != 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_state_is_staged_even_when_device_inputs_are_full() {
+        let mut frame = InputFrame::default();
+        let key = HostInput::Key {
+            code: 70,
+            down: true,
+        };
+        frame.submit(&vec![key; MAX_PENDING_INPUTS]).unwrap();
+        let initial = HostInput::WindowState {
+            fullscreen: true,
+            minimized: false,
+        };
+        let minimized = HostInput::WindowState {
+            fullscreen: false,
+            minimized: true,
+        };
+        frame.submit(&[initial, minimized]).unwrap();
+        assert_eq!(
+            frame.submit(&[initial, key]),
+            Err(ProtocolError::WouldBlock)
+        );
+        assert_eq!(frame.window_state, (false, false));
+
+        frame.apply_window_state();
+        assert_eq!(frame.window_state, (false, true));
+        assert!(!frame.is_physical_down(70));
+        frame.advance(0);
+        assert!(frame.is_physical_press(70));
+        assert_eq!(frame.window_state, (false, true));
     }
 }

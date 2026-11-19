@@ -157,6 +157,10 @@ macOS Flutter Host 向 v2 提交实际窗口状态。真窗口探针验证脚本
 后台存档钩子读到 `minimize=1`、恢复后两项均为 `0`。窗口操作保留原会话与原 Shell 模式，
 退出前最后一次存档仍通过。独立 Core 284 项、C ABI 冒烟及 Flutter 定向回归通过。
 
+窗口快照不占设备输入队列容量；队列满时仍可接收快照，拒收混合批次则保持原快照不变。
+Flutter 在待处理 IO 阻塞退出时继续回复并重试，确认进入关闭阶段后继续完成存档。独立 Core
+285 项、C ABI、Flutter 帧与媒体回归及 macOS 真窗口退出探针均通过。
+
 ## 已完成：Flutter 方法通道与共享纹理适配
 
 macOS Runner 适配器负责调用 v2 会话并管理 Flutter 纹理。Swift 与 Dart 通过方法通道交换事件
