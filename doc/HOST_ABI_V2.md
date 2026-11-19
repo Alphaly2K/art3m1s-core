@@ -137,11 +137,13 @@ Loading 完成必须有事件和状态转换；`open_project` 返回 OK 只表�
   已借出的旧帧字节继续有效到 release；尚有 lease 时允许 reload，但 destroy 返回 STATE。
 - `request_id` 在同一 runtime 生命周期内单调分配且不重用；计数耗尽返回 LIMIT。
   结果按 `(runtime, epoch, request_id, service kind)` 校验；重复/过期结果返回 STALE，无副作用。
-- 收到退出请求后 Host 提交 graceful shutdown。core 发出必要的最终存档/媒体停止请求；
-  Host 执行并回填，直至 Closed 后 destroy。Faulted 可强制销毁，仍须先释放所有帧。
+- Host 可在应用关闭时或收到 `exit_requested` 后提交 `ART_RUNTIME_SHUTDOWN`，使用当前 epoch、
+  `request_id=0` 和 `{}`。Core 发出最终存档请求和媒体停止通知；Host 执行写入、回填结果并
+  停止播放，收到 `ART_RUNTIME_CLOSED_EVENT` 后检查 `save_status`，释放所有帧再 destroy。
+  Faulted 可强制销毁，仍须先释放所有帧。
   强制退出可以放弃未确认存档，不能把它记录为成功持久化。
-- Rust 运行时的 `submit_shutdown(handle, epoch)` 在 Running 阶段受理。游戏暂停在退出点；
-  尚有服务结果待处理时先完成它并推进 `step`。受理后状态进入 Closing，不再运行场景，按顺序
+- 关闭请求在 Running 阶段受理。若返回 `ART_WOULD_BLOCK`，先完成待处理请求并推进原帧，
+  然后重试关闭。受理后状态进入 Closing，不再运行场景，按顺序
   确认全局数据、系统设置和已变化的已读记录。`runtime_closed` 排入队列后才进入 Closed，期间
   拒绝重载。Host 在销毁前拉取关闭结果。
 - 后台时 Host 可用 `ArtStepInfo.flags = ART_STEP_BACKGROUND_AUTOSAVE` 驱动自动存档。时钟和帧 ID
@@ -690,7 +692,8 @@ Swift 应用可使用 [ArtemisMacSession](../tools/host-bindings/swift/ArtemisMa
 主线程管理 runtime 与渲染器；`pollEvents` 返回可交给后台任务的自有数据，`event.reply` 保留
 原请求身份。应用在主线程提交完成结果；批次未受理时保留原批次重试。等待 IO 时使用原 Host
 帧号和时钟继续推进。`setSurface` 持有应用提供的 `CVPixelBuffer`；`present` 只有实际提交
-共享画面时才返回帧 ID。应用应在卸载库或退出玩家视图前显式关闭会话。
+共享画面时才返回帧 ID。正常退出时用 `submit` 发送 `ART_RUNTIME_SHUTDOWN` 并继续处理事件；
+收到 `ART_RUNTIME_CLOSED_EVENT` 后调用 `close()` 释放会话。
 
 `bash scripts/test-host-v2-swift.sh` 使用真实的 Core 和 Metal 动态库验证上述 Swift 接入，
 需要 macOS 和 Metal 设备，无需 Flutter 或外部游戏文件。
@@ -728,6 +731,10 @@ FFmpeg CLI，以同时验证 Ogg 视频。设置 `ARTEMIS_MEDIA_SWIFT_SMOKE=1` �
 `ArtemisSession` 负责协商接口、推进帧以及收发消息。同一会话的创建、调用与关闭须在同一
 OS 线程上执行；Host 自行调度 IO 与设备操作，在该线程提交完成结果。`event.reply` 沿用原
 请求身份，`submit` 返回 `false` 表示整批未受理，Host 可以稍后重试。
+
+正常退出时调用 `requestShutdown()`。返回 `false` 时先处理待完成的请求，推进原帧后重试。
+受理后继续调用 `step` 与 `pollEvents`，确认最终写入；收到 `ART_RUNTIME_CLOSED_EVENT` 并读取
+`save_status` 后，调用 `close()` 释放会话。
 
 `withLatestFrame` 在同步回调结束时释放帧；`copyPacket` 和 `copyTextureRgba` 取得可在回调外
 继续使用的字节。需要直接读取借用像素或在原生线程绘制的 Host 可使用生成的 C ABI 绑定。

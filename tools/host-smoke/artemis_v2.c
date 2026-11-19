@@ -183,11 +183,13 @@ static void service_io(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt,
     }
 }
 
+enum { SAVED_GLOBALS = 32, SAVED_SYSTEM = 64, CLOSED = 128 };
+
 static unsigned pump(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt, uint64_t frame_id) {
     ArtStepInfo step = { .struct_size = sizeof(step), .host_frame_id = frame_id,
                          .monotonic_ns = frame_id * UINT64_C(1000000) };
     ArtStepResult result = { .struct_size = sizeof(result) };
-    unsigned captions = 0;
+    unsigned observed = 0;
     for (unsigned turn = 0; turn < 64; ++turn) {
         assert(api->step(rt, &step, &result) == ART_OK);
         uint8_t events[4096];
@@ -208,16 +210,27 @@ static unsigned pump(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt, uint64_t f
             char metadata[512] = {0};
             assert(meta_size < sizeof(metadata) && meta_size <= size - 64);
             memcpy(metadata, record + 64, meta_size);
-            if (domain == ART_DOMAIN_IO) {
+            if (domain == ART_DOMAIN_IO && kind == ART_IO_WRITE_ATOMIC) {
+                size_t blob_size = (size_t)little(record + 60, 4);
+                assert(blob_size != 0 && blob_size == size - 64 - meta_size);
+                assert(strstr(metadata, "\"namespace\":\"save\""));
+                if (strstr(metadata, "\"key\":\"saveg.dat\"")) observed |= SAVED_GLOBALS;
+                else {
+                    assert(strstr(metadata, "\"key\":\"system.dat\""));
+                    observed |= SAVED_SYSTEM;
+                }
+                ArtMessage reply = message(domain, kind, epoch, request, "{\"status\":\"ok\"}");
+                assert(api->submit(rt, &reply, 1) == ART_OK);
+            } else if (domain == ART_DOMAIN_IO) {
                 service_io(api, rt, kind, epoch, request, metadata);
             } else if (domain == ART_DOMAIN_RENDER) {
                 assert(result.flags & ART_WAIT_RENDER);
                 if (kind == ART_RENDER_CAPTURE) {
                     assert(strstr(metadata, "\"render_frame_id\":"));
-                    captions |= 4;
+                    observed |= 4;
                 } else {
                     assert(kind == ART_RENDER_SAVE_CAPTURE && strstr(metadata, "\"key\":\"thumb.png\""));
-                    captions |= 8;
+                    observed |= 8;
                 }
                 ArtMessage reply = message(domain, kind, epoch, request,
                     kind == ART_RENDER_CAPTURE ? "{\"status\":\"ok\"}" : "{\"status\":\"denied\"}");
@@ -228,16 +241,19 @@ static unsigned pump(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt, uint64_t f
                 ArtMessage reply = message(domain, kind, epoch, request,
                                            "{\"status\":\"ok\",\"status_code\":204}");
                 assert(api->submit(rt, &reply, 1) == ART_OK);
-                captions |= 16;
+                observed |= 16;
             } else if (domain == ART_DOMAIN_UI && kind == ART_UI_CAPTION) {
-                if (strstr(metadata, "\"ready\"")) captions |= 1;
-                if (strstr(metadata, "\"advanced\"")) captions |= 2;
+                if (strstr(metadata, "\"ready\"")) observed |= 1;
+                if (strstr(metadata, "\"advanced\"")) observed |= 2;
+            } else if (domain == ART_DOMAIN_RUNTIME && kind == ART_RUNTIME_CLOSED_EVENT) {
+                assert(!strcmp(metadata, "{\"save_status\":\"written\"}"));
+                observed |= CLOSED;
             }
             offset += size;
         }
         assert(offset == poll.written_bytes);
         if (result.flags & (ART_WAIT_IO | ART_WAIT_UI | ART_WAIT_RENDER)) continue;
-        return captions;
+        return observed;
     }
     assert(!"Host fixture did not settle");
     return 0;
@@ -451,6 +467,11 @@ int main(int argc, char **argv) {
     assert(little(opened + 8, 4) == ART_RUNTIME_SESSION_CHANGED);
     assert(!memcmp(opened + 64, save_path, sizeof(save_path) - 1));
     assert(pump(api, rt, 1) == (1 | 4 | 8));
+    ArtMessage shutdown = message(ART_DOMAIN_RUNTIME, ART_RUNTIME_SHUTDOWN, little(opened + 24, 8), 0, "{}");
+    assert(api->submit(rt, &shutdown, 1) == ART_OK);
+    assert(api->get_state(rt, &state.prefix) == ART_OK && state.prefix.state == ART_RUNTIME_CLOSING);
+    assert(pump(api, rt, 1) == (SAVED_GLOBALS | SAVED_SYSTEM | CLOSED));
+    assert(api->get_state(rt, &state.prefix) == ART_OK && state.prefix.state == ART_RUNTIME_CLOSED);
     assert(api->destroy(rt) == ART_OK);
     puts("Artemis v2 Host smoke passed");
     return 0;

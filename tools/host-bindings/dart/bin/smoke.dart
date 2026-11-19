@@ -280,15 +280,16 @@ end
   );
   bool pendingExists() =>
       saved.parent.listSync(followLinks: false).any((e) => e is Directory);
+  void step() => session.step(
+    frameId: 1,
+    monotonicNs: 0,
+    utcUnixMs: 0,
+    utcOffsetMinutes: 0,
+  );
   ArtemisEvent? abandoned;
   void pump({required bool abandonAfterStaging}) {
     for (var turn = 0; turn < 64; turn++) {
-      session.step(
-        frameId: 1,
-        monotonicNs: 0,
-        utcUnixMs: 0,
-        utcOffsetMinutes: 0,
-      );
+      step();
       for (
         var events = session.pollEvents();
         events.isNotEmpty;
@@ -297,6 +298,12 @@ end
         for (final event in events) {
           final reply = io.handle(event);
           if (reply != null) {
+            if (abandonAfterStaging && reply.metadata['status'] == 'staged') {
+              require(
+                !session.requestShutdown(),
+                'Shutdown was accepted before pending file IO finished',
+              );
+            }
             require(session.submit([reply]), 'File IO reply did not fit');
             if (reply.metadata['status'] == 'staged') {
               require(
@@ -362,6 +369,38 @@ end
     require(
       protected.readAsStringSync() == 'keep',
       'A rejected write modified the directory',
+    );
+    require(session.requestShutdown(), 'Shutdown was not accepted');
+    require(session.state.phase == ART_RUNTIME_CLOSING, 'Not closing');
+    ArtemisEvent? closed;
+    for (var turn = 0; turn < 16 && closed == null; turn++) {
+      step();
+      for (
+        var events = session.pollEvents();
+        events.isNotEmpty;
+        events = session.pollEvents()
+      ) {
+        for (final event in events) {
+          if (event.domain == ART_DOMAIN_RUNTIME &&
+              event.kind == ART_RUNTIME_CLOSED_EVENT) {
+            closed = event;
+          } else {
+            final reply = io.handle(event);
+            require(
+              !event.requiresReply ||
+                  (reply != null && session.submit([reply])),
+              'Final IO reply was not accepted',
+            );
+          }
+        }
+      }
+    }
+    require(
+      closed?.metadata['save_status'] == 'written' &&
+          session.state.phase == ART_RUNTIME_CLOSED &&
+          File('${dir.path}/saveg.dat').lengthSync() > 0 &&
+          File('${dir.path}/system.dat').lengthSync() > 0,
+      'Shutdown did not persist the final saves',
     );
   } finally {
     io.close();

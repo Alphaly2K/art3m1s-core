@@ -206,12 +206,25 @@ final class ArtemisSession {
     return _handle;
   }
 
+  /// Destroys the session. For normal exit, wait for the closed event first.
   void close() {
     if (_handle == 0) return;
     final destroy = _runtime.destroy.asFunction<int Function(int)>();
     _check(_root, 'destroy', destroy(_handle));
     _handle = 0;
   }
+
+  /// Requests a graceful shutdown of the running project.
+  /// If this returns false, finish pending work and retry. Once accepted, keep
+  /// stepping and servicing events until ART_RUNTIME_CLOSED_EVENT is received.
+  bool requestShutdown() => submit([
+    ArtemisMessage(
+      domain: ART_DOMAIN_RUNTIME,
+      kind: ART_RUNTIME_SHUTDOWN,
+      epoch: state.epoch,
+      metadata: const {},
+    ),
+  ]);
 
   void openProject(
     List<int> ini, {
