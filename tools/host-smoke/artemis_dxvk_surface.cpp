@@ -6,6 +6,7 @@
 #include "dxgi/dxgi_interfaces.h"
 #include "dxvk/dxvk_adapter.h"
 #include "artemis_dxvk_metal_writer.h"
+#include "../host-bindings/d3d11/artemis_dxbc_effect.hpp"
 
 #include <chrono>
 #include <cstdio>
@@ -115,7 +116,7 @@ static void complete_draw(ID3D11DeviceContext *context, ID3D11Query *completed) 
 static std::vector<char> load_bytecode(const char *path) {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     const auto bytes = file.tellg();
-    check(bytes >= 4 && bytes <= 16 * 1024 * 1024, "get DXBC bytecode length");
+    check(bytes >= 4 && bytes <= ART_DXBC_MAX_BYTECODE, "get DXBC bytecode length");
     std::vector<char> result(static_cast<size_t>(bytes));
     file.seekg(0);
     check(bool(file.read(result.data(), bytes)) && std::memcmp(result.data(), "DXBC", 4) == 0,
@@ -137,17 +138,11 @@ static Com<ID3D11ShaderResourceView> make_sample(ID3D11Device *device, const uin
     return view;
 }
 
-struct EffectParams {
-    float tint[4] = {0, 1, 0.5f, 1};
-    float param = 1;
-    float padding[3] = {};
-};
-
 static Com<ID3D11Buffer> bind_effect(ID3D11Device *device, ID3D11DeviceContext *context,
-                                    const char *vsPath, const char *psPath, uint32_t width, uint32_t height,
+                                    const char *vsPath, const artemis::DxbcEffect &effect, uint32_t width, uint32_t height,
                                     ID3D11Texture2D *foreground) {
     const auto vs = load_bytecode(vsPath);
-    const auto ps = load_bytecode(psPath);
+    const auto &ps = effect.bytecode();
     Com<ID3D11VertexShader> vertex;
     Com<ID3D11PixelShader> pixel;
     check(SUCCEEDED(device->CreateVertexShader(vs.data(), vs.size(), nullptr, &vertex)), "create native vertex shader");
@@ -180,11 +175,19 @@ static Com<ID3D11Buffer> bind_effect(ID3D11Device *device, ID3D11DeviceContext *
     Com<ID3D11ShaderResourceView> fore;
     check(SUCCEEDED(device->CreateShaderResourceView(foreground, nullptr, &fore)), "create shared input view");
     const auto mask = make_sample(device, {0, 0, 128, 255});
-    ID3D11ShaderResourceView *textures[] = {user.ptr(), nullptr, fore.ptr(), mask.ptr()};
-    context->PSSetShaderResources(0, 4, textures);
+    ID3D11ShaderResourceView *textures[ART_DXBC_TEXTURE_SLOTS] = {};
+    const auto bind_texture = [&](const char *name, ID3D11ShaderResourceView *view) {
+        const int slot = effect.texture_slot(name);
+        check(slot >= 0, "resolve reflected texture slot");
+        textures[slot] = view;
+    };
+    bind_texture("textureFore", fore.ptr());
+    bind_texture("textureMask", mask.ptr());
+    bind_texture("textureUser", user.ptr());
+    context->PSSetShaderResources(0, ART_DXBC_TEXTURE_SLOTS, textures);
 
     D3D11_BUFFER_DESC constantDesc = {};
-    constantDesc.ByteWidth = sizeof(EffectParams);
+    constantDesc.ByteWidth = effect.constant_bytes();
     constantDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     Com<ID3D11Buffer> constants;
     check(SUCCEEDED(device->CreateBuffer(&constantDesc, nullptr, &constants)), "create pixel constants");
@@ -193,9 +196,9 @@ static Com<ID3D11Buffer> bind_effect(ID3D11Device *device, ID3D11DeviceContext *
     return constants;
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv) try {
     if (argc != 1 && argc != 3) {
-        std::fputs("Usage: artemis-dxvk-native [vertex.dxbc pixel.dxbc]\n", stderr);
+        std::fputs("Usage: artemis-dxvk-native [vertex.dxbc pixel.ade]\n", stderr);
         return 2;
     }
     const bool drawEffect = argc == 3;
@@ -260,7 +263,11 @@ int main(int argc, char **argv) {
     Com<ID3D11Query> completed;
     check(SUCCEEDED(device->CreateQuery(&queryDesc, &completed)), "create D3D11 completion query");
     Com<ID3D11Buffer> constants;
+    std::unique_ptr<artemis::DxbcEffect> effect;
+    std::vector<char> params;
     if (drawEffect) {
+        std::ifstream file(argv[2], std::ios::binary);
+        effect = std::make_unique<artemis::DxbcEffect>(file);
         VkExportMetalDeviceInfoEXT metal = {VK_STRUCTURE_TYPE_EXPORT_METAL_DEVICE_INFO_EXT};
         VkExportMetalObjectsInfoEXT exportInfo = {VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECTS_INFO_EXT, &metal};
         exportMetal(vkDevice, &exportInfo);
@@ -272,7 +279,10 @@ int main(int argc, char **argv) {
         interop->TransitionSurfaceLayout(foreground.surface.ptr(), &colorRange,
                                          VK_IMAGE_LAYOUT_UNDEFINED, foreground.layout);
         complete_draw(context.ptr(), completed.ptr());
-        constants = bind_effect(device.ptr(), context.ptr(), argv[1], argv[2], width, height, foreground.texture.ptr());
+        constants = bind_effect(device.ptr(), context.ptr(), argv[1], *effect, width, height, foreground.texture.ptr());
+        params.resize(effect->constant_bytes());
+        const float tint[4] = {0, 1, 0.5f, 1};
+        check(effect->set_uniform(params, "tint", tint, 4), "bind tint by reflection");
     }
 
     const float clearColors[][4] = {{1, 0, 0, 1}, {0, 1, 1, 1}};
@@ -283,9 +293,9 @@ int main(int argc, char **argv) {
     for (size_t i = 0; i < frameCount; ++i) {
         if (drawEffect) {
             if (i < 2) check(art_metal_writer_clear(writer.get(), metalColors[i]), "render Metal foreground");
-            EffectParams params;
-            params.param = i < 2 ? 1.0f : 0.0f;
-            context->UpdateSubresource(constants.ptr(), 0, nullptr, &params, 0, 0);
+            const float param = i < 2 ? 1.0f : 0.0f;
+            check(effect->set_uniform(params, "param", &param, 1), "bind param by reflection");
+            context->UpdateSubresource(constants.ptr(), 0, nullptr, params.data(), 0, 0);
             ID3D11RenderTargetView *activeTarget = target.ptr();
             context->OMSetRenderTargets(1, &activeTarget, nullptr);
             context->Draw(4, 0);
@@ -318,6 +328,9 @@ int main(int argc, char **argv) {
               "unlock pixel buffer");
     }
     context->ClearState();
-    std::puts(drawEffect ? "Native DXVK IOSurface: Metal foreground and HLSL constant updates matched all three frames"
+    std::puts(drawEffect ? "Native DXVK IOSurface: reflected HLSL bindings matched all three frames"
                          : "Native DXVK IOSurface: two D3D11 frames visible in the original pixel buffer");
+} catch (const std::exception &error) {
+    std::fprintf(stderr, "%s\n", error.what());
+    return 1;
 }

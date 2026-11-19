@@ -27,14 +27,14 @@ if [[ $# == 1 ]]; then
   : "${CX_BOTTLE:?Set CX_BOTTLE to a dedicated CrossOver test bottle for HLSL compilation}"
   crossover=${CROSSOVER_ROOT:-/Applications/CrossOver.app/Contents/SharedSupport/CrossOver}
   "${ARTEMIS_D3D_CC:-x86_64-w64-mingw32-gcc}" -std=c11 -O2 -Wall -Wextra -Werror \
-    tools/host-bindings/d3d11/artemis_hlsl_compile.c -o "$scratch/artemis-hlsl-compile.exe" -ld3dcompiler_47
+    tools/host-bindings/d3d11/artemis_hlsl_compile.c -o "$scratch/artemis-hlsl-compile.exe" -ld3dcompiler_47 -ldxguid
   source_files="$PWD/tools/host-smoke/shaders"
   (cd "$scratch"
    CX_GRAPHICS_BACKEND=wined3d "$crossover/bin/wine" --no-gui --debugmsg -all artemis-hlsl-compile.exe vs_5_0 \
      < "$source_files/native-quad.hlsl" > vertex.dxbc
-   CX_GRAPHICS_BACKEND=wined3d "$crossover/bin/wine" --no-gui --debugmsg -all artemis-hlsl-compile.exe ps_5_0 \
-     < "$source_files/native-effect.hlsl" > pixel.dxbc)
-  shader_args=(vertex.dxbc pixel.dxbc)
+   CX_GRAPHICS_BACKEND=wined3d "$crossover/bin/wine" --no-gui --debugmsg -all artemis-hlsl-compile.exe effect \
+     < "$source_files/native-effect.hlsl" > pixel.ade)
+  shader_args=(vertex.dxbc pixel.ade)
 fi
 ln -s "$ARTEMIS_MOLTENVK_DYLIB" "$scratch/libvulkan.1.dylib"
 ln -s "$ARTEMIS_MOLTENVK_DYLIB" "$scratch/libvulkan.dylib"

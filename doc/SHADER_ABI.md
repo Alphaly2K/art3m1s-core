@@ -309,8 +309,11 @@ the device extension, so the source headers and libraries must match.
 Set `CX_BOTTLE` and add `--hlsl` to the native probe command to exercise
 shader execution. The Windows compiler helper reads raw HLSL from stdin,
 compiles `main` to `vs_5_0` or `ps_5_0`, and writes DXBC to stdout with
-diagnostics on stderr. It creates no graphics device. The macOS process
-loads both shader blobs once and binds foreground, mask, and user textures.
+diagnostics on stderr. The `effect` mode compiles `ps_5_0` and includes the
+compiler's reflection in an `ADE1` artifact. It accepts one sampler at `s0`,
+2D textures at `t0` through `t3`, and float scalars and vectors in `b0`. It
+creates no graphics device. The macOS process loads both shaders once and
+binds foreground, mask, user textures, and parameters by reflected name.
 Metal writes the foreground into a separate IOSurface on the same GPU.
 The probe transitions the imported foreground image before the first Metal
 write, waits for Metal completion before sampling, and waits for D3D11
@@ -318,6 +321,14 @@ completion before reusing either surface. Three draws verify the initial
 result, an update to the same foreground surface, and a constant change
 with that foreground held steady. Only the final pixel comparison reads
 the output on the CPU. It does not require game assets or Flutter.
+
+`ADE1` begins with five little-endian `u32` values: magic (`ADE1`), DXBC
+length, `b0` byte size, texture count, and uniform count. Each texture has
+a `u32` slot and a 256-byte NUL-terminated name. Each uniform has a `u32`
+byte offset, a `u32` float component count, and the same name format. The
+DXBC bytes follow the records. The Host zeroes the block before filling
+its constants; the metadata does not carry default values. The compiler
+and decoder share the limits defined in `artemis_dxbc_effect.h`.
 
 To test transfer from Wine to a Flutter texture, set
 `FLUTTER_MACOS_FRAMEWORK_DIR` to the directory containing
