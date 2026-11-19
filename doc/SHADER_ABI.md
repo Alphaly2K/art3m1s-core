@@ -448,6 +448,9 @@ samplers and reflected defaults. Set `ARTEMIS_DXVK_TEST_1080P=1` to use a
 1920×1080 stage and print project-open and steady presentation timings with
 and without the effect. Frame timings include Core stepping, scene rendering,
 and submission to Flutter's texture registry, but exclude display vsync.
+With both options set, the probe measures one, two, and four full-screen
+draws of the same legacy program. The multi-effect checks use translucent
+layers and verify the combined color before measuring.
 
 `ADE1` begins with five little-endian `u32` values: magic (`ADE1`), DXBC
 length, `b0` byte size, texture count, and uniform count. Each texture has
