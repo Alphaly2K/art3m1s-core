@@ -3,7 +3,6 @@ use super::callbacks::FfiCallbacks;
 use super::magic_path;
 use crate::Project;
 use crate::backend::{TextureData, TextureDesc, TextureUsage};
-use crate::runtime::save_io;
 use crate::text::GlyphTextRenderer;
 use asb_interpreter::{CallbackResult, Event};
 use std::sync::Arc;
@@ -299,7 +298,7 @@ impl CoreRuntime {
         // save-files-in-app-sandbox）。原始 SAVEPATH 可能含反斜杠/CSIDL（如
         // hamidashi 的 `まどそふと\ハミダシクリエイティブ`），这里规范化为正斜杠
         // 相对路径，缺省退回 `save`。
-        let savepath = save_io::sanitize_savepath(self.project_savepath.as_deref());
+        let savepath = crate::save::sanitize_savepath(self.project_savepath.as_deref());
         self.interpreter.set_variable(
             "s.savepath",
             asb_interpreter::Value::String(savepath.clone()),

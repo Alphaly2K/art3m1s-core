@@ -129,8 +129,13 @@ pub(super) const HOST_CAP_MEDIA: u64 = 4;
 pub(super) const HOST_CAP_HTTP: u64 = 8;
 pub(super) const HOST_CAP_TRANSLATION: u64 = 16;
 pub(super) const HOST_CAP_CHUNKED_WRITES: u64 = 32;
-pub(super) const HOST_CAPS: u64 =
-    0b11 | HOST_CAP_MEDIA | HOST_CAP_HTTP | HOST_CAP_TRANSLATION | HOST_CAP_CHUNKED_WRITES;
+pub(super) const HOST_CAP_PROJECT_SAVE_PATH: u64 = 64;
+pub(super) const HOST_CAPS: u64 = 0b11
+    | HOST_CAP_MEDIA
+    | HOST_CAP_HTTP
+    | HOST_CAP_TRANSLATION
+    | HOST_CAP_CHUNKED_WRITES
+    | HOST_CAP_PROJECT_SAVE_PATH;
 
 /// Create a runtime owned by the calling thread. Destroy it before that thread exits.
 pub fn create(
@@ -142,7 +147,7 @@ pub fn create(
         random_seed,
         limits,
         max_file_bytes,
-        HOST_CAPS & !(HOST_CAP_TRANSLATION | HOST_CAP_CHUNKED_WRITES),
+        HOST_CAPS & !(HOST_CAP_TRANSLATION | HOST_CAP_CHUNKED_WRITES | HOST_CAP_PROJECT_SAVE_PATH),
         RENDERER_CAPS,
     )
 }
@@ -163,6 +168,7 @@ pub(super) fn create_with_caps(
         session.http_enabled = host_caps & HOST_CAP_HTTP != 0;
         session.translation_enabled = host_caps & HOST_CAP_TRANSLATION != 0;
         session.chunked_writes = host_caps & HOST_CAP_CHUNKED_WRITES != 0;
+        session.project_save_path = host_caps & HOST_CAP_PROJECT_SAVE_PATH != 0;
         session.transitions_enabled = renderer_caps & CAP_TRANSITIONS != 0;
         session.screenshots_enabled = renderer_caps & CAP_SCREENSHOTS != 0;
         session.groups_enabled = renderer_caps & CAP_GROUPS != 0;

@@ -360,10 +360,19 @@ impl SessionTransport {
     /// session_changed; old requests, accepted replies and undelivered output go
     /// away together. Runtime-lifetime IDs and diagnostic loss counts survive.
     pub fn begin_session(&mut self) -> Result<u64, ProtocolError> {
+        self.begin_session_with_body(MessageBody::default())
+    }
+
+    pub(super) fn begin_session_with_body(
+        &mut self,
+        body: MessageBody,
+    ) -> Result<u64, ProtocolError> {
         let epoch = self.epoch.checked_add(1).ok_or(ProtocolError::Limit)?;
         let sequence = self.next_sequence()?;
-        let body = MessageBody::default();
-        let bytes = body.record_bytes()?;
+        let bytes = self.limits.check_body(&body)?;
+        if bytes > self.limits.control.bytes {
+            return Err(ProtocolError::Limit);
+        }
         self.control = EventQueue::default();
         self.diagnostics = EventQueue::default();
         self.pending.clear();

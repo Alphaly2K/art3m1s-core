@@ -278,6 +278,7 @@ pub struct ScriptIoSession {
     save_prefix: String,
     max_file_bytes: usize,
     pub(super) chunked_writes: bool,
+    pub(super) project_save_path: bool,
     last_write_transaction: u64,
     completed: bool,
     faulted: bool,
@@ -343,6 +344,7 @@ impl ScriptIoSession {
             save_prefix,
             max_file_bytes,
             chunked_writes: false,
+            project_save_path: false,
             last_write_transaction: 0,
             completed: false,
             faulted: false,
@@ -512,7 +514,7 @@ impl ScriptIoSession {
         let mut interpreter = self.scenario_interpreter()?;
         interpreter.load_file(name, source)?;
         interpreter.start(name, label)?;
-        self.replace_scenario(interpreter)
+        self.replace_scenario(interpreter, MessageBody::default())
     }
 
     /// Start a fresh VM by restoring available system settings before reading
@@ -521,7 +523,7 @@ impl ScriptIoSession {
         logical_key(name)?;
         let mut interpreter = self.scenario_interpreter()?;
         interpreter.boot(name)?;
-        let epoch = self.replace_scenario(interpreter)?;
+        let epoch = self.replace_scenario(interpreter, MessageBody::default())?;
         self.boot_restore = Some(BootRestore::Start);
         Ok(epoch)
     }
@@ -543,19 +545,19 @@ impl ScriptIoSession {
             return Err(ProtocolError::Argument("project stage dimensions must be nonzero").into());
         }
         logical_key(&project.boot_script)?;
-        let save_prefix = logical_key(
-            project
-                .savepath
-                .as_deref()
-                .filter(|path| !path.trim().is_empty())
-                .unwrap_or("save"),
-        )?;
+        let save_path = crate::save::sanitize_savepath(project.savepath.as_deref());
+        let save_prefix = logical_key(&save_path)?;
+        let body = if self.project_save_path {
+            MessageBody::new(json!({ "save_path": save_path }).to_string(), vec![])?
+        } else {
+            MessageBody::default()
+        };
         let mut config = project.to_interpreter_config(None);
         config.savepath = Some(save_prefix.clone());
         config.reported_os = reported_os.filter(|os| !os.is_empty()).map(str::to_owned);
         let mut interpreter = self.configured_interpreter(config)?;
         interpreter.boot(&project.boot_script)?;
-        let epoch = self.replace_scenario(interpreter)?;
+        let epoch = self.replace_scenario(interpreter, body)?;
         self.save_prefix = save_prefix;
         self.boot_restore = Some(BootRestore::ReadTagIni);
         self.project_loading = true;
@@ -578,8 +580,12 @@ impl ScriptIoSession {
         Ok(interpreter)
     }
 
-    fn replace_scenario(&mut self, interpreter: Interpreter) -> Result<u64, ScriptIoError> {
-        let epoch = self.transport.begin_session()?;
+    fn replace_scenario(
+        &mut self,
+        interpreter: Interpreter,
+        body: MessageBody,
+    ) -> Result<u64, ScriptIoError> {
+        let epoch = self.transport.begin_session_with_body(body)?;
         self.interpreter = interpreter;
         self.task = None;
         self.operation = None;

@@ -546,30 +546,6 @@ fn load_transition_event(trans_type: Option<i32>) -> Option<asb_interpreter::Eve
     })
 }
 
-/// 规范化 system.ini 的 SAVEPATH 为沙箱内的逻辑相对子目录前缀。
-///
-/// 原值可能是 Windows 风格（含反斜杠、盘符、CSIDL 特殊文件夹名），桌面/移动端都
-/// 不能直接当文件系统路径用。这里：反斜杠转正斜杠、去掉首尾分隔符、剔除
-/// `..`/盘符等危险段，得到一个干净的相对前缀；为空则退回 `save`。物理落盘基准由
-/// 宿主（Flutter）解析到应用沙箱目录。
-pub(super) fn sanitize_savepath(raw: Option<&str>) -> String {
-    let raw = raw.map(|s| s.trim()).unwrap_or("");
-    if raw.is_empty() {
-        return "save".to_string();
-    }
-    let normalized = raw.replace('\\', "/");
-    let cleaned: Vec<&str> = normalized
-        .split('/')
-        .map(|seg| seg.trim())
-        .filter(|seg| !seg.is_empty() && *seg != "." && *seg != ".." && !seg.ends_with(':'))
-        .collect();
-    if cleaned.is_empty() {
-        "save".to_string()
-    } else {
-        cleaned.join("/")
-    }
-}
-
 fn normalize_relative_path(path: &str) -> Option<String> {
     let normalized = path.trim().trim_start_matches('/').replace('\\', "/");
     let mut parts = Vec::new();
@@ -656,7 +632,7 @@ fn encode_png_rgba(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Stri
 mod tests {
     use super::{
         ScreenshotBuffer, encode_png_rgba, load_transition_event, persistent_system_snapshot,
-        qualify_save_path, resize_screenshot_rgba, sanitize_savepath,
+        qualify_save_path, resize_screenshot_rgba,
     };
     use crate::save::saved_position_resumes_input_wait;
     use crate::save::system::is_persistent_system_variable;
@@ -793,11 +769,14 @@ mod tests {
     #[test]
     fn savepath_from_ini_is_sanitized() {
         assert_eq!(
-            sanitize_savepath(Some(r"Citrus\\hokeloli")),
+            crate::save::sanitize_savepath(Some(r"Citrus\\hokeloli")),
             "Citrus/hokeloli"
         );
-        assert_eq!(sanitize_savepath(Some("../bad/save")), "bad/save");
-        assert_eq!(sanitize_savepath(None), "save");
+        assert_eq!(
+            crate::save::sanitize_savepath(Some("../bad/save")),
+            "bad/save"
+        );
+        assert_eq!(crate::save::sanitize_savepath(None), "save");
     }
 
     #[test]

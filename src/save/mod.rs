@@ -10,6 +10,21 @@ use serde::{Deserialize, Serialize};
 pub(crate) mod read_history;
 pub(crate) mod system;
 
+pub(crate) fn sanitize_savepath(raw: Option<&str>) -> String {
+    let normalized = raw.unwrap_or_default().replace('\\', "/");
+    let cleaned = normalized
+        .split('/')
+        .map(str::trim)
+        .filter(|seg| !seg.is_empty() && *seg != "." && *seg != ".." && !seg.ends_with(':'))
+        .collect::<Vec<_>>()
+        .join("/");
+    if cleaned.is_empty() {
+        "save".to_string()
+    } else {
+        cleaned
+    }
+}
+
 /// 存档中的音频重放快照。只记录当前应播放的音频，不记录播放进度；
 /// 读档时所有音频都从头重放。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

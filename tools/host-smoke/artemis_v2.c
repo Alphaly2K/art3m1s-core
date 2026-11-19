@@ -9,7 +9,7 @@ _Static_assert(sizeof(ArtApiHeader) == 24, "API table prefix");
 _Static_assert(offsetof(ArtMessage, session_epoch) == 16, "message epoch");
 _Static_assert(offsetof(ArtStepInfo, monotonic_ns) == 16, "step clock");
 
-static const char ini[] = "[WINDOWS]\nWIDTH=640\nHEIGHT=480\nBOOT=boot.iet\n";
+static const char ini[] = "[WINDOWS]\nWIDTH=640\nHEIGHT=480\nBOOT=boot.iet\nSAVEPATH=C:\\Profiles\\Game\n";
 static const char boot[] = "*top\n[lyc id=1 width=2 height=1 color=ff112233]\n"
                            "[takess]\n[savess file=thumb]\n"
                            "[httpget url=https://example.invalid/status varname_code=t.http]\n"
@@ -178,9 +178,16 @@ int main(void) {
     assert(frames->release(rt, view.token) == ART_E_HANDLE);
     assert(api->destroy(rt) == ART_OK);
     assert(api->destroy(rt) == ART_E_HANDLE);
-    info.host_service_caps = ART_HOST_CAP_IO;
+    info.host_service_caps = ART_HOST_CAP_IO | ART_HOST_CAP_PROJECT_SAVE_PATH;
     assert(api->create(&info, &rt) == ART_OK);
     assert(api->open_project(rt, &project) == ART_OK);
+    uint8_t opened[256];
+    ArtPollResult first = { .struct_size = sizeof(first) };
+    assert(api->poll_events(rt, opened, sizeof(opened), &first) == ART_OK);
+    static const char save_path[] = "{\"save_path\":\"Profiles/Game\"}";
+    assert(first.record_count == 1 && first.written_bytes == 64 + sizeof(save_path) - 1);
+    assert(little(opened + 8, 4) == ART_RUNTIME_SESSION_CHANGED);
+    assert(!memcmp(opened + 64, save_path, sizeof(save_path) - 1));
     assert(pump(api, rt, 1) == (1 | 4 | 8));
     assert(api->destroy(rt) == ART_OK);
     puts("Artemis v2 Host smoke passed");

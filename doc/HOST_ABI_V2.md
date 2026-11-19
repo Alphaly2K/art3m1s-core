@@ -247,9 +247,12 @@ emote=16、HLSL=32。
 `metadata_bytes:u32, blob_bytes:u32, UTF-8 JSON metadata, raw blob`，两段长度相加加 8
 必须等于 body_bytes；metadata 必须为 JSON object，无 NUL/隐含 padding。诊断使用相同 body。
 Runtime domain=1、kind=1 为 `session_changed`，request_id=0，metadata=`{}`，blob 为空。
-Runtime kind=2 为 `project_ready`，字段同上；BOOT 与加载期 Lua 完成后交付。记录排入
+Host 声明 `ART_HOST_CAP_PROJECT_SAVE_PATH` 时，由 `open_project` 创建的会话在该事件中提供
+`{"save_path":"…"}`。该值是 Core 解析的逻辑相对子目录，使用 `/` 分隔并保留大小写；Host 可用
+它选择 `save` 命名空间的物理根。存档 IO 的 key 仍相对于该命名空间，Host 须自行验证物理路径。
+Runtime kind=2 为 `project_ready`，request_id=0、metadata=`{}`、blob 为空；BOOT 与加载期 Lua 完成后交付。记录排入
 可靠队列时状态由 Loading 转为 Running，且排在首条场景输出之前。
-Runtime kind=3 为 `exit_requested`，字段同 `session_changed`。
+Runtime kind=3 为 `exit_requested`，request_id=0、metadata=`{}`、blob 为空。
 Runtime kind=4 为 `runtime_closed`，request_id=0、blob 为空；metadata 为
 `{"save_status":"written"}` 或 `{"save_status":"failed","reason":"…","files_written":1}`。
 `files_written` 是本次关闭期间已经收到持久化确认的文件数。
