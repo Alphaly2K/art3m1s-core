@@ -304,8 +304,17 @@ From this repository, run the probe with `ARTEMIS_DXVK_NATIVE_SOURCE` and
 `ARTEMIS_DXVK_NATIVE_BUILD` pointing to that source and build, and
 `ARTEMIS_MOLTENVK_DYLIB` set to the absolute path to the companion MoltenVK
 1.4.3 library. The probe uses a private DXVK adapter interface to request
-the device extension, so the source headers and libraries must match. Shader
-compilation, scene draws, and Flutter engine presentation are separate stages.
+the device extension, so the source headers and libraries must match.
+
+Set `CX_BOTTLE` and add `--hlsl` to the native probe command to exercise
+shader execution. The Windows compiler helper reads raw HLSL from stdin,
+compiles `main` to `vs_5_0` or `ps_5_0`, and writes DXBC to stdout with
+diagnostics on stderr. It creates no graphics device. The macOS process
+loads both shader blobs once, binds foreground, mask, and user textures,
+then changes one constant between two draws into the original IOSurface.
+The probe compares every pixel after each draw. It does not require game
+assets or Flutter. Scene draws and Flutter engine presentation are separate
+integration steps.
 
 To test transfer from Wine to a Flutter texture, set
 `FLUTTER_MACOS_FRAMEWORK_DIR` to the directory containing

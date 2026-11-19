@@ -6,6 +6,10 @@ if [[ $(uname -s) != Darwin ]]; then
   printf '%s\n' 'This check requires macOS and a Metal device.' >&2
   exit 2
 fi
+if [[ $# -gt 1 || ( $# == 1 && $1 != --hlsl ) ]]; then
+  printf '%s\n' 'Usage: test-host-dxvk-native.sh [--hlsl]' >&2
+  exit 2
+fi
 : "${ARTEMIS_DXVK_NATIVE_SOURCE:?Set this to the DXVK source checkout}"
 : "${ARTEMIS_DXVK_NATIVE_BUILD:?Set this to the matching native build directory}"
 : "${ARTEMIS_MOLTENVK_DYLIB:?Set this to an absolute path to libMoltenVK.dylib}"
@@ -18,6 +22,20 @@ if [[ $ARTEMIS_MOLTENVK_DYLIB != /* || ! -f $ARTEMIS_MOLTENVK_DYLIB ]]; then
 fi
 scratch=$(mktemp -d)
 trap 'rm -rf -- "$scratch"' EXIT
+shader_args=()
+if [[ $# == 1 ]]; then
+  : "${CX_BOTTLE:?Set CX_BOTTLE to a dedicated CrossOver test bottle for HLSL compilation}"
+  crossover=${CROSSOVER_ROOT:-/Applications/CrossOver.app/Contents/SharedSupport/CrossOver}
+  "${ARTEMIS_D3D_CC:-x86_64-w64-mingw32-gcc}" -std=c11 -O2 -Wall -Wextra -Werror \
+    tools/host-bindings/d3d11/artemis_hlsl_compile.c -o "$scratch/artemis-hlsl-compile.exe" -ld3dcompiler_47
+  source_files="$PWD/tools/host-smoke/shaders"
+  (cd "$scratch"
+   CX_GRAPHICS_BACKEND=wined3d "$crossover/bin/wine" --no-gui --debugmsg -all artemis-hlsl-compile.exe vs_5_0 \
+     < "$source_files/native-quad.hlsl" > vertex.dxbc
+   CX_GRAPHICS_BACKEND=wined3d "$crossover/bin/wine" --no-gui --debugmsg -all artemis-hlsl-compile.exe ps_5_0 \
+     < "$source_files/native-effect.hlsl" > pixel.dxbc)
+  shader_args=(vertex.dxbc pixel.dxbc)
+fi
 ln -s "$ARTEMIS_MOLTENVK_DYLIB" "$scratch/libvulkan.1.dylib"
 ln -s "$ARTEMIS_MOLTENVK_DYLIB" "$scratch/libvulkan.dylib"
 xcrun clang++ -std=c++17 -Wall -Wextra -Werror -Wno-missing-field-initializers \
@@ -33,4 +51,4 @@ xcrun clang++ -std=c++17 -Wall -Wextra -Werror -Wno-missing-field-initializers \
  DYLD_LIBRARY_PATH="$scratch:$sdl_libdir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
    DXVK_WSI_DRIVER=SDL3 SDL_VULKAN_LIBRARY="$ARTEMIS_MOLTENVK_DYLIB" \
    DXVK_LOG_LEVEL=${DXVK_LOG_LEVEL:-warn} MVK_CONFIG_LOG_LEVEL=${MVK_CONFIG_LOG_LEVEL:-2} \
-   ./artemis-dxvk-native)
+   ./artemis-dxvk-native ${shader_args[@]+"${shader_args[@]}"})

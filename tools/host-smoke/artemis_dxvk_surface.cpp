@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <thread>
 #include <vector>
 
@@ -22,7 +23,91 @@ static void check(bool success, const char *operation) {
     }
 }
 
-int main() {
+static std::vector<char> load_bytecode(const char *path) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    const auto bytes = file.tellg();
+    check(bytes >= 4 && bytes <= 16 * 1024 * 1024, "get DXBC bytecode length");
+    std::vector<char> result(static_cast<size_t>(bytes));
+    file.seekg(0);
+    check(bool(file.read(result.data(), bytes)) && std::memcmp(result.data(), "DXBC", 4) == 0,
+          "read DXBC bytecode");
+    return result;
+}
+
+static Com<ID3D11ShaderResourceView> make_sample(ID3D11Device *device, const uint8_t (&bgra)[4]) {
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width = desc.Height = desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.Usage = D3D11_USAGE_IMMUTABLE;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    const D3D11_SUBRESOURCE_DATA data = {bgra, 4, 0};
+    Com<ID3D11Texture2D> texture;
+    check(SUCCEEDED(device->CreateTexture2D(&desc, &data, &texture)), "create shader input texture");
+    Com<ID3D11ShaderResourceView> view;
+    check(SUCCEEDED(device->CreateShaderResourceView(texture.ptr(), nullptr, &view)), "create shader input view");
+    return view;
+}
+
+struct EffectParams {
+    float tint[4] = {0, 1, 0.5f, 1};
+    float param = 1;
+    float padding[3] = {};
+};
+
+static Com<ID3D11Buffer> bind_effect(ID3D11Device *device, ID3D11DeviceContext *context,
+                                    const char *vsPath, const char *psPath, uint32_t width, uint32_t height) {
+    const auto vs = load_bytecode(vsPath);
+    const auto ps = load_bytecode(psPath);
+    Com<ID3D11VertexShader> vertex;
+    Com<ID3D11PixelShader> pixel;
+    check(SUCCEEDED(device->CreateVertexShader(vs.data(), vs.size(), nullptr, &vertex)), "create native vertex shader");
+    check(SUCCEEDED(device->CreatePixelShader(ps.data(), ps.size(), nullptr, &pixel)), "create native pixel shader");
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    context->VSSetShader(vertex.ptr(), nullptr, 0);
+    context->PSSetShader(pixel.ptr(), nullptr, 0);
+
+    D3D11_RASTERIZER_DESC rasterizerDesc = {};
+    rasterizerDesc.FillMode = D3D11_FILL_SOLID;
+    rasterizerDesc.CullMode = D3D11_CULL_NONE;
+    rasterizerDesc.DepthClipEnable = TRUE;
+    Com<ID3D11RasterizerState> rasterizer;
+    check(SUCCEEDED(device->CreateRasterizerState(&rasterizerDesc, &rasterizer)), "create rasterizer");
+    context->RSSetState(rasterizer.ptr());
+    const D3D11_VIEWPORT viewport = {0, 0, float(width), float(height), 0, 1};
+    context->RSSetViewports(1, &viewport);
+
+    D3D11_SAMPLER_DESC samplerDesc = {};
+    samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+    samplerDesc.AddressU = samplerDesc.AddressV = samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    samplerDesc.MaxAnisotropy = 1;
+    samplerDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+    Com<ID3D11SamplerState> sampler;
+    check(SUCCEEDED(device->CreateSamplerState(&samplerDesc, &sampler)), "create pixel sampler");
+    ID3D11SamplerState *activeSampler = sampler.ptr();
+    context->PSSetSamplers(0, 1, &activeSampler);
+
+    const auto user = make_sample(device, {11, 7, 5, 255});
+    const auto fore = make_sample(device, {51, 34, 17, 255});
+    const auto mask = make_sample(device, {0, 0, 128, 255});
+    ID3D11ShaderResourceView *textures[] = {user.ptr(), nullptr, fore.ptr(), mask.ptr()};
+    context->PSSetShaderResources(0, 4, textures);
+
+    D3D11_BUFFER_DESC constantDesc = {};
+    constantDesc.ByteWidth = sizeof(EffectParams);
+    constantDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    Com<ID3D11Buffer> constants;
+    check(SUCCEEDED(device->CreateBuffer(&constantDesc, nullptr, &constants)), "create pixel constants");
+    ID3D11Buffer *activeConstants = constants.ptr();
+    context->PSSetConstantBuffers(0, 1, &activeConstants);
+    return constants;
+}
+
+int main(int argc, char **argv) {
+    if (argc != 1 && argc != 3) {
+        std::fputs("Usage: artemis-dxvk-native [vertex.dxbc pixel.dxbc]\n", stderr);
+        return 2;
+    }
+    const bool drawEffect = argc == 3;
     Com<IDXGIFactory1> factory;
     check(SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void **>(&factory))),
           "CreateDXGIFactory1");
@@ -137,11 +222,23 @@ int main() {
         Com<ID3D11Query> completed;
         check(SUCCEEDED(device->CreateQuery(&queryDesc, &completed)), "create D3D11 completion query");
         const float colors[][4] = {{1, 0, 0, 1}, {0, 1, 1, 1}};
-        const unsigned char expected[][4] = {{0, 0, 255, 255}, {255, 255, 0, 255}};
+        const unsigned char clearPixels[][4] = {{0, 0, 255, 255}, {255, 255, 0, 255}};
+        const unsigned char effectPixels[][4] = {{24, 24, 5, 255}, {13, 17, 0, 255}};
+        Com<ID3D11Buffer> constants;
+        if (drawEffect) constants = bind_effect(device.ptr(), context.ptr(), argv[1], argv[2], width, height);
         const VkImageSubresourceRange subresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         for (size_t i = 0; i < 2; ++i) {
             context->ClearRenderTargetView(target.ptr(), colors[i]);
-            // Materialize the deferred clear and restore DXVK's layout before the next draw.
+            if (drawEffect) {
+                EffectParams params;
+                params.param = i == 0 ? 1.0f : 0.0f;
+                context->UpdateSubresource(constants.ptr(), 0, nullptr, &params, 0, 0);
+                ID3D11RenderTargetView *activeTarget = target.ptr();
+                context->OMSetRenderTargets(1, &activeTarget, nullptr);
+                context->Draw(4, 0);
+                context->OMSetRenderTargets(0, nullptr, nullptr);
+            }
+            // Materialize deferred writes and restore DXVK's layout before the next draw.
             interop->TransitionSurfaceLayout(interopSurface.ptr(), &subresource,
                                              layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
             interop->TransitionSurfaceLayout(interopSurface.ptr(), &subresource,
@@ -163,7 +260,7 @@ int main() {
             for (uint32_t y = 0; y < height; ++y) {
                 for (uint32_t x = 0; x < width; ++x) {
                     const auto *actual = pixels + y * stride + x * 4;
-                    if (std::memcmp(actual, expected[i], 4) != 0) {
+                    if (std::memcmp(actual, drawEffect ? effectPixels[i] : clearPixels[i], 4) != 0) {
                         std::fprintf(stderr, "Frame %zu pixel (%u, %u): BGRA %u,%u,%u,%u\n",
                             i + 1, x, y, actual[0], actual[1], actual[2], actual[3]);
                         check(false, "compare shared D3D11 output pixel");
@@ -173,9 +270,11 @@ int main() {
             check(CVPixelBufferUnlockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess,
                   "unlock pixel buffer");
         }
+        context->ClearState();
     }
     vkDestroyImage(vkDevice, image, nullptr);
     vkFreeMemory(vkDevice, backing, nullptr);
     CVPixelBufferRelease(buffer);
-    std::puts("Native DXVK IOSurface: two D3D11 frames visible in the original pixel buffer");
+    std::puts(drawEffect ? "Native DXVK IOSurface: HLSL texture bindings and constant update matched both frames"
+                         : "Native DXVK IOSurface: two D3D11 frames visible in the original pixel buffer");
 }
