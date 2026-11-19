@@ -400,6 +400,15 @@ struct ArtBytes {
     size: u64,
 }
 
+impl ArtBytes {
+    unsafe fn as_slice(&self) -> Result<&[u8], i32> {
+        if self.data.is_null() || self.size == 0 || self.size > isize::MAX as u64 {
+            return Err(ARGUMENT);
+        }
+        Ok(unsafe { std::slice::from_raw_parts(self.data, self.size as usize) })
+    }
+}
+
 #[unsafe(no_mangle)]
 unsafe extern "C" fn art3m1s_metal_host_v1_prepare_ade2(
     host: *mut ArtMetalHost,
@@ -408,13 +417,7 @@ unsafe extern "C" fn art3m1s_metal_host_v1_prepare_ade2(
 ) -> i32 {
     unsafe {
         with_host(host, |host| {
-            let bytes = |value: ArtBytes| {
-                if value.data.is_null() || value.size == 0 || value.size > isize::MAX as u64 {
-                    return Err(ARGUMENT);
-                }
-                Ok(std::slice::from_raw_parts(value.data, value.size as usize))
-            };
-            let (source, artifact) = (bytes(source)?, bytes(artifact)?);
+            let (source, artifact) = (source.as_slice()?, artifact.as_slice()?);
             let Some((_, Renderer::Metal(renderer))) = &mut host.renderer else {
                 return Err(UNSUPPORTED);
             };
@@ -427,6 +430,63 @@ unsafe extern "C" fn art3m1s_metal_host_v1_prepare_ade2(
                 })?;
             renderer.clear_cached_shaders();
             Ok(())
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn art3m1s_metal_host_v1_set_glsl_cache(
+    host: *mut ArtMetalHost,
+    directory: *const c_char,
+) -> i32 {
+    unsafe {
+        with_host(host, |host| {
+            if directory.is_null() {
+                return Err(ARGUMENT);
+            }
+            let directory = Path::new(CStr::from_ptr(directory).to_str().map_err(|_| ARGUMENT)?);
+            if !directory.is_absolute() {
+                return Err(ARGUMENT);
+            }
+            let (_, renderer) = host.renderer.as_mut().ok_or(UNSUPPORTED)?;
+            renderer.access(|renderer| {
+                let Renderer::Angle(renderer) = renderer else {
+                    return Err(UNSUPPORTED);
+                };
+                renderer
+                    .backend_mut()
+                    .set_glsl_cache(directory)
+                    .then_some(())
+                    .ok_or(UNSUPPORTED)
+            })
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn art3m1s_metal_host_v1_prepare_glsl(
+    host: *mut ArtMetalHost,
+    source: ArtBytes,
+) -> i32 {
+    unsafe {
+        with_host(host, |host| {
+            let source = source.as_slice()?;
+            if source.len() > 256 * 1024 {
+                return Err(ARGUMENT);
+            }
+            let (_, renderer) = host.renderer.as_mut().ok_or(UNSUPPORTED)?;
+            renderer.access(|renderer| match renderer {
+                Renderer::Angle(renderer) => {
+                    renderer
+                        .backend_mut()
+                        .prepare_glsl(source)
+                        .map_err(|error| {
+                            eprintln!("Artemis GLSL preparation failed: {error}");
+                            ARGUMENT
+                        })
+                }
+                Renderer::Metal(_) => Err(UNSUPPORTED),
+            })
         })
     }
 }

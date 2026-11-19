@@ -42,6 +42,17 @@ pub struct GlBackend {
 }
 
 impl GlBackend {
+    /// Configure the optional program cache while this context is current.
+    pub fn set_glsl_cache(&mut self, directory: &std::path::Path) -> bool {
+        self.renderer.binary_cache = super::binary_cache::Cache::open(&self.gl, directory);
+        self.renderer.binary_cache.is_some()
+    }
+
+    /// Prepare a program for exact source bytes while this context is current.
+    pub fn prepare_glsl(&mut self, source: &[u8]) -> Result<(), String> {
+        self.renderer.prepare_glsl(source)
+    }
+
     pub fn new(config: platform::GfxBackend, width: u32, height: u32) -> Result<Self, String> {
         let (gl, platform_context, effective_backend) =
             platform::create_offscreen_context(config, width, height)?;
@@ -80,7 +91,14 @@ impl GlBackend {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     pub fn new_host_egl(width: u32, height: u32) -> Result<Self, String> {
         let (gl, context, previous) = platform::create_host_egl_context(width, height)?;
-        Self::from_context(gl, context, ShaderProfile::Gles300, width, height, Some(previous))
+        Self::from_context(
+            gl,
+            context,
+            ShaderProfile::Gles300,
+            width,
+            height,
+            Some(previous),
+        )
     }
 
     fn from_context(

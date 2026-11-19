@@ -30,6 +30,7 @@ use std::num::NonZeroU32;
 use std::rc::Rc;
 
 mod backend;
+mod binary_cache;
 mod hlsl;
 pub mod platform;
 mod provider;
@@ -92,7 +93,9 @@ pub struct GlRenderer {
     gl: Rc<glow::Context>,
     program: glow::Program,
     program_bindings: ProgramBindings,
-    custom_programs: HashMap<String, CustomProgram>,
+    custom_programs: HashMap<String, Rc<CustomProgram>>,
+    prepared_glsl: HashMap<Box<[u8]>, Rc<CustomProgram>>,
+    binary_cache: Option<binary_cache::Cache>,
     profile: ShaderProfile,
     white_texture: glow::Texture,
     transparent_texture: glow::Texture,
@@ -146,21 +149,13 @@ impl GlRenderer {
             let mut custom_programs = HashMap::new();
             custom_programs.insert(
                 crate::shader::ALPHA_MASK_SHADER.to_owned(),
-                CustomProgram {
-                    program: alpha_mask_program,
-                    bindings: ProgramBindings::new(&gl, alpha_mask_program),
-                    glsl_uniforms: None,
-                },
+                Rc::new(CustomProgram::new(&gl, alpha_mask_program, false)),
             );
             let group_composite_program =
                 shader::build_builtin_program(&gl, profile, crate::shader::GROUP_COMPOSITE_SHADER)?;
             custom_programs.insert(
                 crate::shader::GROUP_COMPOSITE_SHADER.to_owned(),
-                CustomProgram {
-                    program: group_composite_program,
-                    bindings: ProgramBindings::new(&gl, group_composite_program),
-                    glsl_uniforms: Some(GlslUniforms::reflect(&gl, group_composite_program)),
-                },
+                Rc::new(CustomProgram::new(&gl, group_composite_program, true)),
             );
             // [trans type=2] 规则图像转场内置 shader，与 alpha-mask 同样在
             // 初始化时编译并注册到 custom_programs。
@@ -168,11 +163,7 @@ impl GlRenderer {
                 shader::build_builtin_program(&gl, profile, crate::shader::RULE_TRANS_SHADER)?;
             custom_programs.insert(
                 crate::shader::RULE_TRANS_SHADER.to_owned(),
-                CustomProgram {
-                    program: rule_trans_program,
-                    bindings: ProgramBindings::new(&gl, rule_trans_program),
-                    glsl_uniforms: None,
-                },
+                Rc::new(CustomProgram::new(&gl, rule_trans_program, false)),
             );
 
             // 单位四边形，两个三角形，含纹理坐标。布局：x, y, u, v。
@@ -233,6 +224,8 @@ impl GlRenderer {
                 program,
                 program_bindings,
                 custom_programs,
+                prepared_glsl: HashMap::new(),
+                binary_cache: None,
                 profile,
                 white_texture,
                 transparent_texture,
@@ -321,41 +314,47 @@ impl GlRenderer {
     /// Register one Artemis `[lyshader]` HLSL effect under its script id.
     pub fn register_hlsl_shader(&mut self, name: &str, source: &[u8]) -> Result<(), String> {
         let program = unsafe { shader::build_effect_program(&self.gl, self.profile, source)? };
-        self.insert_effect_program(name, program, None);
+        self.custom_programs.insert(
+            name.into(),
+            Rc::new(CustomProgram::new(&self.gl, program, false)),
+        );
         Ok(())
     }
 
     pub fn register_glsl_shader(&mut self, name: &str, source: &[u8]) -> Result<(), String> {
-        let program = unsafe { shader::build_glsl_effect_program(&self.gl, self.profile, source)? };
-        let uniforms = GlslUniforms::reflect(&self.gl, program);
-        self.insert_effect_program(name, program, Some(uniforms));
+        let program = match self.prepared_glsl.get(source) {
+            Some(prepared) => Rc::clone(prepared),
+            None => self.load_glsl(source)?,
+        };
+        self.custom_programs.insert(name.into(), program);
         Ok(())
     }
 
-    fn insert_effect_program(
-        &mut self,
-        name: &str,
-        program: glow::Program,
-        glsl_uniforms: Option<GlslUniforms>,
-    ) {
-        let custom = CustomProgram {
-            program,
-            bindings: ProgramBindings::new(&self.gl, program),
-            glsl_uniforms,
+    fn load_glsl(&self, source: &[u8]) -> Result<Rc<CustomProgram>, String> {
+        let program = unsafe {
+            shader::build_glsl_effect_program(
+                &self.gl,
+                self.profile,
+                source,
+                self.binary_cache.as_ref(),
+            )?
         };
-        if let Some(old) = self.custom_programs.insert(name.to_string(), custom) {
-            unsafe {
-                self.gl.delete_program(old.program);
+        Ok(Rc::new(CustomProgram::new(&self.gl, program, true)))
+    }
+
+    fn prepare_glsl(&mut self, source: &[u8]) -> Result<(), String> {
+        if !self.prepared_glsl.contains_key(source) {
+            if self.prepared_glsl.len() >= 256 {
+                return Err("GLSL prewarm limit reached".into());
             }
+            let program = self.load_glsl(source)?;
+            self.prepared_glsl.insert(source.into(), program);
         }
+        Ok(())
     }
 
     pub fn unregister_hlsl_shader(&mut self, name: &str) -> bool {
-        let Some(program) = self.custom_programs.remove(name) else {
-            return false;
-        };
-        unsafe { self.gl.delete_program(program.program) };
-        true
+        self.custom_programs.remove(name).is_some()
     }
 
     /// 确保 `targets[depth]` 存在且尺寸匹配，返回其 FBO 与颜色纹理。
@@ -692,7 +691,7 @@ impl GlRenderer {
             let custom_program = cmd
                 .shader
                 .as_ref()
-                .and_then(|effect| self.custom_programs.get(&effect.name));
+                .and_then(|effect| self.custom_programs.get(&effect.name).map(Rc::as_ref));
             let (program, bindings) = custom_program
                 .map(|custom| (custom.program, &custom.bindings))
                 .unwrap_or((self.program, &self.program_bindings));
@@ -1038,7 +1037,7 @@ impl GlRenderer {
         let samples_backdrop = |effect: &crate::draw::ShaderEffect| {
             self.custom_programs
                 .get(&effect.name)
-                .is_some_and(CustomProgram::samples_backdrop)
+                .is_some_and(|program| program.samples_backdrop())
         };
         let current_region = if damage.is_some()
             && (frame
@@ -1270,7 +1269,11 @@ impl GlRenderer {
         self.render_with_clear_color(frame, [0.0, 0.0, 0.0, 1.0]);
     }
 
-    pub(crate) fn render_with_clear_color(&mut self, frame: &DrawList, color: [f32; 4]) -> RenderRegion {
+    pub(crate) fn render_with_clear_color(
+        &mut self,
+        frame: &DrawList,
+        color: [f32; 4],
+    ) -> RenderRegion {
         self.render_internal(frame, None, false, color)
     }
 }
@@ -1295,9 +1298,6 @@ impl Drop for GlRenderer {
         let gl = &self.gl;
         unsafe {
             gl.delete_program(self.program);
-            for program in self.custom_programs.values() {
-                gl.delete_program(program.program);
-            }
             gl.delete_texture(self.white_texture);
             gl.delete_texture(self.transparent_texture);
             if let Some(target) = self.backdrop_target.take() {
@@ -1329,16 +1329,32 @@ struct GroupTarget {
 }
 
 struct CustomProgram {
+    gl: Rc<glow::Context>,
     program: glow::Program,
     bindings: ProgramBindings,
     glsl_uniforms: Option<GlslUniforms>,
 }
 
 impl CustomProgram {
+    fn new(gl: &Rc<glow::Context>, program: glow::Program, reflect: bool) -> Self {
+        Self {
+            gl: Rc::clone(gl),
+            program,
+            bindings: ProgramBindings::new(gl, program),
+            glsl_uniforms: reflect.then(|| GlslUniforms::reflect(gl, program)),
+        }
+    }
+
     fn samples_backdrop(&self) -> bool {
         self.glsl_uniforms
             .as_ref()
             .is_some_and(|uniforms| uniforms.samples_backdrop)
+    }
+}
+
+impl Drop for CustomProgram {
+    fn drop(&mut self) {
+        unsafe { self.gl.delete_program(self.program) };
     }
 }
 

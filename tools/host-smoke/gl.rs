@@ -96,6 +96,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or([5, 24, 24, 255]);
     let mut renderer = SpriteRenderer::new(new_backend(width, height)?);
     renderer.backend_mut().begin_access();
+    if let Some(path) = std::env::var_os("ARTEMIS_GL_SMOKE_CACHE_DIR") {
+        let backend = renderer.backend_mut();
+        assert!(
+            backend.set_glsl_cache(&PathBuf::from(path)),
+            "program binaries unavailable"
+        );
+        backend.prepare_glsl(&effect.shader.source)?;
+    }
     renderer.backend_mut().begin_frame(FrameTarget::Main)?;
     renderer.render_packet(1, &packet, |index| Ok(textures[index]), [0.0; 4])?;
     renderer.backend_mut().end_frame();

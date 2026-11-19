@@ -68,7 +68,17 @@ pub unsafe fn build_glsl_effect_program(
     gl: &glow::Context,
     profile: ShaderProfile,
     source: &[u8],
+    cache: Option<&super::binary_cache::Cache>,
 ) -> Result<glow::Program, String> {
+    let link = |vertex: &str, fragment: &str| {
+        if let Some(cache) = cache {
+            cache.load_or_compile(gl, vertex, fragment, || unsafe {
+                link(gl, vertex, fragment, true)
+            })
+        } else {
+            unsafe { link_program(gl, vertex, fragment) }
+        }
+    };
     let decoded = String::from_utf8_lossy(source);
     let fragment = decoded.trim_start_matches('\u{feff}');
     let normalized;
@@ -91,11 +101,13 @@ pub unsafe fn build_glsl_effect_program(
                 with_precision = format!("precision mediump float;\n#line 1\n{fragment}");
                 &with_precision
             };
-            return unsafe {
-                link_program(gl, &format!("{gles100}{}", vertex.vertex_body), fragment)
-            };
+            return link(&format!("{gles100}{}", vertex.vertex_body), fragment);
         }
-        return unsafe { build_program_from_bodies(gl, profile, vertex.vertex_body, fragment) };
+        let header = profile.version_header();
+        return link(
+            &format!("{header}{}", vertex.vertex_body),
+            &format!("{header}{fragment}"),
+        );
     };
     let header = match (
         profile,
@@ -116,7 +128,7 @@ pub unsafe fn build_glsl_effect_program(
             ));
         }
     };
-    unsafe { link_program(gl, &format!("{header}{}", vertex.vertex_body), fragment) }
+    link(&format!("{header}{}", vertex.vertex_body), fragment)
 }
 
 fn skip_glsl_comments(mut source: &str) -> &str {
@@ -171,6 +183,15 @@ unsafe fn link_program(
     vertex: &str,
     fragment: &str,
 ) -> Result<glow::Program, String> {
+    unsafe { link(gl, vertex, fragment, false) }
+}
+
+unsafe fn link(
+    gl: &glow::Context,
+    vertex: &str,
+    fragment: &str,
+    binary_retrievable: bool,
+) -> Result<glow::Program, String> {
     unsafe {
         let program = gl.create_program()?;
 
@@ -208,6 +229,9 @@ unsafe fn link_program(
 
         gl.bind_attrib_location(program, 0, "a_pos");
         gl.bind_attrib_location(program, 1, "a_uv");
+        if binary_retrievable {
+            gl.program_binary_retrievable_hint(program, true);
+        }
         gl.link_program(program);
         if !gl.get_program_link_status(program) {
             let log = gl.get_program_info_log(program);
