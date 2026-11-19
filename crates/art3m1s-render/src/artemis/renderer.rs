@@ -1,6 +1,8 @@
 //! Host-owned rendering adapter for draft Artemis sprite frames.
 
-use super::frame::{FrameGroup, FrameShaderEffect, FrameSprite, FrameTransition, SpriteBlend};
+use super::frame::{
+    FrameGroup, FrameShaderEffect, FrameShaderLanguage, FrameSprite, FrameTransition, SpriteBlend,
+};
 use super::packet::{FramePacket, FrameTextureDescriptor};
 use crate::backend::{FrameCapture, GpuBackend, RenderRegion, TextureData, TextureDesc};
 use crate::draw::{
@@ -186,7 +188,7 @@ impl<B: GpuBackend> SpriteRenderer<B> {
                     clear_color,
                 )
             } else {
-                Ok(self.backend.render(&draw))
+                Ok(self.backend.render_with_clear_color(&draw, clear_color))
             }
         });
         match result {
@@ -221,14 +223,19 @@ impl<B: GpuBackend> SpriteRenderer<B> {
                 return;
             }
             let name = self.shaders.entry(key).or_insert_with(|| {
-                let name = format!("artemis-hlsl-{:016x}-{}-{revision}", key.0, key.1);
-                match self
-                    .backend
-                    .register_hlsl_shader(&name, &effect.shader.source)
-                {
+                let name = format!("artemis-shader-{:016x}-{}-{revision}", key.0, key.1);
+                let source = &effect.shader.source;
+                let result = match effect.shader.language {
+                    FrameShaderLanguage::Hlsl => self.backend.register_hlsl_shader(&name, source),
+                    FrameShaderLanguage::Glsl => self.backend.register_glsl_shader(&name, source),
+                };
+                match result {
                     Ok(_) => Some(name),
                     Err(error) => {
-                        log::warn!("HLSL shader revision {revision} could not compile: {error}");
+                        log::warn!(
+                            "{:?} shader revision {revision} could not compile: {error}",
+                            effect.shader.language
+                        );
                         None
                     }
                 }
@@ -272,8 +279,7 @@ impl<B: GpuBackend> SpriteRenderer<B> {
         blend: (f32, Option<ShaderEffect>),
         clear_color: [f32; 4],
     ) -> Result<RenderRegion, String> {
-        self.backend.clear(clear_color);
-        self.backend.render(&source);
+        self.backend.render_with_clear_color(&source, clear_color);
         let extent = self
             .backend
             .render_dimensions()
@@ -324,10 +330,9 @@ impl<B: GpuBackend> SpriteRenderer<B> {
             stencil: None,
             native_emote: None,
         });
-        self.backend.clear(clear_color);
-        self.backend.render(&draw);
+        let region = self.backend.render_with_clear_color(&draw, clear_color);
         self.backend.destroy_texture(texture);
-        Ok(RenderRegion::Full)
+        Ok(region)
     }
 
     /// Release the adapter's uploads while the Host's backend context is current.

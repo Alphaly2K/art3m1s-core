@@ -3216,6 +3216,61 @@ fn host_video_layers_publish_immutable_frames_and_resume_media_waits() {
 }
 
 #[test]
+fn numbered_load_ignores_transient_video_textures_in_legacy_saves() {
+    let (mut saver, _, mut host) = playback_project(
+        br#"*top
+[lyc id=still file=still]
+[video id=movie file=overlay.ogv]
+[save file=slot]
+[calllua function=mark]
+[stop]
+[lua]
+function mark() restored=true end
+[/lua]
+"#,
+    );
+    let pixel = [8, 16, 32, 255];
+    host.asset("still.png", &png_bytes(1, 1, &pixel));
+    drive_display_snapshot(&mut saver, &mut host, playback_frame(1, 0));
+    let key = ("save".into(), "slot".into());
+    let mut save: crate::save::SaveData = serde_json::from_slice(&host.files[&key].1).unwrap();
+    let snapshot = save.scene.as_mut().unwrap();
+    assert!(snapshot.get("movie").unwrap().file.is_none());
+    snapshot.set_file(
+        "movie",
+        Some(crate::video::video_layer_texture_name("movie")),
+    );
+    host.files
+        .insert(key, (2, serde_json::to_vec(&save).unwrap()));
+    host.asset("load.iet", b"*top\n[load file=slot]\n[stop]\n");
+
+    let mut loader = session(2, TransportLimits::default(), 4096);
+    loader
+        .open_queued_project(
+            b"[WINDOWS]\nWIDTH=320\nHEIGHT=200\nBOOT=load.iet\n",
+            "windows",
+            None,
+        )
+        .unwrap();
+    drive_display_snapshot(&mut loader, &mut host, playback_frame(1, 0));
+    let frame = loader.frames.latest_snapshot().unwrap();
+    assert_eq!(frame.sprites.len(), 1);
+    assert_eq!(frame.sprites[0].layer_id, "still");
+    assert_eq!(
+        frame.texture(frame.sprites[0].texture).unwrap().rgba(),
+        pixel
+    );
+    assert!(
+        loader
+            .interpreter()
+            .lua()
+            .globals()
+            .get::<bool>("restored")
+            .unwrap()
+    );
+}
+
+#[test]
 fn host_font_draws_text_on_click_wait_and_keeps_previous_atlas_alive() {
     use crate::host::{input::HostInput, runtime};
 
@@ -3351,61 +3406,6 @@ fn test_font() -> Vec<u8> {
         font.resize(font.len().next_multiple_of(4), 0);
     }
     font
-}
-
-#[test]
-fn numbered_load_ignores_transient_video_textures_in_legacy_saves() {
-    let (mut saver, _, mut host) = playback_project(
-        br#"*top
-[lyc id=still file=still]
-[video id=movie file=overlay.ogv]
-[save file=slot]
-[calllua function=mark]
-[stop]
-[lua]
-function mark() restored=true end
-[/lua]
-"#,
-    );
-    let pixel = [8, 16, 32, 255];
-    host.asset("still.png", &png_bytes(1, 1, &pixel));
-    drive_display_snapshot(&mut saver, &mut host, playback_frame(1, 0));
-    let key = ("save".into(), "slot".into());
-    let mut save: crate::save::SaveData = serde_json::from_slice(&host.files[&key].1).unwrap();
-    let snapshot = save.scene.as_mut().unwrap();
-    assert!(snapshot.get("movie").unwrap().file.is_none());
-    snapshot.set_file(
-        "movie",
-        Some(crate::video::video_layer_texture_name("movie")),
-    );
-    host.files
-        .insert(key, (2, serde_json::to_vec(&save).unwrap()));
-    host.asset("load.iet", b"*top\n[load file=slot]\n[stop]\n");
-
-    let mut loader = session(2, TransportLimits::default(), 4096);
-    loader
-        .open_queued_project(
-            b"[WINDOWS]\nWIDTH=320\nHEIGHT=200\nBOOT=load.iet\n",
-            "windows",
-            None,
-        )
-        .unwrap();
-    drive_display_snapshot(&mut loader, &mut host, playback_frame(1, 0));
-    let frame = loader.frames.latest_snapshot().unwrap();
-    assert_eq!(frame.sprites.len(), 1);
-    assert_eq!(frame.sprites[0].layer_id, "still");
-    assert_eq!(
-        frame.texture(frame.sprites[0].texture).unwrap().rgba(),
-        pixel
-    );
-    assert!(
-        loader
-            .interpreter()
-            .lua()
-            .globals()
-            .get::<bool>("restored")
-            .unwrap()
-    );
 }
 
 #[test]
@@ -3642,7 +3642,9 @@ fn transitions_keep_both_scenes_and_obey_time_and_input_policy() {
 }
 
 #[test]
-fn hlsl_source_replacement_keeps_old_frames_and_prefetches_shader_bindings() {
+fn shader_language_replacement_keeps_old_frames_and_prefetches_bindings() {
+    use crate::host::frame::{FramePacket, FrameShaderLanguage};
+
     let mut session = session(1, TransportLimits::default(), 4096);
     let mut host = MemoryHost::default();
     let first_source = b"first shader";
@@ -3650,7 +3652,7 @@ fn hlsl_source_replacement_keeps_old_frames_and_prefetches_shader_bindings() {
     let mask = [255, 128, 0, 64];
     let user = [0, 128, 255, 255];
     host.asset("first.hlsl", first_source);
-    host.asset("second.hlsl", second_source);
+    host.asset("second.frag", second_source);
     host.asset("mask.png", &png_bytes(1, 1, &mask));
     host.asset("user.png", &png_bytes(1, 1, &user));
     host.asset("boot.iet", br#"*top
@@ -3658,9 +3660,14 @@ fn hlsl_source_replacement_keeps_old_frames_and_prefetches_shader_bindings() {
 [lyc id=tile width=4 height=4 color=ffffff]
 [lyprop id=tile shader=test shaderconstant=tint shadertexture=textureUser tint="0.25,0.5,1" mask=mask textureUser=user]
 [flip]
-[lyshader id=test file=second.hlsl]
+[calllua function=replace_shader]
 [trans type=1 time=50]
 [stop]
+[lua]
+function replace_shader(e)
+    e:tag{'lyshader', id='test', file='second.frag'}
+end
+[/lua]
 "#);
     session
         .open_queued_project(
@@ -3693,6 +3700,7 @@ fn hlsl_source_replacement_keeps_old_frames_and_prefetches_shader_bindings() {
     advance(&mut session, 1);
     let old = session.frames.latest_snapshot().unwrap();
     let effect = old.sprites[0].shader.as_ref().unwrap();
+    assert_eq!(effect.shader.language, FrameShaderLanguage::Hlsl);
     assert_eq!(&*effect.shader.source, first_source);
     assert_eq!(effect.uniforms["tint"], [0.25, 0.5, 1.0]);
     assert_eq!(old.texture(effect.mask.unwrap()).unwrap().rgba(), mask);
@@ -3718,32 +3726,29 @@ fn hlsl_source_replacement_keeps_old_frames_and_prefetches_shader_bindings() {
         frame.texture(old_effect.user.unwrap()).unwrap().rgba(),
         user
     );
-    let packet = frame.packet();
-    let mut records = &packet[56 + frame.textures().len() * 24..];
-    let mut programs = Vec::new();
-    let mut bindings = Vec::new();
-    while !records.is_empty() {
-        let length = u32::from_le_bytes(records[..4].try_into().unwrap()) as usize;
-        match u16::from_le_bytes(records[4..6].try_into().unwrap()) {
-            6 => programs.push(&records[16..length]),
-            7 => bindings.push(records[6] & 16 != 0),
-            _ => {}
-        }
-        records = &records[length..];
-    }
-    assert_eq!(programs, [&first_source[..], &second_source[..]]);
-    assert_eq!(bindings, [true, false]);
+    let packet = FramePacket::decode(frame.packet()).unwrap();
+    let new_wire = packet.sprites()[0].shader.as_ref().unwrap();
+    let old_wire = packet.transition().unwrap().source[0]
+        .shader
+        .as_ref()
+        .unwrap();
+    assert_eq!(new_wire.shader.language, FrameShaderLanguage::Glsl);
+    assert_eq!(old_wire.shader.language, FrameShaderLanguage::Hlsl);
+    assert_eq!(new_wire, new_effect);
+    assert_eq!(old_wire, old_effect);
 }
 
 #[test]
 fn numbered_load_restores_captured_shader_sources_and_texture_bindings() {
+    use crate::host::frame::FrameShaderLanguage;
+
     let first = b"saved shader source";
     let second = b"menu shader source";
     let mask = [128, 0, 0, 192];
     let user = [16, 32, 64, 255];
     let (mut saver, _, mut host) = playback_project(
         br#"*top
-[lyshader id=paint file=:effects/original.hlsl]
+[lyshader id=paint file=:effects/original.Frag]
 [lyc id=tile width=4 height=4 color=ffffff]
 [lyprop id=tile shader=paint shadertexture=textureUser textureUser=user mask=mask]
 [takess]
@@ -3755,7 +3760,7 @@ __engine:setMagicPath{'effects', 'shaders'}
 [/lua]
 "#,
     );
-    host.asset("shaders/original.hlsl", first);
+    host.asset("shaders/original.frag", first);
     host.asset("menu.hlsl", second);
     host.asset("mask.png", &png_bytes(1, 1, &mask));
     host.asset("user.png", &png_bytes(1, 1, &user));
@@ -3764,13 +3769,14 @@ __engine:setMagicPath{'effects', 'shaders'}
     let file: HostSaveFile = serde_json::from_slice(bytes).unwrap();
     assert_eq!(
         file.shader_assets.unwrap()["paint"],
-        "shaders/original.hlsl"
+        "shaders/original.frag"
     );
     assert!(serde_json::from_slice::<crate::save::SaveData>(bytes).is_ok());
 
     host.asset(
         "load.iet",
         br#"*top
+[lyshader id=unused file=unused.glsl]
 [lyshader id=paint file=menu.hlsl]
 [lyc id=menu width=4 height=4 color=ffffff]
 [lyprop id=menu shader=paint]
@@ -3795,7 +3801,7 @@ __engine:setMagicPath{'effects', 'shaders'}
     assert_eq!(menu_shader.source.as_ref(), second);
 
     host.files
-        .remove(&("asset".into(), "shaders/original.hlsl".into()));
+        .remove(&("asset".into(), "shaders/original.frag".into()));
     drive_display_snapshot(&mut loader, &mut host, playback_frame(2, 1));
     assert_eq!(loader.interpreter().current_script(), Some("load.iet"));
     assert_eq!(
@@ -3803,12 +3809,13 @@ __engine:setMagicPath{'effects', 'shaders'}
         menu.render_frame_id
     );
 
-    host.asset("shaders/original.hlsl", first);
+    host.asset("shaders/original.frag", first);
     drive_display_snapshot(&mut loader, &mut host, playback_frame(3, 2));
     let frame = loader.frames.latest_snapshot().unwrap();
     assert_eq!(frame.sprites[0].layer_id, "tile");
     let effect = frame.sprites[0].shader.as_ref().unwrap();
     assert_eq!(effect.shader.source.as_ref(), first);
+    assert_eq!(effect.shader.language, FrameShaderLanguage::Glsl);
     assert!(effect.shader.revision > menu_shader.revision);
     assert_eq!(frame.texture(effect.mask.unwrap()).unwrap().rgba(), mask);
     assert_eq!(frame.texture(effect.user.unwrap()).unwrap().rgba(), user);
@@ -3818,6 +3825,33 @@ __engine:setMagicPath{'effects', 'shaders'}
         .unwrap();
     assert_eq!(outgoing.shader.revision, menu_shader.revision);
     assert_eq!(outgoing.shader.source.as_ref(), second);
+
+    let mut hlsl_only = session(3, TransportLimits::default(), 4096);
+    hlsl_only.shader_caps = crate::host::runtime::CAP_HLSL;
+    hlsl_only
+        .open_queued_project(
+            b"[WINDOWS]\nWIDTH=4\nHEIGHT=4\nBOOT=load.iet\n",
+            "windows",
+            None,
+        )
+        .unwrap();
+    host.reads.clear();
+    drive_display_snapshot(&mut hlsl_only, &mut host, playback_frame(1, 0));
+    let frame = hlsl_only.frames.latest_snapshot().unwrap();
+    assert_eq!(
+        frame.sprites[0].shader.as_ref().unwrap().shader.language,
+        FrameShaderLanguage::Hlsl
+    );
+    drive_display_snapshot(&mut hlsl_only, &mut host, playback_frame(2, 1));
+    let frame = hlsl_only.frames.latest_snapshot().unwrap();
+    assert_eq!(frame.sprites[0].layer_id, "tile");
+    assert!(frame.sprites[0].shader.is_none());
+    assert!(
+        !host
+            .reads
+            .iter()
+            .any(|(key, _)| key == "unused.glsl" || key == "shaders/original.frag")
+    );
 }
 
 fn drive_display_snapshot(session: &mut ScriptIoSession, host: &mut MemoryHost, frame: HostFrame) {

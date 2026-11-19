@@ -123,8 +123,10 @@ pub(super) const CAP_SCREENSHOTS: u64 = 4;
 pub(super) const CAP_GROUPS: u64 = 8;
 pub(super) const CAP_EMOTE: u64 = 16;
 pub(super) const CAP_HLSL: u64 = 32;
+pub(super) const CAP_GLSL: u64 = 64;
+pub(super) const SHADER_CAPS: u64 = CAP_HLSL | CAP_GLSL;
 pub(super) const RENDERER_CAPS: u64 =
-    CAP_SPRITES | CAP_TRANSITIONS | CAP_SCREENSHOTS | CAP_GROUPS | CAP_EMOTE | CAP_HLSL;
+    CAP_SPRITES | CAP_TRANSITIONS | CAP_SCREENSHOTS | CAP_GROUPS | CAP_EMOTE | SHADER_CAPS;
 pub(super) const HOST_CAP_MEDIA: u64 = 4;
 pub(super) const HOST_CAP_HTTP: u64 = 8;
 pub(super) const HOST_CAP_TRANSLATION: u64 = 16;
@@ -173,7 +175,7 @@ pub(super) fn create_with_caps(
         session.screenshots_enabled = renderer_caps & CAP_SCREENSHOTS != 0;
         session.groups_enabled = renderer_caps & CAP_GROUPS != 0;
         session.emote_enabled = renderer_caps & CAP_EMOTE != 0;
-        session.shaders_enabled = renderer_caps & CAP_HLSL != 0;
+        session.shader_caps = renderer_caps & SHADER_CAPS;
         Ok::<_, ScriptIoError>(session)
     })
     .map_err(|_| RuntimeError::Panic)??;

@@ -178,6 +178,11 @@ pub trait GpuBackend: TextureProvider {
     }
 
     fn render(&mut self, frame: &DrawList) -> RenderRegion;
+    /// Draw a complete scene over the specified background in the active target.
+    fn render_with_clear_color(&mut self, frame: &DrawList, color: [f32; 4]) -> RenderRegion {
+        self.clear(color);
+        self.render(frame)
+    }
     fn render_damage(&mut self, frame: &DrawList, damage: [f32; 4]) -> RenderRegion;
     fn render_damage_visualized(&mut self, frame: &DrawList, damage: [f32; 4]) -> RenderRegion;
     fn render_visualized(&mut self, frame: &DrawList) -> RenderRegion;
@@ -256,6 +261,16 @@ pub trait GpuBackend: TextureProvider {
         name: &str,
         source: &[u8],
     ) -> Result<ShaderId, ShaderCompileError>;
+    fn register_glsl_shader(
+        &mut self,
+        name: &str,
+        _source: &[u8],
+    ) -> Result<ShaderId, ShaderCompileError> {
+        Err(ShaderCompileError::new(
+            name,
+            "GLSL effects are unsupported by this backend",
+        ))
+    }
     fn replace_hlsl_shader(
         &mut self,
         name: &str,

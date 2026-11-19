@@ -72,13 +72,15 @@ private final class Registry: NSObject, FlutterTextureRegistry {
 
 @main struct ArtemisFlutterSmoke {
     @MainActor static func main() throws {
-        let paths = CommandLine.arguments.dropFirst()
-        guard paths.count == 2, let core = paths.first, let metal = paths.last else {
+        let paths = Array(CommandLine.arguments.dropFirst())
+        guard (2...3).contains(paths.count) else {
             throw Failure(detail: "Expected Core and Metal dylib paths")
         }
         let messenger = Messenger()
         let registry = Registry()
-        let host = ArtemisFlutterHost(registry: registry, corePath: core, metalPath: metal)
+        let angle = paths.count == 3 ? paths[2] : nil
+        let host = ArtemisFlutterHost(registry: registry, corePath: paths[0], metalPath: paths[1],
+                                      angleDirectory: angle)
         host.register(messenger: messenger)
         defer { host.close() }
 
@@ -170,6 +172,9 @@ private final class Registry: NSObject, FlutterTextureRegistry {
         try expect(messenger.call("present") is String && registry.notifications == [0, 1], "New texture did not redraw")
         _ = try messenger.call("close")
         try expect(registry.textures.isEmpty && registry.removed == [0, 1], "Did not unregister textures")
+        if angle != nil {
+            try exerciseAngle(messenger, registry: registry, ini: ini)
+        }
         try exerciseLayerVideoDelivery(registry)
         print("Artemis Flutter channel smoke passed")
     }
@@ -210,5 +215,83 @@ private final class Registry: NSObject, FlutterTextureRegistry {
         try submit(hostFrame: 4, frame: "2", pixel: [4, 5, 6, 255], accepts: true)
         try expect(video.terminalState(after: 4) == nil && video.terminalState(after: 5) == "ended",
                    "End did not wait until Core advanced past the submitted layer frame")
+    }
+
+    @MainActor private static func exerciseAngle(_ messenger: Messenger, registry: Registry, ini: Data) throws {
+        messenger.session = nil
+        let boot = Data("""
+        *top
+        [lyshader id=paint file=paint.frag]
+        [lyc id=1 width=4 height=4 color=ffff0000]
+        [lyprop id=1 shader=paint]
+        [caption data=ready]
+        [stop]
+        """.utf8)
+        let shader = Data("""
+        precision mediump float;
+        varying vec2 resultCoord;
+        uniform sampler2D textureFore;
+        void main() { gl_FragColor = texture2D(textureFore, resultCoord).bgra; }
+        """.utf8)
+        let assets = ["boot.iet": boot, "paint.frag": shader]
+        let open: [String: Any] = ["ini": FlutterStandardTypedData(bytes: ini), "platform": "windows",
+                                   "hostCaps": art_swift_io_cap(), "renderer": "angle", "screenshots": true]
+        func render() throws -> (session: String, frame: String, texture: Int64) {
+            guard let state = try messenger.call("open", open) as? [String: Any],
+                  let session = state["session"] as? String,
+                  let texture = try messenger.call("surface", ["width": 4, "height": 4], session: session) as? Int else {
+                throw Failure(detail: "Could not open an ANGLE session")
+            }
+            let tick: [String: Any] = ["frame": 1, "monotonicNS": 1, "unixMS": 0, "utcOffsetMinutes": 0]
+            var loadedShader = false
+            for _ in 0..<32 {
+                _ = try messenger.call("step", tick, session: session)
+                let events = try messenger.call("poll", session: session) as? [[String: Any]] ?? []
+                for event in events {
+                    guard event["request"] as? String != "0" else { continue }
+                    let args = try JSONSerialization.jsonObject(with: (event["metadata"] as! FlutterStandardTypedData).data)
+                        as? [String: Any] ?? [:]
+                    let key = args["key"] as? String ?? ""
+                    let asset = assets[key]
+                    var reply = event
+                    let metadata: [String: Any]
+                    if event["kind"] as? Int == Int(ArtSwiftIoStat) {
+                        metadata = asset.map { ["status": "ok", "found": true, "size": String($0.count), "revision": "1"] }
+                            ?? ["status": "ok", "found": false]
+                    } else {
+                        try expect(event["kind"] as? Int == Int(ArtSwiftIoRead) && asset != nil, "Invalid ANGLE resource request")
+                        metadata = ["status": "ok", "revision": "1", "eof": true]
+                        reply["blob"] = FlutterStandardTypedData(bytes: asset!)
+                        loadedShader = loadedShader || key == "paint.frag"
+                    }
+                    reply["metadata"] = FlutterStandardTypedData(bytes: try JSONSerialization.data(withJSONObject: metadata))
+                    try expect(messenger.call("submit", ["batch": [reply]], session: session) as? Bool == true,
+                               "Could not reply to ANGLE session")
+                }
+                if loadedShader, let frame = try messenger.call("present", session: session) as? String {
+                    return (session, frame, Int64(texture))
+                }
+            }
+            throw Failure(detail: "ANGLE scene never presented")
+        }
+        let first = try render()
+        let second = try render()
+        _ = try messenger.call("close", session: second.session)
+        guard let buffer = registry.textures[first.texture]?.copyPixelBuffer()?.takeRetainedValue() else {
+            throw Failure(detail: "First ANGLE texture was released with the second session")
+        }
+        try expect(CVPixelBufferLockBaseAddress(buffer, .readOnly) == kCVReturnSuccess, "Cannot lock ANGLE pixels")
+        let pixel = CVPixelBufferGetBaseAddress(buffer).map { Array(UnsafeBufferPointer(start: $0.assumingMemoryBound(to: UInt8.self), count: 4)) }
+        CVPixelBufferUnlockBaseAddress(buffer, .readOnly)
+        try expect(pixel == [255, 0, 0, 255], "GLSL did not change red to blue")
+        let capture = try messenger.call("capture", ["frame": first.frame], session: first.session) as? [String: Any]
+        let rgba = (capture?["rgba"] as? FlutterStandardTypedData)?.data
+        try expect(rgba == Data((0..<16).flatMap { _ in [UInt8(0), 0, 255, 255] }),
+                   "ANGLE capture lost its framebuffer after closing the second session")
+        _ = try messenger.call("surface", ["width": 8, "height": 8], session: first.session)
+        try expect(messenger.call("present", session: first.session) as? String == first.frame, "ANGLE did not redraw onto the replacement surface")
+        _ = try messenger.call("close", session: first.session)
+        try expect(registry.textures.isEmpty, "ANGLE textures remained registered after close")
+        print("Artemis Flutter ANGLE pixels, capture, and session isolation passed")
     }
 }

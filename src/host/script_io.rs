@@ -312,7 +312,7 @@ pub struct ScriptIoSession {
     pub(super) screenshots_enabled: bool,
     pub(super) groups_enabled: bool,
     pub(super) emote_enabled: bool,
-    pub(super) shaders_enabled: bool,
+    pub(super) shader_caps: u64,
     screenshot: screenshot::Screenshot,
     scene: Option<scene::SceneIo>,
     pub(super) frames: super::frame::FramePublisher,
@@ -378,7 +378,7 @@ impl ScriptIoSession {
             screenshots_enabled: true,
             groups_enabled: true,
             emote_enabled: true,
-            shaders_enabled: true,
+            shader_caps: super::runtime::SHADER_CAPS,
             screenshot: Default::default(),
             scene: None,
             frames: Default::default(),
@@ -1167,9 +1167,7 @@ impl ScriptIoSession {
                 if let Event::ShaderLoad { id, file } = &event
                     && let Some(scene) = self.scene.as_mut()
                 {
-                    if self.shaders_enabled
-                        && let Some(request) = scene.prepare_shader(id, file)
-                    {
+                    if let Some(request) = scene.prepare_shader(id, file) {
                         return Ok(ScenarioStep::Request(request));
                     }
                     self.interpreter.advance_line();
@@ -1730,7 +1728,11 @@ impl ScriptIoSession {
             match scene.prepare_saved_shaders(&assets) {
                 Ok(Some(shaders)) => {
                     load.shaders = Some(shaders);
-                    return self.read_saved_shader(load, assets.into_iter().collect());
+                    let remaining = assets
+                        .into_iter()
+                        .filter(|(_, asset)| scene::supports_shader_asset(self.shader_caps, asset))
+                        .collect();
+                    return self.read_saved_shader(load, remaining);
                 }
                 Ok(None) => {}
                 Err(error) => {

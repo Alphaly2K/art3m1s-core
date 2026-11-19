@@ -205,7 +205,7 @@ pub(super) fn encode(frame: &FrameSnapshot) -> Result<Box<[u8]>, ProtocolError> 
     for shader in shaders.values() {
         put_u32(&mut out, (SHADER + shader.source.len()) as u32);
         put_u16(&mut out, 6);
-        put_u16(&mut out, 0);
+        put_u16(&mut out, shader.language as u16);
         put_u64(&mut out, shader.revision);
         out.extend_from_slice(&shader.source);
     }

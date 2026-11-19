@@ -1,5 +1,6 @@
 use super::frame::{
-    FrameGroup, FrameShader, FrameShaderEffect, FrameSprite, FrameTransition, SpriteBlend,
+    FrameGroup, FrameShader, FrameShaderEffect, FrameShaderLanguage, FrameSprite, FrameTransition,
+    SpriteBlend,
 };
 use super::wire::*;
 use crate::draw::NativeEmoteMaterial;
@@ -183,9 +184,11 @@ impl FramePacket {
                     transition = Some((count, progress, rule, vague));
                 }
                 6 => {
-                    if flags != 0 {
-                        return Err(invalid());
-                    }
+                    let language = match flags {
+                        0 => FrameShaderLanguage::Hlsl,
+                        1 => FrameShaderLanguage::Glsl,
+                        _ => return Err(invalid()),
+                    };
                     let revision = record.u64()?;
                     let source = record.take(record.0.len())?;
                     if shaders
@@ -193,6 +196,7 @@ impl FramePacket {
                             revision,
                             Arc::new(FrameShader {
                                 revision,
+                                language,
                                 source: source.into(),
                             }),
                         )

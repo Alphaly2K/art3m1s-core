@@ -1,10 +1,9 @@
 # Runtime Shader ABI
 
-Art3m1s runtime effects use a backend-neutral fragment shader ABI. The host
-registers an Artemis-style HLSL source with a logical name. In v2 the core
-provides source and bindings in the frame packet. The Host renderer normalizes
-legacy names, compiles the supported fragment subset to SPIR-V, reflects its
-resources, and produces the backend artifact:
+Art3m1s runtime effects use a backend-neutral fragment shader ABI. In v2 the
+Core provides the source, language and bindings in the frame packet. Hosts
+negotiate HLSL and GLSL independently. The compatibility HLSL renderer for
+Vulkan and Metal compiles the supported fragment subset as follows:
 
 ```text
 Artemis HLSL -> compatibility normalization -> canonical HLSL
@@ -67,6 +66,65 @@ and the `ps()` return value. It does not promise a complete Direct3D HLSL
 runtime. Vertex shaders, techniques, arbitrary sampler states, geometry or
 compute stages, UAVs, structured buffers, tessellation, and unsupported HLSL
 intrinsics remain outside the ABI.
+
+## GLSL fragment effects
+
+The GL backend compiles a fragment shader with entry point `main` and links
+it against the Host's sprite vertex stage. Use UTF-8 for new assets. The Host
+accepts a UTF-8 BOM and LF, CRLF or CR line endings. Legacy non-UTF-8 comment
+bytes are decoded with replacement. OpenGL Core accepts GLSL
+1.50 and 3.30. OpenGL ES accepts GLSL ES 1.00 and 3.00. Without `#version`,
+the desktop Host uses GLSL 3.30 Core and the GLES Host uses GLSL ES 1.00.
+For an implicit ES 1.00 source without leading directives, the Host provides
+a default float precision of `mediump`. An effect can declare its own precision.
+An explicit version must match the backend family. The Host reports a
+compiler or linker diagnostic and falls back to an unshaded draw on failure.
+
+The vertex stage exposes `vec2 v_uv`, `vec2 resultCoord`, and
+`vec2 resultCoord1` for the foreground texture. `vec2 resultCoord0` is the
+normalized stage position with a top-left origin; `vec2 v_model_position`
+is the layer's unit quad. On GLES, the `resultCoord` names use `mediump`;
+`v_uv` and `v_model_position` use `highp`.
+GLSL ES 1.00 declares these as `varying`; newer shaders use `in`. The fragment
+shader writes one RGBA color to output location zero (`gl_FragColor` in ES 1.00).
+
+| `sampler2D` uniform | Binding |
+| --- | --- |
+| `u_texture_fore`, `textureFore`, `samplerFore` | Foreground/source |
+| `u_texture_mask`, `textureMask`, `samplerMask` | Effect mask; white when absent |
+| `u_texture_user`, `textureUser`, `samplerUser` | User texture; transparent when absent |
+| `u_texture_back`, `textureBack`, `samplerBack` | Color already drawn into the current target, sampled with `resultCoord0` |
+
+The background includes earlier draws in the same target, before the current
+effect. Inside an offscreen group it contains the group's earlier draws; the
+effect that composites the group samples the parent target. Its origin is the
+top left, including when the foreground is clipped. The GL Host takes a copy
+before drawing and redraws the full frame when an active GLSL effect samples
+the background.
+
+`alpha` and `colorMultiply` are supplied as `float` and `vec3`. Named
+script values bind to active `float`, `vec2`, `vec3` or `vec4` uniforms or
+arrays of those types. Each value list must contain whole elements and fit
+the active uniform. An effect supplies its fragment color, including any
+opacity or multiply it wants to apply before blending.
+
+Run `bash scripts/test-host-v2-gl.sh --offline` on macOS with a native
+OpenGL context to check a packet emitted by the Core against expected
+pixels. The probe checks clipped effects on the stage, inside an offscreen
+group, and when compositing a group into its parent. Set `ARTEMIS_GL_SMOKE_ANGLE_DIR` to the
+directory containing ANGLE's EGL and GLES libraries to run the GLSL ES 3.00
+and 1.00 checks through ANGLE/Metal, including presentation into a Host-owned
+IOSurface. On Linux, the same script uses `GlBackend::new_host_egl` to test
+both ES profiles against system EGL, with Mesa software rendering and the
+surfaceless platform as the script defaults. The EGL checks also verify that
+closing one renderer restores the other renderer's active context.
+These graphics checks run separately from the default Rust test suite.
+The probe binary `target/debug/artemis-gl-smoke` also accepts a list of GLSL
+files to compile and link in one context. To draw a single external ES 1.00
+effect through ARFP, run the script with `ARTEMIS_GL_SMOKE_SOURCE` set to
+the source path and `ARTEMIS_GL_SMOKE_EXPECT_RGBA` set to a four-element JSON
+array. The 4x4 fixture uses foreground `#112233`, user texture `#05070b`, and
+script constants `param=1` and `tint=(0,1,0.5,1)`.
 
 ## Direct3D backend probes
 

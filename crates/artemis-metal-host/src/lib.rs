@@ -1,8 +1,11 @@
 use art3m1s_render::artemis::{FramePacket, SpriteRenderer};
-use art3m1s_render::backend::{FrameTarget, GpuBackend, metal::MetalBackend};
+use art3m1s_render::backend::{
+    FrameTarget, GpuBackend, RenderRegion, gl::GlBackend, metal::MetalBackend,
+};
 use art3m1s_render::{Extent2D, NativeSurface, NativeSurfaceKind};
-use std::ffi::c_void;
+use std::ffi::{CStr, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::Path;
 use std::ptr;
 use std::thread::{self, ThreadId};
 
@@ -13,6 +16,7 @@ const BUFFER: i32 = -5;
 const STATE: i32 = -6;
 const STALE: i32 = -7;
 const PANIC: i32 = -9;
+const UNSUPPORTED: i32 = -4;
 const CLEAR_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 unsafe extern "C" {
@@ -132,8 +136,41 @@ struct ArtMetalHost {
     owner: ThreadId,
     frames: Frames,
     target: Option<NativeSurface>,
-    renderer: Option<(Extent2D, SpriteRenderer<MetalBackend>)>,
+    renderer: Option<(Extent2D, Renderer)>,
     failed: bool,
+}
+
+enum Renderer {
+    Metal(SpriteRenderer<MetalBackend>),
+    Angle(SpriteRenderer<GlBackend>),
+}
+
+impl Renderer {
+    fn backend(&mut self) -> &mut dyn GpuBackend {
+        match self {
+            Self::Metal(renderer) => renderer.backend_mut(),
+            Self::Angle(renderer) => renderer.backend_mut(),
+        }
+    }
+
+    fn render<'a>(
+        &mut self,
+        runtime: u64,
+        packet: &FramePacket,
+        pixels: impl FnMut(usize) -> Result<&'a [u8], String>,
+    ) -> Result<RenderRegion, String> {
+        match self {
+            Self::Metal(renderer) => renderer.render_packet(runtime, packet, pixels, CLEAR_COLOR),
+            Self::Angle(renderer) => renderer.render_packet(runtime, packet, pixels, CLEAR_COLOR),
+        }
+    }
+
+    fn access<T>(&mut self, operation: impl FnOnce(&mut Self) -> Result<T, i32>) -> Result<T, i32> {
+        self.backend().begin_access();
+        let result = catch_unwind(AssertUnwindSafe(|| operation(self)));
+        self.backend().end_access();
+        result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    }
 }
 
 impl ArtMetalHost {
@@ -159,31 +196,34 @@ impl ArtMetalHost {
     fn set_target(&mut self, target: Option<NativeSurface>) -> Result<(), i32> {
         self.target = None;
         if let Some((_, renderer)) = &mut self.renderer {
-            let backend = renderer.backend_mut();
-            if let Some(target) = target {
-                if backend.set_native_surface(target).is_err() {
+            renderer.access(|renderer| {
+                let backend = renderer.backend();
+                if let Some(target) = target {
+                    if backend.set_native_surface(target).is_err() {
+                        backend.clear_native_surface();
+                        return Err(STATE);
+                    }
+                } else {
                     backend.clear_native_surface();
-                    return Err(STATE);
                 }
-            } else {
-                backend.clear_native_surface();
-            }
+                Ok(())
+            })?;
         }
         self.target = target;
         Ok(())
     }
 
-    fn renderer(&mut self, extent: Extent2D) -> Result<&mut SpriteRenderer<MetalBackend>, i32> {
+    fn renderer(&mut self, extent: Extent2D) -> Result<&mut Renderer, i32> {
         if self.renderer.is_none() {
             let mut backend = MetalBackend::new(extent.width, extent.height).map_err(|_| STATE)?;
             if let Some(target) = self.target {
                 backend.set_native_surface(target).map_err(|_| STATE)?;
             }
-            self.renderer = Some((extent, SpriteRenderer::new(backend)));
+            self.renderer = Some((extent, Renderer::Metal(SpriteRenderer::new(backend))));
         }
         let (stage, renderer) = self.renderer.as_mut().ok_or(STATE)?;
         if *stage != extent {
-            renderer.backend_mut().resize(extent).map_err(|_| STATE)?;
+            renderer.access(|renderer| renderer.backend().resize(extent).map_err(|_| STATE))?;
             *stage = extent;
         }
         Ok(renderer)
@@ -196,58 +236,58 @@ impl ArtMetalHost {
             return Err(ARGUMENT);
         }
         let renderer = self.renderer(stage)?;
-        if capture_extent.is_some()
-            && renderer
-                .backend_mut()
-                .render_dimensions()
-                .is_some_and(|dims| dims.render_size != stage)
-        {
-            renderer.backend_mut().resize(stage).map_err(|_| STATE)?;
-        }
-        let mut pixel_status = OK;
-        renderer
-            .backend_mut()
-            .begin_frame(FrameTarget::Main)
-            .map_err(|_| STATE)?;
-        renderer.backend_mut().clear(CLEAR_COLOR);
-        let drawn = renderer.render_packet(
-            lease.frames.runtime,
-            &packet,
-            |index| {
+        renderer.access(|renderer| {
+            let backend = renderer.backend();
+            if capture_extent.is_some()
+                && backend
+                    .render_dimensions()
+                    .is_some_and(|dims| dims.render_size != stage)
+            {
+                backend.resize(stage).map_err(|_| STATE)?;
+            }
+            backend.begin_frame(FrameTarget::Main).map_err(|_| STATE)?;
+            let mut pixel_status = OK;
+            let drawn = renderer.render(lease.frames.runtime, &packet, |index| {
                 lease.pixels(index).map_err(|code| {
                     pixel_status = code;
                     format!("Core texture borrow returned {code}")
                 })
-            },
-            CLEAR_COLOR,
-        );
-        renderer.backend_mut().end_frame();
+            });
+            renderer.backend().end_frame();
+            status(pixel_status)?;
+            drawn.map_err(|_| STATE)?;
+            Ok(())
+        })?;
         let id = lease.id;
         lease.release()?;
-        status(pixel_status)?;
-        drawn.map_err(|_| STATE)?;
         Ok(id)
     }
 
     fn capture(&mut self, frame: Lease, extent: Extent2D, rgba: &mut [u8]) -> Result<(), i32> {
         // A larger surface can enlarge Metal's main target. Capture at the logical stage size.
-        let target = self.target;
+        let target = self
+            .target
+            .filter(|_| !matches!(self.renderer, Some((_, Renderer::Angle(_)))));
         if target.is_some() {
             self.set_target(None)?;
         }
         let captured = (|| {
             self.draw(frame, Some(extent))?;
-            self.renderer
-                .as_mut()
-                .ok_or(STATE)?
-                .1
-                .backend_mut()
-                .readback(FrameTarget::Main, extent, rgba)
-                .map_err(|_| STATE)?;
+            self.renderer.as_mut().ok_or(STATE)?.1.access(|renderer| {
+                let written = renderer
+                    .backend()
+                    .readback(FrameTarget::Main, extent, rgba)
+                    .map_err(|_| STATE)?;
+                if written != rgba.len() {
+                    return Err(STATE);
+                }
+                Ok(())
+            })?;
             Ok(())
         })();
         if target.is_some() {
-            captured.and(self.set_target(target))
+            let restored = self.set_target(target);
+            captured.and(restored)
         } else {
             captured
         }
@@ -293,6 +333,44 @@ unsafe extern "C" fn art3m1s_metal_host_v1_create(
     runtime: u64,
     out: *mut *mut ArtMetalHost,
 ) -> i32 {
+    unsafe { create_host(table, runtime, out, || Ok(None)) }
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn art3m1s_metal_host_v1_create_angle(
+    table: *const c_void,
+    runtime: u64,
+    directory: *const c_char,
+    out: *mut *mut ArtMetalHost,
+) -> i32 {
+    unsafe {
+        create_host(table, runtime, out, || {
+            if directory.is_null() {
+                return Err(ARGUMENT);
+            }
+            let directory = CStr::from_ptr(directory).to_str().map_err(|_| ARGUMENT)?;
+            let directory = Path::new(directory);
+            if !directory.is_absolute() {
+                return Err(ARGUMENT);
+            }
+            let backend = GlBackend::new_host_angle(directory, 1, 1).map_err(|error| {
+                eprintln!("Artemis ANGLE/Metal initialization failed: {error}");
+                UNSUPPORTED
+            })?;
+            Ok(Some((
+                Extent2D::new(1, 1),
+                Renderer::Angle(SpriteRenderer::new(backend)),
+            )))
+        })
+    }
+}
+
+unsafe fn create_host(
+    table: *const c_void,
+    runtime: u64,
+    out: *mut *mut ArtMetalHost,
+    renderer: impl FnOnce() -> Result<Option<(Extent2D, Renderer)>, i32>,
+) -> i32 {
     boundary(|| {
         if out.is_null() {
             return Err(ARGUMENT);
@@ -306,7 +384,7 @@ unsafe extern "C" fn art3m1s_metal_host_v1_create(
             owner: thread::current().id(),
             frames: Frames { table, runtime },
             target: None,
-            renderer: None,
+            renderer: renderer()?,
             failed: false,
         };
         unsafe { out.write(Box::into_raw(Box::new(host))) };
@@ -357,9 +435,7 @@ unsafe extern "C" fn art3m1s_metal_host_v1_present(
                 .as_mut()
                 .ok_or(STATE)?
                 .1
-                .backend_mut()
-                .present(None)
-                .map_err(|_| STATE)?;
+                .access(|renderer| renderer.backend().present(None).map_err(|_| STATE))?;
             out_id.write(id);
             Ok(())
         })

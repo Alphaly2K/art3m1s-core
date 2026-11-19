@@ -21,6 +21,7 @@ mod text;
 pub(super) use edit::EditSnapshot;
 pub(super) use edit::LayerEdits;
 pub(super) use shader::SceneShaders;
+pub(super) use shader::supports_shader_asset;
 pub(super) use text::FontRead;
 
 const MAX_TEXTURES: usize = 4096;
@@ -38,7 +39,7 @@ impl ScriptIoSession {
         let scene = SceneCallbacks(Arc::new(Mutex::new(SceneProjection {
             dirty: true,
             emote_enabled: self.emote_enabled,
-            shaders_enabled: self.shaders_enabled,
+            shader_caps: self.shader_caps,
             ..Default::default()
         })));
         let reduced_scene = scene.0.clone();
@@ -179,7 +180,7 @@ struct SceneProjection {
     emote: emote::SceneEmote,
     emote_enabled: bool,
     shaders: shader::SceneShaders,
-    shaders_enabled: bool,
+    shader_caps: u64,
     dirty: bool,
     group_sync_layers: Vec<String>,
 }
@@ -271,7 +272,7 @@ impl SceneProjection {
                     )
                 };
                 let mask = if custom {
-                    self.shaders_enabled.then(|| binding("mask")).flatten()
+                    (self.shader_caps != 0).then(|| binding("mask")).flatten()
                 } else {
                     properties.get("mask").map(String::as_str)
                 };
@@ -280,7 +281,7 @@ impl SceneProjection {
                     properties
                         .get("intermediate_render_mask")
                         .map(String::as_str),
-                    (custom && self.shaders_enabled)
+                    (custom && self.shader_caps != 0)
                         .then(|| binding("textureUser"))
                         .flatten(),
                 ]
@@ -559,7 +560,7 @@ impl SceneIo {
             .all_layers()
             .flat_map(|layer| {
                 let props = &layer.props;
-                let custom_shader = scene.shaders_enabled
+                let custom_shader = scene.shader_caps != 0
                     && props.shader.as_deref().is_some_and(|id| !id.is_empty());
                 let binding = |name: &str| {
                     let reference = props.custom.get(name)?;

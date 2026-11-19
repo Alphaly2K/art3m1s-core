@@ -7,7 +7,8 @@ mod renderer;
 pub mod wire;
 
 pub use frame::{
-    FrameGroup, FrameShader, FrameShaderEffect, FrameSprite, FrameTransition, SpriteBlend,
+    FrameGroup, FrameShader, FrameShaderEffect, FrameShaderLanguage, FrameSprite, FrameTransition,
+    SpriteBlend,
 };
 pub use packet::{FramePacket, FramePacketError, FrameTextureDescriptor};
 pub use renderer::{FramePlan, SpriteRenderer};

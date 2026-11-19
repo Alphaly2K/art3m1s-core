@@ -64,21 +64,119 @@ pub unsafe fn build_effect_program(
     unsafe { build_program_from_bodies(gl, profile, source.vertex_body, &fragment) }
 }
 
+pub unsafe fn build_glsl_effect_program(
+    gl: &glow::Context,
+    profile: ShaderProfile,
+    source: &[u8],
+) -> Result<glow::Program, String> {
+    let decoded = String::from_utf8_lossy(source);
+    let fragment = decoded.trim_start_matches('\u{feff}');
+    let normalized;
+    let fragment = if fragment.contains('\r') {
+        normalized = fragment.replace("\r\n", "\n").replace('\r', "\n");
+        &normalized
+    } else {
+        fragment
+    };
+    let vertex = shader_source::program(crate::shader::SPRITE_SHADER)
+        .ok_or_else(|| "sprite shader asset missing".to_string())?;
+    let gles100 = "#version 100\nprecision highp float;\n";
+    let start = skip_glsl_comments(fragment);
+    let Some(version) = source_version(start) else {
+        if profile == ShaderProfile::Gles300 {
+            let with_precision;
+            let fragment = if start.starts_with('#') {
+                fragment
+            } else {
+                with_precision = format!("precision mediump float;\n#line 1\n{fragment}");
+                &with_precision
+            };
+            return unsafe {
+                link_program(gl, &format!("{gles100}{}", vertex.vertex_body), fragment)
+            };
+        }
+        return unsafe { build_program_from_bodies(gl, profile, vertex.vertex_body, fragment) };
+    };
+    let header = match (
+        profile,
+        version
+            .split_ascii_whitespace()
+            .collect::<Vec<_>>()
+            .as_slice(),
+    ) {
+        (ShaderProfile::Gles300, ["100"]) => gles100,
+        (ShaderProfile::Gles300, ["300", "es"]) => ShaderProfile::Gles300.version_header(),
+        (ShaderProfile::GlCore330, ["150"] | ["150", "core"]) => "#version 150 core\n",
+        (ShaderProfile::GlCore330, ["330"] | ["330", "core"]) => {
+            ShaderProfile::GlCore330.version_header()
+        }
+        _ => {
+            return Err(format!(
+                "GLSL #version {version} is unsupported for {profile:?}"
+            ));
+        }
+    };
+    unsafe { link_program(gl, &format!("{header}{}", vertex.vertex_body), fragment) }
+}
+
+fn skip_glsl_comments(mut source: &str) -> &str {
+    loop {
+        source = source.trim_start();
+        if let Some(rest) = source.strip_prefix("//") {
+            source = rest.split_once('\n').map_or("", |(_, tail)| tail);
+        } else if let Some(rest) = source.strip_prefix("/*") {
+            let Some((_, tail)) = rest.split_once("*/") else {
+                return source;
+            };
+            source = tail;
+        } else {
+            return source;
+        }
+    }
+}
+
+fn source_version(source: &str) -> Option<&str> {
+    let directive = source.strip_prefix('#')?.trim_start();
+    let line = directive.lines().next()?;
+    let rest = line.strip_prefix("version")?;
+    rest.as_bytes().first()?.is_ascii_whitespace().then(|| {
+        rest.split("//")
+            .next()
+            .unwrap_or_default()
+            .split("/*")
+            .next()
+            .unwrap_or_default()
+            .trim()
+    })
+}
+
 unsafe fn build_program_from_bodies(
     gl: &glow::Context,
     profile: ShaderProfile,
     vertex_body: &str,
     fragment_body: &str,
 ) -> Result<glow::Program, String> {
+    let header = profile.version_header();
     unsafe {
-        let header = profile.version_header();
-        let vert_src = format!("{header}{vertex_body}");
-        let frag_src = format!("{header}{fragment_body}");
+        link_program(
+            gl,
+            &format!("{header}{vertex_body}"),
+            &format!("{header}{fragment_body}"),
+        )
+    }
+}
+
+unsafe fn link_program(
+    gl: &glow::Context,
+    vertex: &str,
+    fragment: &str,
+) -> Result<glow::Program, String> {
+    unsafe {
         let program = gl.create_program()?;
 
         let shaders = [
-            (glow::VERTEX_SHADER, vert_src),
-            (glow::FRAGMENT_SHADER, frag_src),
+            (glow::VERTEX_SHADER, vertex),
+            (glow::FRAGMENT_SHADER, fragment),
         ];
         let mut compiled = Vec::with_capacity(2);
         let cleanup = |gl: &glow::Context, compiled: &[glow::Shader]| {
@@ -89,8 +187,14 @@ unsafe fn build_program_from_bodies(
             gl.delete_program(program);
         };
         for (kind, src) in shaders {
-            let shader = gl.create_shader(kind)?;
-            gl.shader_source(shader, &src);
+            let shader = match gl.create_shader(kind) {
+                Ok(shader) => shader,
+                Err(error) => {
+                    cleanup(gl, &compiled);
+                    return Err(error);
+                }
+            };
+            gl.shader_source(shader, src);
             gl.compile_shader(shader);
             if !gl.get_shader_compile_status(shader) {
                 let log = gl.get_shader_info_log(shader);
@@ -102,6 +206,8 @@ unsafe fn build_program_from_bodies(
             compiled.push(shader);
         }
 
+        gl.bind_attrib_location(program, 0, "a_pos");
+        gl.bind_attrib_location(program, 1, "a_uv");
         gl.link_program(program);
         if !gl.get_program_link_status(program) {
             let log = gl.get_program_info_log(program);

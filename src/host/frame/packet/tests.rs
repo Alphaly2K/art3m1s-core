@@ -1,6 +1,7 @@
 use super::*;
 use crate::host::frame::{
-    FrameGroup, FramePacket, FrameShader, FrameTexture, FrameTextureDescriptor, FrameTransition,
+    FrameGroup, FramePacket, FrameShader, FrameShaderLanguage, FrameTexture,
+    FrameTextureDescriptor, FrameTransition,
 };
 use art3m1s_render::draw::NativeEmoteMaterial;
 use std::sync::Arc;
@@ -8,6 +9,7 @@ use std::sync::Arc;
 fn frame() -> FrameSnapshot {
     let shader = Arc::new(FrameShader {
         revision: 19,
+        language: FrameShaderLanguage::Hlsl,
         source: Box::from(&b"float opacity;"[..]),
     });
     let effect = FrameShaderEffect {

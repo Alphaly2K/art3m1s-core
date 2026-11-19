@@ -2061,20 +2061,23 @@ impl GpuBackend for VulkanBackend {
         self.readback_impl(target, e, out)
     }
     fn render(&mut self, f: &DrawList) -> RenderRegion {
-        self.render_impl(f, None, false)
+        self.render_with_clear_color(f, [0.0, 0.0, 0.0, 1.0])
+    }
+    fn render_with_clear_color(&mut self, f: &DrawList, color: [f32; 4]) -> RenderRegion {
+        self.render_impl(f, None, false, color)
     }
     fn render_damage(&mut self, f: &DrawList, d: [f32; 4]) -> RenderRegion {
-        self.render_impl(f, Some(d), false)
+        self.render_impl(f, Some(d), false, [0.0, 0.0, 0.0, 1.0])
     }
     fn render_damage_visualized(&mut self, f: &DrawList, d: [f32; 4]) -> RenderRegion {
-        self.render_impl(f, Some(d), true)
+        self.render_impl(f, Some(d), true, [0.0, 0.0, 0.0, 1.0])
     }
     fn render_visualized(&mut self, f: &DrawList) -> RenderRegion {
-        self.render_impl(f, None, true)
+        self.render_impl(f, None, true, [0.0, 0.0, 0.0, 1.0])
     }
     fn clear_damage_overlay(&mut self, f: &DrawList) -> Option<RenderRegion> {
         let r = self.last_overlay?;
-        Some(self.render_impl(f, r.damage(), false))
+        Some(self.render_impl(f, r.damage(), false, [0.0, 0.0, 0.0, 1.0]))
     }
     fn replace_asset_source(&mut self, s: Box<AssetSource>) {
         let framebuffers = self
@@ -2469,6 +2472,7 @@ impl VulkanBackend {
         frame: &DrawList,
         damage: Option<[f32; 4]>,
         visualize: bool,
+        clear: [f32; 4],
     ) -> RenderRegion {
         let current = RenderRegion::from_damage(damage);
         let repaint = self
@@ -2478,7 +2482,7 @@ impl VulkanBackend {
         let Some(target) = self.active.as_ref().map(|a| a.view) else {
             return repaint;
         };
-        self.clear_current(target, [0., 0., 0., 1.], repaint.damage());
+        self.clear_current(target, clear, repaint.damage());
         if let Err(e) = self.encode_range(
             target,
             frame,

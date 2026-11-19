@@ -224,7 +224,7 @@ C 预览版 `ArtMessage.schema_version=1`、`flags=0`。一个批次可包含一
 
 `ArtCreateInfo` 的 Host 能力位分别为 IO=1、UI=2、Media=4、HTTP=8、Translation=16、
 ChunkedWrites=32。Renderer 位分别为 sprite=1、transition=2、screenshot=4、group=8、
-emote=16、HLSL=32。
+emote=16、HLSL=32、GLSL=64。
 预览版检查未知位；Host 仍须处理收到的服务请求，缺少可选服务时返回相应失败。
 
 `poll_events` 按以下固定小端格式写入完整记录，不直接 memcpy C struct：
@@ -440,7 +440,7 @@ Rust 草案先提供 `acquire_latest(handle, after)`，可借用基础图层快�
 给出纹理表索引、原始图层 ID、仿射变换、UV、舞台裁剪、颜色、透明度和混合方式。纹理是
 紧密排列的 RGBA8，直通 alpha，首行在顶端；资源缓存键为 `(runtime, epoch, revision)`。
 同尺寸蒙版用独立纹理索引表示：采样前逐像素以 `alpha * mask_red / 255` 取整得到新 alpha。
-缺失或尺寸不符的蒙版回退为原图。帧支持精灵、转场、内置组效果、E-Mote 和 HLSL 效果。
+缺失或尺寸不符的蒙版回退为原图。帧支持精灵、转场、内置组效果、E-Mote 及 HLSL 和 GLSL 效果。
 Rust 借用随 `FrameLease` 释放。
 
 `FrameLease::packet()` 返回 `ARFP` 草案版 1 的二进制描述；`texture(index)` 借用对应像素。
@@ -457,8 +457,8 @@ C 草案的 `texture_rgba` 也使用帧内索引，像素和帧描述一起由�
 | 合成组记录，56 字节 | 记录总长度 `u32`（56）；opcode `u16`（3 = 合成组）；flags `u16`；精灵起点、结束点、蒙版索引、混合方式各 `u32`；opacity `f32`，RGB 乘色 3 个 `f32`，裁剪 4 个 `f32` |
 | 扩展精灵记录 | 与精灵记录共用 104 字节前缀和 UTF-8 图层 ID，opcode `u16`（4）；图层 ID 后依次为顶点数 `u32`、可选材质、顶点数据 |
 | Stencil 组记录，40 字节 | 记录总长度 `u32`（40）；opcode `u16`（5）；flags `u16`；精灵起点、结束点、遮罩起点、结束点各 `u32`；裁剪 4 个 `f32` |
-| HLSL 源码记录 | 记录总长度 `u32`；opcode `u16`（6）；flags `u16`（0）；源码 revision `u64`；原始 HLSL 字节（记录长度减 16） |
-| HLSL 效果记录 | 记录总长度 `u32`；opcode `u16`（7）；flags `u16`；源码 revision `u64`；精灵起点、结束点、蒙版索引、用户纹理索引、常量数各 `u32`；裁剪 4 个 `f32`；随后依次读取指定数量的常量 |
+| 着色器源码记录 | 记录总长度 `u32`；opcode `u16`（6）；语言 `u16`（0 = HLSL，1 = GLSL）；源码 revision `u64`；原始源码字节（记录长度减 16） |
+| 着色器效果记录 | 记录总长度 `u32`；opcode `u16`（7）；flags `u16`；源码 revision `u64`；精灵起点、结束点、蒙版索引、用户纹理索引、常量数各 `u32`；裁剪 4 个 `f32`；随后依次读取指定数量的常量 |
 
 索引从 0 开始；无蒙版用 `UINT32_MAX`。混合方式按 Alpha、Add、Screen、Multiply
 依次编号 0 至 3。flags 的低三位依次表示裁剪、灰阶和反色，其余写零。裁剪为舞台上的
@@ -497,19 +497,22 @@ C Host 声明 `ART_RENDERER_CAP_EMOTE` 后，Core 按 Host 的单调时间求值
 DXT5 的 PSB 提交资源读取。Host 通过帧内 CPU 图集、材质、网格和 stencil 指令绘制模型；
 不需要解析 PSB。未声明时，Luau 的模型创建调用返回错误。
 
-HLSL 源码记录在普通和遮罩精灵之后，每个源码 revision 只出现一次。随后是绑定单一精灵的
-效果记录，再按每个场景的组顺序写入组效果、合成组及 stencil 组。HLSL 效果 flags 的位值
+源码记录在普通和遮罩精灵之后，每个源码 revision 只出现一次。随后是绑定单一精灵的
+效果记录，再按每个场景的组顺序写入组效果、合成组及 stencil 组。着色器效果 flags 的位值
 `1` 表示有裁剪，`2` 表示离屏组效果，`16` 表示属于转场旧场景。起点包含、结束点排除；单一
 精灵效果的区间长度为 1。缺省纹理索引使用 `UINT32_MAX`。常量依次为名称长度 `u16`、值数
 `u16`、UTF-8 名称字节和对应数量的 `f32`，没有终止符或填充。
 
-C Host 通过 `ART_RENDERER_CAP_HLSL` 启用 `[lyshader]` 读取和 HLSL 记录。Host 以
-`(runtime, epoch, shader_revision)` 缓存平台程序，按本帧效果绑定纹理和常量。源码和效果
-随帧借用；重载不会修改旧帧的源码。源码缺失或编译失败时直接绘制精灵，组内已有的其他效果
-继续执行。着色器语言的约定见 [Runtime Shader ABI](SHADER_ABI.md)。
+C Host 分别声明 `ART_RENDERER_CAP_HLSL`、`ART_RENDERER_CAP_GLSL`，可同时启用。`[lyshader]`
+按解析后的逻辑路径识别语言：`.glsl`、`.frag`、`.fsh`、`.fs` 属于 GLSL，其余路径沿用 HLSL。
+源码记录只使用 Host 声明支持的语言，原有 HLSL 记录保持字节兼容。Host 以
+`(runtime, epoch, shader_revision)` 缓存平台程序，按本帧效果绑定纹理和常量。源码和效果随帧
+借用，重载保留旧帧的原始语言和源码。源码缺失或编译失败时直接绘制精灵，组内已有的其他效果
+继续执行。编译和绑定约定见 [Runtime Shader ABI](SHADER_ABI.md)。
 
-编号存档可记录 shader ID 到逻辑源码键的映射。使用截图时记录捕获时的映射。支持 HLSL 的
-Core 在提交读档前通过 Host IO 预读这些源码和采样纹理；源码不可读时，读档失败并保留原场景。
+编号存档可记录 shader ID 到逻辑源码键的映射。使用截图时记录捕获时的映射。读档提交前，
+Core 通过 Host IO 预读已协商语言的源码及相关采样纹理。已协商的源码不可读时，读档失败并
+保留原场景；未协商语言的效果跳过，不请求其源码。
 恢复后的帧使用新的 shader revision，旧帧仍使用其借用的版本。缺少此映射的旧档沿用当前会话
 已注册的 shader。
 
@@ -663,6 +666,9 @@ ARFP 和纹理像素后的绘制结果，包含向共享 IOSurface 连续呈现�
 macOS 应用可按 [Metal Host C 头文件](abi/art3m1s_metal_host_v1.h) 单独构建和链接渲染库。
 先在原生线程创建 Core runtime，再在同一线程向渲染库传入 Frame 函数表和 runtime 句柄。
 Host 保持 Core 动态库、runtime 和绑定的 BGRA IOSurface 存活，释放顺序是渲染器、runtime、库。
+选择 ANGLE/Metal 时使用 `art3m1s_metal_host_v1_create_angle`，传入随应用分发的 EGL/GLES
+库所在目录，并协商 `ART_ANGLE_HOST_V1_RENDERER_CAPS`。该构造器失败时返回错误。两种
+后端共用绑定、呈现、截图和销毁入口。
 Host 每次推进逻辑并处理请求后可尝试呈现；只在 `present` 返回 `ART_OK` 时更新已呈现帧号并通知
 纹理消费者。`ART_NO_DATA` 保留前一张画面。重建共享纹理时，先解绑再释放旧表面，绑定新表面后
 传 `after_frame_id = 0` 重绘，下一次逻辑推进无需等待重绘。
@@ -687,6 +693,8 @@ macOS Flutter Runner 可将 [ArtemisFlutterHost](../tools/host-bindings/swift/Ar
 原生端分配，事件的请求 ID 和 epoch 以十进制字符串传输，metadata 和 blob 以字节传输。应用
 决定何时推进和处理服务，原生端只在成功呈现时通知纹理消费者。应用退出玩家视图时调用
 `session.close()`，Runner 离开时调用 `host.close()` 注销通道并释放剩余会话。
+Runner 可提供 `angleDirectory`，Dart 在 `ArtemisFlutterSession.open(angle: true)` 时选择
+ANGLE/Metal。省略该参数使用原生 Metal。应用在创建会话时选定后端。
 
 可选提供 `mediaPath` 加载独立的 [媒体 Host](abi/art3m1s_media_host_v1.h)，用于 ASF/WMV 和
 Ogg 视频。该库用现有 FFmpeg 动态库构建，提供时间戳、RGBA 帧和 48 kHz 双声道 PCM；调用者
@@ -702,6 +710,8 @@ FFmpeg CLI，以同时验证 Ogg 视频。设置 `ARTEMIS_MEDIA_SWIFT_SMOKE=1` �
 将 `FLUTTER_MACOS_FRAMEWORK_DIR` 指向包含 `FlutterMacOS.framework` 的目录后运行
 `bash scripts/test-host-v2-flutter.sh`，可以验证标准方法编解码器、真实 Core 和 Metal 设备的
 接线。探针独立运行并检查纹理注册、像素和关闭，无需启动游戏应用。
+同时设置 `ARTEMIS_GL_SMOKE_ANGLE_DIR` 可验证两个 ANGLE 会话的 GLSL 像素、截图和纹理
+替换，以及关闭其中一个会话后另一个仍可绘制。
 
 在 `tools/host-bindings/dart` 目录运行 `dart pub get --enforce-lockfile` 后，使用
 `dart run bin/smoke.dart <纯 Core 动态库路径>` 可验证 Dart 接入。`artemis_host.dart` 的

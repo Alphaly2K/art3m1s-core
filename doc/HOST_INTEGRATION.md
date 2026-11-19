@@ -25,8 +25,11 @@ Artemis 解释器在所有平台统一使用 Luau。现有 v1 C 函数表保持�
 支持子场景离屏合成的 Host 声明 `ART_RENDERER_CAP_GROUP`，按帧包的组范围、效果与遮罩合成。
 支持 E-Mote 材质、网格和 stencil 的 Host 声明 `ART_RENDERER_CAP_EMOTE`，并通过同一资源
 协议提供 PSB 字节。
-支持 Artemis HLSL 子集的 Host 声明 `ART_RENDERER_CAP_HLSL`，根据帧包交付的源码版本
-和绑定编译绘制。使用 `SpriteRenderer` 时，可用 `clear_cached_shaders()` 释放已注册的程序。
+Host 按编译后端声明 `ART_RENDERER_CAP_HLSL` 和/或 `ART_RENDERER_CAP_GLSL`，根据帧包的
+语言、源码版本和绑定编译绘制。使用 `SpriteRenderer` 时，可用 `clear_cached_shaders()`
+释放已注册的程序。GL/GLES 后端的片元输入和绑定见 [Runtime Shader ABI](SHADER_ABI.md)。
+Linux 和 Android 的 Rust Host 可用 `GlBackend::new_host_egl` 创建系统 GLES 3 上下文；
+macOS 和 iOS 可用 `GlBackend::new_host_angle` 并提供 ANGLE/Metal 库的目录。
 
 [内存 Host 示例](../tools/host-smoke/artemis_v2.c) 不依赖窗口或游戏素材。以下命令构建预览库、
 检查导出并运行示例。macOS 或 Linux 使用：
@@ -207,9 +210,9 @@ IO 挂起期间可继续呈现上次取得的帧。借用跨重载有效；单�
 版本约定见 [帧契约](HOST_ABI_V2.md#7-画面core-帧契约与-host-renderer)。
 
 使用项目自带 GPU 后端时，将 Host 创建的后端传给 `SpriteRenderer::new`。Host 通过
-`backend_mut()` 配置目标及舞台映射，调用 `begin_access`、`begin_frame` 并清理目标，
+`backend_mut()` 配置目标及舞台映射，调用 `begin_access` 和 `begin_frame`，
 然后调用 `render(&lease)`。成功后由 Host 结束帧并呈现；出错时也要结束已打开的访问和帧。
-转场的旧场景和新场景用相同的背景色；自定义背景时调用 `render_with_clear_color`。
+绘制时适配器会清理目标；自定义背景时调用 `render_with_clear_color`，转场的两个场景使用同一颜色。
 清理适配器缓存须在后端上下文可用时调用 `clear_cached_textures()`。
 
 句柄入口的 `step` 会自动处理 `[save]` 和编号 `[load]`。Host 按现有 IO 请求读写并回填结果，
@@ -413,9 +416,9 @@ PFS 多卷和补丁覆盖在 core 内按统一索引解析；目录挂载只暴�
 
 ### 游戏隔离
 
-INI 的 `SAVEPATH=savedata` 会产生 `savedata/save0001.dat`、`savedata/saveg.dat` 等路径。
-Core 已添加逻辑前缀，Host 不要重复添加。将这些路径映射到当前游戏专属的可写根目录，
-不能只用常见的 `root.pfs` 文件名作为游戏身份。
+为每个游戏选择独立的可写根目录，使用稳定的游戏标识。v1 交付的存档路径已含 `SAVEPATH`
+前缀。v2 的存档 key 相对于 `save` 命名空间；如需延用 v1 的目录布局，可声明
+`ART_HOST_CAP_PROJECT_SAVE_PATH`，在收到 `session_changed` 时使用 `save_path` 选择该命名空间的根。
 
 编号存档与 `saveg.dat`、`system.dat`、已读记录是不同文件。load 旧编号存档不能回滚
 整个可写目录。封面和翻译缓存等 Host 元数据也应由稳定游戏 ID 隔离。

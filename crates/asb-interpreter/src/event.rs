@@ -559,7 +559,7 @@ pub enum Event {
     },
     /// 立即反映图层变更 [flip]
     Flip,
-    /// 注册图层 HLSL shader [lyshader]
+    /// 注册图层着色器 [lyshader]
     ShaderLoad { id: String, file: String },
     /// 截图 [takess]
     TakeScreenshot,

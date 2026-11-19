@@ -8,7 +8,8 @@ use std::sync::Arc;
 mod packet;
 pub use art3m1s_render::artemis::{
     FRAME_PACKET_VERSION, FrameGroup, FramePacket, FramePacketError, FrameShader,
-    FrameShaderEffect, FrameSprite, FrameTextureDescriptor, FrameTransition, SpriteBlend,
+    FrameShaderEffect, FrameShaderLanguage, FrameSprite, FrameTextureDescriptor, FrameTransition,
+    SpriteBlend,
 };
 
 fn remap_effect(effect: &mut FrameShaderEffect, textures: &[usize]) {

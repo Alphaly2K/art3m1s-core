@@ -65,7 +65,15 @@ pub struct FrameGroup {
 #[derive(Debug, PartialEq)]
 pub struct FrameShader {
     pub revision: u64,
+    pub language: FrameShaderLanguage,
     pub source: Box<[u8]>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u16)]
+pub enum FrameShaderLanguage {
+    Hlsl = 0,
+    Glsl = 1,
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -26,4 +26,6 @@ MACOSX_DEPLOYMENT_TARGET=12.0 swiftc -swift-version 5 -strict-concurrency=comple
   tools/host-bindings/swift/ArtemisMacSession.swift tools/host-bindings/swift/ArtemisFlutterHost.swift \
   tools/host-bindings/swift/ArtemisLegacyMedia.swift \
   tools/host-smoke/ArtemisFlutterSmoke.swift -o "$scratch/artemis-flutter"
-"$scratch/artemis-flutter" "$lib_dir/libart3m1s_core.dylib" "$PWD/target/debug/libart3m1s_artemis_metal_host.dylib"
+args=("$lib_dir/libart3m1s_core.dylib" "$PWD/target/debug/libart3m1s_artemis_metal_host.dylib")
+if [[ -n ${ARTEMIS_GL_SMOKE_ANGLE_DIR:-} ]]; then args+=("$ARTEMIS_GL_SMOKE_ANGLE_DIR"); fi
+"$scratch/artemis-flutter" "${args[@]}"

@@ -1996,24 +1996,28 @@ impl GpuBackend for MetalBackend {
     }
 
     fn render(&mut self, frame: &DrawList) -> RenderRegion {
-        self.render_internal(frame, None, false)
+        self.render_with_clear_color(frame, [0.0, 0.0, 0.0, 1.0])
+    }
+
+    fn render_with_clear_color(&mut self, frame: &DrawList, color: [f32; 4]) -> RenderRegion {
+        self.render_internal(frame, None, false, color)
     }
 
     fn render_damage(&mut self, frame: &DrawList, damage: [f32; 4]) -> RenderRegion {
-        self.render_internal(frame, Some(damage), false)
+        self.render_internal(frame, Some(damage), false, [0.0, 0.0, 0.0, 1.0])
     }
 
     fn render_damage_visualized(&mut self, frame: &DrawList, damage: [f32; 4]) -> RenderRegion {
-        self.render_internal(frame, Some(damage), true)
+        self.render_internal(frame, Some(damage), true, [0.0, 0.0, 0.0, 1.0])
     }
 
     fn render_visualized(&mut self, frame: &DrawList) -> RenderRegion {
-        self.render_internal(frame, None, true)
+        self.render_internal(frame, None, true, [0.0, 0.0, 0.0, 1.0])
     }
 
     fn clear_damage_overlay(&mut self, frame: &DrawList) -> Option<RenderRegion> {
         let region = self.last_damage_overlay?;
-        Some(self.render_internal(frame, region.damage(), false))
+        Some(self.render_internal(frame, region.damage(), false, [0.0, 0.0, 0.0, 1.0]))
     }
 
     fn replace_asset_source(&mut self, source: Box<AssetSource>) {
@@ -2546,6 +2550,7 @@ impl MetalBackend {
         frame: &DrawList,
         damage: Option<[f32; 4]>,
         visualize_damage: bool,
+        clear: [f32; 4],
     ) -> RenderRegion {
         let current_region = RenderRegion::from_damage(damage);
         let repaint = self
@@ -2560,7 +2565,7 @@ impl MetalBackend {
         let target = active.target.clone();
         let result = (|| {
             match repaint.damage() {
-                None => encode_clear(&command_buffer, &target, [0.0, 0.0, 0.0, 1.0])?,
+                None => encode_clear(&command_buffer, &target, clear)?,
                 Some(rect) => self.encode_clear_rect(&command_buffer, &target, rect)?,
             }
             self.encode_range(

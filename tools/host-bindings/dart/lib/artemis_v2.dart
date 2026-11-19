@@ -418,6 +418,7 @@ const int ART_RENDERER_CAP_GROUP = 8;
 const int ART_RENDERER_CAP_EMOTE = 16;
 
 const int ART_RENDERER_CAP_HLSL = 32;
+const int ART_RENDERER_CAP_GLSL = 64;
 
 const int ART_WAIT_IO = 1;
 

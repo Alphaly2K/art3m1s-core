@@ -96,6 +96,7 @@ pub struct GlRenderer {
     profile: ShaderProfile,
     white_texture: glow::Texture,
     transparent_texture: glow::Texture,
+    backdrop_target: Cell<Option<GroupTarget>>,
     group_targets: Vec<GroupTarget>,
     mask_group_targets: Vec<GroupTarget>,
     vao: glow::VertexArray,
@@ -148,6 +149,7 @@ impl GlRenderer {
                 CustomProgram {
                     program: alpha_mask_program,
                     bindings: ProgramBindings::new(&gl, alpha_mask_program),
+                    glsl_uniforms: None,
                 },
             );
             let group_composite_program =
@@ -157,6 +159,7 @@ impl GlRenderer {
                 CustomProgram {
                     program: group_composite_program,
                     bindings: ProgramBindings::new(&gl, group_composite_program),
+                    glsl_uniforms: Some(GlslUniforms::reflect(&gl, group_composite_program)),
                 },
             );
             // [trans type=2] 规则图像转场内置 shader，与 alpha-mask 同样在
@@ -168,6 +171,7 @@ impl GlRenderer {
                 CustomProgram {
                     program: rule_trans_program,
                     bindings: ProgramBindings::new(&gl, rule_trans_program),
+                    glsl_uniforms: None,
                 },
             );
 
@@ -232,6 +236,7 @@ impl GlRenderer {
                 profile,
                 white_texture,
                 transparent_texture,
+                backdrop_target: Cell::new(None),
                 group_targets: Vec::new(),
                 mask_group_targets: Vec::new(),
                 vao,
@@ -316,16 +321,33 @@ impl GlRenderer {
     /// Register one Artemis `[lyshader]` HLSL effect under its script id.
     pub fn register_hlsl_shader(&mut self, name: &str, source: &[u8]) -> Result<(), String> {
         let program = unsafe { shader::build_effect_program(&self.gl, self.profile, source)? };
-        let bindings = ProgramBindings::new(&self.gl, program);
-        if let Some(old) = self
-            .custom_programs
-            .insert(name.to_string(), CustomProgram { program, bindings })
-        {
+        self.insert_effect_program(name, program, None);
+        Ok(())
+    }
+
+    pub fn register_glsl_shader(&mut self, name: &str, source: &[u8]) -> Result<(), String> {
+        let program = unsafe { shader::build_glsl_effect_program(&self.gl, self.profile, source)? };
+        let uniforms = GlslUniforms::reflect(&self.gl, program);
+        self.insert_effect_program(name, program, Some(uniforms));
+        Ok(())
+    }
+
+    fn insert_effect_program(
+        &mut self,
+        name: &str,
+        program: glow::Program,
+        glsl_uniforms: Option<GlslUniforms>,
+    ) {
+        let custom = CustomProgram {
+            program,
+            bindings: ProgramBindings::new(&self.gl, program),
+            glsl_uniforms,
+        };
+        if let Some(old) = self.custom_programs.insert(name.to_string(), custom) {
             unsafe {
                 self.gl.delete_program(old.program);
             }
         }
-        Ok(())
     }
 
     pub fn unregister_hlsl_shader(&mut self, name: &str) -> bool {
@@ -721,6 +743,11 @@ impl GlRenderer {
                 if has_mesh { 1.0 } else { cmd.clip.quad_size[0] },
                 if has_mesh { 1.0 } else { cmd.clip.quad_size[1] },
             );
+            gl.uniform_2_f32(
+                bindings.stage_size.as_ref(),
+                self.stage_width,
+                self.stage_height,
+            );
             // UV 重映射：把 0..1 的顶点 UV 映射到裁剪子区域。
             gl.uniform_2_f32(
                 bindings.uv_offset.as_ref(),
@@ -773,6 +800,17 @@ impl GlRenderer {
                 gl.uniform_3_f32(bindings.emote_wipe.as_ref(), wipe[0], wipe[1], wipe[2]);
             }
 
+            let backdrop = if custom_program.is_some_and(CustomProgram::samples_backdrop) {
+                // Allocating the snapshot can replace the active texture binding.
+                gl.active_texture(glow::TEXTURE0 + 2);
+                self.copy_backdrop(viewport, top_left_target)
+                    .unwrap_or_else(|error| {
+                        log::warn!("GLSL background copy failed: {error}");
+                        self.transparent_texture
+                    })
+            } else {
+                self.transparent_texture
+            };
             gl.active_texture(glow::TEXTURE0);
             let texture = texture_from_id(cmd.texture);
             gl.bind_texture(glow::TEXTURE_2D, texture);
@@ -786,7 +824,7 @@ impl GlRenderer {
                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, filter as i32);
             }
 
-            if custom_program.is_some() {
+            if let Some(custom) = custom_program {
                 gl.uniform_1_i32(bindings.texture_fore.as_ref(), 0);
                 let mask_texture = cmd
                     .shader
@@ -796,7 +834,7 @@ impl GlRenderer {
                     .unwrap_or(self.white_texture);
                 bind_texture(gl, 1, mask_texture);
                 gl.uniform_1_i32(bindings.texture_mask.as_ref(), 1);
-                bind_texture(gl, 2, self.transparent_texture);
+                bind_texture(gl, 2, backdrop);
                 gl.uniform_1_i32(bindings.texture_back.as_ref(), 2);
 
                 let user_texture = cmd
@@ -807,6 +845,11 @@ impl GlRenderer {
                     .unwrap_or(self.transparent_texture);
                 bind_texture(gl, 3, user_texture);
                 gl.uniform_1_i32(bindings.texture_user.as_ref(), 3);
+                if let Some(uniforms) = &custom.glsl_uniforms {
+                    for (location, unit) in &uniforms.samplers {
+                        gl.uniform_1_i32(Some(location), *unit);
+                    }
+                }
 
                 gl.uniform_1_f32(bindings.alpha.as_ref(), cmd.opacity);
                 gl.uniform_3_f32(
@@ -817,10 +860,16 @@ impl GlRenderer {
                 );
                 if let Some(effect) = &cmd.shader {
                     for (name, values) in &effect.uniforms {
-                        gl.uniform_1_f32_slice(
-                            gl.get_uniform_location(program, name).as_ref(),
-                            values,
-                        );
+                        if let Some(uniforms) = &custom.glsl_uniforms {
+                            if let Some(uniform) = uniforms.constants.get(name) {
+                                uniform.set(gl, values);
+                            }
+                        } else {
+                            gl.uniform_1_f32_slice(
+                                gl.get_uniform_location(program, name).as_ref(),
+                                values,
+                            );
+                        }
                     }
                 }
             } else {
@@ -834,6 +883,67 @@ impl GlRenderer {
             } else {
                 gl.draw_arrays(glow::TRIANGLES, 0, 6);
             }
+        }
+    }
+
+    fn copy_backdrop(
+        &self,
+        (width, height): (i32, i32),
+        flip_y: bool,
+    ) -> Result<glow::Texture, String> {
+        let gl = &self.gl;
+        unsafe {
+            while gl.get_error() != glow::NO_ERROR {}
+            let read = framebuffer_from_raw(gl.get_parameter_i32(glow::READ_FRAMEBUFFER_BINDING));
+            let draw = framebuffer_from_raw(gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING));
+            let result = (|| {
+                let target = if let Some(target) = self.backdrop_target.get()
+                    && (target.width, target.height) == (width, height)
+                {
+                    target
+                } else {
+                    let (framebuffer, texture) = platform::create_fbo_target(gl, width, height)?;
+                    let target = GroupTarget {
+                        framebuffer,
+                        texture,
+                        width,
+                        height,
+                    };
+                    if let Some(old) = self.backdrop_target.replace(Some(target)) {
+                        gl.delete_framebuffer(old.framebuffer);
+                        gl.delete_texture(old.texture);
+                    }
+                    target
+                };
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, draw);
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(target.framebuffer));
+                let scissor = gl.is_enabled(glow::SCISSOR_TEST);
+                gl.disable(glow::SCISSOR_TEST);
+                let (y0, y1) = if flip_y { (height, 0) } else { (0, height) };
+                gl.blit_framebuffer(
+                    0,
+                    0,
+                    width,
+                    height,
+                    0,
+                    y0,
+                    width,
+                    y1,
+                    glow::COLOR_BUFFER_BIT,
+                    glow::NEAREST,
+                );
+                if scissor {
+                    gl.enable(glow::SCISSOR_TEST);
+                }
+                let error = gl.get_error();
+                if error != glow::NO_ERROR {
+                    return Err(format!("GL {error:#x}"));
+                }
+                Ok(target.texture)
+            })();
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, read);
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, draw);
+            result
         }
     }
 
@@ -923,8 +1033,29 @@ impl GlRenderer {
         frame: &DrawList,
         damage: Option<[f32; 4]>,
         visualize_damage: bool,
+        clear: [f32; 4],
     ) -> RenderRegion {
-        let current_region = RenderRegion::from_damage(damage);
+        let samples_backdrop = |effect: &crate::draw::ShaderEffect| {
+            self.custom_programs
+                .get(&effect.name)
+                .is_some_and(CustomProgram::samples_backdrop)
+        };
+        let current_region = if damage.is_some()
+            && (frame
+                .commands
+                .iter()
+                .chain(&frame.mask_commands)
+                .filter_map(|command| command.shader.as_ref())
+                .any(samples_backdrop)
+                || frame
+                    .shader_groups
+                    .iter()
+                    .any(|group| samples_backdrop(&group.effect)))
+        {
+            RenderRegion::Full
+        } else {
+            RenderRegion::from_damage(damage)
+        };
         let repaint_region = self
             .last_damage_overlay
             .map(|previous| previous.union(current_region))
@@ -940,7 +1071,7 @@ impl GlRenderer {
             ) {
                 return repaint_region;
             }
-            gl.clear_color(0.0, 0.0, 0.0, 1.0);
+            gl.clear_color(clear[0], clear[1], clear[2], clear[3]);
             gl.clear(glow::COLOR_BUFFER_BIT);
 
             let mut mesh_vertices = Vec::new();
@@ -1022,7 +1153,7 @@ impl GlRenderer {
     }
 
     pub(crate) fn render_damage(&mut self, frame: &DrawList, damage: [f32; 4]) -> RenderRegion {
-        self.render_internal(frame, Some(damage), false)
+        self.render_internal(frame, Some(damage), false, [0.0, 0.0, 0.0, 1.0])
     }
 
     pub(crate) fn render_damage_visualized(
@@ -1030,17 +1161,17 @@ impl GlRenderer {
         frame: &DrawList,
         damage: [f32; 4],
     ) -> RenderRegion {
-        self.render_internal(frame, Some(damage), true)
+        self.render_internal(frame, Some(damage), true, [0.0, 0.0, 0.0, 1.0])
     }
 
     pub(crate) fn render_visualized(&mut self, frame: &DrawList) -> RenderRegion {
-        self.render_internal(frame, None, true)
+        self.render_internal(frame, None, true, [0.0, 0.0, 0.0, 1.0])
     }
 
     /// 清掉上一帧临时脏区色。返回实际重绘区域，供外部纹理做同范围提交。
     pub(crate) fn clear_damage_overlay(&mut self, frame: &DrawList) -> Option<RenderRegion> {
         let region = self.last_damage_overlay?;
-        Some(self.render_internal(frame, region.damage(), false))
+        Some(self.render_internal(frame, region.damage(), false, [0.0, 0.0, 0.0, 1.0]))
     }
 
     /// Draws the persistent internal FBO texture into the currently bound
@@ -1103,6 +1234,7 @@ impl GlRenderer {
             gl.uniform_3_f32(self.program_bindings.multiply.as_ref(), 1.0, 1.0, 1.0);
             gl.uniform_1_i32(self.program_bindings.grayscale.as_ref(), 0);
             gl.uniform_1_i32(self.program_bindings.negative.as_ref(), 0);
+            gl.uniform_1_i32(self.program_bindings.emote_enabled.as_ref(), 0);
             gl.uniform_1_i32(self.program_bindings.sampler.as_ref(), 0);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
@@ -1135,7 +1267,11 @@ impl GlRenderer {
 impl GlRenderer {
     /// Renders a complete draw list into the currently bound framebuffer.
     pub fn render(&mut self, frame: &DrawList) {
-        let _ = self.render_internal(frame, None, false);
+        self.render_with_clear_color(frame, [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    pub(crate) fn render_with_clear_color(&mut self, frame: &DrawList, color: [f32; 4]) -> RenderRegion {
+        self.render_internal(frame, None, false, color)
     }
 }
 
@@ -1164,6 +1300,10 @@ impl Drop for GlRenderer {
             }
             gl.delete_texture(self.white_texture);
             gl.delete_texture(self.transparent_texture);
+            if let Some(target) = self.backdrop_target.take() {
+                gl.delete_framebuffer(target.framebuffer);
+                gl.delete_texture(target.texture);
+            }
             for target in &self.group_targets {
                 gl.delete_framebuffer(target.framebuffer);
                 gl.delete_texture(target.texture);
@@ -1191,12 +1331,100 @@ struct GroupTarget {
 struct CustomProgram {
     program: glow::Program,
     bindings: ProgramBindings,
+    glsl_uniforms: Option<GlslUniforms>,
+}
+
+impl CustomProgram {
+    fn samples_backdrop(&self) -> bool {
+        self.glsl_uniforms
+            .as_ref()
+            .is_some_and(|uniforms| uniforms.samples_backdrop)
+    }
+}
+
+#[derive(Default)]
+struct GlslUniforms {
+    samples_backdrop: bool,
+    samplers: Vec<(glow::UniformLocation, i32)>,
+    constants: HashMap<String, GlslUniform>,
+}
+
+impl GlslUniforms {
+    fn reflect(gl: &glow::Context, program: glow::Program) -> Self {
+        let mut bindings = Self::default();
+        unsafe {
+            for index in 0..gl.get_active_uniforms(program) {
+                let Some(uniform) = gl.get_active_uniform(program, index) else {
+                    continue;
+                };
+                if uniform.utype == glow::SAMPLER_2D {
+                    let unit = match uniform.name.as_str() {
+                        "samplerFore" | "textureFore" => 0,
+                        "samplerMask" | "textureMask" => 1,
+                        "samplerBack" | "textureBack" | "u_texture_back" => 2,
+                        "samplerUser" | "textureUser" => 3,
+                        _ => continue,
+                    };
+                    if let Some(location) = gl.get_uniform_location(program, &uniform.name) {
+                        bindings.samples_backdrop |= unit == 2;
+                        bindings.samplers.push((location, unit));
+                    }
+                    continue;
+                }
+                let width = match uniform.utype {
+                    glow::FLOAT => 1,
+                    glow::FLOAT_VEC2 => 2,
+                    glow::FLOAT_VEC3 => 3,
+                    glow::FLOAT_VEC4 => 4,
+                    _ => continue,
+                };
+                let Some(location) = gl.get_uniform_location(program, &uniform.name) else {
+                    continue;
+                };
+                let name = uniform.name.strip_suffix("[0]").unwrap_or(&uniform.name);
+                bindings.constants.insert(
+                    name.into(),
+                    GlslUniform {
+                        location,
+                        width,
+                        len: uniform.size as usize * width,
+                    },
+                );
+            }
+        }
+        bindings
+    }
+}
+
+struct GlslUniform {
+    location: glow::UniformLocation,
+    width: usize,
+    len: usize,
+}
+
+impl GlslUniform {
+    fn set(&self, gl: &glow::Context, values: &[f32]) {
+        if values.is_empty() || values.len() > self.len || values.len() % self.width != 0 {
+            return;
+        }
+        let location = Some(&self.location);
+        unsafe {
+            match self.width {
+                1 => gl.uniform_1_f32_slice(location, values),
+                2 => gl.uniform_2_f32_slice(location, values),
+                3 => gl.uniform_3_f32_slice(location, values),
+                4 => gl.uniform_4_f32_slice(location, values),
+                _ => unreachable!(),
+            }
+        }
+    }
 }
 
 struct ProgramBindings {
     projection: Option<glow::UniformLocation>,
     transform: Option<glow::UniformLocation>,
     size: Option<glow::UniformLocation>,
+    stage_size: Option<glow::UniformLocation>,
     uv_offset: Option<glow::UniformLocation>,
     uv_scale: Option<glow::UniformLocation>,
     opacity: Option<glow::UniformLocation>,
@@ -1228,6 +1456,7 @@ impl ProgramBindings {
             projection: get("u_projection"),
             transform: get("u_transform"),
             size: get("u_size"),
+            stage_size: get("u_stage_size"),
             uv_offset: get("u_uv_offset"),
             uv_scale: get("u_uv_scale"),
             opacity: get("u_opacity"),

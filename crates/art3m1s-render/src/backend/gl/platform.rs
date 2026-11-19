@@ -1,7 +1,7 @@
 //! Cross-platform GL context creation.  Supports CGL (macOS) and
 //! ANGLE via EGL.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::OnceLock;
 
@@ -21,15 +21,12 @@ pub fn set_angle_path_prefix(prefix: impl Into<PathBuf>) -> bool {
     ANGLE_PATH.set(prefix).is_ok()
 }
 
-fn angle_lib_path(name: &str) -> String {
-    ANGLE_PATH
-        .get()
-        .map(|prefix| prefix.join(name).to_string_lossy().into_owned())
-        .unwrap_or_else(|| name.to_owned())
-}
-
 pub trait GLPlatformContext: Send {
     fn make_current(&self) -> bool;
+
+    fn make_current_for_drop(&mut self) -> bool {
+        self.make_current()
+    }
 
     /// Resolves a GL entry point from the same implementation backing this
     /// context. External renderers such as libmpv must not load a different
@@ -143,8 +140,8 @@ pub fn create_offscreen_context(
 ) -> Result<CreatedPlatformContext, String> {
     match backend {
         GfxBackend::Cgl => create_cgl().map(|(g, c)| (g, c, GfxBackend::Cgl)),
-        GfxBackend::Angle(sub) => match create_egl(sub, stage_w, stage_h) {
-            Ok((g, c)) => Ok((g, c, GfxBackend::Angle(sub))),
+        GfxBackend::Angle(sub) => match create_egl(sub, stage_w, stage_h, EglMode::Legacy) {
+            Ok((g, c, _)) => Ok((g, c, GfxBackend::Angle(sub))),
             Err(e) => {
                 if std::env::var_os("ART3M1S_ANGLE_REQUIRED").is_some() {
                     return Err(format!("ANGLE initialization failed: {e}"));
@@ -154,6 +151,30 @@ pub fn create_offscreen_context(
             }
         },
     }
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub(super) fn create_host_angle_context(
+    directory: &Path,
+    width: u32,
+    height: u32,
+) -> Result<
+    (
+        Rc<glow::Context>,
+        Box<dyn GLPlatformContext>,
+        SavedGlContext,
+    ),
+    String,
+> {
+    create_egl(AngleBackend::Metal, width, height, EglMode::Host(Some(directory)))
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(super) fn create_host_egl_context(
+    width: u32,
+    height: u32,
+) -> Result<(Rc<glow::Context>, Box<dyn GLPlatformContext>, SavedGlContext), String> {
+    create_egl(AngleBackend::OpenGL, width, height, EglMode::Host(None))
 }
 
 // ── CGL (macOS Core OpenGL) ────────────────────────────────────
@@ -302,15 +323,32 @@ fn create_cgl() -> Result<(Rc<glow::Context>, Box<dyn GLPlatformContext>), Strin
 
 // ── EGL / ANGLE ─────────────────────────────────────────────────
 
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "android")),
+    allow(dead_code)
+)]
+enum EglMode<'a> {
+    Legacy,
+    Host(Option<&'a Path>),
+}
+
 fn create_egl(
     backend: AngleBackend,
     stage_w: u32,
     stage_h: u32,
-) -> Result<(Rc<glow::Context>, Box<dyn GLPlatformContext>), String> {
+    mode: EglMode<'_>,
+) -> Result<
+    (
+        Rc<glow::Context>,
+        Box<dyn GLPlatformContext>,
+        SavedGlContext,
+    ),
+    String,
+> {
     mod egl {
-        use super::GLPlatformContext;
-        use super::angle_lib_path;
+        use super::{EglMode, GLPlatformContext};
         use libloading::Library;
+        use std::collections::HashMap;
         use std::ffi::{CString, c_char, c_uint, c_void};
         use std::rc::Rc;
         use std::sync::Mutex;
@@ -323,7 +361,53 @@ fn create_egl(
         type EGLint = i32;
         type EglGetProcAddress = unsafe extern "C" fn(*const c_char) -> *const c_void;
 
+        type DisplayKey = (usize, usize);
+        static HOST_DISPLAYS: std::sync::LazyLock<Mutex<HashMap<DisplayKey, HostDisplay>>> =
+            std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+        struct HostDisplay {
+            users: usize,
+            owns_initialization: bool,
+        }
+
+        struct DisplayOwner {
+            display: EGLDisplay,
+            terminate: unsafe extern "C" fn(EGLDisplay) -> EGLBoolean,
+            shared: bool,
+        }
+
+        impl DisplayOwner {
+            fn key(&self) -> DisplayKey {
+                (self.terminate as usize, self.display as usize)
+            }
+        }
+
+        impl Drop for DisplayOwner {
+            fn drop(&mut self) {
+                if self.shared {
+                    let mut displays = HOST_DISPLAYS.lock().unwrap();
+                    let Some(display) = displays.get_mut(&self.key()) else {
+                        return;
+                    };
+                    display.users -= 1;
+                    if display.users != 0 {
+                        return;
+                    }
+                    let owns_initialization = display.owns_initialization;
+                    displays.remove(&self.key());
+                    if owns_initialization {
+                        unsafe { (self.terminate)(self.display) };
+                    }
+                } else {
+                    unsafe { (self.terminate)(self.display) };
+                }
+            }
+        }
+
         const EGL_NONE: EGLint = 0x3038;
+        const EGL_VERSION: EGLint = 0x3054;
+        const EGL_DRAW: EGLint = 0x3059;
+        const EGL_READ: EGLint = 0x305A;
         const EGL_RENDERABLE_TYPE: EGLint = 0x3040;
         const EGL_OPENGL_ES2_BIT: EGLint = 0x0004;
         const EGL_OPENGL_ES3_BIT: EGLint = 0x0040;
@@ -423,7 +507,6 @@ fn create_egl(
             ctx: EGLContext,
             destroy: unsafe extern "C" fn(EGLDisplay, EGLContext) -> EGLBoolean,
             destroy_surface: unsafe extern "C" fn(EGLDisplay, EGLSurface) -> EGLBoolean,
-            terminate: unsafe extern "C" fn(EGLDisplay) -> EGLBoolean,
             make_current:
                 unsafe extern "C" fn(EGLDisplay, EGLSurface, EGLSurface, EGLContext) -> EGLBoolean,
             // 用于 bind_save/restore：查询/恢复当前线程的 EGL 上下文。
@@ -469,6 +552,8 @@ fn create_egl(
             iosurface_texture_target: EGLint,
             external_surface: Mutex<Option<ExternalSurface>>,
             get_proc_address: Option<EglGetProcAddress>,
+            restore_on_drop: Option<super::SavedGlContext>,
+            _display_owner: DisplayOwner,
             _egl_library: Library,
             _gles_library: Library,
             _desktop_gl_library: Option<Library>,
@@ -477,6 +562,17 @@ fn create_egl(
         unsafe impl Send for EglCtx {}
 
         impl EglCtx {
+            fn current_context(&self) -> super::SavedGlContext {
+                unsafe {
+                    super::SavedGlContext {
+                        display: (self.get_current_display)(),
+                        draw: (self.get_current_surface)(EGL_DRAW),
+                        read: (self.get_current_surface)(EGL_READ),
+                        context: (self.get_current_context)(),
+                    }
+                }
+            }
+
             unsafe fn create_metal_texture_target(
                 &self,
                 handle: *mut c_void,
@@ -559,6 +655,16 @@ fn create_egl(
                     (self.make_current)(self.display, self.pbuffer, self.pbuffer, self.ctx) != 0
                 }
             }
+
+            fn make_current_for_drop(&mut self) -> bool {
+                if self._display_owner.shared {
+                    let saved = self.current_context();
+                    if !saved.is_none() && saved.context != self.ctx {
+                        self.restore_on_drop = Some(saved);
+                    }
+                }
+                self.make_current()
+            }
             fn get_proc_address(&self, name: &str) -> *const c_void {
                 let Ok(name) = CString::new(name) else {
                     return std::ptr::null();
@@ -572,15 +678,7 @@ fn create_egl(
                 unsafe { symbol_address(&self._gles_library, &name) }
             }
             fn bind_save(&self) -> super::SavedGlContext {
-                // 先记录当前线程的 EGL 上下文（宿主如 Flutter 的），然后切到我们的。
-                let saved = unsafe {
-                    super::SavedGlContext {
-                        display: (self.get_current_display)().cast(),
-                        draw: (self.get_current_surface)(0x305A /* EGL_DRAW */).cast(),
-                        read: (self.get_current_surface)(0x305B /* EGL_READ */).cast(),
-                        context: (self.get_current_context)().cast(),
-                    }
-                };
+                let saved = self.current_context();
                 let _ = self.make_current();
                 saved
             }
@@ -688,7 +786,7 @@ fn create_egl(
                     unsafe {
                         match surface {
                             ExternalSurface::Surface { surface, .. } => {
-                                if (self.get_current_surface)(0x305A /* EGL_DRAW */) == surface {
+                                if (self.get_current_surface)(EGL_DRAW) == surface {
                                     let _ = self.make_current();
                                 }
                                 (self.destroy_surface)(self.display, surface);
@@ -797,7 +895,9 @@ fn create_egl(
                     }
                     (self.destroy_surface)(self.display, self.pbuffer);
                     (self.destroy)(self.display, self.ctx);
-                    (self.terminate)(self.display);
+                }
+                if let Some(saved) = self.restore_on_drop.take() {
+                    self.restore(saved);
                 }
             }
         }
@@ -816,7 +916,18 @@ fn create_egl(
             backend: super::AngleBackend,
             stage_w: u32,
             stage_h: u32,
-        ) -> Result<(Rc<glow::Context>, EglCtx), String> {
+            mode: EglMode<'_>,
+        ) -> Result<(Rc<glow::Context>, EglCtx, super::SavedGlContext), String> {
+            let (shared, directory) = match mode {
+                EglMode::Legacy => (false, super::ANGLE_PATH.get().map(|path| path.as_path())),
+                EglMode::Host(directory) => (true, directory),
+            };
+            let angle_lib_path = |name: &str| {
+                directory.map_or_else(
+                    || name.to_owned(),
+                    |prefix| prefix.join(name).to_string_lossy().into_owned(),
+                )
+            };
             unsafe {
                 // ── Linux / mesa 特殊处理 ────────────────────────────────
                 // mesa 的 libGLESv2 是 dispatch 层，需要桌面 GL 符号（glTexImage2D
@@ -886,26 +997,49 @@ fn create_egl(
                         super::AngleBackend::D3D11 => EGL_PLATFORM_ANGLE_TYPE_D3D11_ANGLE,
                         super::AngleBackend::OpenGL => EGL_PLATFORM_ANGLE_TYPE_OPENGL_ANGLE,
                     };
-                    let attribs: [EGLAttrib; 3] = [
-                        EGL_PLATFORM_ANGLE_TYPE_ANGLE as EGLAttrib,
-                        angle_type,
-                        EGL_NONE as EGLAttrib,
-                    ];
-
                     type PfPlatformDisplay =
                         unsafe extern "C" fn(EGLint, *mut c_void, *const EGLAttrib) -> EGLDisplay;
-                    ["eglGetPlatformDisplay", "eglGetPlatformDisplayEXT"]
-                        .iter()
-                        .find_map(|name| {
-                            let f: PfPlatformDisplay = optional_symbol(&egl_lib, name)?;
-                            let d = f(
-                                EGL_PLATFORM_ANGLE_ANGLE,
-                                EGL_DEFAULT_DISPLAY as *mut c_void,
-                                attribs.as_ptr(),
-                            );
-                            if d.is_null() { None } else { Some(d) }
-                        })
-                        .unwrap_or_else(|| egl_get_display(EGL_DEFAULT_DISPLAY))
+                    if shared && directory.is_some() {
+                        let get_display: unsafe extern "C" fn(
+                            EGLint,
+                            *mut c_void,
+                            *const EGLint,
+                        )
+                            -> EGLDisplay = load!(egl_lib, "eglGetPlatformDisplayEXT");
+                        let display = get_display(
+                            EGL_PLATFORM_ANGLE_ANGLE,
+                            std::ptr::null_mut(),
+                            [
+                                EGL_PLATFORM_ANGLE_TYPE_ANGLE,
+                                angle_type as EGLint,
+                                EGL_NONE,
+                            ]
+                            .as_ptr(),
+                        );
+                        if display.is_null() {
+                            egl_get_display(EGL_DEFAULT_DISPLAY)
+                        } else {
+                            display
+                        }
+                    } else {
+                        let attribs = [
+                            EGL_PLATFORM_ANGLE_TYPE_ANGLE as EGLAttrib,
+                            angle_type,
+                            EGL_NONE as EGLAttrib,
+                        ];
+                        ["eglGetPlatformDisplay", "eglGetPlatformDisplayEXT"]
+                            .iter()
+                            .find_map(|name| {
+                                let f: PfPlatformDisplay = optional_symbol(&egl_lib, name)?;
+                                let d = f(
+                                    EGL_PLATFORM_ANGLE_ANGLE,
+                                    EGL_DEFAULT_DISPLAY as *mut c_void,
+                                    attribs.as_ptr(),
+                                );
+                                if d.is_null() { None } else { Some(d) }
+                            })
+                            .unwrap_or_else(|| egl_get_display(EGL_DEFAULT_DISPLAY))
+                    }
                 };
                 let egl_choose_config: unsafe extern "C" fn(
                     EGLDisplay,
@@ -968,6 +1102,12 @@ fn create_egl(
                     load!(egl_lib, "eglGetCurrentSurface");
                 let egl_get_current_context: unsafe extern "C" fn() -> EGLContext =
                     load!(egl_lib, "eglGetCurrentContext");
+                let previous = super::SavedGlContext {
+                    display: egl_get_current_display(),
+                    draw: egl_get_current_surface(EGL_DRAW),
+                    read: egl_get_current_surface(EGL_READ),
+                    context: egl_get_current_context(),
+                };
 
                 if display.is_null() {
                     return Err(format!(
@@ -975,12 +1115,44 @@ fn create_egl(
                         egl_get_error_early()
                     ));
                 }
-                if egl_initialize(display, std::ptr::null_mut(), std::ptr::null_mut()) == 0 {
-                    return Err(format!(
-                        "eglInitialize failed: EGL {:#x}",
-                        egl_get_error_early()
-                    ));
+                let initialize_display = || {
+                    if egl_initialize(display, std::ptr::null_mut(), std::ptr::null_mut()) == 0 {
+                        return Err(format!(
+                            "eglInitialize failed: EGL {:#x}",
+                            egl_get_error_early()
+                        ));
+                    }
+                    Ok(())
+                };
+                if shared {
+                    let mut displays = HOST_DISPLAYS.lock().unwrap();
+                    let key = (egl_terminate as usize, display as usize);
+                    if let Some(display) = displays.get_mut(&key) {
+                        display.users += 1;
+                    } else {
+                        let query_string: unsafe extern "C" fn(EGLDisplay, EGLint) -> *const c_char =
+                            load!(egl_lib, "eglQueryString");
+                        let owns_initialization = query_string(display, EGL_VERSION).is_null();
+                        if owns_initialization {
+                            let _ = egl_get_error_early();
+                            initialize_display()?;
+                        }
+                        displays.insert(
+                            key,
+                            HostDisplay {
+                                users: 1,
+                                owns_initialization,
+                            },
+                        );
+                    }
+                } else {
+                    initialize_display()?;
                 }
+                let display_owner = DisplayOwner {
+                    display,
+                    terminate: egl_terminate,
+                    shared,
+                };
 
                 // 告诉 EGL 我们要用 OpenGL ES API（mesa 严格要求；ANGLE 宽松但
                 // 也接受此调用）。必须在 eglCreateContext 之前。
@@ -992,7 +1164,7 @@ fn create_egl(
 
                 let config_attrs = [
                     EGL_RENDERABLE_TYPE,
-                    if cfg!(any(target_os = "ios", target_os = "android")) {
+                    if shared || cfg!(any(target_os = "ios", target_os = "android")) {
                         EGL_OPENGL_ES3_BIT
                     } else {
                         EGL_OPENGL_ES2_BIT
@@ -1043,11 +1215,12 @@ fn create_egl(
                     return Err("eglCreatePbufferSurface failed".into());
                 }
 
-                let context_version = if cfg!(any(target_os = "ios", target_os = "android")) {
-                    3
-                } else {
-                    2
-                };
+                let context_version =
+                    if shared || cfg!(any(target_os = "ios", target_os = "android")) {
+                        3
+                    } else {
+                        2
+                    };
                 let ctx_attrs = [
                     0x3098, /* EGL_CONTEXT_CLIENT_VERSION */
                     context_version,
@@ -1056,10 +1229,13 @@ fn create_egl(
                 let ctx =
                     egl_create_context(display, config, std::ptr::null_mut(), ctx_attrs.as_ptr());
                 if ctx.is_null() {
+                    egl_destroy_surface(display, surface);
                     return Err("eglCreateContext failed".into());
                 }
 
                 if egl_make_current(display, surface, surface, ctx) == 0 {
+                    egl_destroy_context(display, ctx);
+                    egl_destroy_surface(display, surface);
                     return Err("eglMakeCurrent failed".into());
                 }
 
@@ -1137,7 +1313,6 @@ fn create_egl(
                         ctx,
                         destroy: egl_destroy_context,
                         destroy_surface: egl_destroy_surface,
-                        terminate: egl_terminate,
                         make_current: egl_make_current,
                         get_current_display: egl_get_current_display,
                         get_current_surface: egl_get_current_surface,
@@ -1162,16 +1337,19 @@ fn create_egl(
                         iosurface_texture_target,
                         external_surface: Mutex::new(None),
                         get_proc_address: egl_get_proc_addr,
+                        restore_on_drop: None,
+                        _display_owner: display_owner,
                         _egl_library: egl_lib,
                         _gles_library: gles_lib,
                         _desktop_gl_library: desktop_gl_library,
                     },
+                    previous,
                 ))
             }
         }
     }
-    let (gl, ctx) = egl::make(backend, stage_w, stage_h)?;
-    Ok((gl, Box::new(ctx)))
+    let (gl, ctx, previous) = egl::make(backend, stage_w, stage_h, mode)?;
+    Ok((gl, Box::new(ctx), previous))
 }
 
 /// Creates an RGBA8 texture and framebuffer target.

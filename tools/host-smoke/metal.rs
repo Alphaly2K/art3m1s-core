@@ -1,9 +1,12 @@
 #[cfg(target_os = "macos")]
 mod metal_abi;
+#[cfg(target_os = "macos")]
+mod shared_surface;
 
 #[cfg(target_os = "macos")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use crate::metal_abi::{Frame, NativeHost, Session, SharedSurface};
+    use crate::metal_abi::{Frame, NativeHost, Session};
+    use crate::shared_surface::SharedSurface;
     use art3m1s_render::artemis::{FramePacket, SpriteRenderer};
     use art3m1s_render::backend::{FrameTarget, GpuBackend, RenderRegion, metal::MetalBackend};
     use art3m1s_render::types::Extent2D;
@@ -205,7 +208,6 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
         draw: impl FnOnce(&mut SpriteRenderer<MetalBackend>) -> Result<RenderRegion, String>,
     ) -> Result<(), String> {
         renderer.backend_mut().begin_frame(FrameTarget::Main)?;
-        renderer.backend_mut().clear([0.0, 0.0, 0.0, 1.0]);
         let rendered = draw(renderer);
         renderer.backend_mut().end_frame();
         rendered.map(|_| ())
@@ -250,10 +252,10 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
             session.id(),
             &packet,
             |_| Err("unexpected pixel request".into()),
-            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.25, 0.5, 1.0],
         )
     })?;
-    assert_eq!(cached, pixels);
+    check(&cached, |_, _| [128, 32, 64, 255]);
     drop(old);
     for (id, ms, expected) in [
         (2, 10, [128, 0, 0, 255]),

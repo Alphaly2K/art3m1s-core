@@ -45,16 +45,62 @@ impl GlBackend {
     pub fn new(config: platform::GfxBackend, width: u32, height: u32) -> Result<Self, String> {
         let (gl, platform_context, effective_backend) =
             platform::create_offscreen_context(config, width, height)?;
-        let (framebuffer, framebuffer_texture) = unsafe {
-            platform::create_fbo_target(&gl, width as i32, height as i32)
-                .map_err(|error| format!("FBO: {error}"))?
-        };
         let profile = match effective_backend {
             platform::GfxBackend::Cgl => ShaderProfile::GlCore330,
             platform::GfxBackend::Angle(_) => ShaderProfile::Gles300,
         };
-        let renderer = GlRenderer::new(gl.clone(), width, height, profile)
-            .map_err(|error| format!("创建渲染器失败: {error}"))?;
+        Self::from_context(gl, platform_context, profile, width, height, None)
+    }
+
+    /// Creates an offscreen GLES 3 context using the Host's ANGLE/Metal libraries.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    pub fn new_host_angle(
+        directory: &std::path::Path,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, String> {
+        let (gl, context, previous) =
+            platform::create_host_angle_context(directory, width, height)?;
+        let renderer = unsafe { gl.get_parameter_string(glow::RENDERER) };
+        if !renderer.contains("ANGLE Metal Renderer") {
+            context.restore(previous);
+            return Err(format!("ANGLE selected an unexpected renderer: {renderer}"));
+        }
+        Self::from_context(
+            gl,
+            context,
+            ShaderProfile::Gles300,
+            width,
+            height,
+            Some(previous),
+        )
+    }
+
+    /// Creates an offscreen GLES 3 context using the system EGL libraries.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub fn new_host_egl(width: u32, height: u32) -> Result<Self, String> {
+        let (gl, context, previous) = platform::create_host_egl_context(width, height)?;
+        Self::from_context(gl, context, ShaderProfile::Gles300, width, height, Some(previous))
+    }
+
+    fn from_context(
+        gl: Rc<glow::Context>,
+        platform_context: Box<dyn GLPlatformContext>,
+        profile: ShaderProfile,
+        width: u32,
+        height: u32,
+        previous: Option<SavedGlContext>,
+    ) -> Result<Self, String> {
+        let resources = (|| {
+            let renderer = GlRenderer::new(gl.clone(), width, height, profile)?;
+            let (framebuffer, texture) =
+                unsafe { platform::create_fbo_target(&gl, width as i32, height as i32)? };
+            Ok::<_, String>((renderer, framebuffer, texture))
+        })();
+        if let Some(previous) = previous {
+            platform_context.restore(previous);
+        }
+        let (renderer, framebuffer, framebuffer_texture) = resources?;
         let textures = GlTextureProvider::new(gl.clone(), profile);
         let main_target = RenderTarget {
             id: RenderTargetId::from_opaque(framebuffer.0.get() as u64),
@@ -80,6 +126,16 @@ impl GlBackend {
             next_video_handle: 1,
             platform_context,
         })
+    }
+
+    fn shader_id(&mut self, name: &str) -> ShaderId {
+        if let Some(id) = self.shader_ids.get(name).copied() {
+            return id;
+        }
+        let id = ShaderId::from_opaque(self.next_shader_id);
+        self.next_shader_id = self.next_shader_id.wrapping_add(1).max(1);
+        self.shader_ids.insert(name.to_owned(), id);
+        id
     }
 
     fn remember_video_name(&mut self, name: &str) -> ExternalTextureHandle {
@@ -423,6 +479,10 @@ impl GpuBackend for GlBackend {
         RenderRegion::Full
     }
 
+    fn render_with_clear_color(&mut self, frame: &DrawList, color: [f32; 4]) -> RenderRegion {
+        self.renderer.render_with_clear_color(frame, color)
+    }
+
     fn render_damage(&mut self, frame: &DrawList, damage: [f32; 4]) -> RenderRegion {
         self.renderer.render_damage(frame, damage)
     }
@@ -633,13 +693,18 @@ impl GpuBackend for GlBackend {
         self.renderer
             .register_hlsl_shader(name, source)
             .map_err(|error| crate::backend::ShaderCompileError::new(name, error))?;
-        if let Some(id) = self.shader_ids.get(name).copied() {
-            return Ok(id);
-        }
-        let id = ShaderId::from_opaque(self.next_shader_id);
-        self.next_shader_id = self.next_shader_id.wrapping_add(1).max(1);
-        self.shader_ids.insert(name.to_owned(), id);
-        Ok(id)
+        Ok(self.shader_id(name))
+    }
+
+    fn register_glsl_shader(
+        &mut self,
+        name: &str,
+        source: &[u8],
+    ) -> Result<ShaderId, crate::backend::ShaderCompileError> {
+        self.renderer
+            .register_glsl_shader(name, source)
+            .map_err(|error| crate::backend::ShaderCompileError::new(name, error))?;
+        Ok(self.shader_id(name))
     }
 
     fn unregister_shader(&mut self, name: &str) -> bool {
@@ -730,7 +795,7 @@ fn validate_block_data(name: &str, extent: Extent2D, bytes: &[u8]) -> Result<(),
 
 impl Drop for GlBackend {
     fn drop(&mut self) {
-        if self.platform_context.make_current() {
+        if self.platform_context.make_current_for_drop() {
             unsafe {
                 self.gl.delete_framebuffer(self.framebuffer);
                 if let Some(texture) = NonZeroU32::new(self.main_target.color.0 as u32) {

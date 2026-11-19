@@ -1,11 +1,33 @@
 use super::*;
-use crate::host::frame::{FrameShader, FrameShaderEffect};
+use crate::host::frame::{FrameShader, FrameShaderEffect, FrameShaderLanguage};
+use crate::host::runtime::{CAP_GLSL, CAP_HLSL};
 use crate::render_pipeline::draw::ShaderEffect;
 use std::collections::BTreeMap;
 
 const MAX_SOURCE_BYTES: usize = 256 * 1024;
 const MAX_SHADER_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SHADERS: usize = 256;
+
+fn shader_language(asset: &str) -> FrameShaderLanguage {
+    let leaf = asset.rsplit('/').next().unwrap_or(asset);
+    if leaf.rsplit_once('.').is_some_and(|(_, ext)| {
+        ["glsl", "frag", "fsh", "fs"]
+            .iter()
+            .any(|suffix| ext.eq_ignore_ascii_case(suffix))
+    }) {
+        FrameShaderLanguage::Glsl
+    } else {
+        FrameShaderLanguage::Hlsl
+    }
+}
+
+pub(in crate::host::script_io) fn supports_shader_asset(caps: u64, asset: &str) -> bool {
+    let required = match shader_language(asset) {
+        FrameShaderLanguage::Hlsl => CAP_HLSL,
+        FrameShaderLanguage::Glsl => CAP_GLSL,
+    };
+    caps & required != 0
+}
 
 #[derive(Default)]
 pub(in crate::host::script_io) struct SceneShaders {
@@ -46,11 +68,12 @@ impl SceneShaders {
         self.sources.insert(
             id,
             RegisteredShader {
-                asset,
                 frame: Arc::new(FrameShader {
                     revision,
+                    language: shader_language(&asset),
                     source: source.into_boxed_slice(),
                 }),
+                asset,
             },
         );
         self.revision = revision;
@@ -81,7 +104,7 @@ impl SceneIo {
         &self,
     ) -> Option<BTreeMap<String, String>> {
         let scene = self.scene.lock().unwrap();
-        scene.shaders_enabled.then(|| {
+        (scene.shader_caps != 0).then(|| {
             scene
                 .shaders
                 .sources
@@ -96,7 +119,7 @@ impl SceneIo {
         assets: &BTreeMap<String, String>,
     ) -> Result<Option<SceneShaders>, ProtocolError> {
         let scene = self.scene.lock().unwrap();
-        if !scene.shaders_enabled {
+        if scene.shader_caps == 0 {
             return Ok(None);
         }
         if assets.len() > MAX_SHADERS {
@@ -123,6 +146,9 @@ impl SceneIo {
         path: &str,
     ) -> Option<IoRequest> {
         let path = self.resolve_media_asset(path).ok()?;
+        if !supports_shader_asset(self.scene.lock().unwrap().shader_caps, &path) {
+            return None;
+        }
         self.pending_shader = Some((id.into(), path.clone()));
         Some(IoRequest::Read { path })
     }

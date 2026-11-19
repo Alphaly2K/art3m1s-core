@@ -31,17 +31,33 @@ pub(super) fn program(name: &str) -> Option<ShaderProgramSource> {
 }
 
 const SPRITE_VERTEX_BODY: &str = r#"
-layout(location = 0) in vec2 a_pos;   // unit quad 0..1
-layout(location = 1) in vec2 a_uv;
+#if __VERSION__ < 130
+#define ART_VERTEX_IN attribute
+#define ART_VERTEX_OUT varying
+#else
+#define ART_VERTEX_IN in
+#define ART_VERTEX_OUT out
+#endif
+ART_VERTEX_IN vec2 a_pos;   // unit quad 0..1
+ART_VERTEX_IN vec2 a_uv;
 
 uniform mat3 u_projection;  // stage pixels -> NDC
 uniform mat3 u_transform;   // layer world transform in stage pixels
 uniform vec2 u_size;        // drawn quad size in pixels
+uniform vec2 u_stage_size;
 uniform vec2 u_uv_offset;   // normalized UV origin
 uniform vec2 u_uv_scale;    // normalized UV span
 
-out vec2 v_uv;
-out vec2 v_model_position;
+ART_VERTEX_OUT vec2 v_uv;
+ART_VERTEX_OUT vec2 v_model_position;
+#ifdef GL_ES
+#define ART_COORD_PRECISION mediump
+#else
+#define ART_COORD_PRECISION
+#endif
+ART_VERTEX_OUT ART_COORD_PRECISION vec2 resultCoord;
+ART_VERTEX_OUT ART_COORD_PRECISION vec2 resultCoord0;
+ART_VERTEX_OUT ART_COORD_PRECISION vec2 resultCoord1;
 
 void main() {
     vec2 local = a_pos * u_size;
@@ -49,6 +65,9 @@ void main() {
     vec3 ndc = u_projection * vec3(world.xy, 1.0);
     gl_Position = vec4(ndc.xy, 0.0, 1.0);
     v_uv = u_uv_offset + a_uv * u_uv_scale;
+    resultCoord = v_uv;
+    resultCoord0 = world.xy / u_stage_size;
+    resultCoord1 = v_uv;
     v_model_position = a_pos;
 }
 "#;
