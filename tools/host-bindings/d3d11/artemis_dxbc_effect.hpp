@@ -16,7 +16,7 @@ class DxbcEffect {
 public:
     explicit DxbcEffect(std::istream &file) {
         require(file.read(reinterpret_cast<char *>(&header_), sizeof(header_)).good() &&
-            header_.magic == ART_DXBC_EFFECT_MAGIC &&
+            (header_.magic == ART_DXBC_EFFECT_MAGIC || header_.magic == ART_DXBC_EFFECT_PAIR_MAGIC) &&
             header_.bytecode_bytes >= 4 && header_.bytecode_bytes <= ART_DXBC_MAX_BYTECODE &&
             header_.constant_bytes <= ART_DXBC_MAX_CONSTANTS && !(header_.constant_bytes & 15) &&
             header_.textures <= ART_DXBC_TEXTURE_SLOTS && header_.uniforms <= ART_DXBC_MAX_UNIFORMS);
@@ -25,9 +25,13 @@ public:
         if (!uniforms_.empty()) {
             require(file.read(reinterpret_cast<char *>(uniforms_.data()), uniforms_.size() * sizeof(ArtDxbcUniform)).good());
         }
-        bytecode_.resize(header_.bytecode_bytes);
-        require(file.read(bytecode_.data(), bytecode_.size()).good() &&
-            std::memcmp(bytecode_.data(), "DXBC", 4) == 0 && file.peek() == std::istream::traits_type::eof());
+        read_bytecode(file, header_.bytecode_bytes, bytecode_);
+        if (header_.magic == ART_DXBC_EFFECT_PAIR_MAGIC) {
+            uint32_t bytes = 0;
+            require(file.read(reinterpret_cast<char *>(&bytes), sizeof(bytes)).good());
+            read_bytecode(file, bytes, vertex_bytecode_);
+        }
+        require(file.peek() == std::istream::traits_type::eof());
 
         uint32_t slots = 0;
         for (uint32_t i = 0; i < header_.textures; ++i) {
@@ -50,6 +54,7 @@ public:
     }
 
     const std::vector<char> &bytecode() const { return bytecode_; }
+    const std::vector<char> &vertex_bytecode() const { return vertex_bytecode_; }
     uint32_t constant_bytes() const { return header_.constant_bytes; }
     uint32_t texture_count() const { return header_.textures; }
 
@@ -72,7 +77,13 @@ public:
 
 private:
     static void require(bool valid) {
-        if (!valid) throw std::runtime_error("invalid ADE1 shader effect");
+        if (!valid) throw std::runtime_error("invalid ADE shader effect");
+    }
+
+    static void read_bytecode(std::istream &file, uint32_t bytes, std::vector<char> &code) {
+        require(bytes >= 4 && bytes <= ART_DXBC_MAX_BYTECODE);
+        code.resize(bytes);
+        require(file.read(code.data(), code.size()).good() && std::memcmp(code.data(), "DXBC", 4) == 0);
     }
 
     static bool name_valid(const char (&name)[ART_DXBC_NAME_BYTES]) {
@@ -83,6 +94,7 @@ private:
     std::array<ArtDxbcTexture, ART_DXBC_TEXTURE_SLOTS> textures_{};
     std::vector<ArtDxbcUniform> uniforms_;
     std::vector<char> bytecode_;
+    std::vector<char> vertex_bytecode_;
 };
 
 }

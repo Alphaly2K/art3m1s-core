@@ -31,8 +31,7 @@ struct Uniform {
 
 unsafe extern "C" {
     fn art_dxvk_pass_create(
-        vs: *const c_char,
-        ps: *const c_char,
+        effect: *const c_char,
         foreground: *mut c_void,
         output: *mut c_void,
     ) -> *mut c_void;
@@ -135,8 +134,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::io::stdout().write_all(&first.effect().shader.source)?;
         return Ok(());
     }
-    let [_, vs, ps] = args.as_slice() else {
-        return Err("expected ARFP, vertex DXBC and pixel ADE paths".into());
+    let [_, effect] = args.as_slice() else {
+        return Err("expected ARFP and ADE2 paths".into());
     };
     let scenes = [first, Scene::read(&mut data)?, Scene::read(&mut data)?];
     assert!(data.is_empty(), "trailing fixture bytes");
@@ -146,12 +145,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let final_surface = SharedSurface::new(extent)?;
     let foreground_handle = foreground.handle()?.as_ptr();
     let output_handle = output.handle()?.as_ptr();
-    let vs = CString::new(vs.as_bytes())?;
-    let ps = CString::new(ps.as_bytes())?;
+    let effect = CString::new(effect.as_bytes())?;
     // Initialize the D3D11 image layout before Metal first writes the foreground.
     let pass = Pass(
         NonNull::new(unsafe {
-            art_dxvk_pass_create(vs.as_ptr(), ps.as_ptr(), foreground_handle, output_handle)
+            art_dxvk_pass_create(effect.as_ptr(), foreground_handle, output_handle)
         })
         .ok_or("cannot create native DXVK pass")?,
     );

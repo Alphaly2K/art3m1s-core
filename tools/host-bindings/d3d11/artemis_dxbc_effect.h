@@ -5,6 +5,7 @@
 
 /* ADE1 uses little-endian words and fixed-size, NUL-terminated names. */
 #define ART_DXBC_EFFECT_MAGIC UINT32_C(0x31454441)
+#define ART_DXBC_EFFECT_PAIR_MAGIC UINT32_C(0x32454441)
 #define ART_DXBC_MAX_BYTECODE (16u * 1024 * 1024)
 #define ART_DXBC_MAX_CONSTANTS (64u * 1024)
 #define ART_DXBC_MAX_UNIFORMS 256

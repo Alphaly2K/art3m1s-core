@@ -22,6 +22,99 @@ static int copy_name(char name[ART_DXBC_NAME_BYTES], const char *source) {
     return 1;
 }
 
+static void report_diagnostics(ID3DBlob *diagnostics) {
+    if (!diagnostics) return;
+    fwrite(ID3D10Blob_GetBufferPointer(diagnostics), 1, ID3D10Blob_GetBufferSize(diagnostics), stderr);
+    ID3D10Blob_Release(diagnostics);
+}
+
+enum QuadField { QUAD_POSITION, QUAD_UV0, QUAD_UV1, QUAD_FIELD_COUNT };
+
+static int quad_field(const D3D11_SIGNATURE_PARAMETER_DESC *input) {
+    if (input->ComponentType != D3D_REGISTER_COMPONENT_FLOAT32 ||
+        input->MinPrecision != D3D_MIN_PRECISION_DEFAULT || input->Stream || !input->SemanticName) return -1;
+    if (input->SystemValueType == D3D_NAME_POSITION && !input->SemanticIndex && input->Mask == 15)
+        return QUAD_POSITION;
+    if (input->SystemValueType == D3D_NAME_UNDEFINED && !_stricmp(input->SemanticName, "TEXCOORD") &&
+        input->SemanticIndex <= 1 && (input->Mask == 3 || input->Mask == 12))
+        return QUAD_UV0 + (int)input->SemanticIndex;
+    return -1;
+}
+
+static int matching_parameter(const D3D11_SIGNATURE_PARAMETER_DESC *input,
+                              const D3D11_SIGNATURE_PARAMETER_DESC *output) {
+    return quad_field(input) == quad_field(output) && output->Register == input->Register &&
+        output->Mask == input->Mask;
+}
+
+static HRESULT quad_vertex(ID3D11ShaderReflection *pixel, UINT count, ID3DBlob **code) {
+    const char *const fields[] = {
+        "float4 position : SV_Position;\n",
+        "float2 uv0 : TEXCOORD0;\n",
+        "float2 uv1 : TEXCOORD1;\n",
+    };
+    const char *const assignments[] = {
+        "result.position = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);\n",
+        "result.uv0 = uv;\n",
+        "result.uv1 = uv;\n",
+    };
+    if (count > QUAD_FIELD_COUNT) {
+        fputs("Too many pixel inputs for the Artemis quad\n", stderr);
+        return E_NOTIMPL;
+    }
+    int order[QUAD_FIELD_COUNT];
+    unsigned seen = 0;
+    D3D11_SIGNATURE_PARAMETER_DESC inputs[QUAD_FIELD_COUNT];
+    for (UINT i = 0; i < count; ++i) {
+        HRESULT status = pixel->lpVtbl->GetInputParameterDesc(pixel, i, &inputs[i]);
+        if (FAILED(status)) return status;
+        int field = quad_field(&inputs[i]);
+        if (field < 0 || (seen & (1u << field))) {
+            fprintf(stderr, "Unsupported pixel input: %s%u (register %u, mask 0x%x)\n",
+                    inputs[i].SemanticName ? inputs[i].SemanticName : "<unnamed>", inputs[i].SemanticIndex,
+                    inputs[i].Register, (unsigned)inputs[i].Mask);
+            return E_NOTIMPL;
+        }
+        order[i] = field;
+        seen |= 1u << field;
+    }
+    UINT fields_count = count;
+    if (!(seen & (1u << QUAD_POSITION))) order[fields_count++] = QUAD_POSITION;
+
+    // Each fragment is fixed above; the maximum source is under 512 bytes.
+    char source[512] = "struct QuadOutput {\n";
+    for (UINT i = 0; i < fields_count; ++i) strcat(source, fields[order[i]]);
+    strcat(source, "};\nQuadOutput main(uint id : SV_VertexID) {\n"
+                   "float2 uv = float2(id & 1, id >> 1);\nQuadOutput result;\n");
+    for (UINT i = 0; i < fields_count; ++i) strcat(source, assignments[order[i]]);
+    strcat(source, "return result;\n}\n");
+
+    ID3DBlob *diagnostics = NULL;
+    HRESULT status = D3DCompile(source, strlen(source), "artemis-quad.hlsl", NULL, NULL,
+                                "main", "vs_5_0", 0, 0, code, &diagnostics);
+    report_diagnostics(diagnostics);
+    if (FAILED(status)) return status;
+
+    ID3D11ShaderReflection *vertex = NULL;
+    status = D3DReflect(ID3D10Blob_GetBufferPointer(*code), ID3D10Blob_GetBufferSize(*code),
+                        &IID_ID3D11ShaderReflection, (void **)&vertex);
+    if (FAILED(status)) return status;
+    D3D11_SHADER_DESC desc;
+    status = vertex->lpVtbl->GetDesc(vertex, &desc);
+    if (SUCCEEDED(status) && desc.OutputParameters != fields_count) status = E_FAIL;
+    for (UINT i = 0; SUCCEEDED(status) && i < count; ++i) {
+        D3D11_SIGNATURE_PARAMETER_DESC output;
+        status = vertex->lpVtbl->GetOutputParameterDesc(vertex, i, &output);
+        if (SUCCEEDED(status) && !matching_parameter(&inputs[i], &output)) {
+            fprintf(stderr, "Generated vertex output does not match pixel input %s%u (register %u, mask 0x%x)\n",
+                    inputs[i].SemanticName, inputs[i].SemanticIndex, inputs[i].Register, (unsigned)inputs[i].Mask);
+            status = E_NOTIMPL;
+        }
+    }
+    vertex->lpVtbl->Release(vertex);
+    return status;
+}
+
 static HRESULT reflect_uniforms(ID3D11ShaderReflection *reflection, const char *name,
                                 ArtDxbcHeader *header, ArtDxbcUniform *uniforms) {
     ID3D11ShaderReflectionConstantBuffer *buffer = reflection->lpVtbl->GetConstantBufferByName(reflection, name);
@@ -52,11 +145,13 @@ static HRESULT reflect_uniforms(ID3D11ShaderReflection *reflection, const char *
     return S_OK;
 }
 
-static HRESULT write_effect(const void *data, uint32_t bytes) {
+static HRESULT write_effect(const void *data, uint32_t bytes, int paired) {
     ID3D11ShaderReflection *reflection = NULL;
+    ID3DBlob *vertex = NULL;
+    uint32_t vertex_bytes = 0;
     HRESULT status = D3DReflect(data, bytes, &IID_ID3D11ShaderReflection, (void **)&reflection);
     if (FAILED(status)) return status;
-    ArtDxbcHeader header = {ART_DXBC_EFFECT_MAGIC, bytes, 0, 0, 0};
+    ArtDxbcHeader header = {paired ? ART_DXBC_EFFECT_PAIR_MAGIC : ART_DXBC_EFFECT_MAGIC, bytes, 0, 0, 0};
     ArtDxbcTexture textures[ART_DXBC_TEXTURE_SLOTS] = {0};
     ArtDxbcUniform uniforms[ART_DXBC_MAX_UNIFORMS] = {0};
     D3D11_SHADER_DESC desc;
@@ -80,19 +175,34 @@ static HRESULT write_effect(const void *data, uint32_t bytes) {
             goto done;
         }
     }
+    if (paired) {
+        status = quad_vertex(reflection, desc.InputParameters, &vertex);
+        if (FAILED(status)) goto done;
+        const size_t length = ID3D10Blob_GetBufferSize(vertex);
+        if (length < 4 || length > ART_DXBC_MAX_BYTECODE || memcmp(ID3D10Blob_GetBufferPointer(vertex), "DXBC", 4)) {
+            status = E_FAIL;
+            goto done;
+        }
+        vertex_bytes = (uint32_t)length;
+    }
     if (fwrite(&header, sizeof(header), 1, stdout) != 1 ||
         fwrite(textures, sizeof(*textures), header.textures, stdout) != header.textures ||
         fwrite(uniforms, sizeof(*uniforms), header.uniforms, stdout) != header.uniforms ||
-        fwrite(data, 1, bytes, stdout) != bytes || fflush(stdout) != 0) status = E_FAIL;
+        fwrite(data, 1, bytes, stdout) != bytes ||
+        (paired && (fwrite(&vertex_bytes, sizeof(vertex_bytes), 1, stdout) != 1 ||
+                    fwrite(ID3D10Blob_GetBufferPointer(vertex), 1, vertex_bytes, stdout) != vertex_bytes)) ||
+        fflush(stdout) != 0) status = E_FAIL;
 done:
+    if (vertex) ID3D10Blob_Release(vertex);
     reflection->lpVtbl->Release(reflection);
     return status;
 }
 
 int main(int argc, char **argv) {
-    const int effect = argc == 2 && strcmp(argv[1], "effect") == 0;
+    const int paired = argc == 2 && strcmp(argv[1], "effect-pair") == 0;
+    const int effect = paired || (argc == 2 && strcmp(argv[1], "effect") == 0);
     if (argc != 2 || (!effect && strcmp(argv[1], "vs_5_0") && strcmp(argv[1], "ps_5_0"))) {
-        fputs("Usage: artemis-hlsl-compile.exe vs_5_0|ps_5_0|effect < source.hlsl > bytecode\n", stderr);
+        fputs("Usage: artemis-hlsl-compile.exe vs_5_0|ps_5_0|effect|effect-pair < source.hlsl > bytecode\n", stderr);
         return 2;
     }
     if (_setmode(_fileno(stdin), _O_BINARY) == -1 || _setmode(_fileno(stdout), _O_BINARY) == -1) return 1;
@@ -110,18 +220,14 @@ int main(int argc, char **argv) {
     const HRESULT status = D3DCompile(source, length, "artemis.hlsl", NULL, NULL, "main", profile,
                                       0, 0, &code, &diagnostics);
     free(source);
-    if (diagnostics) {
-        size_t bytes = ID3D10Blob_GetBufferSize(diagnostics);
-        fwrite(ID3D10Blob_GetBufferPointer(diagnostics), 1, bytes, stderr);
-        ID3D10Blob_Release(diagnostics);
-    }
+    report_diagnostics(diagnostics);
     int result = 1;
     if (SUCCEEDED(status) && code) {
         const void *data = ID3D10Blob_GetBufferPointer(code);
         const size_t bytes = ID3D10Blob_GetBufferSize(code);
         if (bytes >= 4 && bytes <= ART_DXBC_MAX_BYTECODE && memcmp(data, "DXBC", 4) == 0) {
             if (effect) {
-                const HRESULT reflected = write_effect(data, (uint32_t)bytes);
+                const HRESULT reflected = write_effect(data, (uint32_t)bytes, paired);
                 result = FAILED(reflected);
                 if (result) fprintf(stderr, "Shader reflection failed (0x%08lx)\n", (unsigned long)(DWORD)reflected);
             } else {

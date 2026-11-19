@@ -34,12 +34,17 @@ static const char shader_sequence_boot[] = "*top\n[lyshader id=paint file=paint.
 static const char glsl_boot[] = "*top\n[lyshader id=paint file=paint.Frag]\n"
     SHADER_SCENE SHADER_BINDINGS "[flip]\n[caption data=ready]\n[stop]\n";
 static const char shader_ini[] = "[WINDOWS]\nWIDTH=4\nHEIGHT=4\nBOOT=boot.iet\n";
-static const char shader[] = "Texture2D textureFore : register(t2); Texture2D textureMask : register(t3); "
-    "Texture2D textureUser : register(t0); SamplerState sam : register(s0); "
+#define HLSL_RESOURCES \
+    "Texture2D textureFore : register(t2); Texture2D textureMask : register(t3); " \
+    "Texture2D textureUser : register(t0); SamplerState sam : register(s0); " \
     "cbuffer Params : register(b0) { float4 tint; float param; }; "
-    "float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target { "
-    "float4 fore = textureFore.Sample(sam, uv) * tint; "
-    "return float4(fore.rgb * textureMask.Sample(sam, uv).r + textureUser.Sample(sam, uv).rgb * param, fore.a); }";
+#define HLSL_BODY \
+    "float4 fore = textureFore.Sample(sam, uv) * tint; " \
+    "return float4(fore.rgb * textureMask.Sample(sam, uv).r + textureUser.Sample(sam, uv).rgb * param, fore.a); }"
+static const char shader[] = HLSL_RESOURCES
+    "float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target { " HLSL_BODY;
+static const char shader_sequence_source[] = HLSL_RESOURCES
+    "float4 main(float2 uv : TEXCOORD0) : SV_Target { " HLSL_BODY;
 #define GLSL_BODY \
     "uniform sampler2D textureFore; uniform sampler2D samplerMask;" \
     "uniform sampler2D textureUser; uniform vec4 tint;\n" \
@@ -100,7 +105,8 @@ static void service_io(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt,
     const char *asset = NULL;
     if (strstr(metadata, "\"key\":\"boot.iet\""))
         asset = shader_sequence ? shader_sequence_boot : shader_frame == HLSL ? shader_boot : shader_frame ? glsl_boot : boot;
-    if (shader_frame == HLSL && strstr(metadata, "\"key\":\"paint.hlsl\"")) asset = shader;
+    if (shader_frame == HLSL && strstr(metadata, "\"key\":\"paint.hlsl\""))
+        asset = shader_sequence ? shader_sequence_source : shader;
     if (strstr(metadata, "\"key\":\"paint.frag\"")) {
         if (shader_frame == GLSL) asset = glsl;
         if (shader_frame == GLES) asset = gles;

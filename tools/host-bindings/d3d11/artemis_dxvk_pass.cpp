@@ -12,27 +12,19 @@ static void require(bool success, const char *message) {
     if (!success) throw std::runtime_error(message);
 }
 
-static std::vector<char> load_vertex(const char *path) {
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    const auto bytes = file.tellg();
-    require(bytes >= 4 && bytes <= ART_DXBC_MAX_BYTECODE, "Invalid vertex DXBC length");
-    std::vector<char> result(static_cast<size_t>(bytes));
-    file.seekg(0);
-    require(bool(file.read(result.data(), bytes)) && !std::memcmp(result.data(), "DXBC", 4), "Invalid vertex DXBC");
-    return result;
-}
-
 struct ArtDxvkPass {
-    artemis::DxvkDevice host;
     artemis::DxbcEffect effect;
+    artemis::DxvkDevice host;
     std::unique_ptr<artemis::DxvkSurface> foreground, output;
     Com<ID3D11ShaderResourceView> foreground_view;
     Com<ID3D11RenderTargetView> target;
     Com<ID3D11Buffer> constants;
     void *metal_device;
 
-    ArtDxvkPass(const char *vs_path, std::istream &artifact, IOSurfaceRef source, IOSurfaceRef dest)
+    ArtDxvkPass(std::istream &artifact, IOSurfaceRef source, IOSurfaceRef dest)
         : effect(artifact), metal_device(host.metal_device()) {
+        const auto &vs = effect.vertex_bytecode();
+        require(!vs.empty(), "DXVK pass requires an ADE2 shader pair");
         require(source && dest && source != dest, "DXVK pass requires distinct foreground and output surfaces");
         const auto width = IOSurfaceGetWidth(dest), height = IOSurfaceGetHeight(dest);
         require(IOSurfaceGetWidth(source) == width && IOSurfaceGetHeight(source) == height,
@@ -47,7 +39,6 @@ struct ArtDxvkPass {
                 "Cannot create DXVK foreground view");
         require(SUCCEEDED(device->CreateRenderTargetView(output->texture(), nullptr, &target)),
                 "Cannot create DXVK output view");
-        const auto vs = load_vertex(vs_path);
         const auto &ps = effect.bytecode();
         Com<ID3D11VertexShader> vertex;
         Com<ID3D11PixelShader> pixel;
@@ -140,9 +131,9 @@ struct ArtDxvkPass {
     }
 };
 
-ArtDxvkPass *art_dxvk_pass_create(const char *vertex, const char *effect, IOSurfaceRef foreground, IOSurfaceRef output) try {
+ArtDxvkPass *art_dxvk_pass_create(const char *effect, IOSurfaceRef foreground, IOSurfaceRef output) try {
     std::ifstream file(effect, std::ios::binary);
-    return new ArtDxvkPass(vertex, file, foreground, output);
+    return new ArtDxvkPass(file, foreground, output);
 } catch (const std::exception &error) {
     std::fprintf(stderr, "%s\n", error.what());
     return nullptr;

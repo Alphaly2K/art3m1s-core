@@ -23,9 +23,8 @@ typedef struct ArtDxvkUniform {
     size_t count;
 } ArtDxvkUniform;
 
-/* Owner-thread pass for matching BGRA surfaces. Attach before writing foreground. */
-ArtDxvkPass *art_dxvk_pass_create(const char *vertex_dxbc, const char *effect_ade,
-                                 IOSurfaceRef foreground, IOSurfaceRef output);
+/* Load an ADE2 shader pair on the owner thread. Attach before writing foreground. */
+ArtDxvkPass *art_dxvk_pass_create(const char *effect_ade, IOSurfaceRef foreground, IOSurfaceRef output);
 void *art_dxvk_pass_metal_device(const ArtDxvkPass *pass);
 /* Wait for the producer before drawing. Returns after output is ready for Metal. */
 int art_dxvk_pass_draw(ArtDxvkPass *pass, ArtDxvkImage mask, ArtDxvkImage user,

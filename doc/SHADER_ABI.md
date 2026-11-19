@@ -310,9 +310,15 @@ Set `CX_BOTTLE` and add `--hlsl` to the native probe command to exercise
 shader execution. The Windows compiler helper reads raw HLSL from stdin,
 compiles `main` to `vs_5_0` or `ps_5_0`, and writes DXBC to stdout with
 diagnostics on stderr. The `effect` mode compiles `ps_5_0` and includes the
-compiler's reflection in an `ADE1` artifact. It accepts one sampler at `s0`,
-2D textures at `t0` through `t3`, and float scalars and vectors in `b0`. It
-creates no graphics device. The macOS process loads both shaders once and
+compiler's reflection in an `ADE1` artifact. The native probe uses
+`effect-pair`, which also generates a matching `vs_5_0` shader and packs
+both stages into `ADE2`. It supports optional `SV_Position` and `float2`
+`TEXCOORD0` and `TEXCOORD1` inputs. Both texture coordinates use the quad's
+normalized coordinates. The compiler checks the output registers and
+masks against the pixel inputs and rejects unsupported signatures. Both
+modes accept one sampler at `s0`, 2D textures at `t0` through `t3`, and
+float scalars and vectors in `b0`. They create no graphics device. The
+macOS process loads the shader pair once and
 binds foreground, mask, user textures, and parameters by reflected name.
 Metal writes the foreground into a separate IOSurface on the same GPU.
 The probe transitions the imported foreground image before the first Metal
@@ -328,17 +334,19 @@ Use `--arfp` in place of `--hlsl` to run Core's three-frame scene fixture.
 The probe compiles the first packet's HLSL once. Metal renders the group's
 layers into a shared foreground, and DXVK binds the packet's mask, user
 texture, and named constants. The final Metal texture is checked pixel by
-pixel after both a uniform change and a layer move. This fixture supplies
-matching vertex output and pixel input signatures. Game shaders require
-selecting a vertex signature that matches the compiled pixel shader.
+pixel after both a uniform change and a layer move. The fixture's pixel
+shader declares `TEXCOORD0` without `SV_Position`, so a vertex shader with
+position first would put the texture coordinates in the wrong register.
 
 `ADE1` begins with five little-endian `u32` values: magic (`ADE1`), DXBC
 length, `b0` byte size, texture count, and uniform count. Each texture has
 a `u32` slot and a 256-byte NUL-terminated name. Each uniform has a `u32`
 byte offset, a `u32` float component count, and the same name format. The
-DXBC bytes follow the records. The Host zeroes the block before filling
-its constants; the metadata does not carry default values. The compiler
-and decoder share the limits defined in `artemis_dxbc_effect.h`.
+pixel DXBC bytes follow the records. `ADE2` uses the same layout with
+magic `ADE2`, then appends a little-endian `u32` vertex bytecode length and
+the vertex DXBC. The Host zeroes the block before filling its constants;
+the metadata does not carry default values. The compiler and decoder
+share the limits defined in `artemis_dxbc_effect.h`.
 
 To test transfer from Wine to a Flutter texture, set
 `FLUTTER_MACOS_FRAMEWORK_DIR` to the directory containing

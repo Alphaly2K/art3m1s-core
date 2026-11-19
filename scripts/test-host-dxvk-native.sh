@@ -47,7 +47,6 @@ run_native() (
    "$@"
 )
 
-vertex_src="$PWD/tools/host-smoke/shaders/native-quad.hlsl"
 effect_src="$PWD/tools/host-smoke/shaders/native-effect.hlsl"
 if [[ $mode == --arfp ]]; then
   "${compile[@]}" -dynamiclib -Wl,-install_name,@rpath/libartemis_dxvk_probe.dylib \
@@ -75,14 +74,23 @@ else
   crossover=${CROSSOVER_ROOT:-/Applications/CrossOver.app/Contents/SharedSupport/CrossOver}
   "${ARTEMIS_D3D_CC:-x86_64-w64-mingw32-gcc}" -std=c11 -O2 -Wall -Wextra -Werror \
     tools/host-bindings/d3d11/artemis_hlsl_compile.c -o "$scratch/artemis-hlsl-compile.exe" -ld3dcompiler_47 -ldxguid
-  (cd "$scratch"
-   CX_GRAPHICS_BACKEND=wined3d "$crossover/bin/wine" --no-gui --debugmsg -all artemis-hlsl-compile.exe vs_5_0 \
-     < "$vertex_src" > vertex.dxbc
-   CX_GRAPHICS_BACKEND=wined3d "$crossover/bin/wine" --no-gui --debugmsg -all artemis-hlsl-compile.exe effect \
-     < "$effect_src" > pixel.ade)
+  compile_effect() (
+    cd "$scratch"
+    CX_GRAPHICS_BACKEND=wined3d "$crossover/bin/wine" --no-gui --debugmsg -all artemis-hlsl-compile.exe "$1"
+  )
+  compile_effect effect-pair < "$effect_src" > "$scratch/effect.ade"
   if [[ $mode == --arfp ]]; then
-    run_native "$executable" frames vertex.dxbc pixel.ade
+    run_native "$executable" frames effect.ade
   else
-    run_native "$executable" vertex.dxbc pixel.ade
+    if printf '%s\n' 'float4 main(float3 normal : NORMAL0) : SV_Target { return float4(normal, 1); }' |
+        compile_effect effect-pair > "$scratch/unsupported.ade" 2> "$scratch/unsupported.log"; then
+      printf '%s\n' 'The compiler accepted an unsupported pixel input.' >&2
+      exit 1
+    fi
+    if [[ -s "$scratch/unsupported.ade" ]] || ! grep -q 'Unsupported pixel input:' "$scratch/unsupported.log"; then
+      printf '%s\n' 'Unsupported pixel input did not produce the expected diagnostic.' >&2
+      exit 1
+    fi
+    run_native "$executable" effect.ade
   fi
 fi

@@ -8,7 +8,7 @@ cbuffer Params : register(b0) {
     float4 tint;
 };
 
-float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
-    float4 fore = textureFore.Sample(sam, uv) * tint;
-    return float4(fore.rgb * textureMask.Sample(sam, uv).r + textureUser.Sample(sam, uv).rgb * param, fore.a);
+float4 main(float2 uv1 : TEXCOORD1, float4 position : SV_Position, float2 uv0 : TEXCOORD0) : SV_Target {
+    float4 fore = textureFore.Sample(sam, uv0) * tint;
+    return float4(fore.rgb * textureMask.Sample(sam, uv1).r + textureUser.Sample(sam, uv1).rgb * param, fore.a);
 }

@@ -69,7 +69,7 @@ static void clear_surfaces() {
     std::puts("Native DXVK IOSurface: two D3D11 frames visible in the original pixel buffer");
 }
 
-static void draw_effect(const char *vertex, const char *pixel) {
+static void draw_effect(const char *effect) {
     constexpr uint32_t width = 7, height = 5;
     const auto foreground = make_buffer(width, height);
     const auto output = make_buffer(width, height);
@@ -77,7 +77,7 @@ static void draw_effect(const char *vertex, const char *pixel) {
     const auto source_surface = CVPixelBufferGetIOSurface(foreground.get());
     const auto output_surface = CVPixelBufferGetIOSurface(output.get());
     std::unique_ptr<ArtDxvkPass, decltype(&art_dxvk_pass_destroy)> pass(
-        art_dxvk_pass_create(vertex, pixel, source_surface, output_surface), art_dxvk_pass_destroy);
+        art_dxvk_pass_create(effect, source_surface, output_surface), art_dxvk_pass_destroy);
     check(bool(pass), "create DXVK effect pass");
     auto *device = art_dxvk_pass_metal_device(pass.get());
     using Writer = std::unique_ptr<ArtMetalWriter, decltype(&art_metal_writer_destroy)>;
@@ -105,9 +105,9 @@ static void draw_effect(const char *vertex, const char *pixel) {
 
 int main(int argc, char **argv) try {
     if (argc == 1) clear_surfaces();
-    else if (argc == 3) draw_effect(argv[1], argv[2]);
+    else if (argc == 2) draw_effect(argv[1]);
     else {
-        std::fputs("Usage: artemis-dxvk-native [vertex.dxbc pixel.ade]\n", stderr);
+        std::fputs("Usage: artemis-dxvk-native [effect.ade]\n", stderr);
         return 2;
     }
 } catch (const std::exception &error) {
