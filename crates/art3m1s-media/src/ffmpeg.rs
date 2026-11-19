@@ -180,6 +180,7 @@ pub struct FfmpegVideoDecoder {
     yuv_scaler: Option<scaling::Context>,
     stream_index: usize,
     time_base: Rational,
+    timestamp_origin_us: i64,
     frame_rate: Option<Rational>,
     info: VideoStreamInfo,
     eof: bool,
@@ -204,6 +205,15 @@ struct SourceInput {
 }
 
 impl SourceInput {
+    fn timeline_start_us(&self) -> i64 {
+        let start = unsafe { (*self.input.as_ptr()).start_time };
+        if start == ffmpeg::ffi::AV_NOPTS_VALUE {
+            0
+        } else {
+            start
+        }
+    }
+
     fn open(source: Arc<dyn MediaSource>, legacy_host: bool) -> Result<Self, String> {
         initialize();
         let mut io_state = Box::new(SourceIoState { source, offset: 0 });
@@ -309,6 +319,11 @@ impl FfmpegVideoDecoder {
 
     fn open_video(source: Arc<dyn MediaSource>, legacy_host: bool) -> Result<Self, String> {
         let source = SourceInput::open(source, legacy_host)?;
+        let timestamp_origin_us = if legacy_host {
+            source.timeline_start_us()
+        } else {
+            0
+        };
         let stream = source
             .input
             .streams()
@@ -357,6 +372,7 @@ impl FfmpegVideoDecoder {
             yuv_scaler: None,
             stream_index,
             time_base,
+            timestamp_origin_us,
             frame_rate: rate,
             info,
             eof: false,
@@ -536,7 +552,8 @@ impl FfmpegVideoDecoder {
         plane_count: u8,
         planes: [VideoPlane; MAX_VIDEO_PLANES],
     ) -> DecodedVideoFrame {
-        let pts = pts_micros(frame.pts().or_else(|| frame.timestamp()), self.time_base);
+        let pts = pts_micros(frame.pts().or_else(|| frame.timestamp()), self.time_base)
+            .map(|pts| pts.saturating_sub(self.timestamp_origin_us));
         let duration = self
             .frame_rate
             .and_then(|rate| {
@@ -639,6 +656,7 @@ pub struct LegacyHostAudioDecoder {
     decoder: ffmpeg::decoder::Audio,
     stream_index: usize,
     time_base: Rational,
+    timestamp_origin_us: i64,
     resampler: Option<resampling::Context>,
     origin_us: Option<u64>,
     frames: u64,
@@ -650,9 +668,11 @@ impl LegacyHostAudioDecoder {
     const RATE: u32 = 48_000;
     const FORMAT: format::Sample = format::Sample::I16(format::sample::Type::Packed);
     const MAX_FRAMES: usize = 131_072;
+    const TIMESTAMP_JITTER_US: u64 = 5_000;
 
     pub fn open(source: Arc<dyn MediaSource>) -> Result<Option<Self>, String> {
         let source = SourceInput::open(source, true)?;
+        let timestamp_origin_us = source.timeline_start_us();
         let Some(stream) = source.input.streams().best(Type::Audio) else {
             return Ok(None);
         };
@@ -670,6 +690,7 @@ impl LegacyHostAudioDecoder {
             decoder,
             stream_index,
             time_base,
+            timestamp_origin_us,
             resampler: None,
             origin_us: None,
             frames: 0,
@@ -761,19 +782,32 @@ impl LegacyHostAudioDecoder {
                 .map_err(|error| error.to_string())?,
             );
         }
-        self.origin_us.get_or_insert_with(|| {
-            pts_micros(input.timestamp().or_else(|| input.pts()), self.time_base)
+        let resampler = self.resampler.as_mut().unwrap();
+        if let Some(pts) = pts_micros(input.timestamp().or_else(|| input.pts()), self.time_base) {
+            let delay_us =
+                Self::samples_to_micros(resampler.delay().map_or(0, |delay| delay.output as u64));
+            let pts = (pts.saturating_sub(self.timestamp_origin_us).max(0) as u64)
+                .saturating_sub(delay_us);
+            let next_pts = self
+                .origin_us
                 .unwrap_or(0)
-                .max(0) as u64
-        });
+                .saturating_add(Self::samples_to_micros(self.frames));
+            // Millisecond packet timestamps can round independently of the PCM clock.
+            if self.frames == 0 || pts > next_pts.saturating_add(Self::TIMESTAMP_JITTER_US) {
+                self.origin_us = Some(pts);
+                self.frames = 0;
+            }
+        }
         let mut output =
             ffmpeg::frame::Audio::new(Self::FORMAT, capacity as usize, ChannelLayout::STEREO);
-        self.resampler
-            .as_mut()
-            .unwrap()
+        resampler
             .run(&input, &mut output)
             .map_err(|error| error.to_string())?;
         Ok(self.block(&output))
+    }
+
+    fn samples_to_micros(samples: u64) -> u64 {
+        samples.saturating_mul(1_000_000) / u64::from(Self::RATE)
     }
 
     fn block(&mut self, frame: &ffmpeg::frame::Audio) -> Option<HostPcmBlock> {
@@ -783,7 +817,7 @@ impl LegacyHostAudioDecoder {
         let pts_us = self
             .origin_us
             .unwrap_or(0)
-            .saturating_add(self.frames.saturating_mul(1_000_000) / u64::from(Self::RATE));
+            .saturating_add(Self::samples_to_micros(self.frames));
         self.frames = self.frames.saturating_add(frame.samples() as u64);
         Some(HostPcmBlock {
             pts_us,

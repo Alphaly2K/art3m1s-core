@@ -3,7 +3,7 @@
 #include <dlfcn.h>
 #include <stdio.h>
 
-static int probe(const ArtMediaHostApiV1 *api, const char *path) {
+static int probe(const ArtMediaHostApiV1 *api, const char *path, unsigned expected_frames) {
     ArtMediaVideo *video = api->open_video(path);
     if (!video) return 0;
     ArtMediaFrame frame;
@@ -14,23 +14,27 @@ static int probe(const ArtMediaHostApiV1 *api, const char *path) {
         if (frame.width != 32 || frame.height != 32 || frame.bytes != 32 * 32 * 4 ||
             !frame.rgba || frame.rgba[0] > 8 || frame.rgba[1] > 8 ||
             frame.rgba[2] < 245 || frame.rgba[3] != 255 ||
-            (frames > 0 && frame.pts_us <= previous_pts) || frame.duration_us == 0) {
+            (frames == 0 ? frame.pts_us > 50000 : frame.pts_us <= previous_pts) ||
+            frame.duration_us == 0) {
             status = -1;
             break;
         }
         previous_pts = frame.pts_us;
-        if (++frames > 24) break;
+        if (++frames > expected_frames) break;
     }
     api->close_video(video);
-    return status == 0 && frames == 24;
+    return status == 0 && frames == expected_frames;
 }
 
-static int probe_audio(const ArtMediaHostApiV1 *api, const char *path) {
+static int probe_audio(const ArtMediaHostApiV1 *api, const char *path, int delayed) {
     ArtMediaAudio *audio = NULL;
     if (api->open_audio(path, &audio) != 1 || !audio) return 0;
     ArtMediaPcm block;
     uint64_t previous_pts = 0;
+    uint64_t end = 0;
     uint64_t frames = 0;
+    unsigned gaps = 0;
+    uint64_t first_pts = 0;
     int non_silent = 0;
     int32_t status;
     while ((status = api->next_audio(audio, &block)) == 1) {
@@ -38,19 +42,35 @@ static int probe_audio(const ArtMediaHostApiV1 *api, const char *path) {
             status = -1;
             break;
         }
+        if (!frames) {
+            first_pts = block.pts_us;
+        } else if (block.pts_us > end + 100000) {
+            const uint64_t gap = block.pts_us - end;
+            if (gap < 850000 || gap > 1150000) {
+                status = -1;
+                break;
+            }
+            gaps++;
+        }
         for (uint32_t i = 0; i < block.frames * 2; ++i) {
             if (block.stereo_i16[i] != 0) non_silent = 1;
         }
         previous_pts = block.pts_us;
+        end = block.pts_us + (uint64_t)block.frames * 1000000 / 48000;
         frames += block.frames;
-        if (frames > 52000) break;
+        if (frames > (delayed ? 200000u : 52000u)) break;
     }
     api->close_audio(audio);
-    return status == 0 && non_silent && frames >= 44000 && frames <= 52000;
+    if (status != 0 || !non_silent) return 0;
+    if (delayed) {
+        return first_pts >= 650000 && first_pts <= 950000 && gaps == 1 &&
+            end >= 5600000 && end <= 6000000 && frames >= 185000 && frames <= 200000;
+    }
+    return first_pts <= 120000 && gaps == 0 && frames >= 44000 && frames <= 52000;
 }
 
 int main(int argc, char **argv) {
-    if (argc < 4) return 1;
+    if (argc < 5) return 1;
     void *library = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
     if (!library) {
         fprintf(stderr, "%s\n", dlerror());
@@ -67,16 +87,20 @@ int main(int argc, char **argv) {
         return 1;
     }
     for (int i = 3; i < argc; ++i) {
-        if (!probe(api, argv[i])) {
-            fputs("Legacy video did not deliver 24 timestamped blue frames and EOF.\n", stderr);
+        if (!probe(api, argv[i], i == 4 ? 144 : 24)) {
+            fputs("Legacy video did not deliver normalized blue frames and EOF.\n", stderr);
             return 1;
         }
     }
-    if (!probe_audio(api, argv[3])) {
+    if (!probe_audio(api, argv[3], 0)) {
         fputs("WMV did not deliver timestamped stereo PCM and EOF.\n", stderr);
         return 1;
     }
-    for (int i = 4; i < argc; ++i) {
+    if (!probe_audio(api, argv[4], 1)) {
+        fputs("Delayed WMV audio did not preserve its initial offset and midstream gap.\n", stderr);
+        return 1;
+    }
+    for (int i = 5; i < argc; ++i) {
         ArtMediaAudio *silent = NULL;
         if (api->open_audio(argv[i], &silent) != 0 || silent) {
             api->close_audio(silent);

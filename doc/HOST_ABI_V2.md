@@ -686,8 +686,12 @@ macOS Flutter Runner 可将 [ArtemisFlutterHost](../tools/host-bindings/swift/Ar
 Ogg 视频。该库用现有 FFmpeg 动态库构建，提供时间戳、RGBA 帧和 48 kHz 双声道 PCM；调用者
 串行使用每个解码句柄，并在下一次拉取或关闭前消费借用数据。Flutter Runner 可使用
 [ArtemisLegacyMedia](../tools/host-bindings/swift/ArtemisLegacyMedia.swift) 调度播放；解码库无需链接 Core。
+音视频时间戳以同一个容器起点为零，保留音轨相对于视频的启动偏移；PCM 块之间的空档表示静音。
 设置 `FFMPEG_DIR` 指向 FFmpeg SDK 后运行 `bash scripts/test-host-v2-media.sh` 可验证独立解码库。
-该检查会生成 WMV；`FFMPEG_CLI` 可指定额外支持 `libtheora` 的 FFmpeg CLI，以同时验证 Ogg 视频。
+该检查会生成带音轨偏移和时间戳空档的 WMV；`FFMPEG_CLI` 可指定额外支持 `libtheora` 的
+FFmpeg CLI，以同时验证 Ogg 视频。设置 `ARTEMIS_MEDIA_SWIFT_SMOKE=1` 可额外静音运行约
+19 秒的 Swift 调度探针，检查起播、轮询停顿后的追帧、暂停恢复和自然结束。该探针需要 macOS
+音频会话，无需 Flutter 窗口。
 
 将 `FLUTTER_MACOS_FRAMEWORK_DIR` 指向包含 `FlutterMacOS.framework` 的目录后运行
 `bash scripts/test-host-v2-flutter.sh`，可以验证标准方法编解码器、真实 Core 和 Metal 设备的
