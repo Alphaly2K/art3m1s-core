@@ -2825,14 +2825,24 @@ fn audio_feedback_uses_playback_identity_and_resumes_its_wait_after_callback_io(
     .unwrap();
     let mut host = MemoryHost::default();
     host.asset("empty", b"");
+    host.files.insert(
+        ("save".into(), "system.dat".into()),
+        (
+            1,
+            serde_json::to_vec(&HashMap::from([("bgmvol", asb_interpreter::Value::Int(600))]))
+                .unwrap(),
+        ),
+    );
     host.asset(
         "boot.iet",
         br#"*top
+[var name=s.sevol data=800]
 [splay file=:bgm/theme_a.ogg loop=1 gain=450]
 [setonsoundfinish id=fx label=finished call=1]
 [seplay id=fx file=old.ogg]
 [seplay id=fx file=new.ogg]
 [wait se=fx time=50]
+[var name=s.bgmvol data=250]
 [caption data=timed]
 [wait se=fx]
 [caption data=ended]
@@ -2914,6 +2924,13 @@ end
         }
     }
     assert_eq!(record(PROJECT_READY), json!({}));
+    for (channel, level) in [("bgm", 600), ("se", 800)] {
+        assert_eq!(step(1, 0), ScriptIoProgress::WouldBlock);
+        assert_eq!(
+            record(MEDIA_AUDIO_COMMAND),
+            json!({"op":"volume","channel":channel,"level":level})
+        );
+    }
     assert_eq!(step(1, 0), ScriptIoProgress::WouldBlock);
     let bgm = record(MEDIA_AUDIO_COMMAND);
     assert_eq!(bgm["key"], "sound/theme_a.ogg");
@@ -2935,6 +2952,11 @@ end
     assert_eq!(step(2, 20_000_000), ScriptIoProgress::Event);
     assert_eq!(step(3, 69_999_999), ScriptIoProgress::Event);
     assert!(poll().is_empty());
+    assert_eq!(step(4, 70_000_000), ScriptIoProgress::WouldBlock);
+    assert_eq!(
+        record(MEDIA_AUDIO_COMMAND),
+        json!({"op":"volume","channel":"bgm","level":250})
+    );
     assert_eq!(step(4, 70_000_000), ScriptIoProgress::Event);
     assert_eq!(record(UI_CAPTION), json!({"text":"timed"}));
 
@@ -4739,6 +4761,9 @@ function load_once()
         e:enqueueTag{'caption', data='abandoned'}
     end
 end
+function on_save(e) e:tag{'var', name='s.bgmvol', data=800} end
+function on_load(e) e:tag{'var', name='s.bgmvol', data=500} end
+__engine:setEventHandler{onSave='on_save', onLoad='on_load'}
 [/lua]
 "#,
     );
@@ -4776,10 +4801,13 @@ end
         if !bytes.is_empty() && requests.is_empty() {
             let domain = u16::from_le_bytes(bytes[6..8].try_into().unwrap());
             let kind = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-            if (domain, kind) == (Domain::Runtime as u16, RUNTIME_PERSISTENCE_RESULT.kind)
-                || domain == Domain::Ui as u16
-            {
-                observed.push(serde_json::from_slice::<Value>(&bytes[64..]).unwrap());
+            if let Ok(body) = serde_json::from_slice::<Value>(&bytes[64..]) {
+                if (domain, kind) == (Domain::Runtime as u16, RUNTIME_PERSISTENCE_RESULT.kind)
+                    || domain == Domain::Ui as u16
+                    || (domain == Domain::Media as u16 && body["op"] == "volume")
+                {
+                    observed.push(body);
+                }
             }
         }
         for request in requests {
@@ -4806,7 +4834,9 @@ end
         observed,
         [
             json!({"operation":"save", "status":"failed", "reason":"denied", "files_written":0}),
+            json!({"op":"volume", "channel":"bgm", "level":800}),
             json!({"operation":"save", "status":"failed", "reason":"io_error", "files_written":2}),
+            json!({"op":"volume", "channel":"bgm", "level":500}),
             json!({"operation":"load", "status":"restored"}),
             json!({"operation":"load", "status":"failed", "reason":"not_found"}),
             json!({"text":"done"}),

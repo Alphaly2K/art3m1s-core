@@ -63,6 +63,17 @@ impl ScriptIoSession {
     ) -> Result<ScriptIoProgress, ScriptIoError> {
         let mut progress = self.step_frame(frame)?;
         loop {
+            if let Err(error) = self.sync_audio_bus_volumes() {
+                if error == ProtocolError::WouldBlock {
+                    return Ok(if progress == ScriptIoProgress::Waiting {
+                        progress
+                    } else {
+                        ScriptIoProgress::WouldBlock
+                    });
+                }
+                self.mark_faulted();
+                return Err(error.into());
+            }
             if progress == ScriptIoProgress::Event && self.stop_auto_at_stop() {
                 progress = self.step()?;
                 continue;

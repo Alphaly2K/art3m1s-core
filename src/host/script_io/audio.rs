@@ -33,6 +33,7 @@ type Tag = (String, HashMap<String, String>);
 pub(super) struct Audio {
     serial: u64,
     voice_serial: u64,
+    bus_volumes: [Option<u16>; 3],
     active: BTreeMap<Channel, Playback>,
     finish_handlers: HashMap<String, Vec<Tag>>,
     pending: Vec<(u64, PlaybackStatus)>,
@@ -232,6 +233,38 @@ impl Audio {
 }
 
 impl ScriptIoSession {
+    pub(super) fn sync_audio_bus_volumes(&mut self) -> Result<(), ProtocolError> {
+        if !self.media_enabled
+            || self.scene.is_none()
+            || self.project_loading
+            || !matches!(self.shutdown, Shutdown::Open)
+        {
+            return Ok(());
+        }
+        let channels = [("bgm", "s.bgmvol"), ("se", "s.sevol"), ("video", "s.videovol")];
+        let levels = {
+            let vars = self.interpreter.variables_handle();
+            let vars = vars.lock().unwrap();
+            channels.map(|(_, name)| {
+                vars.get(name)
+                    .and_then(asb_interpreter::Value::as_float)
+                    .filter(|value| value.is_finite())
+                    .map_or(1000, |value| value.round().clamp(0.0, 1000.0) as u16)
+            })
+        };
+        for (index, ((channel, _), level)) in channels.into_iter().zip(levels).enumerate() {
+            if self.audio.bus_volumes[index].unwrap_or(1000) == level {
+                continue;
+            }
+            emit(
+                &mut self.transport,
+                json!({"op":"volume","channel":channel,"level":level}),
+            )?;
+            self.audio.bus_volumes[index] = Some(level);
+        }
+        Ok(())
+    }
+
     pub(in crate::host) fn submit_playback_status(
         &mut self,
         epoch: u64,
