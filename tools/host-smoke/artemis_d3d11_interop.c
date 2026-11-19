@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define VK_NO_PROTOTYPES
 #include <d3d11.h>
+#include <dxgi1_2.h>
 #include <vulkan/vulkan_core.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +21,42 @@ struct InteropDevice { const InteropVtbl *vtbl; };
 static const GUID iid_interop_device = {
     0xe2ef5fa5, 0xdc21, 0x4af7, { 0x90, 0xc4, 0xf6, 0x7e, 0xf6, 0xa0, 0x93, 0x23 }
 };
+
+static void check_shared_texture(ID3D11Device *device) {
+    const D3D11_TEXTURE2D_DESC desc = {
+        .Width = 4, .Height = 4, .MipLevels = 1, .ArraySize = 1,
+        .Format = DXGI_FORMAT_B8G8R8A8_UNORM, .SampleDesc = { 1, 0 },
+        .Usage = D3D11_USAGE_DEFAULT,
+        .BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
+        .MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX,
+    };
+    const char *operation = "CreateTexture2D";
+    ID3D11Texture2D *texture = NULL;
+    IDXGIResource1 *resource = NULL;
+    HANDLE handle = NULL;
+    HRESULT status = ID3D11Device_CreateTexture2D(device, &desc, NULL, &texture);
+    if (SUCCEEDED(status) && !texture) status = E_POINTER;
+    if (SUCCEEDED(status)) {
+        operation = "QueryInterface(IDXGIResource1)";
+        status = ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIResource1, (void **)&resource);
+        if (SUCCEEDED(status) && !resource) status = E_POINTER;
+    }
+    if (SUCCEEDED(status)) {
+        operation = "CreateSharedHandle";
+        status = IDXGIResource1_CreateSharedHandle(resource, NULL,
+            DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, NULL, &handle);
+        if (SUCCEEDED(status) && (!handle || handle == INVALID_HANDLE_VALUE)) status = E_HANDLE;
+    }
+    if (SUCCEEDED(status)) {
+        fprintf(stderr, "D3D11 interop: shareable BGRA texture created an NT handle\n");
+        CloseHandle(handle);
+    } else {
+        fprintf(stderr, "D3D11 interop: shareable BGRA texture %s failed (0x%08lx)\n",
+                operation, (unsigned long)(DWORD)status);
+    }
+    if (resource) IDXGIResource1_Release(resource);
+    if (texture) ID3D11Texture2D_Release(texture);
+}
 
 int main(void) {
     const D3D_FEATURE_LEVEL level = D3D_FEATURE_LEVEL_11_0;
@@ -65,20 +102,29 @@ int main(void) {
     extensions = calloc(count ? count : 1, sizeof(*extensions));
     if (!extensions || enumerate(adapter, NULL, &count, extensions) != VK_SUCCESS) goto done;
 
-    const char *names[] = { "VK_EXT_metal_objects", "VK_KHR_external_memory_win32",
-                            "VK_KHR_external_semaphore_win32" };
+    const struct { const char *extension, *entrypoint; } checks[] = {
+        { "VK_EXT_metal_objects", "vkExportMetalObjectsEXT" },
+        { "VK_KHR_external_memory_win32", "vkGetMemoryWin32HandleKHR" },
+        { "VK_KHR_external_semaphore_win32", "vkGetSemaphoreWin32HandleKHR" },
+    };
+    int win32_memory = 0;
     fprintf(stderr, "D3D11 interop: Vulkan device and queue family %u available\n", family);
-    for (unsigned index = 0; index < sizeof(names) / sizeof(names[0]); ++index) {
+    for (unsigned index = 0; index < sizeof(checks) / sizeof(checks[0]); ++index) {
+        const char *name = checks[index].extension;
+        const char *entrypoint = checks[index].entrypoint;
         int exposed = 0;
         for (uint32_t i = 0; i < count; ++i) {
-            if (strcmp(names[index], extensions[i].extensionName) == 0) exposed = 1;
+            if (strcmp(name, extensions[i].extensionName) == 0) exposed = 1;
         }
-        fprintf(stderr, "D3D11 interop: %s exposed=%s\n", names[index], exposed ? "yes" : "no");
+        int resolved = device_proc(device, entrypoint) != NULL;
+        fprintf(stderr, "D3D11 interop: %s exposed=%s\n", name, exposed ? "yes" : "no");
+        fprintf(stderr, "D3D11 interop: %s entrypoint=%s\n", entrypoint, resolved ? "yes" : "no");
+        if (strcmp(name, "VK_KHR_external_memory_win32") == 0) win32_memory = exposed && resolved;
     }
-    const char *functions[] = { "vkExportMetalObjectsEXT", "vkGetMemoryWin32HandleKHR", "vkGetSemaphoreWin32HandleKHR" };
-    for (unsigned i = 0; i < sizeof(functions) / sizeof(functions[0]); ++i) {
-        fprintf(stderr, "D3D11 interop: %s entrypoint=%s\n", functions[i],
-                device_proc(device, functions[i]) ? "yes" : "no");
+    if (win32_memory) {
+        check_shared_texture(d3d);
+    } else {
+        fputs("D3D11 interop: shareable BGRA texture skipped (Win32 external memory unavailable)\n", stderr);
     }
     result = 0;
 done:

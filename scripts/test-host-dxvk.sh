@@ -64,6 +64,7 @@ includes=()
 if [[ $interop == 1 ]]; then
   sources=(tools/host-smoke/artemis_d3d11_interop.c)
   includes=(-I "${ARTEMIS_VULKAN_INCLUDE:?Set this to a directory containing vulkan/vulkan_core.h}")
+  libraries+=(-ldxguid)
 elif [[ $api == d3d11 ]]; then
   if [[ $worker == 1 ]]; then sources=(tools/host-bindings/d3d11/artemis_shader_worker.c); fi
   sources+=(tools/host-bindings/d3d11/artemis_shader_pass.c)

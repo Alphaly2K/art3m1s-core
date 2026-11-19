@@ -154,8 +154,14 @@ MoltenVK library. With `--d3d11`, use `ARTEMIS_DXVK_D3D11_DIR` containing
 `d3d11.dll` and `dxgi.dll` instead of the D3D9 DLL. The script reports the
 loaded backend and checks native DLL loading for an alternate candidate.
 
-On Apple Silicon the passing candidate used Swingby DXVK (`1c15610`, based
-on DXVK 2.4.1) and public MoltenVK 1.4.2. Build the candidate from that
+For D3D11 on Apple Silicon, the `metalsharp/DXVK-MacOS` release
+`v3.1.1-macos.4` passed the ARFP worker and Flutter texture pixel check with
+its x86-64 DLLs and companion universal MoltenVK 1.4.3. Verify both release
+archives against their SHA-256 digests before extracting them. The probe
+still requires a compatible Wine runner and a D3D compiler.
+
+For D3D9, Swingby DXVK (`1c15610`, based on DXVK 2.4.1) passed with public
+MoltenVK 1.4.2. Build the candidate from that
 source revision with its initialized submodules, Meson, MinGW and glslang:
 
 ```sh
@@ -264,7 +270,12 @@ Run `scripts/test-host-dxvk.sh dxvk --d3d11 --interop` with the same
 `ARTEMIS_VULKAN_INCLUDE` to query `IDXGIVkInteropDevice` in Wine. The probe
 checks the device and queue, enumerates the visible device extensions and
 reports whether Metal object export or Win32 external memory and semaphore
-entry points can be resolved. It does not submit Vulkan work to DXVK's queue.
+entry points can be resolved. If the Win32 external memory extension and
+device entry point are available, it also attempts to create a shared NT
+handle for a BGRA render texture. It does not submit Vulkan work to DXVK's
+queue. The tested DXVK configurations running under CrossOver did not
+expose either Win32 external memory or Metal object export. The companion
+MoltenVK from `v3.1.1-macos.4` passed the native IOSurface probe.
 
 To test transfer from Wine to a Flutter texture, set
 `FLUTTER_MACOS_FRAMEWORK_DIR` to the directory containing
