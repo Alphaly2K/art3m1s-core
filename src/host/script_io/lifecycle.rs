@@ -26,6 +26,19 @@ impl Shutdown {
 }
 
 impl ScriptIoSession {
+    fn save_blocked(&self) -> bool {
+        self.dialog_request.is_some()
+            || self.http.is_pending()
+            || self.screenshot.pending_request().is_some()
+            || self.operation.is_some()
+            || self.cancelled
+            || self.interpreter.pending_host_io().is_some()
+            || self.event_filter.is_some()
+            || self.save_work.is_some()
+            || self.save_file_work.is_some()
+            || self.numbered_load.is_some()
+    }
+
     pub(in crate::host) fn submit_shutdown(&mut self, epoch: u64) -> Result<(), ProtocolError> {
         use crate::host::runtime::RuntimePhase;
 
@@ -36,15 +49,7 @@ impl ScriptIoSession {
         if state.phase != RuntimePhase::Running {
             return Err(ProtocolError::State);
         }
-        if self.dialog_request.is_some()
-            || self.http.is_pending()
-            || self.screenshot.pending_request().is_some()
-            || self.operation.is_some()
-            || self.cancelled
-            || self.interpreter.pending_host_io().is_some()
-            || self.event_filter.is_some()
-            || self.save_work.is_some()
-            || self.numbered_load.is_some()
+        if self.save_blocked()
             || (matches!(self.scenario_event, Some(Event::Exit))
                 && !matches!(self.shutdown, Shutdown::ExitNotified))
         {
@@ -59,6 +64,44 @@ impl ScriptIoSession {
             SaveTarget::System
         }));
         Ok(())
+    }
+
+    pub(in crate::host) fn step_background_autosave(
+        &mut self,
+    ) -> Result<ScriptIoProgress, ScriptIoError> {
+        use crate::host::runtime::RuntimePhase;
+
+        if self.runtime_state().phase != RuntimePhase::Running {
+            return Err(ProtocolError::State.into());
+        }
+        if !self.background_autosave {
+            if self.control.autosave_allow != 1 {
+                return Ok(ScriptIoProgress::Completed);
+            }
+            if self.save_blocked()
+                || self.has_persistence_event()
+                || !matches!(self.shutdown, Shutdown::Open)
+            {
+                return Ok(ScriptIoProgress::WouldBlock);
+            }
+            self.background_autosave = true;
+            self.save_work = Some(SaveWork::Queued(SaveTarget::Automatic));
+        }
+
+        // Run the save continuation without sampling input or advancing a frame.
+        let progress = self.step_inner().inspect_err(|_| self.mark_faulted())?;
+        if progress != ScriptIoProgress::SaveReady {
+            return Ok(progress);
+        }
+        match self.notify_save_result("autosave") {
+            Ok(()) => {
+                self.save_work = None;
+                self.background_autosave = false;
+                Ok(ScriptIoProgress::Completed)
+            }
+            Err(ProtocolError::WouldBlock) => Ok(ScriptIoProgress::WouldBlock),
+            Err(error) => Err(error.into()),
+        }
     }
 
     pub(in crate::host) fn step_queued_frame(

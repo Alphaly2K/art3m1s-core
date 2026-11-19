@@ -144,6 +144,10 @@ Loading 完成必须有事件和状态转换；`open_project` 返回 OK 只表�
   尚有服务结果待处理时先完成它并推进 `step`。受理后状态进入 Closing，不再运行场景，按顺序
   确认全局数据、系统设置和已变化的已读记录。`runtime_closed` 排入队列后才进入 Closed，期间
   拒绝重载。Host 在销毁前拉取关闭结果。
+- 后台时 Host 可用 `ArtStepInfo.flags = ART_STEP_BACKGROUND_AUTOSAVE` 驱动自动存档。时钟和帧 ID
+  不参与该调用；Core 保留上一个逻辑帧和剧情等待。`[autosave allow=1]` 时执行存档；未启用时
+  直接返回 OK。先完成正在处理的场景服务，再发起存档。发起后，Host 应继续用同一标志步进、
+  拉取 IO 并回填结果，直到返回 OK 且 `ART_WAIT_IO` 清除。此期间普通帧返回 WOULD_BLOCK。
 - 所有 debug、字体、窗口状态、文本表、surface/资源 CPU 缓存和诊断计数归 runtime。
   进程级库初始化日志单独交给 SDK 诊断，不能偷偷路由到最近运行的游戏。
 
@@ -256,8 +260,8 @@ Runtime kind=3 为 `exit_requested`，request_id=0、metadata=`{}`、blob 为空
 Runtime kind=4 为 `runtime_closed`，request_id=0、blob 为空；metadata 为
 `{"save_status":"written"}` 或 `{"save_status":"failed","reason":"…","files_written":1}`。
 `files_written` 是本次关闭期间已经收到持久化确认的文件数。
-Runtime kind=5 为 `persistence_result`，request_id=0、blob 为空。`operation` 为 `save`
-或 `load`；`status` 为 `written`、`restored` 或 `failed`。失败包含 `reason`；保存失败
+Runtime kind=5 为 `persistence_result`，request_id=0、blob 为空。`operation` 为 `save`、
+`load` 或 `autosave`（切后台）；`status` 为 `written`、`restored` 或 `failed`。失败包含 `reason`；保存失败
 还包含 `files_written`，表示此前已确认的文件数。结果先进入可靠队列，再继续场景。
 服务请求只使用 IO/UI/media/render domain；其余 service kind 和 payload 由各自 schema 定义。
 高频 input/render 可以使用独立版本化二进制

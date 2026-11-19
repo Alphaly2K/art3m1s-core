@@ -48,6 +48,27 @@ impl ScriptIoSession {
         Ok(())
     }
 
+    pub(super) fn notify_save_result(&mut self, operation: &str) -> Result<(), ProtocolError> {
+        let Some(SaveWork::Finished(Some(result))) = &self.save_work else {
+            return Err(ProtocolError::State);
+        };
+        let metadata = match result {
+            SaveResult::Written => json!({"operation":operation, "status":"written"}),
+            SaveResult::Failed {
+                kind,
+                files_written,
+                ..
+            } => json!({
+                "operation":operation, "status":"failed", "reason":kind.as_str(),
+                "files_written":files_written,
+            }),
+        };
+        self.transport.notify(
+            RUNTIME_PERSISTENCE_RESULT,
+            MessageBody::new(metadata.to_string(), vec![])?,
+        )
+    }
+
     pub(super) fn start_persistence(&mut self) -> Result<(), ProtocolError> {
         let saving = matches!(self.scenario_event, Some(Event::SaveGame { .. }));
         let result = if saving {
@@ -76,23 +97,12 @@ impl ScriptIoSession {
         &mut self,
         progress: ScriptIoProgress,
     ) -> Result<(), ProtocolError> {
+        if progress == ScriptIoProgress::SaveReady {
+            self.notify_save_result("save")?;
+            self.take_save_result();
+            return self.resume_scenario();
+        }
         let (metadata, restored) = match progress {
-            ScriptIoProgress::SaveReady => {
-                let Some(SaveWork::Finished(Some(result))) = &self.save_work else {
-                    return Err(ProtocolError::State);
-                };
-                let metadata = match result {
-                    SaveResult::Written => json!({"operation":"save", "status":"written"}),
-                    SaveResult::Failed {
-                        kind,
-                        files_written,
-                        ..
-                    } => json!({
-                        "operation":"save", "status":"failed", "reason":kind.as_str(), "files_written":files_written
-                    }),
-                };
-                (metadata, false)
-            }
             ScriptIoProgress::LoadReady => {
                 let Some(NumberedLoadWork::Finished(Some(result))) = &self.numbered_load else {
                     return Err(ProtocolError::State);
@@ -115,11 +125,7 @@ impl ScriptIoSession {
             RUNTIME_PERSISTENCE_RESULT,
             MessageBody::new(metadata.to_string(), vec![])?,
         )?;
-        if progress == ScriptIoProgress::SaveReady {
-            self.take_save_result();
-        } else {
-            self.take_numbered_load_result();
-        }
+        self.take_numbered_load_result();
         if !restored {
             self.resume_scenario()?;
         }

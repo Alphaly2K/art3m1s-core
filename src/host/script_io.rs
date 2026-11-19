@@ -297,6 +297,7 @@ pub struct ScriptIoSession {
     wait_start: Option<(u64, u64)>,
     event_filter: Option<EventFilterWork>,
     save_work: Option<SaveWork>,
+    background_autosave: bool,
     save_file_work: Option<(save_files::SaveFileCaller, save_files::SaveFileWork)>,
     gameplay_checkpoint: Option<crate::save::GameplayCheckpoint>,
     numbered_load: Option<NumberedLoadWork>,
@@ -363,6 +364,7 @@ impl ScriptIoSession {
             wait_start: None,
             event_filter: None,
             save_work: None,
+            background_autosave: false,
             save_file_work: None,
             gameplay_checkpoint: None,
             numbered_load: None,
@@ -426,7 +428,7 @@ impl ScriptIoSession {
             host_frame_id: self.frame.map(|frame| frame.id),
             latest_render_frame_id: self.frames.latest_id(),
             stage_size: (transport.epoch != 0).then_some([config.stage_width, config.stage_height]),
-            waiting_for_io: self.operation.is_some(),
+            waiting_for_io: self.operation.is_some() || self.background_autosave,
             waiting_for_ui: matches!(self.scenario_event, Some(Event::ShowDialog { .. }))
                 || self.http.waits_for_host(),
             waiting_for_render: self.screenshot.pending_request().is_some(),
@@ -489,6 +491,7 @@ impl ScriptIoSession {
         self.wait_start = None;
         self.event_filter = None;
         self.save_work = None;
+        self.background_autosave = false;
         self.save_file_work = None;
         self.gameplay_checkpoint = None;
         self.numbered_load = None;
@@ -605,6 +608,7 @@ impl ScriptIoSession {
         self.wait_start = None;
         self.event_filter = None;
         self.save_work = None;
+        self.background_autosave = false;
         self.save_file_work = None;
         self.gameplay_checkpoint = None;
         self.numbered_load = None;
@@ -895,6 +899,9 @@ impl ScriptIoSession {
         }
         if !(-1440..=1440).contains(&frame.utc_offset_minutes) {
             return Err(ProtocolError::Argument("invalid Host UTC offset").into());
+        }
+        if self.background_autosave {
+            return Ok(ScriptIoProgress::WouldBlock);
         }
         if matches!(self.shutdown, Shutdown::Closed)
             || (self.scene.is_none() && self.completed && !self.shutdown.is_closing_or_closed())

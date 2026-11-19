@@ -433,23 +433,28 @@ unsafe extern "C" fn open_project(rt: u64, info: *const ProjectInfo) -> i32 {
 }
 
 unsafe extern "C" fn step(rt: u64, info: *const StepInfo, out: *mut StepResult) -> i32 {
+    const BACKGROUND_AUTOSAVE: u32 = 1;
     boundary(|| {
         let size = unsafe { clear_output(out)? };
         unsafe { struct_size(info)? };
         let info = unsafe { &*info };
-        if info.flags != 0 || info.reserved != 0 || info.host_frame_id == 0 {
+        if info.reserved != 0 {
             return Err(Failure::new(ARGUMENT, "invalid Host frame descriptor"));
         }
         let handle = RuntimeHandle::from_raw(rt);
-        let progress = runtime::step(
-            handle,
-            HostFrame {
-                id: info.host_frame_id,
-                monotonic_ns: info.monotonic_ns,
-                utc_unix_ms: info.utc_unix_ms,
-                utc_offset_minutes: info.utc_offset_minutes,
-            },
-        )?;
+        let progress = match info.flags {
+            BACKGROUND_AUTOSAVE => runtime::step_background_autosave(handle)?,
+            0 if info.host_frame_id != 0 => runtime::step(
+                handle,
+                HostFrame {
+                    id: info.host_frame_id,
+                    monotonic_ns: info.monotonic_ns,
+                    utc_unix_ms: info.utc_unix_ms,
+                    utc_offset_minutes: info.utc_offset_minutes,
+                },
+            )?,
+            _ => return Err(Failure::new(ARGUMENT, "invalid Host frame descriptor")),
+        };
         let state = runtime::get_state(handle)?;
         unsafe {
             set_output(

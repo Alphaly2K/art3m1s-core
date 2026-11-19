@@ -405,6 +405,10 @@ int main(int argc, char **argv) {
     uint64_t epoch = state.prefix.session_epoch;
     assert(state.prefix.state == ART_RUNTIME_RUNNING && state.prefix.stage_width == 640);
     assert(state.tail == UINT64_C(0x123456789abcdef0));
+    ArtStepInfo background = { .struct_size = sizeof(background), .flags = ART_STEP_BACKGROUND_AUTOSAVE };
+    ArtStepResult background_result = { .struct_size = sizeof(background_result) };
+    assert(api->step(rt, &background, &background_result) == ART_OK);
+    assert(background_result.host_frame_id == 1 && background_result.flags == ART_WAIT_SCENARIO);
     ArtFrameView view = { .struct_size = sizeof(view) };
     assert(frames->acquire_latest(rt, 0, &view) == ART_OK);
     assert(view.packet.size >= 4 && !memcmp(view.packet.data, "ARFP", 4));

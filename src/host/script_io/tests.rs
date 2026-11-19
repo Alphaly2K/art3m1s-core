@@ -1934,6 +1934,69 @@ __engine:setEventHandler{onSave="save_hook"}
 }
 
 #[test]
+fn background_autosave_waits_for_host_io_without_advancing_the_game() {
+    let (mut session, epoch, mut host) = playback_project(
+        br#"*top
+[autosave allow=1]
+[wt0]
+[var name=t.advanced data=1]
+[stop]
+[lua]
+function tick() ticks=(ticks or 0)+1 end
+__engine:setEventHandler{onEnterFrame="tick"}
+[/lua]
+"#,
+    );
+    drive_playback_boot(&mut session, &mut host);
+    assert!(requests(&mut session).is_empty());
+    let globals = session.interpreter().lua().globals();
+    let ticks = globals.get::<usize>("ticks").unwrap();
+    let future_frame = playback_frame(2, 100);
+    for key in ["__autosave.dat", "saveg.dat", "system.dat"] {
+        assert_eq!(
+            session.step_background_autosave().unwrap(),
+            ScriptIoProgress::Waiting
+        );
+        let request = requests(&mut session).pop().unwrap();
+        assert_eq!(request.metadata["key"], key);
+        assert_eq!(
+            session.step_queued_frame(future_frame).unwrap(),
+            ScriptIoProgress::WouldBlock
+        );
+        assert_eq!(
+            session.step_background_autosave().unwrap(),
+            ScriptIoProgress::Waiting
+        );
+        session.submit_replies(&[host.complete(&request)]).unwrap();
+    }
+    assert_eq!(
+        session.step_background_autosave().unwrap(),
+        ScriptIoProgress::Completed
+    );
+    assert_eq!(session.runtime_state().host_frame_id, Some(1));
+    assert!(!session.runtime_state().waiting_for_io);
+    assert!(session.at_input_wait());
+    assert_eq!(globals.get::<usize>("ticks").unwrap(), ticks);
+    let mut event = vec![0; session.state().control.bytes];
+    assert_eq!(session.poll_events(&mut event).written_bytes, event.len());
+    assert_eq!(
+        u32::from_le_bytes(event[8..12].try_into().unwrap()),
+        RUNTIME_PERSISTENCE_RESULT.kind
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&event[64..]).unwrap(),
+        json!({"operation":"autosave", "status":"written"})
+    );
+
+    submit_playback_keys(&mut session, epoch, &[(13, true)]);
+    assert_eq!(
+        session.step_queued_frame(future_frame).unwrap(),
+        ScriptIoProgress::Event
+    );
+    assert!(session.interpreter.get_variable("t.advanced").is_some());
+}
+
+#[test]
 fn http_requests_resume_once_across_frame_io_cancellation_and_save() {
     let mut limits = TransportLimits::default();
     limits.replies.records = 1;

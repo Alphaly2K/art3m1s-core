@@ -303,6 +303,12 @@ pub fn step(handle: RuntimeHandle, frame: HostFrame) -> Result<ScriptIoProgress,
     })
 }
 
+pub(super) fn step_background_autosave(
+    handle: RuntimeHandle,
+) -> Result<ScriptIoProgress, RuntimeError> {
+    with_session(handle, |session| Ok(session.step_background_autosave()?))
+}
+
 /// Borrow the latest CPU frame newer than `after`, if any. Dropping the view releases it.
 pub fn acquire_latest(
     handle: RuntimeHandle,
