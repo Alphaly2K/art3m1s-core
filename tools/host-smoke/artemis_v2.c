@@ -23,7 +23,10 @@ static const char boot[] = "*top\n[debug mode=1 level=1]\n[debugprint data=boot]
                            "[lyc id=1 width=2 height=1 color=ff112233]\n"
                            "[takess]\n[savess file=thumb]\n"
                            "[httpget url=https://example.invalid/status varname_code=t.http]\n"
-                           "[caption data=ready]\n[@]\n[caption data=advanced]\n[stop]\n";
+                           "[caption data=ready]\n[@]\n"
+                           "[var system=fullscreen name=t.fs]\n[var system=minimize name=t.min]\n"
+                           "[if estimate=\"$t.fs == 1 && t.min == 1\"]\n[caption data=advanced]\n[/if]\n"
+                           "[stop]\n";
 #define SHADER_SCENE \
     "[lyc id=1 width=4 height=4 color=ff112233]\n"
 #define SHADER_BINDINGS \
@@ -424,10 +427,14 @@ int main(int argc, char **argv) {
     };
     assert(api->submit(rt, keys, 2) == ART_E_ARGUMENT);
     assert(pump(api, rt, 2) == 0);
-    assert(api->submit(rt, keys, 1) == ART_OK);
+    ArtMessage input[] = {
+        keys[0],
+        message(ART_DOMAIN_INPUT, ART_INPUT_WINDOW_STATE, epoch, 0, "{\"fullscreen\":true,\"minimized\":true}")
+    };
+    assert(api->submit(rt, input, 2) == ART_OK);
     assert(pump(api, rt, 3) == 2);
     assert(api->open_project(rt, &project) == ART_OK);
-    assert(api->submit(rt, keys, 1) == ART_E_STALE);
+    assert(api->submit(rt, input, 2) == ART_E_STALE);
     assert(!memcmp(pixels.data, expected, sizeof(expected)));
     assert(frames->release(rt, view.token) == ART_OK);
     assert(frames->release(rt, view.token) == ART_E_HANDLE);

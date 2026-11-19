@@ -36,6 +36,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v4
+    - name: Check standalone Artemis dependencies and Luau
+      if: runner.os == 'Linux'
+      run: bash scripts/check-host-v2-deps.sh
     - name: Check standalone Artemis v2 ABI on Unix
       if: runner.os != 'Windows'
       run: bash scripts/test-host-v2.sh

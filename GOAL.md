@@ -161,6 +161,11 @@ macOS Flutter Host 向 v2 提交实际窗口状态。真窗口探针验证脚本
 Flutter 在待处理 IO 阻塞退出时继续回复并重试，确认进入关闭阶段后继续完成存档。独立 Core
 285 项、C ABI、Flutter 帧与媒体回归及 macOS 真窗口退出探针均通过。
 
+独立 Core 的 CI 增加全目标依赖图检查，限制 Luau 配置，并拒绝已拆出的后端和宿主依赖。
+本机检查通过，注入 Lua 5.3、Metal 后端与 FFmpeg 的测试图均被拒绝。C ABI 冒烟新增窗口快照
+读取与旧会话输入检查，在原生 macOS 和 Windows x64 兼容层通过；Windows GNU DLL 仍只导出
+`art3m1s_get_api_v2`。最新 Linux 与 Windows MSVC 原生任务仍待运行。
+
 ## 已完成：Flutter 方法通道与共享纹理适配
 
 macOS Runner 适配器负责调用 v2 会话并管理 Flutter 纹理。Swift 与 Dart 通过方法通道交换事件
