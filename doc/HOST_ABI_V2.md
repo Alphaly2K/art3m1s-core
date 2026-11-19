@@ -712,6 +712,8 @@ FFmpeg CLI，以同时验证 Ogg 视频。设置 `ARTEMIS_MEDIA_SWIFT_SMOKE=1` �
 接线。探针独立运行并检查纹理注册、像素和关闭，无需启动游戏应用。
 同时设置 `ARTEMIS_GL_SMOKE_ANGLE_DIR` 可验证两个 ANGLE 会话的 GLSL 像素、截图和纹理
 替换，以及关闭其中一个会话后另一个仍可绘制。
+设置 `ARTEMIS_VIDEO_SWIFT_SMOKE=1` 可验证原生 H.264 短片在首次轮询前播完时的像素、
+终态顺序和纹理释放。该检查需要支持 `libx264` 的 FFmpeg，无需游戏资源。
 
 在 `tools/host-bindings/dart` 目录运行 `dart pub get --enforce-lockfile` 后，使用
 `dart run bin/smoke.dart <纯 Core 动态库路径>` 可验证 Dart 接入。`artemis_host.dart` 的

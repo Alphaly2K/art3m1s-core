@@ -18,7 +18,7 @@ cargo build --locked --lib --manifest-path crates/artemis-core/Cargo.toml --targ
 cargo build --locked --manifest-path crates/artemis-metal-host/Cargo.toml --target-dir target "$@"
 lib_dir="$(cd "$build_dir/debug" && pwd)"
 scratch="$(mktemp -d)"
-trap 'rm -f "$scratch/artemis-flutter" && rmdir "$scratch"' EXIT
+trap 'rm -f "$scratch/artemis-flutter" "$scratch/short.mp4" && rmdir "$scratch"' EXIT
 MACOSX_DEPLOYMENT_TARGET=12.0 swiftc -swift-version 5 -strict-concurrency=complete -warnings-as-errors \
   -module-cache-path "$build_dir/swift-modules" -Xcc -Idoc/abi \
   -import-objc-header tools/host-bindings/swift/ArtemisHostBridge.h \
@@ -28,4 +28,9 @@ MACOSX_DEPLOYMENT_TARGET=12.0 swiftc -swift-version 5 -strict-concurrency=comple
   tools/host-smoke/ArtemisFlutterSmoke.swift -o "$scratch/artemis-flutter"
 args=("$lib_dir/libart3m1s_core.dylib" "$PWD/target/debug/libart3m1s_artemis_metal_host.dylib")
 if [[ -n ${ARTEMIS_GL_SMOKE_ANGLE_DIR:-} ]]; then args+=("$ARTEMIS_GL_SMOKE_ANGLE_DIR"); fi
+if [[ ${ARTEMIS_VIDEO_SWIFT_SMOKE:-0} == 1 ]]; then
+  "${FFMPEG_CLI:-ffmpeg}" -nostdin -v error -f lavfi -i 'color=red:s=32x32:r=24:d=0.25' \
+    -c:v libx264 -pix_fmt yuv420p "$scratch/short.mp4"
+  export ARTEMIS_VIDEO_SMOKE_CLIP="$scratch/short.mp4"
+fi
 "$scratch/artemis-flutter" "${args[@]}"

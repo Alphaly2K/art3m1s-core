@@ -1,3 +1,4 @@
+import AVFoundation
 import CoreVideo
 import FlutterMacOS
 import Foundation
@@ -176,7 +177,55 @@ private final class Registry: NSObject, FlutterTextureRegistry {
             try exerciseAngle(messenger, registry: registry, ini: ini)
         }
         try exerciseLayerVideoDelivery(registry)
+        if let clip = ProcessInfo.processInfo.environment["ARTEMIS_VIDEO_SMOKE_CLIP"] {
+            try exerciseUnpolledVideoEnd(messenger, registry: registry, open: open, path: clip)
+        }
         print("Artemis Flutter channel smoke passed")
+    }
+
+    @MainActor private static func exerciseUnpolledVideoEnd(_ messenger: Messenger, registry: Registry,
+                                                           open: [String: Any], path: String) throws {
+        guard let state = try messenger.call("open", open) as? [String: Any],
+              let session = state["session"] as? String, let epoch = state["epoch"] as? String else {
+            throw Failure(detail: "Could not open short video session")
+        }
+        defer { _ = try? messenger.call("close", session: session) }
+        var reachedEnd = false
+        let center = NotificationCenter.default
+        let observer = center.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { reachedEnd = true }
+        }
+        defer { center.removeObserver(observer) }
+        let playback = "9223372036854775809"
+        _ = try messenger.call("videoOpen", ["epoch": epoch, "playback": playback, "path": path,
+                                             "fullscreen": true, "volume": 0.0], session: session)
+        let deadline = ProcessInfo.processInfo.systemUptime + 5
+        while !reachedEnd && ProcessInfo.processInfo.systemUptime < deadline {
+            _ = RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
+        }
+        try expect(reachedEnd, "AVPlayer did not reach the end of the short video")
+        // Deliver both end observers before the first Host poll.
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+        let events = try messenger.call("videoPoll", session: session) as? [[String: Any]]
+        guard let events, events.count == 1, let event = events.first,
+              event["playback"] as? String == playback, event["status"] as? String == "started",
+              let texture = event["texture"] as? Int64,
+              let buffer = registry.textures[texture]?.copyPixelBuffer()?.takeRetainedValue() else {
+            throw Failure(detail: "Short video ended before delivery: \(String(describing: events))")
+        }
+        try expect(CVPixelBufferGetWidth(buffer) == 32 && CVPixelBufferGetHeight(buffer) == 32,
+                   "Short video did not publish the expected texture")
+        try expect(CVPixelBufferLockBaseAddress(buffer, .readOnly) == kCVReturnSuccess,
+                   "Could not read the short video texture")
+        let pixel = CVPixelBufferGetBaseAddress(buffer)?.assumingMemoryBound(to: UInt8.self)
+        let red = pixel.map { $0[0] < 16 && $0[1] < 16 && $0[2] > 220 && $0[3] == 255 }
+        CVPixelBufferUnlockBaseAddress(buffer, .readOnly)
+        try expect(red == true, "Short video published the wrong BGRA pixels")
+        let ended = try messenger.call("videoPoll", session: session) as? [[String: String]]
+        try expect(ended == [["playback": playback, "status": "ended"]] && registry.textures[texture] == nil,
+                   "Short video's terminal event did not release its texture")
+        try expect((messenger.call("videoPoll", session: session) as? [[String: Any]])?.isEmpty == true,
+                   "Short video reported a second terminal event")
     }
 
     @MainActor private static func exerciseLayerVideoDelivery(_ registry: Registry) throws {
