@@ -2753,33 +2753,95 @@ impl MetalBackend {
         #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
         if self.dxvk.is_some() {
             let mut start = 0;
-            for (index, command) in commands.iter().enumerate() {
-                if !self.is_dxvk_effect(command.shader.as_ref()) {
-                    continue;
-                }
+            while let Some(offset) = commands[start..]
+                .iter()
+                .position(|command| self.is_dxvk_effect(command.shader.as_ref()))
+            {
+                let index = start + offset;
                 self.encode_draw_batch(command_buffer, target, &commands[start..index], damage)?;
-                let source = self
-                    .textures
-                    .get(&command.texture)
-                    .map(|t| t.raw.clone())
-                    .ok_or("missing DXVK sprite texture")?;
-                let output =
-                    self.apply_dxvk(command_buffer, command.shader.as_ref(), &source, false);
-                self.encode_draw(
-                    command_buffer,
-                    target,
-                    command,
-                    damage,
-                    output.as_ref(),
-                    None,
-                    None,
-                    None,
-                )?;
-                start = index + 1;
+                let pair = commands.get(index + 1).is_some_and(|command| {
+                    if !self.is_dxvk_effect(command.shader.as_ref()) {
+                        return false;
+                    }
+                    let Some(texture) = self.textures.get(&command.texture) else {
+                        return false;
+                    };
+                    let extent =
+                        Extent2D::new(texture.raw.width() as u32, texture.raw.height() as u32);
+                    // Limit the extra foreground/output pair to 32 MiB of pixels.
+                    extent
+                        .rgba8_len()
+                        .is_some_and(|bytes| bytes <= 16 * 1024 * 1024)
+                        && self
+                            .dxvk
+                            .as_mut()
+                            .unwrap()
+                            .foreground(1, &self.device, extent)
+                            .is_ok()
+                });
+                start = index + if pair { 2 } else { 1 };
+                self.encode_dxvk_sprites(command_buffer, target, &commands[index..start], damage)?;
             }
             return self.encode_draw_batch(command_buffer, target, &commands[start..], damage);
         }
         self.encode_draw_batch(command_buffer, target, commands, damage)
+    }
+
+    #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
+    fn encode_dxvk_sprites(
+        &mut self,
+        command_buffer: &mut CommandBuffer,
+        target: &PrivateRenderTarget,
+        commands: &[DrawCommand],
+        damage: Option<[f32; 4]>,
+    ) -> Result<(), String> {
+        let mut ready = [false; 2];
+        // Sprite effects sample only their own inputs. Keep their outputs separate
+        // until they are blended into the scene in draw order.
+        for (slot, command) in commands.iter().enumerate() {
+            let source = self
+                .textures
+                .get(&command.texture)
+                .map(|texture| texture.raw.clone())
+                .ok_or("missing DXVK sprite texture")?;
+            match self.encode_dxvk_input(command_buffer, slot, &source, false) {
+                Ok(()) => ready[slot] = true,
+                Err(error) => {
+                    log::warn!("[MetalBackend] DXVK foreground preparation failed: {error}")
+                }
+            }
+        }
+        if ready.iter().any(|&encoded| encoded)
+            && let Err(error) = self.submit_dxvk_inputs(command_buffer)
+        {
+            log::warn!("[MetalBackend] DXVK foreground submission failed: {error}");
+            ready.fill(false);
+        }
+        for (slot, command) in commands.iter().enumerate() {
+            let output = if ready[slot] {
+                let effect = command.shader.as_ref().unwrap();
+                match self.draw_dxvk(slot, effect) {
+                    Ok(output) => Some(output),
+                    Err(error) => {
+                        log::warn!("[MetalBackend] DXVK effect {} failed: {error}", effect.name);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            self.encode_draw(
+                command_buffer,
+                target,
+                command,
+                damage,
+                output.as_ref(),
+                None,
+                None,
+                None,
+            )?;
+        }
+        Ok(())
     }
 
     #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
@@ -2798,7 +2860,11 @@ impl MetalBackend {
         unpremultiply_input: bool,
     ) -> Option<Texture> {
         let effect = effect.filter(|effect| self.is_dxvk_effect(Some(effect)))?;
-        match self.run_dxvk(command_buffer, effect, source, unpremultiply_input) {
+        let result = self
+            .encode_dxvk_input(command_buffer, 0, source, unpremultiply_input)
+            .and_then(|()| self.submit_dxvk_inputs(command_buffer))
+            .and_then(|()| self.draw_dxvk(0, effect));
+        match result {
             Ok(output) => Some(output),
             Err(error) => {
                 log::warn!("[MetalBackend] DXVK effect {} failed: {error}", effect.name);
@@ -2808,19 +2874,19 @@ impl MetalBackend {
     }
 
     #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
-    fn run_dxvk(
+    fn encode_dxvk_input(
         &mut self,
         command_buffer: &mut CommandBuffer,
-        effect: &ShaderEffect,
+        slot: usize,
         source: &Texture,
         unpremultiply_input: bool,
-    ) -> Result<Texture, String> {
+    ) -> Result<(), String> {
         let extent = Extent2D::new(source.width() as u32, source.height() as u32);
         let foreground = self
             .dxvk
             .as_mut()
             .unwrap()
-            .foreground(&self.device, extent)?
+            .foreground(slot, &self.device, extent)?
             .clone();
         let copy = DrawCommand {
             texture: TextureId(0),
@@ -2857,9 +2923,12 @@ impl MetalBackend {
             None,
             Some(PipelineBlend::Replace),
             Some(extent),
-        )?;
+        )
+    }
 
-        // Finish earlier Metal reads of the shared output and the current foreground write.
+    #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
+    fn submit_dxvk_inputs(&self, command_buffer: &mut CommandBuffer) -> Result<(), String> {
+        // Finish previous Metal reads of the outputs and the new foreground writes.
         let next = self
             .queue
             .commandBuffer()
@@ -2870,11 +2939,17 @@ impl MetalBackend {
         if submitted.status() != MTLCommandBufferStatus::Completed {
             return Err(format_command_error(&submitted));
         }
+        Ok(())
+    }
+
+    #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
+    fn draw_dxvk(&self, slot: usize, effect: &ShaderEffect) -> Result<Texture, String> {
         let texture = |id: Option<TextureId>| {
             id.and_then(|id| self.textures.get(&id))
                 .map(|texture| &texture.raw)
         };
         self.dxvk.as_ref().unwrap().draw(
+            slot,
             effect,
             texture(effect.mask_texture),
             texture(effect.user_texture),

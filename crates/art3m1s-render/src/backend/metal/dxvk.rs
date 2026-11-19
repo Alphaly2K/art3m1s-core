@@ -63,7 +63,7 @@ pub(super) struct Targets {
 
 pub(super) struct Effects {
     // Programs and targets must drop before the context, and all before the library.
-    targets: Option<Targets>,
+    targets: [Option<Targets>; 2],
     programs: HashMap<Box<[u8]>, (Resource, EffectProgram)>,
     active: ShaderRegistry<EffectProgram>,
     context: OnceCell<Result<Resource, String>>,
@@ -117,7 +117,7 @@ impl Effects {
                 .get::<DrawEffect>(b"art_dxvk_draw")
                 .map_err(|e| e.to_string())?;
             Ok(Self {
-                targets: None,
+                targets: [None, None],
                 programs: HashMap::new(),
                 active: ShaderRegistry::default(),
                 context: OnceCell::new(),
@@ -203,11 +203,11 @@ impl Effects {
 
     pub fn foreground(
         &mut self,
+        slot: usize,
         device: &Device,
         extent: Extent2D,
     ) -> Result<&PrivateRenderTarget, String> {
-        if self
-            .targets
+        if self.targets[slot]
             .as_ref()
             .is_none_or(|targets| targets.foreground.extent != extent)
         {
@@ -216,7 +216,7 @@ impl Effects {
             let (out_surface, output) = shared_texture(device, extent)?;
             let raw = unsafe { (self.create_targets)(context, &fore_surface, &out_surface) }
                 .ok_or("cannot import DXVK effect targets")?;
-            self.targets = Some(Targets {
+            self.targets[slot] = Some(Targets {
                 handle: Resource {
                     raw,
                     destroy: self.destroy_targets,
@@ -229,16 +229,19 @@ impl Effects {
                 output,
             });
         }
-        Ok(&self.targets.as_ref().unwrap().foreground)
+        Ok(&self.targets[slot].as_ref().unwrap().foreground)
     }
 
     pub fn draw(
         &self,
+        slot: usize,
         effect: &ShaderEffect,
         mask: Option<&Texture>,
         user: Option<&Texture>,
     ) -> Result<Texture, String> {
-        let targets = self.targets.as_ref().ok_or("DXVK targets unavailable")?;
+        let targets = self.targets[slot]
+            .as_ref()
+            .ok_or("DXVK targets unavailable")?;
         let context = self.context()?;
         let program = *self
             .active
