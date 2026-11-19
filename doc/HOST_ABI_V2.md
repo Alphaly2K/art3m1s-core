@@ -221,6 +221,7 @@ C 预览版 `ArtMessage.schema_version=1`、`flags=0`。一个批次可包含一
 | Input (2) | 3 | `id`、`phase`（`down`、`move`、`up`）、`x`、`y` |
 | Input (2) | 4 | `{}`，失焦 |
 | Input (2) | 5 | `button`：0 关闭，1 最大化，2 最小化 |
+| Input (2) | 6 | 窗口快照 `fullscreen`、`minimized`（布尔） |
 | Runtime (1) | 16 | `{}`，请求正常关闭 |
 | Runtime (1) | 17 | `{}`，blob 为默认字体 |
 | Media (5) | 16 | `playback_id`、`status`（`started`、`ended`、`failed`、`cancelled`） |
@@ -230,6 +231,9 @@ C 预览版 `ArtMessage.schema_version=1`、`flags=0`。一个批次可包含一
 ChunkedWrites=32。Renderer 位分别为 sprite=1、transition=2、screenshot=4、group=8、
 emote=16、HLSL=32、GLSL=64。
 预览版检查未知位；Host 仍须处理收到的服务请求，缺少可选服务时返回相应失败。
+
+窗口快照采用最近一次提交值，在下一逻辑帧或新开始的后台自动存档中生效。重试同一帧或同一次
+后台存档保持原快照。未提交快照时两项均为 false。
 
 `poll_events` 按以下固定小端格式写入完整记录，不直接 memcpy C struct：
 

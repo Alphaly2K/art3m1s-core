@@ -153,6 +153,10 @@ HLSL 路径，显式选择 ANGLE 仍优先。macOS Runner 的两份混合资源�
 校验包签名、独立 Core 导出和随包依赖。Apple Silicon 本地使用与工作流相同的发布参数通过，
 归档解包后保留可执行权限并通过复验；要求 DXVK 而包内缺库时明确失败。远端工作流尚未运行。
 
+macOS Flutter Host 向 v2 提交实际窗口状态。真窗口探针验证脚本在全屏时读到 `fullscreen=1`、
+后台存档钩子读到 `minimize=1`、恢复后两项均为 `0`。窗口操作保留原会话与原 Shell 模式，
+退出前最后一次存档仍通过。独立 Core 284 项、C ABI 冒烟及 Flutter 定向回归通过。
+
 ## 已完成：Flutter 方法通道与共享纹理适配
 
 macOS Runner 适配器负责调用 v2 会话并管理 Flutter 纹理。Swift 与 Dart 通过方法通道交换事件

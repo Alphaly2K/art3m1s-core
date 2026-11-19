@@ -36,6 +36,10 @@ pub enum HostInput {
     WindowButton {
         button: u32,
     },
+    WindowState {
+        fullscreen: bool,
+        minimized: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +62,8 @@ pub(crate) const OVERRIDE_IS_DECIDE: u32 = 32;
 #[derive(Default)]
 pub(in crate::host) struct InputFrame {
     pending: Vec<HostInput>,
+    pending_window_state: Option<(bool, bool)>,
+    pub window_state: (bool, bool),
     now_ns: u64,
     keys: BTreeMap<u32, KeyState>,
     overrides: BTreeMap<u32, u32>,
@@ -98,11 +104,26 @@ impl InputFrame {
         if self.pending.len() + events.len() > MAX_PENDING_INPUTS {
             return Err(ProtocolError::WouldBlock);
         }
-        self.pending.extend_from_slice(events);
+        for &event in events {
+            match event {
+                HostInput::WindowState {
+                    fullscreen,
+                    minimized,
+                } => self.pending_window_state = Some((fullscreen, minimized)),
+                _ => self.pending.push(event),
+            }
+        }
         Ok(())
     }
 
+    pub fn apply_window_state(&mut self) {
+        if let Some(state) = self.pending_window_state.take() {
+            self.window_state = state;
+        }
+    }
+
     pub fn advance(&mut self, now_ns: u64) {
+        self.apply_window_state();
         self.now_ns = now_ns;
         self.overrides.clear();
         self.override_all = None;
@@ -157,6 +178,7 @@ impl InputFrame {
                     self.focus_lost = true;
                 }
                 HostInput::WindowButton { button } => self.window_buttons.push(button),
+                HostInput::WindowState { .. } => unreachable!("window state is staged separately"),
             }
         }
     }

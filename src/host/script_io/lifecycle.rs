@@ -84,11 +84,14 @@ impl ScriptIoSession {
             {
                 return Ok(ScriptIoProgress::WouldBlock);
             }
+            if let Some(scene) = &self.scene {
+                scene.with_input(|input| input.apply_window_state());
+            }
             self.background_autosave = true;
             self.save_work = Some(SaveWork::Queued(SaveTarget::Automatic));
         }
 
-        // Run the save continuation without sampling input or advancing a frame.
+        // Run the save continuation without consuming device input or advancing a frame.
         let progress = self.step_inner().inspect_err(|_| self.mark_faulted())?;
         if progress != ScriptIoProgress::SaveReady {
             return Ok(progress);

@@ -864,6 +864,9 @@ impl EngineCallbacks for SceneCallbacks {
     fn get_script_status(&self) -> u8 {
         0
     }
+    fn get_window_state(&self) -> (bool, bool) {
+        self.0.lock().unwrap().input.window_state
+    }
     fn is_key_down(&self, code: u32) -> bool {
         self.0.lock().unwrap().input.is_down(code)
     }

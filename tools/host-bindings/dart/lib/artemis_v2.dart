@@ -504,6 +504,8 @@ const int ART_INPUT_FOCUS_LOST = 4;
 
 const int ART_INPUT_WINDOW_BUTTON = 5;
 
+const int ART_INPUT_WINDOW_STATE = 6;
+
 const int ART_MEDIA_AUDIO_COMMAND = 1;
 
 const int ART_MEDIA_VIDEO_COMMAND = 2;

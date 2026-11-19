@@ -116,7 +116,7 @@ enum Family {
 fn classify(message: &Message) -> Result<Family, Failure> {
     match (message.domain, message.kind, message.request_id) {
         (3, 1 | 2 | 4 | 5, 1..) | (4, 2 | 5 | 7, 1..) | (6, 1 | 2, 1..) => Ok(Family::Reply),
-        (2, 1..=5, 0) => Ok(Family::Input),
+        (2, 1..=6, 0) => Ok(Family::Input),
         (1 | 5, 16 | 17, 0) => Ok(Family::Control),
         _ => Err(Failure::new(UNSUPPORTED, "unknown submitted message")),
     }
@@ -186,6 +186,10 @@ unsafe fn input(message: &Message) -> Result<HostInput, Failure> {
         4 => Ok(HostInput::FocusLost),
         5 => Ok(HostInput::WindowButton {
             button: u32_at(&data, "button")?,
+        }),
+        6 => Ok(HostInput::WindowState {
+            fullscreen: data["fullscreen"].as_bool().ok_or_else(invalid)?,
+            minimized: data["minimized"].as_bool().ok_or_else(invalid)?,
         }),
         _ => unreachable!(),
     }
