@@ -9,7 +9,9 @@
 extern "C" {
 #endif
 
-typedef struct ArtDxvkPass ArtDxvkPass;
+typedef struct ArtDxvkContext ArtDxvkContext;
+typedef struct ArtDxvkProgram ArtDxvkProgram;
+typedef struct ArtDxvkTargets ArtDxvkTargets;
 
 typedef struct ArtDxvkImage {
     const uint8_t *rgba;
@@ -23,13 +25,22 @@ typedef struct ArtDxvkUniform {
     size_t count;
 } ArtDxvkUniform;
 
-/* Load an ADE2 shader pair on the owner thread. Attach before writing foreground. */
-ArtDxvkPass *art_dxvk_pass_create(const char *effect_ade, IOSurfaceRef foreground, IOSurfaceRef output);
-void *art_dxvk_pass_metal_device(const ArtDxvkPass *pass);
-/* Wait for the producer before drawing. Returns after output is ready for Metal. */
-int art_dxvk_pass_draw(ArtDxvkPass *pass, ArtDxvkImage mask, ArtDxvkImage user,
-                       const ArtDxvkUniform *uniforms, size_t uniform_count);
-void art_dxvk_pass_destroy(ArtDxvkPass *pass);
+/* Use one context per owner thread. Destroy its programs and targets before the context. */
+ArtDxvkContext *art_dxvk_context_create(void);
+void *art_dxvk_context_metal_device(const ArtDxvkContext *context);
+void art_dxvk_context_destroy(ArtDxvkContext *context);
+
+/* Load an ADE2 shader pair from caller-owned bytes. No byte borrow survives the call. */
+ArtDxvkProgram *art_dxvk_program_create(ArtDxvkContext *context, const uint8_t *ade, size_t size);
+void art_dxvk_program_destroy(ArtDxvkProgram *program);
+
+/* Import distinct BGRA IOSurfaces of equal size. Call before the first foreground write. */
+ArtDxvkTargets *art_dxvk_targets_create(ArtDxvkContext *context, IOSurfaceRef foreground, IOSurfaceRef output);
+void art_dxvk_targets_destroy(ArtDxvkTargets *targets);
+
+/* Wait for the foreground producer before calling. Returns after output is ready for Metal. */
+int art_dxvk_draw(ArtDxvkContext *context, ArtDxvkProgram *program, const ArtDxvkTargets *targets,
+                  ArtDxvkImage mask, ArtDxvkImage user, const ArtDxvkUniform *uniforms, size_t uniform_count);
 
 #ifdef __cplusplus
 }

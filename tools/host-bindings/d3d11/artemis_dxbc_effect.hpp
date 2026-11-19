@@ -5,33 +5,33 @@
 
 #include <array>
 #include <cstring>
-#include <istream>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace artemis {
 
 class DxbcEffect {
 public:
-    explicit DxbcEffect(std::istream &file) {
-        require(file.read(reinterpret_cast<char *>(&header_), sizeof(header_)).good() &&
-            (header_.magic == ART_DXBC_EFFECT_MAGIC || header_.magic == ART_DXBC_EFFECT_PAIR_MAGIC) &&
+    explicit DxbcEffect(std::string_view artifact) {
+        read(artifact, &header_, sizeof(header_));
+        require((header_.magic == ART_DXBC_EFFECT_MAGIC || header_.magic == ART_DXBC_EFFECT_PAIR_MAGIC) &&
             header_.bytecode_bytes >= 4 && header_.bytecode_bytes <= ART_DXBC_MAX_BYTECODE &&
             header_.constant_bytes <= ART_DXBC_MAX_CONSTANTS && !(header_.constant_bytes & 15) &&
             header_.textures <= ART_DXBC_TEXTURE_SLOTS && header_.uniforms <= ART_DXBC_MAX_UNIFORMS);
-        require(file.read(reinterpret_cast<char *>(textures_.data()), header_.textures * sizeof(ArtDxbcTexture)).good());
+        read(artifact, textures_.data(), header_.textures * sizeof(ArtDxbcTexture));
         uniforms_.resize(header_.uniforms);
         if (!uniforms_.empty()) {
-            require(file.read(reinterpret_cast<char *>(uniforms_.data()), uniforms_.size() * sizeof(ArtDxbcUniform)).good());
+            read(artifact, uniforms_.data(), uniforms_.size() * sizeof(ArtDxbcUniform));
         }
-        read_bytecode(file, header_.bytecode_bytes, bytecode_);
+        bytecode_ = read_bytecode(artifact, header_.bytecode_bytes);
         if (header_.magic == ART_DXBC_EFFECT_PAIR_MAGIC) {
             uint32_t bytes = 0;
-            require(file.read(reinterpret_cast<char *>(&bytes), sizeof(bytes)).good());
-            read_bytecode(file, bytes, vertex_bytecode_);
+            read(artifact, &bytes, sizeof(bytes));
+            vertex_bytecode_ = read_bytecode(artifact, bytes);
         }
-        require(file.peek() == std::istream::traits_type::eof());
+        require(artifact.empty());
 
         uint32_t slots = 0;
         for (uint32_t i = 0; i < header_.textures; ++i) {
@@ -53,8 +53,9 @@ public:
         }
     }
 
-    const std::vector<char> &bytecode() const { return bytecode_; }
-    const std::vector<char> &vertex_bytecode() const { return vertex_bytecode_; }
+    std::pair<std::string_view, std::string_view> take_bytecode() {
+        return {std::exchange(vertex_bytecode_, {}), std::exchange(bytecode_, {})};
+    }
     uint32_t constant_bytes() const { return header_.constant_bytes; }
     uint32_t texture_count() const { return header_.textures; }
 
@@ -80,10 +81,18 @@ private:
         if (!valid) throw std::runtime_error("invalid ADE shader effect");
     }
 
-    static void read_bytecode(std::istream &file, uint32_t bytes, std::vector<char> &code) {
-        require(bytes >= 4 && bytes <= ART_DXBC_MAX_BYTECODE);
-        code.resize(bytes);
-        require(file.read(code.data(), code.size()).good() && std::memcmp(code.data(), "DXBC", 4) == 0);
+    static void read(std::string_view &artifact, void *output, size_t bytes) {
+        require(bytes <= artifact.size());
+        if (bytes) std::memcpy(output, artifact.data(), bytes);
+        artifact.remove_prefix(bytes);
+    }
+
+    static std::string_view read_bytecode(std::string_view &artifact, uint32_t bytes) {
+        require(bytes >= 4 && bytes <= ART_DXBC_MAX_BYTECODE && bytes <= artifact.size() &&
+                std::memcmp(artifact.data(), "DXBC", 4) == 0);
+        const auto code = artifact.substr(0, bytes);
+        artifact.remove_prefix(bytes);
+        return code;
     }
 
     static bool name_valid(const char (&name)[ART_DXBC_NAME_BYTES]) {
@@ -93,8 +102,7 @@ private:
     ArtDxbcHeader header_{};
     std::array<ArtDxbcTexture, ART_DXBC_TEXTURE_SLOTS> textures_{};
     std::vector<ArtDxbcUniform> uniforms_;
-    std::vector<char> bytecode_;
-    std::vector<char> vertex_bytecode_;
+    std::string_view bytecode_, vertex_bytecode_;
 };
 
 }

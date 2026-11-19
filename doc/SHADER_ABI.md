@@ -318,8 +318,13 @@ normalized coordinates. The compiler checks the output registers and
 masks against the pixel inputs and rejects unsupported signatures. Both
 modes accept one sampler at `s0`, 2D textures at `t0` through `t3`, and
 float scalars and vectors in `b0`. They create no graphics device. The
-macOS process loads the shader pair once and
-binds foreground, mask, user textures, and parameters by reflected name.
+native [DXVK pass interface](../tools/host-bindings/d3d11/artemis_dxvk_pass.h)
+prepares an ADE2 program from Host-owned bytes, independently of any
+texture. A single context may reuse multiple programs and replace the
+foreground/output IOSurface pair without preparing the programs again.
+Use all three objects on the owner thread and destroy the programs and
+targets before destroying the context. The pass binds foreground, mask,
+user textures, and parameters by reflected name.
 Metal writes the foreground into a separate IOSurface on the same GPU.
 The probe transitions the imported foreground image before the first Metal
 write, waits for Metal completion before sampling, and waits for D3D11
@@ -327,8 +332,10 @@ completion before reusing either surface. Three draws verify the initial
 result, an update to the same foreground surface, and a constant change
 with that foreground held steady. Metal copies each DXVK result to a
 separate presentation IOSurface on the GPU. Only the final pixel
-comparison reads the presentation buffer on the CPU. The probe requires
-neither game assets nor Flutter.
+comparison reads the presentation buffer on the CPU. The `--hlsl` probe
+switches between two programs and replaces the DXVK targets before reusing
+the first program. It checks the new output and the retained presentation
+buffer. The probe requires neither game assets nor Flutter.
 
 Use `--arfp` in place of `--hlsl` to run Core's three-frame scene fixture.
 The probe compiles the first packet's HLSL once. Metal renders the group's

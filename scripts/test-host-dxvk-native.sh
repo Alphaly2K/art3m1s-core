@@ -91,6 +91,8 @@ else
       printf '%s\n' 'Unsupported pixel input did not produce the expected diagnostic.' >&2
       exit 1
     fi
-    run_native "$executable" effect.ade
+    printf '%s\n' 'float4 main() : SV_Target { return float4(0, 0, 1, 1); }' |
+      compile_effect effect-pair > "$scratch/alternate.ade"
+    run_native "$executable" effect.ade alternate.ade
   fi
 fi

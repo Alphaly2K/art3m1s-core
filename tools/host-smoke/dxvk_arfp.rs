@@ -7,10 +7,9 @@ use art3m1s_render::backend::{FrameTarget, GpuBackend, metal::MetalBackend};
 use art3m1s_render::{Extent2D, NativeSurface, NativeSurfaceKind};
 use shared_surface::SharedSurface;
 use std::{
-    ffi::{CString, c_char, c_void},
+    ffi::c_void,
     fs,
     io::Write,
-    os::unix::ffi::OsStrExt,
     ptr::{self, NonNull},
 };
 
@@ -30,20 +29,26 @@ struct Uniform {
 }
 
 unsafe extern "C" {
-    fn art_dxvk_pass_create(
-        effect: *const c_char,
+    fn art_dxvk_context_create() -> *mut c_void;
+    fn art_dxvk_context_metal_device(context: *mut c_void) -> *mut c_void;
+    fn art_dxvk_context_destroy(context: *mut c_void);
+    fn art_dxvk_program_create(context: *mut c_void, ade: *const u8, size: usize) -> *mut c_void;
+    fn art_dxvk_program_destroy(program: *mut c_void);
+    fn art_dxvk_targets_create(
+        context: *mut c_void,
         foreground: *mut c_void,
         output: *mut c_void,
     ) -> *mut c_void;
-    fn art_dxvk_pass_metal_device(pass: *mut c_void) -> *mut c_void;
-    fn art_dxvk_pass_draw(
-        pass: *mut c_void,
+    fn art_dxvk_targets_destroy(targets: *mut c_void);
+    fn art_dxvk_draw(
+        context: *mut c_void,
+        program: *mut c_void,
+        targets: *mut c_void,
         mask: Image,
         user: Image,
         uniforms: *const Uniform,
         count: usize,
     ) -> i32;
-    fn art_dxvk_pass_destroy(pass: *mut c_void);
     fn art_metal_writer_create(
         device: *mut c_void,
         output: *mut c_void,
@@ -54,10 +59,24 @@ unsafe extern "C" {
     fn art_metal_writer_destroy(writer: *mut c_void);
 }
 
-struct Pass(NonNull<c_void>);
-impl Drop for Pass {
+struct Context(NonNull<c_void>);
+impl Drop for Context {
     fn drop(&mut self) {
-        unsafe { art_dxvk_pass_destroy(self.0.as_ptr()) }
+        unsafe { art_dxvk_context_destroy(self.0.as_ptr()) }
+    }
+}
+
+struct Program(NonNull<c_void>);
+impl Drop for Program {
+    fn drop(&mut self) {
+        unsafe { art_dxvk_program_destroy(self.0.as_ptr()) }
+    }
+}
+
+struct Targets(NonNull<c_void>);
+impl Drop for Targets {
+    fn drop(&mut self) {
+        unsafe { art_dxvk_targets_destroy(self.0.as_ptr()) }
     }
 }
 
@@ -139,24 +158,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let scenes = [first, Scene::read(&mut data)?, Scene::read(&mut data)?];
     assert!(data.is_empty(), "trailing fixture bytes");
+    let context = Context(
+        NonNull::new(unsafe { art_dxvk_context_create() }).ok_or("cannot create DXVK context")?,
+    );
+    let program = {
+        let ade = fs::read(effect)?;
+        Program(
+            NonNull::new(unsafe {
+                art_dxvk_program_create(context.0.as_ptr(), ade.as_ptr(), ade.len())
+            })
+            .ok_or("cannot prepare DXVK program")?,
+        )
+    };
     let extent = Extent2D::new(4, 4);
     let foreground = SharedSurface::new(extent)?;
     let output = SharedSurface::new(extent)?;
     let final_surface = SharedSurface::new(extent)?;
     let foreground_handle = foreground.handle()?.as_ptr();
     let output_handle = output.handle()?.as_ptr();
-    let effect = CString::new(effect.as_bytes())?;
     // Initialize the D3D11 image layout before Metal first writes the foreground.
-    let pass = Pass(
+    let targets = Targets(
         NonNull::new(unsafe {
-            art_dxvk_pass_create(effect.as_ptr(), foreground_handle, output_handle)
+            art_dxvk_targets_create(context.0.as_ptr(), foreground_handle, output_handle)
         })
-        .ok_or("cannot create native DXVK pass")?,
+        .ok_or("cannot create DXVK targets")?,
     );
     let presenter = Presenter(
         NonNull::new(unsafe {
             art_metal_writer_create(
-                art_dxvk_pass_metal_device(pass.0.as_ptr()),
+                art_dxvk_context_metal_device(context.0.as_ptr()),
                 final_surface.handle()?.as_ptr(),
                 extent.width,
                 extent.height,
@@ -216,8 +246,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .collect::<Vec<_>>();
         let result = unsafe {
-            art_dxvk_pass_draw(
-                pass.0.as_ptr(),
+            art_dxvk_draw(
+                context.0.as_ptr(),
+                program.0.as_ptr(),
+                targets.0.as_ptr(),
                 scene.image(effect.mask),
                 scene.image(effect.user),
                 uniforms.as_ptr(),

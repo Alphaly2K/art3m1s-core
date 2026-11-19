@@ -6,8 +6,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <type_traits>
+#include <vector>
 
 using dxvk::Com;
 using PixelBuffer = std::unique_ptr<std::remove_pointer_t<CVPixelBufferRef>, decltype(&CVPixelBufferRelease)>;
@@ -69,45 +71,88 @@ static void clear_surfaces() {
     std::puts("Native DXVK IOSurface: two D3D11 frames visible in the original pixel buffer");
 }
 
-static void draw_effect(const char *effect) {
-    constexpr uint32_t width = 7, height = 5;
-    const auto foreground = make_buffer(width, height);
-    const auto output = make_buffer(width, height);
-    const auto presentation = make_buffer(width, height);
-    const auto source_surface = CVPixelBufferGetIOSurface(foreground.get());
-    const auto output_surface = CVPixelBufferGetIOSurface(output.get());
-    std::unique_ptr<ArtDxvkPass, decltype(&art_dxvk_pass_destroy)> pass(
-        art_dxvk_pass_create(effect, source_surface, output_surface), art_dxvk_pass_destroy);
-    check(bool(pass), "create DXVK effect pass");
-    auto *device = art_dxvk_pass_metal_device(pass.get());
-    using Writer = std::unique_ptr<ArtMetalWriter, decltype(&art_metal_writer_destroy)>;
-    Writer writer(art_metal_writer_create(device, source_surface, width, height), art_metal_writer_destroy);
-    Writer presenter(art_metal_writer_create(device, CVPixelBufferGetIOSurface(presentation.get()), width, height),
-                     art_metal_writer_destroy);
-    check(writer && presenter, "create Metal foreground and presentation targets");
-    const uint8_t colors[][4] = {{17, 34, 51, 255}, {17, 68, 102, 255}};
-    const uint8_t pixels[][4] = {{24, 24, 5, 255}, {37, 41, 5, 255}, {26, 34, 0, 255}};
+using Program = std::unique_ptr<ArtDxvkProgram, decltype(&art_dxvk_program_destroy)>;
+using Targets = std::unique_ptr<ArtDxvkTargets, decltype(&art_dxvk_targets_destroy)>;
+using Writer = std::unique_ptr<ArtMetalWriter, decltype(&art_metal_writer_destroy)>;
+
+static Program load_program(ArtDxvkContext *context, const char *path) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    const auto bytes = file.tellg();
+    check(bytes > 0, "open shader artifact");
+    std::vector<uint8_t> ade(static_cast<size_t>(bytes));
+    file.seekg(0);
+    check(bool(file.read(reinterpret_cast<char *>(ade.data()), bytes)), "read shader artifact");
+    Program program(art_dxvk_program_create(context, ade.data(), ade.size()), art_dxvk_program_destroy);
+    check(bool(program), "prepare DXVK program");
+    return program;
+}
+
+struct Presentation {
+    PixelBuffer foreground, output, presentation;
+    Targets targets;
+    Writer writer, presenter;
+
+    Presentation(ArtDxvkContext *context, uint32_t width, uint32_t height)
+        : foreground(make_buffer(width, height)), output(make_buffer(width, height)),
+          presentation(make_buffer(width, height)),
+          targets(art_dxvk_targets_create(context, CVPixelBufferGetIOSurface(foreground.get()), output_surface()),
+                  art_dxvk_targets_destroy),
+          writer(art_metal_writer_create(art_dxvk_context_metal_device(context), CVPixelBufferGetIOSurface(foreground.get()),
+                                         width, height), art_metal_writer_destroy),
+          presenter(art_metal_writer_create(art_dxvk_context_metal_device(context), CVPixelBufferGetIOSurface(presentation.get()),
+                                            width, height), art_metal_writer_destroy) {
+        check(targets && writer && presenter, "create DXVK and Metal surfaces");
+    }
+
+    IOSurfaceRef output_surface() const { return CVPixelBufferGetIOSurface(output.get()); }
+
+    void present() const {
+        check(art_metal_writer_copy(presenter.get(), output_surface()), "consume DXVK output in Metal");
+    }
+};
+
+static void draw_effect(const char *effect, const char *alternate) {
+    std::unique_ptr<ArtDxvkContext, decltype(&art_dxvk_context_destroy)> context(art_dxvk_context_create(),
+                                                                                art_dxvk_context_destroy);
+    check(bool(context), "create DXVK context");
+    auto primary = load_program(context.get(), effect);
+    auto second = load_program(context.get(), alternate);
+    Presentation original(context.get(), 7, 5);
+    const uint8_t initial[] = {17, 34, 51, 255}, changed[] = {17, 68, 102, 255};
+    const uint8_t pixels[][4] = {{24, 24, 5, 255}, {255, 0, 0, 255}, {26, 34, 0, 255}};
     const uint8_t mask[] = {128, 0, 0, 255}, user[] = {5, 7, 11, 255};
     const float tint[] = {0, 1, 0.5f, 1};
-    for (size_t i = 0; i < 3; ++i) {
-        if (i < 2) check(art_metal_writer_clear(writer.get(), colors[i]), "render Metal foreground");
-        const float param = i < 2 ? 1.0f : 0.0f;
+    const auto draw_primary = [&](const Presentation &surface, const uint8_t (&color)[4], float param) {
+        check(art_metal_writer_clear(surface.writer.get(), color), "render Metal foreground");
         const ArtDxvkUniform uniforms[] = {
             {reinterpret_cast<const uint8_t *>("tint"), 4, tint, 4},
             {reinterpret_cast<const uint8_t *>("param"), 5, &param, 1},
         };
-        check(art_dxvk_pass_draw(pass.get(), {mask, 1, 1}, {user, 1, 1}, uniforms, 2) == 0, "render HLSL effect");
-        check(art_metal_writer_copy(presenter.get(), output_surface), "consume DXVK output in Metal");
-        check_pixels(presentation.get(), i + 1, pixels[i]);
-    }
-    std::puts("Native DXVK IOSurface: Metal presented all three reflected HLSL frames");
+        check(art_dxvk_draw(context.get(), primary.get(), surface.targets.get(), {mask, 1, 1}, {user, 1, 1},
+                            uniforms, 2) == 0, "render reflected HLSL effect");
+        surface.present();
+    };
+    draw_primary(original, initial, 1);
+    check_pixels(original.presentation.get(), 1, pixels[0]);
+    check(art_dxvk_draw(context.get(), second.get(), original.targets.get(), {}, {}, nullptr, 0) == 0,
+          "switch shader on the same DXVK target");
+    original.present();
+    check_pixels(original.presentation.get(), 2, pixels[1]);
+    second.reset();
+
+    original.targets.reset();
+    Presentation replacement(context.get(), 5, 3);
+    draw_primary(replacement, changed, 0);
+    check_pixels(replacement.presentation.get(), 3, pixels[2]);
+    check_pixels(original.presentation.get(), 2, pixels[1]);
+    std::puts("Native DXVK reused one device across two programs and a replaced presentation target");
 }
 
 int main(int argc, char **argv) try {
     if (argc == 1) clear_surfaces();
-    else if (argc == 2) draw_effect(argv[1]);
+    else if (argc == 3) draw_effect(argv[1], argv[2]);
     else {
-        std::fputs("Usage: artemis-dxvk-native [effect.ade]\n", stderr);
+        std::fputs("Usage: artemis-dxvk-native [effect.ade alternate.ade]\n", stderr);
         return 2;
     }
 } catch (const std::exception &error) {
