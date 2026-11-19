@@ -1,0 +1,47 @@
+diff --git a/src/vulkan/vulkan_loader.cpp b/src/vulkan/vulkan_loader.cpp
+--- a/src/vulkan/vulkan_loader.cpp
++++ b/src/vulkan/vulkan_loader.cpp
+@@ -15,6 +15,7 @@ namespace dxvk::vk {
+       "winevulkan.dll",
+       "vulkan-1.dll",
+ #elif defined(__APPLE__)
++      "@loader_path/libMoltenVK.dylib",
+       "libvulkan.1.dylib",
+       "libvulkan.dylib",
+ #else
+diff --git a/src/wsi/sdl3/wsi_platform_sdl3.cpp b/src/wsi/sdl3/wsi_platform_sdl3.cpp
+--- a/src/wsi/sdl3/wsi_platform_sdl3.cpp
++++ b/src/wsi/sdl3/wsi_platform_sdl3.cpp
+@@ -16,8 +16,12 @@ namespace dxvk::wsi {
+ #elif defined(__APPLE__)
+-        "libSDL3.0.dylib"
++        "@loader_path/libSDL3.0.dylib"
+ #else
+         "libSDL3.so.0"
+ #endif
+       );
++#if defined(__APPLE__)
++    if (libsdl == nullptr)
++      libsdl = LoadLibraryA("libSDL3.0.dylib");
++#endif
+     if (libsdl == nullptr)
+       throw DxvkError("SDL3 WSI: Failed to load SDL3 DLL.");
+@@ -43,3 +47,6 @@ namespace dxvk::wsi {
+   std::vector<const char *> Sdl3WsiDriver::getInstanceExtensions() {
++#if defined(__APPLE__)
++    if (!SDL_Vulkan_LoadLibrary("@loader_path/libMoltenVK.dylib"))
++#endif
+     if (!SDL_Vulkan_LoadLibrary(nullptr))
+       throw DxvkError(str::format("SDL3 WSI: Failed to load Vulkan library: ", SDL_GetError()));
+diff --git a/src/wsi/wsi_platform.cpp b/src/wsi/wsi_platform.cpp
+--- a/src/wsi/wsi_platform.cpp
++++ b/src/wsi/wsi_platform.cpp
+@@ -33,6 +33,8 @@ namespace dxvk::wsi {
+         // for other platforms however we _need_ to know which WSI to use!
+ #if defined(DXVK_WSI_WIN32)
+         hint = "Win32";
++#elif defined(__APPLE__) && defined(DXVK_WSI_SDL3)
++        hint = "SDL3";
+ #else
+         throw DxvkError("DXVK_WSI_DRIVER environment variable unset");
+ #endif

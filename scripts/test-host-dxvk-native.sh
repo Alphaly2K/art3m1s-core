@@ -11,46 +11,68 @@ if [[ $# -gt 1 || ( -n $mode && $mode != --hlsl && $mode != --arfp ) ]]; then
   printf '%s\n' 'Usage: test-host-dxvk-native.sh [--hlsl|--arfp]' >&2
   exit 2
 fi
-: "${ARTEMIS_DXVK_NATIVE_SOURCE:?Set this to the DXVK source checkout}"
-: "${ARTEMIS_DXVK_NATIVE_BUILD:?Set this to the matching native build directory}"
-: "${ARTEMIS_MOLTENVK_DYLIB:?Set this to an absolute path to libMoltenVK.dylib}"
-source_dir=$(cd "$ARTEMIS_DXVK_NATIVE_SOURCE" && pwd)
-build_dir=$(cd "$ARTEMIS_DXVK_NATIVE_BUILD" && pwd)
-sdl_libdir=$(pkg-config --variable=libdir sdl3)
-if [[ $ARTEMIS_MOLTENVK_DYLIB != /* || ! -f $ARTEMIS_MOLTENVK_DYLIB ]]; then
-  printf '%s\n' 'ARTEMIS_MOLTENVK_DYLIB must be an absolute path to a MoltenVK dylib.' >&2
-  exit 2
-fi
 scratch=$(mktemp -d)
 trap 'rm -rf -- "$scratch"' EXIT
-ln -s "$ARTEMIS_MOLTENVK_DYLIB" "$scratch/libvulkan.1.dylib"
-ln -s "$ARTEMIS_MOLTENVK_DYLIB" "$scratch/libvulkan.dylib"
+runtime_dir=${ARTEMIS_DXVK_RUNTIME_DIR:-}
 xcrun clang++ -std=c++17 -fobjc-arc -Wall -Wextra -Werror \
   -c tools/host-smoke/artemis_dxvk_metal_writer.mm -o "$scratch/metal-writer.o"
-compile=(xcrun clang++ -std=c++17 -Wall -Wextra -Werror -Wno-missing-field-initializers
-  -isystem "$source_dir/include/native/windows" -isystem "$source_dir/include/native/directx" \
-  -isystem "$source_dir/include/native" -isystem "$source_dir/include/vulkan/include" \
-  -isystem "$source_dir/include/spirv/include" -isystem "$source_dir/src/dxgi" \
-  -isystem "$source_dir/src")
-link=(
-  tools/host-bindings/d3d11/artemis_dxvk_device.cpp tools/host-bindings/d3d11/artemis_dxvk_pass.cpp "$scratch/metal-writer.o" \
-  "$build_dir/src/d3d11/libdxvk_d3d11.0.dylib" "$build_dir/src/dxgi/libdxvk_dxgi.0.dylib" \
-  "$ARTEMIS_MOLTENVK_DYLIB" -Wl,-rpath,"$build_dir/src/d3d11" -Wl,-rpath,"$build_dir/src/dxgi" \
-  -Wl,-rpath,"$(dirname "$ARTEMIS_MOLTENVK_DYLIB")" \
-  -framework CoreVideo -framework CoreFoundation -framework Foundation -framework IOSurface -framework Metal)
+if [[ -n $runtime_dir ]]; then
+  if [[ $mode != --arfp ]]; then
+    printf '%s\n' 'Use --arfp to test a packaged DXVK runtime.' >&2
+    exit 2
+  fi
+  runtime_dir=$(cd "$runtime_dir" && pwd)
+else
+  : "${ARTEMIS_DXVK_NATIVE_SOURCE:?Set this to the DXVK source checkout}"
+  : "${ARTEMIS_DXVK_NATIVE_BUILD:?Set this to the matching native build directory}"
+  : "${ARTEMIS_MOLTENVK_DYLIB:?Set this to an absolute path to libMoltenVK.dylib}"
+  source_dir=$(cd "$ARTEMIS_DXVK_NATIVE_SOURCE" && pwd)
+  build_dir=$(cd "$ARTEMIS_DXVK_NATIVE_BUILD" && pwd)
+  sdl_libdir=$(pkg-config --variable=libdir sdl3)
+  if [[ $ARTEMIS_MOLTENVK_DYLIB != /* || ! -f $ARTEMIS_MOLTENVK_DYLIB ]]; then
+    printf '%s\n' 'ARTEMIS_MOLTENVK_DYLIB must be an absolute path to a MoltenVK dylib.' >&2
+    exit 2
+  fi
+  ln -s "$ARTEMIS_MOLTENVK_DYLIB" "$scratch/libvulkan.1.dylib"
+  ln -s "$ARTEMIS_MOLTENVK_DYLIB" "$scratch/libvulkan.dylib"
+  compile=(xcrun clang++ -std=c++17 -Wall -Wextra -Werror -Wno-missing-field-initializers
+    -isystem "$source_dir/include/native/windows" -isystem "$source_dir/include/native/directx"
+    -isystem "$source_dir/include/native" -isystem "$source_dir/include/vulkan/include"
+    -isystem "$source_dir/include/spirv/include" -isystem "$source_dir/src/dxgi" -isystem "$source_dir/src")
+  link=(
+    tools/host-bindings/d3d11/artemis_dxvk_device.cpp tools/host-bindings/d3d11/artemis_dxvk_pass.cpp "$scratch/metal-writer.o"
+    "$build_dir/src/d3d11/libdxvk_d3d11.0.dylib" "$build_dir/src/dxgi/libdxvk_dxgi.0.dylib"
+    "$ARTEMIS_MOLTENVK_DYLIB" -Wl,-rpath,"$build_dir/src/d3d11" -Wl,-rpath,"$build_dir/src/dxgi"
+    -Wl,-rpath,"$(dirname "$ARTEMIS_MOLTENVK_DYLIB")"
+    -framework CoreVideo -framework CoreFoundation -framework Foundation -framework IOSurface -framework Metal)
+fi
 
 run_native() (
   cd "$scratch"
-  DYLD_LIBRARY_PATH="$scratch:$sdl_libdir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
-   DXVK_WSI_DRIVER=SDL3 SDL_VULKAN_LIBRARY="$ARTEMIS_MOLTENVK_DYLIB" \
-   DXVK_LOG_LEVEL=${DXVK_LOG_LEVEL:-warn} MVK_CONFIG_LOG_LEVEL=${MVK_CONFIG_LOG_LEVEL:-2} \
-   "$@"
+  if [[ -n $runtime_dir ]]; then
+    unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH DXVK_WSI_DRIVER SDL_VULKAN_LIBRARY
+    DXVK_LOG_LEVEL=${DXVK_LOG_LEVEL:-warn} MVK_CONFIG_LOG_LEVEL=${MVK_CONFIG_LOG_LEVEL:-2} "$@"
+  else
+    DYLD_LIBRARY_PATH="$scratch:$sdl_libdir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
+      DXVK_WSI_DRIVER=SDL3 SDL_VULKAN_LIBRARY="$ARTEMIS_MOLTENVK_DYLIB" \
+      DXVK_LOG_LEVEL=${DXVK_LOG_LEVEL:-warn} MVK_CONFIG_LOG_LEVEL=${MVK_CONFIG_LOG_LEVEL:-2} \
+      "$@"
+  fi
 )
 
 effect_src="$PWD/tools/host-smoke/shaders/native-effect.hlsl"
 if [[ $mode == --arfp ]]; then
-  "${compile[@]}" -dynamiclib -Wl,-install_name,@rpath/libartemis_dxvk_probe.dylib \
-    "${link[@]}" -o "$scratch/libartemis_dxvk_probe.dylib"
+  probe_link=(-L "native=$scratch" -l dylib=artemis_dxvk_probe)
+  if [[ -n $runtime_dir ]]; then
+    xcrun clang++ -dynamiclib -Wl,-install_name,@rpath/libartemis_dxvk_probe.dylib \
+      "$scratch/metal-writer.o" -framework Metal -framework Foundation -framework IOSurface \
+      -o "$scratch/libartemis_dxvk_probe.dylib"
+    probe_link+=(-L "native=$runtime_dir" -l dylib=art3m1s_artemis_dxvk_host -C "link-arg=-Wl,-rpath,$runtime_dir")
+  else
+    "${compile[@]}" -dynamiclib -Wl,-install_name,@rpath/libartemis_dxvk_probe.dylib \
+      "${link[@]}" -o "$scratch/libartemis_dxvk_probe.dylib"
+  fi
+  probe_link+=(-C "link-arg=-Wl,-rpath,$scratch")
   core_build=${ART3M1S_V2_TARGET_DIR:-target/host-v2}
   cargo build --quiet --locked --lib --manifest-path crates/artemis-core/Cargo.toml --target-dir "$core_build"
   core_lib=$(cd "$core_build/debug" && pwd)
@@ -58,7 +80,7 @@ if [[ $mode == --arfp ]]; then
     -L"$core_lib" -lart3m1s_core -Wl,-rpath,"$core_lib" -o "$scratch/arfp"
   "$scratch/arfp" --shader-sequence > "$scratch/frames"
   cargo rustc --quiet --locked --manifest-path tools/host-smoke/Cargo.toml --target-dir target/host-v2 \
-    --features dxvk-smoke --bin artemis-dxvk-arfp -- -L "native=$scratch" -l dylib=artemis_dxvk_probe
+    --features dxvk-smoke --bin artemis-dxvk-arfp -- "${probe_link[@]}"
   executable="$PWD/target/host-v2/debug/artemis-dxvk-arfp"
   effect_src="$scratch/effect.hlsl"
   run_native "$executable" frames > "$effect_src"

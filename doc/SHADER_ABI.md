@@ -345,6 +345,24 @@ pixel after both a uniform change and a layer move. The fixture's pixel
 shader declares `TEXCOORD0` without `SV_Position`, so a vertex shader with
 position first would put the texture coordinates in the wrong register.
 
+To assemble the macOS effect runtime, apply
+[the adjacent library patch](../tools/host-bindings/d3d11/dxvk-macos-runtime.patch)
+to the DXVK source and rebuild both native libraries. Run
+`bash scripts/build-host-dxvk-native.sh OUTPUT_DIRECTORY` with the same
+source, build, and MoltenVK variables as the probe. The SDK and native
+libraries must match the architecture of their Host process. The script
+expects `LICENSE.MoltenVK` alongside MoltenVK and SDL3's installed license,
+or an explicit `ARTEMIS_SDL3_LICENSE` path for the latter.
+
+Keep the five dylibs together when moving the runtime and include its
+`licenses` directory when distributing it. Load
+`libart3m1s_artemis_dxvk_host.dylib` from the application's runtime directory
+and sign the dylibs with the app's signing identity when packaging them.
+The runtime consumes ADE2 bytes and needs no Wine or compiler to draw.
+Set `ARTEMIS_DXVK_RUNTIME_DIR` to the assembled directory and run
+`bash scripts/test-host-dxvk-native.sh --arfp` to check the packaged libraries.
+CrossOver is used only to generate the fixture's ADE2 input in this check.
+
 `ADE1` begins with five little-endian `u32` values: magic (`ADE1`), DXBC
 length, `b0` byte size, texture count, and uniform count. Each texture has
 a `u32` slot and a 256-byte NUL-terminated name. Each uniform has a `u32`
