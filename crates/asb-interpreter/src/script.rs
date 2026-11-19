@@ -119,9 +119,7 @@ impl Script {
             }
 
             // 指令解析 - 一行中可能混合多个标签与剧情文本段
-            // （Artemis 语义：未被 [ 和 ] 包围的部分都是剧情文本，见
-            // docs/spec/script_syntax.md；预处理器注入的
-            // [onlinehead]text[onlineend] 也依赖此规则）
+            // 预处理器注入的 [onlinehead]text[onlineend] 也依赖此规则。
             if line.contains('[') {
                 let mut segments = split_line_segments(line);
                 let mut wrapped = false;
@@ -153,13 +151,7 @@ impl Script {
                             if text.starts_with("//") {
                                 break;
                             }
-                            let mut params = HashMap::new();
-                            params.insert("text".to_string(), text.to_string());
-                            instructions.push(Instruction {
-                                tag: "__text".to_string(),
-                                params,
-                                line: line_num,
-                            });
+                            push_text_segment(&mut instructions, text, line_num);
                             continue;
                         }
                     };
@@ -221,15 +213,7 @@ impl Script {
                 continue;
             }
 
-            // 剧情文本（未被 [] 包围的内容）
-            // 创建特殊的 text 标签
-            let mut params = HashMap::new();
-            params.insert("text".to_string(), line.to_string());
-            instructions.push(Instruction {
-                tag: "__text".to_string(),
-                params,
-                line: line_num,
-            });
+            push_text_segment(&mut instructions, line, line_num);
             line_idx += 1;
         }
 
@@ -321,6 +305,25 @@ pub(crate) fn split_line_segments(line: &str) -> Vec<LineSegment> {
     }
 
     segments
+}
+
+fn push_text_segment(instructions: &mut Vec<Instruction>, text: &str, line: usize) {
+    let before_wait = text.strip_suffix('@');
+    let text = before_wait.unwrap_or(text);
+    if !text.is_empty() {
+        instructions.push(Instruction {
+            tag: "__text".into(),
+            params: HashMap::from([("text".into(), text.into())]),
+            line,
+        });
+    }
+    if before_wait.is_some() {
+        instructions.push(Instruction {
+            tag: "@".into(),
+            params: HashMap::new(),
+            line,
+        });
+    }
 }
 
 fn wrapped_tag<'a>(open: &str, remaining: &[&'a str]) -> Option<(usize, String, &'a str)> {
@@ -584,12 +587,17 @@ mod tests {
 
     #[test]
     fn test_mixed_text_and_tags_in_one_line() {
-        // Artemis 语义：未被 [ ] 包围的部分是剧情文本（docs/spec/script_syntax.md），
-        // 文本段与标签段按行内顺序产出指令。
-        let script = Script::parse("test", "[onlinehead]「ぷるぷる」@[rp]").unwrap();
+        let script = Script::parse("test", "[onlinehead]a@b@[rp]\nplain@\n@\n").unwrap();
         let tags: Vec<&str> = script.instructions.iter().map(|i| i.tag.as_str()).collect();
-        assert_eq!(tags, vec!["onlinehead", "__text", "rp"]);
-        assert_eq!(script.instructions[1].get("text"), Some("「ぷるぷる」@"));
+        assert_eq!(
+            tags,
+            ["onlinehead", "__text", "@", "rp", "__text", "@", "@"]
+        );
+        assert_eq!(script.instructions[1].get("text"), Some("a@b"));
+        assert_eq!(script.instructions[4].get("text"), Some("plain"));
+        assert_eq!(script.instructions[2].line, 1);
+        assert_eq!(script.instructions[5].line, 2);
+        assert_eq!(script.instructions[6].line, 3);
     }
 
     #[test]
@@ -666,10 +674,9 @@ mod tests {
         let content = "[&scpsupport mode=\"init\"]\n[&scpsupport mode=\"add\" command=\"@\"]\n[&scpsupport mode=\"add\" command=\"rp\"]\n[&scpsupport mode=\"add\" char=\"】\" command=\"rt\"]\n【スライム】\n「ぷるぷる」";
         let script = Script::parse("test", content).unwrap();
         let tags: Vec<&str> = script.instructions.iter().map(|i| i.tag.as_str()).collect();
-        assert_eq!(tags, vec!["__text", "rt", "__text", "rp"]);
+        assert_eq!(tags, vec!["__text", "rt", "__text", "@", "rp"]);
         assert_eq!(script.instructions[0].get("text"), Some("【スライム】"));
-        // 换行规则的 @ 并入文本段（与手写 「…」@[rp] 等价）
-        assert_eq!(script.instructions[2].get("text"), Some("「ぷるぷる」@"));
+        assert_eq!(script.instructions[2].get("text"), Some("「ぷるぷる」"));
     }
 
     #[test]

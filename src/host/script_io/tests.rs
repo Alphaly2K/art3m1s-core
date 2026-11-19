@@ -2675,7 +2675,7 @@ fn numbered_save_from_a_menu_reloads_the_story_wait_with_the_save_hook_values() 
         br#"*top
 [var name=story_state data=7]
 [rclick allow=1 file=menu.iet]
-[wt0]
+First page@[rp]
 [calllua function=continued]
 [stop]
 [lua]
@@ -2694,6 +2694,7 @@ __engine:setEventHandler{onSave='capture'}
     );
     host.asset("load.iet", b"*top\n[load file=slot]\n[stop]\n");
     drive_playback_boot(&mut saver, &mut host);
+    assert!(saver.at_input_wait());
     let drive = |session: &mut ScriptIoSession, host: &mut MemoryHost, frame| {
         for _ in 0..2048 {
             if session.step_queued_frame(frame).unwrap() == ScriptIoProgress::Event {
