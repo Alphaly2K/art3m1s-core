@@ -119,6 +119,17 @@ void exerciseHost(
   }
 
   pump(1);
+  final background = session.step(
+    frameId: 2,
+    monotonicNs: 2000000,
+    utcUnixMs: 0,
+    utcOffsetMinutes: 0,
+    backgroundAutosave: true,
+  );
+  require(
+    background.status == ART_OK && background.frameId == 1,
+    'A background autosave step advanced the scenario clock',
+  );
   final borrowed = session.withLatestFrame(0, (frame) {
     final packet = frame.copyPacket();
     require(

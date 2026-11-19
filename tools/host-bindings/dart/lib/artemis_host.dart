@@ -250,11 +250,13 @@ final class ArtemisSession {
     );
   });
 
+  /// With [backgroundAutosave], drive the save without advancing the game frame.
   ArtemisStep step({
     required int frameId,
     required int monotonicNs,
     required int utcUnixMs,
     required int utcOffsetMinutes,
+    bool backgroundAutosave = false,
   }) => using((arena) {
     final step = _runtime.step
         .asFunction<
@@ -263,6 +265,7 @@ final class ArtemisSession {
     final info = arena<ArtStepInfo>();
     info.ref
       ..struct_size = sizeOf<ArtStepInfo>()
+      ..flags = backgroundAutosave ? ART_STEP_BACKGROUND_AUTOSAVE : 0
       ..host_frame_id = frameId
       ..monotonic_ns = monotonicNs
       ..utc_unix_ms = utcUnixMs

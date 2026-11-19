@@ -166,6 +166,11 @@ Flutter 在待处理 IO 阻塞退出时继续回复并重试，确认进入关�
 读取与旧会话输入检查，在原生 macOS 和 Windows x64 兼容层通过；Windows GNU DLL 仍只导出
 `art3m1s_get_api_v2`。最新 Linux 与 Windows MSVC 原生任务仍待运行。
 
+独立 Swift SDK 与 Flutter 共用会话实现，提供后台存档、GLSL 预热和 DXVK 程序准备；缓存目录
+由调用方指定。macOS v2 构建会在编译前核对 Swift SDK 与 C 头副本。重新生成 Dart 声明并接入
+后台存档步进，直连探针验证逻辑帧保持不变。Swift 冒烟、Flutter ANGLE 像素与发布包校验通过，
+缺少匹配 ABI 副本的构建已验证会被拒绝。
+
 ## 已完成：Flutter 方法通道与共享纹理适配
 
 macOS Runner 适配器负责调用 v2 会话并管理 Flutter 纹理。Swift 与 Dart 通过方法通道交换事件

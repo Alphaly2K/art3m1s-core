@@ -21,6 +21,7 @@ enum {
     ArtSwiftIoRead = ART_IO_READ,
     ArtSwiftIoWrite = ART_IO_WRITE_ATOMIC,
     ArtSwiftWaitIo = ART_WAIT_IO,
+    ArtSwiftBackgroundAutosave = ART_STEP_BACKGROUND_AUTOSAVE,
     ArtSwiftUI = ART_DOMAIN_UI,
     ArtSwiftHttpRequest = ART_UI_HTTP_REQUEST,
     ArtSwiftHttpCancel = ART_UI_HTTP_CANCEL,
@@ -52,6 +53,10 @@ static inline int art_swift_header_valid(ArtApiHeader header, uint32_t id, uint3
 typedef __typeof__(art3m1s_get_api_v2) *ArtSwiftGetAPI;
 typedef __typeof__(art3m1s_metal_host_v1_create) *ArtSwiftMetalCreate;
 typedef __typeof__(art3m1s_metal_host_v1_create_angle) *ArtSwiftAngleCreate;
+typedef __typeof__(art3m1s_metal_host_v1_set_glsl_cache) *ArtSwiftGlslCache;
+typedef __typeof__(art3m1s_metal_host_v1_prepare_glsl) *ArtSwiftPrepareGlsl;
+typedef __typeof__(art3m1s_metal_host_v1_create_dxvk) *ArtSwiftDxvkCreate;
+typedef __typeof__(art3m1s_metal_host_v1_prepare_ade2) *ArtSwiftPrepareADE2;
 typedef __typeof__(art3m1s_metal_host_v1_destroy) *ArtSwiftMetalDestroy;
 typedef __typeof__(art3m1s_metal_host_v1_set_surface) *ArtSwiftMetalSurface;
 typedef __typeof__(art3m1s_metal_host_v1_present) *ArtSwiftMetalPresent;

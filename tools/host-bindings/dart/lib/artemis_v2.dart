@@ -405,6 +405,7 @@ const int ART_HOST_CAP_HTTP = 8;
 const int ART_HOST_CAP_TRANSLATION = 16;
 
 const int ART_HOST_CAP_CHUNKED_WRITES = 32;
+
 const int ART_HOST_CAP_PROJECT_SAVE_PATH = 64;
 
 const int ART_RENDERER_CAP_SPRITE = 1;
@@ -418,6 +419,7 @@ const int ART_RENDERER_CAP_GROUP = 8;
 const int ART_RENDERER_CAP_EMOTE = 16;
 
 const int ART_RENDERER_CAP_HLSL = 32;
+
 const int ART_RENDERER_CAP_GLSL = 64;
 
 const int ART_WAIT_IO = 1;
@@ -429,6 +431,8 @@ const int ART_WAIT_SCENARIO = 4;
 const int ART_STEP_SCENARIO_FINISHED = 8;
 
 const int ART_WAIT_RENDER = 16;
+
+const int ART_STEP_BACKGROUND_AUTOSAVE = 1;
 
 const int ART_RUNTIME_CREATED = 0;
 
