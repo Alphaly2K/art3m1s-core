@@ -370,7 +370,25 @@ and sign the dylibs with the app's signing identity when packaging them.
 The runtime consumes ADE2 bytes and needs no Wine or compiler to draw.
 Set `ARTEMIS_DXVK_RUNTIME_DIR` to the assembled directory and run
 `bash scripts/test-host-dxvk-native.sh --arfp` to check the packaged libraries.
-CrossOver is used only to generate the fixture's ADE2 input in this check.
+To generate the fixture's ADE2 without CrossOver, set
+`ARTEMIS_NATIVE_HLSL_COMPILER` to the absolute path of the native compiler.
+
+Build and install vkd3d 2.1 separately with GNU Make 4.3 or newer, Bison 3,
+Flex, Perl with JSON, and Vulkan and SPIR-V headers. Use
+`--disable-maintainer-mode --disable-tests --without-xcb --without-opengl
+--without-ncurses` for the compiler build. Set `SONAME_LIBVULKAN` if
+configure cannot resolve the Vulkan library; the compile and reflect operations
+do not create a graphics device. The release archive includes the generated IDL
+headers. If sandboxed configure cannot read the maximum command length, set
+`lt_cv_sys_max_cmd_len=262144`.
+
+Run `bash scripts/build-host-hlsl-native.sh VKD3D_PREFIX VKD3D_SOURCE_TAR_XZ
+OUTPUT_DIRECTORY` with the installation and its corresponding source archive.
+The output contains `artemis-hlsl-compile`, the dynamically linked vkd3d
+libraries, license notices and source. Keep the tool and libraries together and
+retain `licenses/` and `source/` when distributing the package. The same
+`effect-pair` command reads HLSL from stdin and returns ADE2 on stdout on
+both macOS and Windows.
 
 The [macOS frame Host](abi/art3m1s_metal_host_v1.h) can create a DXVK
 renderer from that directory. Before drawing, pass each compiled effect and

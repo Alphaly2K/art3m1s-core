@@ -1,11 +1,22 @@
 #define COBJMACROS
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <d3dcompiler.h>
 #include <d3d11shader.h>
-#include "artemis_dxbc_effect.h"
-
 #include <fcntl.h>
 #include <io.h>
+#define semantic_casecmp _stricmp
+#else
+#define INITGUID
+#define COM_NO_WINDOWS_H
+#include <vkd3d_windows.h>
+#include <vkd3d_d3d11shader.h>
+#include <vkd3d_d3dcompiler.h>
+#include <strings.h>
+#define semantic_casecmp strcasecmp
+#endif
+#include "artemis_dxbc_effect.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,7 +46,7 @@ static int quad_field(const D3D11_SIGNATURE_PARAMETER_DESC *input) {
         input->MinPrecision != D3D_MIN_PRECISION_DEFAULT || input->Stream || !input->SemanticName) return -1;
     if (input->SystemValueType == D3D_NAME_POSITION && !input->SemanticIndex && input->Mask == 15)
         return QUAD_POSITION;
-    if (input->SystemValueType == D3D_NAME_UNDEFINED && !_stricmp(input->SemanticName, "TEXCOORD") &&
+    if (input->SystemValueType == D3D_NAME_UNDEFINED && !semantic_casecmp(input->SemanticName, "TEXCOORD") &&
         input->SemanticIndex <= 1 && (input->Mask == 3 || input->Mask == 12))
         return QUAD_UV0 + (int)input->SemanticIndex;
     return -1;
@@ -202,10 +213,12 @@ int main(int argc, char **argv) {
     const int paired = argc == 2 && strcmp(argv[1], "effect-pair") == 0;
     const int effect = paired || (argc == 2 && strcmp(argv[1], "effect") == 0);
     if (argc != 2 || (!effect && strcmp(argv[1], "vs_5_0") && strcmp(argv[1], "ps_5_0"))) {
-        fputs("Usage: artemis-hlsl-compile.exe vs_5_0|ps_5_0|effect|effect-pair < source.hlsl > bytecode\n", stderr);
+        fputs("Usage: artemis-hlsl-compile vs_5_0|ps_5_0|effect|effect-pair < source.hlsl > bytecode\n", stderr);
         return 2;
     }
+#ifdef _WIN32
     if (_setmode(_fileno(stdin), _O_BINARY) == -1 || _setmode(_fileno(stdout), _O_BINARY) == -1) return 1;
+#endif
     char *source = malloc(MAX_SOURCE + 1);
     if (!source) return 1;
     const size_t length = fread(source, 1, MAX_SOURCE + 1, stdin);

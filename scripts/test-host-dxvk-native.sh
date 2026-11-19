@@ -92,14 +92,22 @@ fi
 if [[ -z $mode ]]; then
   run_native "$executable"
 else
-  : "${CX_BOTTLE:?Set CX_BOTTLE to a dedicated CrossOver test bottle for HLSL compilation}"
-  crossover=${CROSSOVER_ROOT:-/Applications/CrossOver.app/Contents/SharedSupport/CrossOver}
-  "${ARTEMIS_D3D_CC:-x86_64-w64-mingw32-gcc}" -std=c11 -O2 -Wall -Wextra -Werror \
-    tools/host-bindings/d3d11/artemis_hlsl_compile.c -o "$scratch/artemis-hlsl-compile.exe" -ld3dcompiler_47 -ldxguid
-  compile_effect() (
-    cd "$scratch"
-    CX_GRAPHICS_BACKEND=wined3d "$crossover/bin/wine" --no-gui --debugmsg -all artemis-hlsl-compile.exe "$1"
-  )
+  if [[ -n ${ARTEMIS_NATIVE_HLSL_COMPILER:-} ]]; then
+    if [[ $ARTEMIS_NATIVE_HLSL_COMPILER != /* || ! -x $ARTEMIS_NATIVE_HLSL_COMPILER ]]; then
+      printf '%s\n' 'ARTEMIS_NATIVE_HLSL_COMPILER must be an absolute executable path.' >&2
+      exit 2
+    fi
+    compile_effect() { "$ARTEMIS_NATIVE_HLSL_COMPILER" "$1"; }
+  else
+    : "${CX_BOTTLE:?Set CX_BOTTLE to a dedicated CrossOver test bottle for HLSL compilation}"
+    crossover=${CROSSOVER_ROOT:-/Applications/CrossOver.app/Contents/SharedSupport/CrossOver}
+    "${ARTEMIS_D3D_CC:-x86_64-w64-mingw32-gcc}" -std=c11 -O2 -Wall -Wextra -Werror \
+      tools/host-bindings/d3d11/artemis_hlsl_compile.c -o "$scratch/artemis-hlsl-compile.exe" -ld3dcompiler_47 -ldxguid
+    compile_effect() (
+      cd "$scratch"
+      CX_GRAPHICS_BACKEND=wined3d "$crossover/bin/wine" --no-gui --debugmsg -all artemis-hlsl-compile.exe "$1"
+    )
+  fi
   compile_effect effect-pair < "$effect_src" > "$scratch/effect.ade"
   if [[ $mode == --arfp ]]; then
     run_native "$executable" frames effect.ade
