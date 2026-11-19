@@ -51,6 +51,7 @@ public:
 
     const std::vector<char> &bytecode() const { return bytecode_; }
     uint32_t constant_bytes() const { return header_.constant_bytes; }
+    uint32_t texture_count() const { return header_.textures; }
 
     int texture_slot(std::string_view name) const {
         for (uint32_t i = 0; i < header_.textures; ++i) {

@@ -22,13 +22,22 @@ static const char boot[] = "*top\n[lyc id=1 width=2 height=1 color=ff112233]\n"
     "mask=mask shadertexture=textureUser textureUser=user]\n"
 static const char shader_boot[] = "*top\n[lyshader id=paint file=paint.hlsl]\n"
     SHADER_SCENE SHADER_BINDINGS "[flip]\n[caption data=ready]\n[stop]\n";
+static const char shader_sequence_boot[] = "*top\n[lyshader id=paint file=paint.hlsl]\n"
+    "[lyc id=fx.base width=4 height=4 color=ff112233]\n"
+    "[lyc id=fx.top width=4 height=2 color=ff114466]\n"
+    "[lyprop id=fx.top top=2]\n"
+    "[lyprop id=fx shader=paint shaderconstant=\"tint,param\" tint=\"0,1,0.5,1\" "
+    "param=1 mask=mask shadertexture=textureUser textureUser=user]\n"
+    "[flip]\n[caption data=ready]\n[wait time=1 input=0]\n"
+    "[lyprop id=fx param=0]\n[flip]\n[caption data=ready]\n[wait time=1 input=0]\n"
+    "[lyprop id=fx.top top=0]\n[flip]\n[caption data=ready]\n[stop]\n";
 static const char glsl_boot[] = "*top\n[lyshader id=paint file=paint.Frag]\n"
     SHADER_SCENE SHADER_BINDINGS "[flip]\n[caption data=ready]\n[stop]\n";
 static const char shader_ini[] = "[WINDOWS]\nWIDTH=4\nHEIGHT=4\nBOOT=boot.iet\n";
 static const char shader[] = "Texture2D textureFore : register(t2); Texture2D textureMask : register(t3); "
     "Texture2D textureUser : register(t0); SamplerState sam : register(s0); "
     "cbuffer Params : register(b0) { float4 tint; float param; }; "
-    "float4 main(float2 uv : TEXCOORD0) : SV_Target { "
+    "float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target { "
     "float4 fore = textureFore.Sample(sam, uv) * tint; "
     "return float4(fore.rgb * textureMask.Sample(sam, uv).r + textureUser.Sample(sam, uv).rgb * param, fore.a); }";
 #define GLSL_BODY \
@@ -61,6 +70,7 @@ static const uint8_t user_png[] = { // RGBA (5, 7, 11, 255)
     0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
 };
 static enum { NO_SHADER, HLSL, GLSL, GLES, GLES100 } shader_frame;
+static int shader_sequence;
 static uint8_t external_glsl[256 * 1024];
 static size_t external_glsl_len;
 
@@ -89,7 +99,7 @@ static void service_io(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt,
                        const char *metadata) {
     const char *asset = NULL;
     if (strstr(metadata, "\"key\":\"boot.iet\""))
-        asset = shader_frame == HLSL ? shader_boot : shader_frame ? glsl_boot : boot;
+        asset = shader_sequence ? shader_sequence_boot : shader_frame == HLSL ? shader_boot : shader_frame ? glsl_boot : boot;
     if (shader_frame == HLSL && strstr(metadata, "\"key\":\"paint.hlsl\"")) asset = shader;
     if (strstr(metadata, "\"key\":\"paint.frag\"")) {
         if (shader_frame == GLSL) asset = glsl;
@@ -184,6 +194,10 @@ static unsigned pump(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt, uint64_t f
 
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--shader-frame")) shader_frame = HLSL;
+    else if (argc == 2 && !strcmp(argv[1], "--shader-sequence")) {
+        shader_frame = HLSL;
+        shader_sequence = 1;
+    }
     else if (argc == 2 && !strcmp(argv[1], "--glsl-frame")) shader_frame = GLSL;
     else if (argc == 2 && !strcmp(argv[1], "--gles-frame")) shader_frame = GLES;
     else if (argc == 2 && !strcmp(argv[1], "--gles100-frame")) shader_frame = GLES100;
@@ -215,6 +229,7 @@ int main(int argc, char **argv) {
                            .renderer_caps = ART_RENDERER_CAP_SPRITE | ART_RENDERER_CAP_SCREENSHOT };
     if (shader_frame == HLSL) info.renderer_caps |= ART_RENDERER_CAP_HLSL;
     else if (shader_frame) info.renderer_caps |= ART_RENDERER_CAP_GLSL;
+    if (shader_sequence) info.renderer_caps |= ART_RENDERER_CAP_GROUP;
     ArtRuntimeHandle rt = 0;
     assert(api->create(&info, &rt) == ART_OK && rt != 0);
     ArtProjectInfo project = { .struct_size = sizeof(project),
@@ -222,21 +237,27 @@ int main(int argc, char **argv) {
                                .platform_utf8 = text("windows") };
     assert(api->open_project(rt, &project) == ART_OK);
     if (shader_frame) {
-        unsigned captions = 0;
-        for (uint64_t id = 1; id <= 8 && !captions; ++id) captions = pump(api, rt, id);
-        assert(captions == 1);
-        ArtFrameView frame = { .struct_size = sizeof(frame) };
-        assert(frames->acquire_latest(rt, 0, &frame) == ART_OK);
-        assert(frame.packet.size >= 56);
-        const uint8_t *packet = frame.packet.data;
-        uint32_t textures = (uint32_t)little(packet + 12, 4);
-        assert(fwrite(packet, 1, (size_t)frame.packet.size, stdout) == frame.packet.size);
-        for (uint32_t i = 0; i < textures; ++i) {
-            ArtBytes rgba = {0};
-            assert(frames->texture_rgba(rt, frame.token, i, &rgba) == ART_OK);
-            assert(fwrite(rgba.data, 1, (size_t)rgba.size, stdout) == rgba.size);
+        unsigned emitted = 0;
+        const unsigned expected = shader_sequence ? 3 : 1;
+        uint64_t after = 0;
+        for (uint64_t id = 1; id <= 16 && emitted < expected; ++id) {
+            if (pump(api, rt, id) != 1) continue;
+            ArtFrameView frame = { .struct_size = sizeof(frame) };
+            assert(frames->acquire_latest(rt, after, &frame) == ART_OK);
+            assert(frame.packet.size >= 56);
+            const uint8_t *packet = frame.packet.data;
+            uint32_t textures = (uint32_t)little(packet + 12, 4);
+            assert(fwrite(packet, 1, (size_t)frame.packet.size, stdout) == frame.packet.size);
+            for (uint32_t i = 0; i < textures; ++i) {
+                ArtBytes rgba = {0};
+                assert(frames->texture_rgba(rt, frame.token, i, &rgba) == ART_OK);
+                assert(fwrite(rgba.data, 1, (size_t)rgba.size, stdout) == rgba.size);
+            }
+            after = frame.render_frame_id;
+            assert(frames->release(rt, frame.token) == ART_OK);
+            ++emitted;
         }
-        assert(frames->release(rt, frame.token) == ART_OK);
+        assert(emitted == expected);
         assert(api->destroy(rt) == ART_OK && fflush(stdout) == 0);
         return 0;
     }

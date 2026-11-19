@@ -15,8 +15,14 @@ name = "artemis-gl-smoke"
 path = "gl.rs"
 required-features = ["gl-smoke"]
 
+[[bin]]
+name = "artemis-dxvk-arfp"
+path = "dxvk_arfp.rs"
+required-features = ["dxvk-smoke"]
+
 [features]
 gl-smoke = ["art3m1s-render/gl"]
+dxvk-smoke = []
 
 [target.'cfg(target_os = "macos")'.dependencies]
 art3m1s-render = { path = "../../crates/art3m1s-render", features = ["artemis", "metal"] }

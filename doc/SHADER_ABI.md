@@ -324,6 +324,14 @@ separate presentation IOSurface on the GPU. Only the final pixel
 comparison reads the presentation buffer on the CPU. The probe requires
 neither game assets nor Flutter.
 
+Use `--arfp` in place of `--hlsl` to run Core's three-frame scene fixture.
+The probe compiles the first packet's HLSL once. Metal renders the group's
+layers into a shared foreground, and DXVK binds the packet's mask, user
+texture, and named constants. The final Metal texture is checked pixel by
+pixel after both a uniform change and a layer move. This fixture supplies
+matching vertex output and pixel input signatures. Game shaders require
+selecting a vertex signature that matches the compiled pixel shader.
+
 `ADE1` begins with five little-endian `u32` values: magic (`ADE1`), DXBC
 length, `b0` byte size, texture count, and uniform count. Each texture has
 a `u32` slot and a 256-byte NUL-terminated name. Each uniform has a `u32`
