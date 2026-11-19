@@ -2539,7 +2539,7 @@ impl MetalBackend {
     /// `directory` must contain a trusted DXVK runtime. Call before drawing.
     #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
     pub unsafe fn enable_dxvk(&mut self, directory: &std::path::Path) -> Result<(), String> {
-        self.dxvk = Some(dxvk::Effects::open(directory, &self.device)?);
+        self.dxvk = Some(dxvk::Effects::open(directory)?);
         Ok(())
     }
 
@@ -2548,7 +2548,7 @@ impl MetalBackend {
         self.dxvk
             .as_mut()
             .ok_or("DXVK is not enabled")?
-            .cache(source, artifact)
+            .cache(&self.device, source, artifact)
     }
 
     fn drain_profile_stats(&self) -> GpuProfileStats {

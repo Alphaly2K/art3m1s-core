@@ -10,10 +10,12 @@ use objc2_metal::{
     MTLDevice, MTLOrigin, MTLPixelFormat, MTLRegion, MTLResource, MTLSize, MTLStorageMode,
     MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
 };
-use std::{collections::HashMap, ffi::c_void, path::Path, ptr::NonNull};
+use std::{cell::OnceCell, collections::HashMap, ffi::c_void, path::Path, ptr::NonNull};
 
 type Handle = NonNull<c_void>;
 type Destroy = unsafe extern "C" fn(Handle);
+type CreateContext = unsafe extern "C" fn() -> Option<Handle>;
+type MetalDevice = unsafe extern "C" fn(Handle) -> *const ProtocolObject<dyn MTLDevice>;
 
 #[repr(C)]
 struct Image {
@@ -57,7 +59,10 @@ pub(super) struct Effects {
     targets: Option<Targets>,
     programs: HashMap<Box<[u8]>, Resource>,
     active: ShaderRegistry<Handle>,
-    context: Resource,
+    context: OnceCell<Result<Resource, String>>,
+    create_context: CreateContext,
+    destroy_context: Destroy,
+    metal_device: MetalDevice,
     create_program: CreateProgram,
     destroy_program: Destroy,
     create_targets: CreateTargets,
@@ -67,7 +72,7 @@ pub(super) struct Effects {
 }
 
 impl Effects {
-    pub fn open(directory: &Path, device: &Device) -> Result<Self, String> {
+    pub fn open(directory: &Path) -> Result<Self, String> {
         if !directory.is_absolute() {
             return Err("DXVK runtime directory must be absolute".into());
         }
@@ -76,15 +81,13 @@ impl Effects {
             let library = Library::new(directory.join("libart3m1s_artemis_dxvk_host.dylib"))
                 .map_err(|e| e.to_string())?;
             let create_context = *library
-                .get::<unsafe extern "C" fn() -> Option<Handle>>(b"art_dxvk_context_create")
+                .get::<CreateContext>(b"art_dxvk_context_create")
                 .map_err(|e| e.to_string())?;
             let destroy_context = *library
                 .get::<Destroy>(b"art_dxvk_context_destroy")
                 .map_err(|e| e.to_string())?;
             let metal_device = *library
-                .get::<unsafe extern "C" fn(Handle) -> *const ProtocolObject<dyn MTLDevice>>(
-                    b"art_dxvk_context_metal_device",
-                )
+                .get::<MetalDevice>(b"art_dxvk_context_metal_device")
                 .map_err(|e| e.to_string())?;
             let create_program = *library
                 .get::<CreateProgram>(b"art_dxvk_program_create")
@@ -101,21 +104,14 @@ impl Effects {
             let draw = *library
                 .get::<DrawEffect>(b"art_dxvk_draw")
                 .map_err(|e| e.to_string())?;
-            let context = Resource {
-                raw: create_context().ok_or("cannot create DXVK effect context")?,
-                destroy: destroy_context,
-            };
-            let selected = metal_device(context.raw)
-                .as_ref()
-                .ok_or("DXVK has no Metal device")?;
-            if selected.registryID() != device.registryID() {
-                return Err("DXVK and Metal selected different devices".into());
-            }
             Ok(Self {
                 targets: None,
                 programs: HashMap::new(),
                 active: ShaderRegistry::default(),
-                context,
+                context: OnceCell::new(),
+                create_context,
+                destroy_context,
+                metal_device,
                 create_program,
                 destroy_program,
                 create_targets,
@@ -126,12 +122,33 @@ impl Effects {
         }
     }
 
-    pub fn cache(&mut self, source: &[u8], artifact: &[u8]) -> Result<(), String> {
+    fn context(&self) -> Result<Handle, String> {
+        self.context
+            .get()
+            .ok_or("DXVK effect context has not been prepared")?
+            .as_ref()
+            .map(|context| context.raw)
+            .map_err(Clone::clone)
+    }
+
+    pub fn cache(&mut self, device: &Device, source: &[u8], artifact: &[u8]) -> Result<(), String> {
         if !self.programs.contains_key(source) {
-            let raw = unsafe {
-                (self.create_program)(self.context.raw, artifact.as_ptr(), artifact.len())
-            }
-            .ok_or("cannot prepare ADE2 shader")?;
+            self.context.get_or_init(|| unsafe {
+                let context = Resource {
+                    raw: (self.create_context)().ok_or("cannot create DXVK effect context")?,
+                    destroy: self.destroy_context,
+                };
+                let selected = (self.metal_device)(context.raw)
+                    .as_ref()
+                    .ok_or("DXVK has no Metal device")?;
+                if selected.registryID() != device.registryID() {
+                    return Err("DXVK and Metal selected different devices".into());
+                }
+                Ok(context)
+            });
+            let context = self.context()?;
+            let raw = unsafe { (self.create_program)(context, artifact.as_ptr(), artifact.len()) }
+                .ok_or("cannot prepare ADE2 shader")?;
             self.programs.insert(
                 source.into(),
                 Resource {
@@ -166,11 +183,11 @@ impl Effects {
             .as_ref()
             .is_none_or(|targets| targets.foreground.extent != extent)
         {
+            let context = self.context()?;
             let (fore_surface, foreground) = shared_texture(device, extent)?;
             let (out_surface, output) = shared_texture(device, extent)?;
-            let raw =
-                unsafe { (self.create_targets)(self.context.raw, &fore_surface, &out_surface) }
-                    .ok_or("cannot import DXVK effect targets")?;
+            let raw = unsafe { (self.create_targets)(context, &fore_surface, &out_surface) }
+                .ok_or("cannot import DXVK effect targets")?;
             self.targets = Some(Targets {
                 handle: Resource {
                     raw,
@@ -194,6 +211,7 @@ impl Effects {
         user: Option<&Texture>,
     ) -> Result<Texture, String> {
         let targets = self.targets.as_ref().ok_or("DXVK targets unavailable")?;
+        let context = self.context()?;
         let program = *self
             .active
             .get_by_name(&effect.name)
@@ -212,7 +230,7 @@ impl Effects {
             .collect::<Vec<_>>();
         let code = unsafe {
             (self.draw)(
-                self.context.raw,
+                context,
                 program,
                 targets.handle.raw,
                 mask.as_image(),

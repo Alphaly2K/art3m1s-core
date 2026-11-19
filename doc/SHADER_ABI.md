@@ -399,12 +399,14 @@ retain `licenses/` and `source/` when distributing the package. The same
 `effect-pair` command reads HLSL from stdin and returns ADE2 on stdout on
 both macOS and Windows.
 
-The [macOS frame Host](abi/art3m1s_metal_host_v1.h) can create a DXVK
-renderer from that directory. Before drawing, pass each compiled effect and
-its exact HLSL source to `art3m1s_metal_host_v1_prepare_ade2`. The caller can
-release both byte buffers after the call. A session can reuse the program for
-multiple layers and frames. An effect with no prepared program draws without
-the effect. Present and capture use the same programs and frame composition.
+The [macOS frame Host](abi/art3m1s_metal_host_v1.h) can open that runtime
+without initializing a DXVK device. Before drawing an effect, pass it and
+its exact HLSL source to `art3m1s_metal_host_v1_prepare_ade2`. The first
+preparation initializes the device and reports any initialization failure.
+The caller can release both byte buffers after the call. A session can reuse
+the program for multiple layers and frames. An effect with no prepared
+program draws without the effect. Present and capture use the same programs
+and frame composition.
 
 For the Flutter macOS v2 preview, set `ARTEMIS_V2_DXVK_RUNTIME_DIR` to the
 assembled runtime when building the Runner. Set `ARTEMIS_V2_HLSL_COMPILER_DIR`
