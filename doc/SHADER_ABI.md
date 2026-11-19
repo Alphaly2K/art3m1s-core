@@ -398,19 +398,30 @@ multiple layers and frames. An effect with no prepared program draws without
 the effect. Present and capture use the same programs and frame composition.
 
 For the Flutter macOS v2 preview, set `ARTEMIS_V2_DXVK_RUNTIME_DIR` to the
-assembled runtime when building the Runner. Store a project's precompiled
-effects at `artemis-shaders/ade2/<source-path>.<sha256>.ade2`, where
+assembled runtime when building the Runner. Set `ARTEMIS_V2_HLSL_COMPILER_DIR`
+to the native compiler package to bundle automatic compilation. The bundled
+tool prepares indexed `.hlsl` and `.fx` assets before the first frame, subject
+to the startup budget. A shader of either extension first read during play
+is prepared before the Host replies with its source. Matching compiled
+effects are reused from the application cache across launches; the cache key
+includes the compiler binaries and the exact source bytes.
+
+To supply precompiled effects, store them at
+`artemis-shaders/ade2/<source-path>.<sha256>.ade2`, where
 `<source-path>` is the project-relative path and `<sha256>` is the lowercase
-digest of the exact HLSL bytes read by the Host. Matching entries are prepared
-before the project runs. A session without matching entries or a usable DXVK
-runtime uses the normal Metal renderer. Explicit ANGLE sessions continue to use
-the GLSL path.
+digest of the exact HLSL bytes read by the Host. They take precedence over
+compilation. DXVK requires a usable runtime plus either a bundled compiler or
+usable project effects. Other Metal sessions use the normal Metal renderer.
+Explicit ANGLE sessions use GLSL.
 
 The Flutter project's `tool/integration_tests/artemis_v2_dxvk_smoke.dart`
 checks presentation, screenshots and source changes. Build it as the Runner's
 target with `ARTEMIS_V2=true` and the v2 and DXVK runtimes bundled. Set
 `ARTEMIS_DXVK_TEST_ADE2` at launch to the `effect-pair` output for the exact
-shader source in that fixture.
+shader source in that fixture to check project-supplied artifacts. With the
+compiler bundled, set `ARTEMIS_DXVK_TEST_CACHE_TOKEN` to a new alphanumeric
+token for a cold launch. Launch again with the same token and
+`ARTEMIS_DXVK_TEST_WARM=1` to verify reuse across processes.
 
 `ADE1` begins with five little-endian `u32` values: magic (`ADE1`), DXBC
 length, `b0` byte size, texture count, and uniform count. Each texture has
