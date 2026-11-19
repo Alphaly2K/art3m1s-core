@@ -319,8 +319,10 @@ The probe transitions the imported foreground image before the first Metal
 write, waits for Metal completion before sampling, and waits for D3D11
 completion before reusing either surface. Three draws verify the initial
 result, an update to the same foreground surface, and a constant change
-with that foreground held steady. Only the final pixel comparison reads
-the output on the CPU. It does not require game assets or Flutter.
+with that foreground held steady. Metal copies each DXVK result to a
+separate presentation IOSurface on the GPU. Only the final pixel
+comparison reads the presentation buffer on the CPU. The probe requires
+neither game assets nor Flutter.
 
 `ADE1` begins with five little-endian `u32` values: magic (`ADE1`), DXBC
 length, `b0` byte size, texture count, and uniform count. Each texture has

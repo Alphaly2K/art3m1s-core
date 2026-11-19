@@ -39,6 +39,28 @@ bool art_metal_writer_clear(ArtMetalWriter *writer, const uint8_t rgba[4]) {
     }
 }
 
+bool art_metal_writer_copy(ArtMetalWriter *writer, IOSurfaceRef source) {
+    @autoreleasepool {
+        const NSUInteger width = writer->texture.width, height = writer->texture.height;
+        if (IOSurfaceGetWidth(source) != width || IOSurfaceGetHeight(source) != height) return false;
+        MTLTextureDescriptor *descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+            width:width height:height mipmapped:NO];
+        descriptor.storageMode = MTLStorageModeShared;
+        id<MTLTexture> texture = [writer->texture.device newTextureWithDescriptor:descriptor iosurface:source plane:0];
+        if (!texture) return false;
+        id<MTLCommandBuffer> command = [writer->queue commandBuffer];
+        id<MTLBlitCommandEncoder> encoder = [command blitCommandEncoder];
+        if (!encoder) return false;
+        [encoder copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+                      sourceSize:MTLSizeMake(width, height, 1) toTexture:writer->texture destinationSlice:0
+                 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [encoder endEncoding];
+        [command commit];
+        [command waitUntilCompleted];
+        return command.status == MTLCommandBufferStatusCompleted;
+    }
+}
+
 void art_metal_writer_destroy(ArtMetalWriter *writer) {
     delete writer;
 }

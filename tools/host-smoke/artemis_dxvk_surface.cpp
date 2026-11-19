@@ -1,23 +1,18 @@
 #include <CoreVideo/CoreVideo.h>
-#include <d3d11_3.h>
-#include <vulkan/vulkan_core.h>
-#include <vulkan/vulkan_metal.h>
-
-#include "dxgi/dxgi_interfaces.h"
-#include "dxvk/dxvk_adapter.h"
 #include "artemis_dxvk_metal_writer.h"
+#include "../host-bindings/d3d11/artemis_dxvk_device.hpp"
 #include "../host-bindings/d3d11/artemis_dxbc_effect.hpp"
 
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <memory>
-#include <thread>
+#include <type_traits>
 #include <vector>
 
 using dxvk::Com;
+using PixelBuffer = std::unique_ptr<std::remove_pointer_t<CVPixelBufferRef>, decltype(&CVPixelBufferRelease)>;
 
 static void check(bool success, const char *operation) {
     if (!success) {
@@ -26,91 +21,19 @@ static void check(bool success, const char *operation) {
     }
 }
 
-constexpr VkImageSubresourceRange colorRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-
-struct SharedTexture {
-    explicit SharedTexture(VkDevice device) : device(device) {}
-    SharedTexture(const SharedTexture &) = delete;
-    SharedTexture &operator=(const SharedTexture &) = delete;
-    ~SharedTexture() {
-        surface = nullptr;
-        texture = nullptr;
-        if (image) vkDestroyImage(device, image, nullptr);
-        if (backing) vkFreeMemory(device, backing, nullptr);
-        if (buffer) CVPixelBufferRelease(buffer);
-    }
-
-    void create(IDXGIVkInteropDevice1 *interop, uint32_t width, uint32_t height, UINT bind) {
-        CFDictionaryRef properties = CFDictionaryCreate(nullptr, nullptr, nullptr, 0,
-            &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-        const void *keys[] = {kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferMetalCompatibilityKey};
-        const void *values[] = {properties, kCFBooleanTrue};
-        CFDictionaryRef attributes = CFDictionaryCreate(nullptr, keys, values, 2,
-            &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-        check(CVPixelBufferCreate(nullptr, width, height, kCVPixelFormatType_32BGRA,
-            attributes, &buffer) == kCVReturnSuccess, "create BGRA pixel buffer");
-        CFRelease(attributes);
-        CFRelease(properties);
-
-        VkImportMetalIOSurfaceInfoEXT import = {VK_STRUCTURE_TYPE_IMPORT_METAL_IO_SURFACE_INFO_EXT};
-        import.ioSurface = CVPixelBufferGetIOSurface(buffer);
-        check(import.ioSurface != nullptr, "get IOSurface");
-        VkImageCreateInfo imageInfo = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-        imageInfo.pNext = &import;
-        imageInfo.imageType = VK_IMAGE_TYPE_2D;
-        imageInfo.format = VK_FORMAT_B8G8R8A8_UNORM;
-        imageInfo.extent = {width, height, 1};
-        imageInfo.mipLevels = 1;
-        imageInfo.arrayLayers = 1;
-        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-        imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-            (bind == D3D11_BIND_RENDER_TARGET ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : VK_IMAGE_USAGE_SAMPLED_BIT);
-        check(vkCreateImage(device, &imageInfo, nullptr, &image) == VK_SUCCESS, "import IOSurface as VkImage");
-        VkMemoryRequirements memory;
-        vkGetImageMemoryRequirements(device, image, &memory);
-        uint32_t type = 0;
-        while (type < VK_MAX_MEMORY_TYPES && !(memory.memoryTypeBits & (UINT32_C(1) << type))) ++type;
-        check(type < VK_MAX_MEMORY_TYPES, "find IOSurface image memory type");
-        VkMemoryAllocateInfo allocation = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-        allocation.allocationSize = memory.size;
-        allocation.memoryTypeIndex = type;
-        check(vkAllocateMemory(device, &allocation, nullptr, &backing) == VK_SUCCESS, "allocate image memory");
-        check(vkBindImageMemory(device, image, backing, 0) == VK_SUCCESS, "bind image memory");
-
-        D3D11_TEXTURE2D_DESC1 desc = {};
-        desc.Width = width;
-        desc.Height = height;
-        desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
-        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        desc.BindFlags = bind;
-        check(SUCCEEDED(interop->CreateTexture2DFromVkImage(&desc, image, &texture)), "wrap VkImage in D3D11");
-        check(SUCCEEDED(texture->QueryInterface(__uuidof(IDXGIVkInteropSurface),
-                                               reinterpret_cast<void **>(&surface))),
-              "QueryInterface(IDXGIVkInteropSurface)");
-        VkImage imported = VK_NULL_HANDLE;
-        check(SUCCEEDED(surface->GetVulkanImageInfo(&imported, &layout, nullptr)) && imported == image,
-              "get imported D3D11 image and layout");
-    }
-
-    VkDevice device;
+static CVPixelBufferRef make_buffer(uint32_t width, uint32_t height) {
+    CFDictionaryRef properties = CFDictionaryCreate(nullptr, nullptr, nullptr, 0,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    const void *keys[] = {kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferMetalCompatibilityKey};
+    const void *values[] = {properties, kCFBooleanTrue};
+    CFDictionaryRef attributes = CFDictionaryCreate(nullptr, keys, values, 2,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     CVPixelBufferRef buffer = nullptr;
-    VkImage image = VK_NULL_HANDLE;
-    VkDeviceMemory backing = VK_NULL_HANDLE;
-    Com<ID3D11Texture2D> texture;
-    Com<IDXGIVkInteropSurface> surface;
-    VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
-};
-
-static void complete_draw(ID3D11DeviceContext *context, ID3D11Query *completed) {
-    context->End(completed);
-    context->Flush();
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    HRESULT ready;
-    while ((ready = context->GetData(completed, nullptr, 0, 0)) == S_FALSE &&
-           std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    check(ready == S_OK, "wait for D3D11 rendering");
+    const auto status = CVPixelBufferCreate(nullptr, width, height, kCVPixelFormatType_32BGRA, attributes, &buffer);
+    CFRelease(attributes);
+    CFRelease(properties);
+    check(status == kCVReturnSuccess, "create BGRA pixel buffer");
+    return buffer;
 }
 
 static std::vector<char> load_bytecode(const char *path) {
@@ -202,84 +125,36 @@ int main(int argc, char **argv) try {
         return 2;
     }
     const bool drawEffect = argc == 3;
-    Com<IDXGIFactory1> factory;
-    check(SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void **>(&factory))),
-          "CreateDXGIFactory1");
-    Com<IDXGIAdapter1> adapter;
-    check(SUCCEEDED(factory->EnumAdapters1(0, &adapter)), "EnumAdapters1");
-    Com<IDXGIVkInteropAdapter> vulkanAdapter;
-    check(SUCCEEDED(adapter->QueryInterface(__uuidof(IDXGIVkInteropAdapter),
-                                           reinterpret_cast<void **>(&vulkanAdapter))),
-          "QueryInterface(IDXGIVkInteropAdapter)");
-    VkPhysicalDevice physical = VK_NULL_HANDLE;
-    vulkanAdapter->GetVulkanHandles(nullptr, &physical);
-    check(physical != VK_NULL_HANDLE, "GetVulkanHandles");
-
-    uint32_t count = 0;
-    check(vkEnumerateDeviceExtensionProperties(physical, nullptr, &count, nullptr) == VK_SUCCESS,
-          "enumerate Vulkan device extension count");
-    std::vector<VkExtensionProperties> extensions(count);
-    check(vkEnumerateDeviceExtensionProperties(physical, nullptr, &count, extensions.data()) == VK_SUCCESS,
-          "enumerate Vulkan device extensions");
-    dxvk::DxvkExtensionList required;
-    for (const auto &extension : extensions) {
-        if (std::strcmp(extension.extensionName, VK_EXT_METAL_OBJECTS_EXTENSION_NAME) == 0) {
-            required.push_back(extension);
-            break;
-        }
-    }
-    check(!required.empty(), "find VK_EXT_metal_objects");
-    Com<IDXGIDXVKAdapter> nativeAdapter;
-    check(SUCCEEDED(adapter->QueryInterface(__uuidof(IDXGIDXVKAdapter),
-                                           reinterpret_cast<void **>(&nativeAdapter))),
-          "QueryInterface(IDXGIDXVKAdapter)");
-    nativeAdapter->GetDXVKAdapter()->enableExtensions(required);
-
-    const D3D_FEATURE_LEVEL feature = D3D_FEATURE_LEVEL_11_0;
-    Com<ID3D11Device> device;
-    Com<ID3D11DeviceContext> context;
-    check(SUCCEEDED(D3D11CreateDevice(adapter.ptr(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
-        D3D11_CREATE_DEVICE_BGRA_SUPPORT, &feature, 1, D3D11_SDK_VERSION, &device, nullptr, &context)),
-        "D3D11CreateDevice (feature level 11.0)");
-    Com<IDXGIVkInteropDevice1> interop;
-    check(SUCCEEDED(device->QueryInterface(__uuidof(IDXGIVkInteropDevice1),
-                                           reinterpret_cast<void **>(&interop))),
-          "QueryInterface(IDXGIVkInteropDevice1)");
-    VkDevice vkDevice = VK_NULL_HANDLE;
-    interop->GetVulkanHandles(nullptr, nullptr, &vkDevice);
-    check(vkDevice != VK_NULL_HANDLE, "get DXVK Vulkan device");
-    const auto exportMetal = reinterpret_cast<PFN_vkExportMetalObjectsEXT>(
-        vkGetDeviceProcAddr(vkDevice, "vkExportMetalObjectsEXT"));
-    check(exportMetal != nullptr, "resolve Metal objects extension on the DXVK device");
+    artemis::DxvkDevice host;
+    auto *device = host.device();
+    auto *context = host.context();
 
     constexpr uint32_t width = 7, height = 5;
-    SharedTexture output(vkDevice);
-    output.create(interop.ptr(), width, height, D3D11_BIND_RENDER_TARGET);
-    SharedTexture foreground(vkDevice);
-    std::unique_ptr<ArtMetalWriter, decltype(&art_metal_writer_destroy)> writer(nullptr, art_metal_writer_destroy);
+    PixelBuffer outputBuffer(make_buffer(width, height), CVPixelBufferRelease);
+    const auto output = artemis::DxvkSurface::import(host, CVPixelBufferGetIOSurface(outputBuffer.get()), D3D11_BIND_RENDER_TARGET);
+    std::unique_ptr<artemis::DxvkSurface> foreground;
+    using MetalWriter = std::unique_ptr<ArtMetalWriter, decltype(&art_metal_writer_destroy)>;
+    MetalWriter writer(nullptr, art_metal_writer_destroy);
+    MetalWriter presenter(nullptr, art_metal_writer_destroy);
+    PixelBuffer presentation(nullptr, CVPixelBufferRelease);
     Com<ID3D11RenderTargetView> target;
-    check(SUCCEEDED(device->CreateRenderTargetView(output.texture.ptr(), nullptr, &target)), "create D3D11 target");
-    const D3D11_QUERY_DESC queryDesc = {D3D11_QUERY_EVENT, 0};
-    Com<ID3D11Query> completed;
-    check(SUCCEEDED(device->CreateQuery(&queryDesc, &completed)), "create D3D11 completion query");
+    check(SUCCEEDED(device->CreateRenderTargetView(output->texture(), nullptr, &target)), "create D3D11 target");
     Com<ID3D11Buffer> constants;
     std::unique_ptr<artemis::DxbcEffect> effect;
     std::vector<char> params;
     if (drawEffect) {
         std::ifstream file(argv[2], std::ios::binary);
         effect = std::make_unique<artemis::DxbcEffect>(file);
-        VkExportMetalDeviceInfoEXT metal = {VK_STRUCTURE_TYPE_EXPORT_METAL_DEVICE_INFO_EXT};
-        VkExportMetalObjectsInfoEXT exportInfo = {VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECTS_INFO_EXT, &metal};
-        exportMetal(vkDevice, &exportInfo);
-        check(metal.mtlDevice != nullptr, "export DXVK Metal device");
-        foreground.create(interop.ptr(), width, height, D3D11_BIND_SHADER_RESOURCE);
-        writer.reset(art_metal_writer_create(metal.mtlDevice, CVPixelBufferGetIOSurface(foreground.buffer), width, height));
-        check(writer != nullptr, "create Metal foreground writer");
-        // Initialize the imported image layout before Metal produces its first contents.
-        interop->TransitionSurfaceLayout(foreground.surface.ptr(), &colorRange,
-                                         VK_IMAGE_LAYOUT_UNDEFINED, foreground.layout);
-        complete_draw(context.ptr(), completed.ptr());
-        constants = bind_effect(device.ptr(), context.ptr(), argv[1], *effect, width, height, foreground.texture.ptr());
+        PixelBuffer foregroundBuffer(make_buffer(width, height), CVPixelBufferRelease);
+        auto surface = CVPixelBufferGetIOSurface(foregroundBuffer.get());
+        foreground = artemis::DxvkSurface::import(host, surface, D3D11_BIND_SHADER_RESOURCE);
+        auto *metalDevice = host.metal_device();
+        writer.reset(art_metal_writer_create(metalDevice, surface, width, height));
+        presentation.reset(make_buffer(width, height));
+        presenter.reset(art_metal_writer_create(metalDevice, CVPixelBufferGetIOSurface(presentation.get()), width, height));
+        check(writer && presenter, "create Metal foreground and presentation targets");
+        host.prepare_input(*foreground);
+        constants = bind_effect(device, context, argv[1], *effect, width, height, foreground->texture());
         params.resize(effect->constant_bytes());
         const float tint[4] = {0, 1, 0.5f, 1};
         check(effect->set_uniform(params, "tint", tint, 4), "bind tint by reflection");
@@ -303,16 +178,15 @@ int main(int argc, char **argv) try {
         } else {
             context->ClearRenderTargetView(target.ptr(), clearColors[i]);
         }
-        // Materialize deferred writes and restore DXVK's layout before the next draw.
-        interop->TransitionSurfaceLayout(output.surface.ptr(), &colorRange,
-                                         output.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-        interop->TransitionSurfaceLayout(output.surface.ptr(), &colorRange,
-                                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, output.layout);
-        complete_draw(context.ptr(), completed.ptr());
-        check(CVPixelBufferLockBaseAddress(output.buffer, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess,
-              "lock pixel buffer");
-        const auto *pixels = static_cast<const uint8_t *>(CVPixelBufferGetBaseAddress(output.buffer));
-        const size_t stride = CVPixelBufferGetBytesPerRow(output.buffer);
+        host.finish_output(*output);
+        if (presenter) {
+            check(art_metal_writer_copy(presenter.get(), CVPixelBufferGetIOSurface(outputBuffer.get())),
+                  "consume DXVK output in Metal");
+        }
+        const auto pixelsBuffer = presenter ? presentation.get() : outputBuffer.get();
+        check(CVPixelBufferLockBaseAddress(pixelsBuffer, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess, "lock pixel buffer");
+        const auto *pixels = static_cast<const uint8_t *>(CVPixelBufferGetBaseAddress(pixelsBuffer));
+        const size_t stride = CVPixelBufferGetBytesPerRow(pixelsBuffer);
         check(pixels != nullptr, "access pixel buffer");
         for (uint32_t y = 0; y < height; ++y) {
             for (uint32_t x = 0; x < width; ++x) {
@@ -324,11 +198,11 @@ int main(int argc, char **argv) try {
                 }
             }
         }
-        check(CVPixelBufferUnlockBaseAddress(output.buffer, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess,
+        check(CVPixelBufferUnlockBaseAddress(pixelsBuffer, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess,
               "unlock pixel buffer");
     }
     context->ClearState();
-    std::puts(drawEffect ? "Native DXVK IOSurface: reflected HLSL bindings matched all three frames"
+    std::puts(drawEffect ? "Native DXVK IOSurface: Metal presented all three reflected HLSL frames"
                          : "Native DXVK IOSurface: two D3D11 frames visible in the original pixel buffer");
 } catch (const std::exception &error) {
     std::fprintf(stderr, "%s\n", error.what());

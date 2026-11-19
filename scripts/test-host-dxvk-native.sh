@@ -44,11 +44,12 @@ xcrun clang++ -std=c++17 -Wall -Wextra -Werror -Wno-missing-field-initializers \
   -isystem "$source_dir/include/native/windows" -isystem "$source_dir/include/native/directx" \
   -isystem "$source_dir/include/native" -isystem "$source_dir/include/vulkan/include" \
   -isystem "$source_dir/include/spirv/include" -isystem "$source_dir/src/dxgi" \
-  -isystem "$source_dir/src" tools/host-smoke/artemis_dxvk_surface.cpp "$scratch/metal-writer.o" \
+  -isystem "$source_dir/src" tools/host-smoke/artemis_dxvk_surface.cpp \
+  tools/host-bindings/d3d11/artemis_dxvk_device.cpp "$scratch/metal-writer.o" \
   "$build_dir/src/d3d11/libdxvk_d3d11.0.dylib" "$build_dir/src/dxgi/libdxvk_dxgi.0.dylib" \
   "$ARTEMIS_MOLTENVK_DYLIB" -Wl,-rpath,"$build_dir/src/d3d11" -Wl,-rpath,"$build_dir/src/dxgi" \
   -Wl,-rpath,"$(dirname "$ARTEMIS_MOLTENVK_DYLIB")" \
-  -framework CoreVideo -framework CoreFoundation -framework Foundation -framework Metal \
+  -framework CoreVideo -framework CoreFoundation -framework Foundation -framework IOSurface -framework Metal \
   -o "$scratch/artemis-dxvk-native"
 (cd "$scratch"
  DYLD_LIBRARY_PATH="$scratch:$sdl_libdir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
