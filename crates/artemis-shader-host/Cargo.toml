@@ -5,5 +5,5 @@ edition = "2024"
 license = "MPL-2.0"
 publish = false
 
-[dev-dependencies]
+[dependencies]
 art3m1s-render = { path = "../art3m1s-render", features = ["artemis"] }

@@ -1,5 +1,9 @@
 use std::fmt;
 use std::io::{self, Read, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+mod frame_effect;
+pub use frame_effect::{FrameEffectDraw, FrameEffectProgram};
 
 const MAGIC: [u8; 4] = *b"ADX1";
 const COMPILE: u32 = 1;
@@ -8,6 +12,7 @@ const RELEASE: u32 = 3;
 const TEXTURE_BINDING: u32 = 4;
 const MAX_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SOURCE_BYTES: usize = 1024 * 1024;
+static WORKER_IDS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
 pub enum Error {
@@ -38,7 +43,10 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Program(u32);
+pub struct Program {
+    worker: u64,
+    id: u32,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TextureBinding {
@@ -67,6 +75,7 @@ pub struct Draw<'a> {
 /// Caller supplies one worker's stdout and stdin. I/O is synchronous; run it
 /// off the presentation thread and let the Host supervise the process.
 pub struct Worker<R, W> {
+    id: u64,
     reader: R,
     writer: W,
     next_id: u32,
@@ -76,6 +85,9 @@ pub struct Worker<R, W> {
 impl<R: Read, W: Write> Worker<R, W> {
     pub fn connect(reader: R, writer: W) -> Result<Self, Error> {
         let mut worker = Self {
+            id: WORKER_IDS
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+                .map_err(|_| Error::Protocol("worker identities exhausted"))?,
             reader,
             writer,
             next_id: 0,
@@ -90,10 +102,14 @@ impl<R: Read, W: Write> Worker<R, W> {
             return Err(Error::Argument("invalid shader source size"));
         }
         let (id, _) = self.exchange(COMPILE, source.len(), 0, |writer| writer.write_all(source))?;
-        Ok(Program(id))
+        Ok(Program {
+            worker: self.id,
+            id,
+        })
     }
 
     pub fn draw(&mut self, program: Program, draw: &Draw<'_>) -> Result<Vec<u8>, Error> {
+        self.check_owner(program)?;
         let result = image_len(draw.width, draw.height)?;
         let prefix = draw.encode_prefix(program)?;
         let mut bytes = prefix.len() + 8 * draw.textures.len();
@@ -125,8 +141,9 @@ impl<R: Read, W: Write> Worker<R, W> {
     }
 
     pub fn release(&mut self, program: Program) -> Result<(), Error> {
+        self.check_owner(program)?;
         self.exchange(RELEASE, 4, 0, |writer| {
-            writer.write_all(&program.0.to_le_bytes())
+            writer.write_all(&program.id.to_le_bytes())
         })
         .map(|_| ())
     }
@@ -136,11 +153,12 @@ impl<R: Read, W: Write> Worker<R, W> {
         program: Program,
         name: &str,
     ) -> Result<Option<TextureBinding>, Error> {
+        self.check_owner(program)?;
         if name.is_empty() || name.len() > 256 || name.contains('\0') {
             return Err(Error::Argument("invalid shader texture name"));
         }
         let (_, data) = self.exchange(TEXTURE_BINDING, 4 + name.len(), 8, |writer| {
-            writer.write_all(&program.0.to_le_bytes())?;
+            writer.write_all(&program.id.to_le_bytes())?;
             writer.write_all(name.as_bytes())
         })?;
         let slot = u32::from_le_bytes(data[..4].try_into().unwrap());
@@ -152,6 +170,14 @@ impl<R: Read, W: Write> Worker<R, W> {
         } else {
             self.usable = false;
             Err(Error::Protocol("invalid worker texture binding"))
+        }
+    }
+
+    fn check_owner(&self, program: Program) -> Result<(), Error> {
+        if self.id == program.worker {
+            Ok(())
+        } else {
+            Err(Error::Argument("shader program belongs to another worker"))
         }
     }
 
@@ -239,7 +265,7 @@ impl Draw<'_> {
         }
         let mut body = Vec::with_capacity(16 + 28 * 4 + 4);
         let flags = u32::from(self.alpha_blend) | (u32::from(self.point_sampler) << 1);
-        for value in [program.0, self.width, self.height, flags] {
+        for value in [program.id, self.width, self.height, flags] {
             body.extend_from_slice(&value.to_le_bytes());
         }
         for value in self.clear_rgba.iter().chain(self.quad.iter().flatten()) {
@@ -262,5 +288,33 @@ impl Draw<'_> {
             }
         }
         Ok(body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn a_program_cannot_be_sent_to_another_worker() {
+        fn connect() -> Worker<Cursor<Vec<u8>>, Vec<u8>> {
+            let mut replies = Vec::new();
+            for (op, id) in [(0, 0u32), (COMPILE, 1)] {
+                replies.extend(MAGIC);
+                replies.extend(op.to_le_bytes());
+                replies.extend(id.to_le_bytes());
+                replies.extend(4u32.to_le_bytes());
+                replies.extend(0u32.to_le_bytes());
+            }
+            Worker::connect(Cursor::new(replies), Vec::new()).unwrap()
+        }
+
+        let mut first = connect();
+        let mut second = connect();
+        let foreign = first.compile(b"shader").unwrap();
+        assert!(matches!(second.release(foreign), Err(Error::Argument(_))));
+        assert!(second.writer.is_empty());
+        assert_ne!(second.compile(b"shader").unwrap(), foreign);
     }
 }

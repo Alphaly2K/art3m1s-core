@@ -202,9 +202,24 @@ Run `CX_BOTTLE=DedicatedTestBottle bash scripts/test-host-dxvk.sh dxvk --d3d11 -
 to exercise the Windows worker from a macOS process. The probe also accepts
 `wined3d`. The Rust SDK in `crates/artemis-shader-host` uses the worker's
 stdout and stdin; the Host owns process launch, timeouts and configuration.
+
+`Worker::compile_frame_effect` compiles an ARFP HLSL effect and caches its
+texture slots. `draw_frame_effect` reuses that program with the constants and
+texture indices from the current packet. The shader must match the one used
+at compile time. The Host supplies the target, quad, foreground pixels, and
+the current background if the shader reads it. The SDK resolves reflected
+`textureFore`, `textureMask`, `textureUser`, and `textureBack` (or their
+`samplerFore`, `samplerMask`, `samplerUser`, and `samplerBack` texture resource
+aliases). Other texture names are left unbound. An absent mask defaults to
+opaque white and an absent user texture defaults to transparent black. A
+referenced texture index must resolve to BGRA pixels. Draw and release the
+program on the worker that created it; call `release_frame_effect` when it
+is no longer needed. Closing the worker releases all its programs.
+
 Set `ARTEMIS_D3D11_ARFP=1` to also draw a Core frame packet's HLSL effect
 with its foreground, mask, user texture and named constants. The probe
-verifies the readback pixels and resolves texture slots by reflected name.
+verifies readback pixels before and after changing a constant on the same
+compiled program.
 Use the `dxvk` mode for this check. The tested WineD3D configuration rejects
 the fixture's pixel shader input when linking the graphics pipeline.
 Set `ARTEMIS_D3D11_MEASURE=1` to measure a 1920×1080 draw with two full-size
