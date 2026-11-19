@@ -310,11 +310,14 @@ Set `CX_BOTTLE` and add `--hlsl` to the native probe command to exercise
 shader execution. The Windows compiler helper reads raw HLSL from stdin,
 compiles `main` to `vs_5_0` or `ps_5_0`, and writes DXBC to stdout with
 diagnostics on stderr. It creates no graphics device. The macOS process
-loads both shader blobs once, binds foreground, mask, and user textures,
-then changes one constant between two draws into the original IOSurface.
-The probe compares every pixel after each draw. It does not require game
-assets or Flutter. Scene draws and Flutter engine presentation are separate
-integration steps.
+loads both shader blobs once and binds foreground, mask, and user textures.
+Metal writes the foreground into a separate IOSurface on the same GPU.
+The probe transitions the imported foreground image before the first Metal
+write, waits for Metal completion before sampling, and waits for D3D11
+completion before reusing either surface. Three draws verify the initial
+result, an update to the same foreground surface, and a constant change
+with that foreground held steady. Only the final pixel comparison reads
+the output on the CPU. It does not require game assets or Flutter.
 
 To test transfer from Wine to a Flutter texture, set
 `FLUTTER_MACOS_FRAMEWORK_DIR` to the directory containing
