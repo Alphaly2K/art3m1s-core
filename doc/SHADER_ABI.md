@@ -431,6 +431,11 @@ shader source in that fixture to check project-supplied artifacts. With the
 compiler bundled, set `ARTEMIS_DXVK_TEST_CACHE_TOKEN` to a new alphanumeric
 token for a cold launch. Launch again with the same token and
 `ARTEMIS_DXVK_TEST_WARM=1` to verify reuse across processes.
+Set `ARTEMIS_DXVK_TEST_LEGACY=1` on both launches to exercise combined
+samplers and reflected defaults. Set `ARTEMIS_DXVK_TEST_1080P=1` to use a
+1920×1080 stage and print project-open and steady presentation timings with
+and without the effect. Frame timings include Core stepping, scene rendering,
+and submission to Flutter's texture registry, but exclude display vsync.
 
 `ADE1` begins with five little-endian `u32` values: magic (`ADE1`), DXBC
 length, `b0` byte size, texture count, and uniform count. Each texture has
@@ -438,9 +443,13 @@ a `u32` slot and a 256-byte NUL-terminated name. Each uniform has a `u32`
 byte offset, a `u32` float component count, and the same name format. The
 pixel DXBC bytes follow the records. `ADE2` uses the same layout with
 magic `ADE2`, then appends a little-endian `u32` vertex bytecode length and
-the vertex DXBC. The Host zeroes the block before filling its constants;
-the metadata does not carry default values. The compiler and decoder
-share the limits defined in `artemis_dxbc_effect.h`.
+the vertex DXBC. For array constants, the low byte of the component count
+gives the element's float width, and the upper bytes give the array length;
+elements occupy consecutive 16-byte registers. An optional tail of exactly
+`b0` byte size holds the initial constant block. The Host restores this block
+on every draw, or starts with zeroes if it is absent, before applying frame
+parameters. The compiler and decoder share the limits defined in
+`artemis_dxbc_effect.h`.
 
 To test transfer from Wine to a Flutter texture, set
 `FLUTTER_MACOS_FRAMEWORK_DIR` to the directory containing
