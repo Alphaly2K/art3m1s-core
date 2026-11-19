@@ -11,7 +11,7 @@ pub struct SplayHandler;
 
 impl TagHandler for SplayHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let file = ctx.resolve_param("file")?.as_string();
+        let file = ctx.resolve_param_str("file")?;
         let loop_play = ctx
             .instruction
             .get("loop")
@@ -95,7 +95,7 @@ pub struct SxfadeHandler;
 
 impl TagHandler for SxfadeHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let file = ctx.resolve_param("file")?.as_string();
+        let file = ctx.resolve_param_str("file")?;
         let loop_play = ctx
             .instruction
             .get("loop")
@@ -132,7 +132,7 @@ pub struct SeplayHandler;
 impl TagHandler for SeplayHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let id = ctx.resolve_param_str("id")?;
-        let file = ctx.resolve_param("file")?.as_string();
+        let file = ctx.resolve_param_str("file")?;
         let loop_play = ctx
             .instruction
             .get("loop")
@@ -234,7 +234,7 @@ impl TagHandler for VoiceHandler {
             }
             None => None,
         };
-        let file = ctx.resolve_param("file")?.as_string();
+        let file = ctx.resolve_param_str("file")?;
         let loop_play = ctx
             .instruction
             .get("loop")
@@ -423,11 +423,12 @@ mod tests {
         };
         assert_eq!(buffer, Some(-1), "-1 表示内存播放");
 
-        let TagResult::Emit(Event::BgmPlay { buffer, .. }) =
-            exec(&SplayHandler, "splay", &[("file", "bgm01")])
+        let TagResult::Emit(Event::BgmPlay { file, buffer, .. }) =
+            exec(&SplayHandler, "splay", &[("file", "007")])
         else {
             panic!("splay 应产出 BgmPlay");
         };
+        assert_eq!(file, "007");
         assert_eq!(buffer, None, "缺省使用默认缓冲");
     }
 

@@ -80,7 +80,7 @@ pub struct LycHandler;
 impl TagHandler for LycHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let id = ctx.resolve_param_str("id")?;
-        let file = ctx.resolve_param("file")?.as_string();
+        let file = ctx.resolve_param_str("file")?;
 
         // 先发 Create（携带 id/file）。文档中 mask/width/height/color 为附加参数：
         // - file 存在时 width/height/color 被忽略，仅 mask 生效；
@@ -127,7 +127,7 @@ pub struct Lyc2Handler;
 impl TagHandler for Lyc2Handler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let id = ctx.resolve_param_str("id")?;
-        let file = ctx.resolve_param("file")?.as_string();
+        let file = ctx.resolve_param_str("file")?;
         let alpha = ctx
             .instruction
             .get("alpha")
@@ -184,7 +184,7 @@ pub struct LyshaderHandler;
 impl TagHandler for LyshaderHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let id = ctx.resolve_param_str("id")?;
-        let file = ctx.resolve_param("file")?.as_string();
+        let file = ctx.resolve_param_str("file")?;
         Ok(TagResult::Emit(Event::ShaderLoad { id, file }))
     }
 }
@@ -258,12 +258,12 @@ mod tests {
     fn lyc_without_extra_params_emits_single_create() {
         // 无 mask/width/height/color 时行为与旧实现一致：只发一个 Create
         let TagResult::Emit(Event::Layer(LayerEvent::Create { id, file })) =
-            exec(&LycHandler, "lyc", &[("id", "0"), ("file", "bg")])
+            exec(&LycHandler, "lyc", &[("id", "0"), ("file", "007")])
         else {
             panic!("lyc 无附加参数时应只发 Create");
         };
         assert_eq!(id, "0");
-        assert_eq!(file, "bg");
+        assert_eq!(file, "007");
     }
 
     #[test]
