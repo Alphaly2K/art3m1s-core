@@ -2061,8 +2061,8 @@ impl Interpreter {
     ///
     /// docs/spec/macro.md：宏实参自动展开为变量（宏体内 `$param`、
     /// `var_exist target="param"` 都按变量取用）；同时经
-    /// [`MacroRegistry::expand`] 做值参数的文本替换（estimate/cond 表达式
-    /// 除外，见 macro.rs）。展开结果拼上收尾 [return] 构成合成脚本，用
+    /// [`MacroRegistry::expand`] 替换普通值参数，表达式留到执行时求值。
+    /// 展开结果拼上收尾 [return] 构成合成脚本，用
     /// `TagResult::Call` 进入，宏体内 if/endif 与显式 [return] 都按普通
     /// 脚本语义工作。
     fn invoke_macro(

@@ -1833,6 +1833,51 @@ fn drive_playback_boot(session: &mut ScriptIoSession, host: &mut MemoryHost) {
 }
 
 #[test]
+fn macro_expressions_keep_clickable_layers_attached_to_their_parent() {
+    use crate::host::input::HostInput;
+
+    let (mut session, epoch, mut host) = playback_project(
+        b"*top\n[make_button group=4.20]\n[lyprop id=4.20 left=80 top=40]\n[stop]\n",
+    );
+    host.asset(
+        "macro.iet",
+        br#"*make_button
+[lyc id="$group + '.0'" width=12 height=8 color=ffffffff]
+[setonclick id="$group + '.0'" handler=var name=t.pressed data=1]
+[return]
+"#,
+    );
+    drive_playback_boot(&mut session, &mut host);
+
+    for (id, x, y) in [(2, 4, 4), (3, 84, 44)] {
+        session
+            .submit_input(
+                epoch,
+                &[
+                    HostInput::Pointer { x, y },
+                    HostInput::Key {
+                        code: 1,
+                        down: false,
+                    },
+                    HostInput::Key {
+                        code: 1,
+                        down: true,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            session.step_queued_frame(playback_frame(id, id)).unwrap(),
+            ScriptIoProgress::Event
+        );
+        assert_eq!(
+            session.interpreter.get_variable("t.pressed").is_some(),
+            id == 3
+        );
+    }
+}
+
+#[test]
 fn autosave_writes_once_per_input_wait_and_preserves_the_wait() {
     let (mut session, epoch, mut host) = playback_project(
         br#"*top

@@ -151,6 +151,14 @@ impl MacroRegistry {
                 if key == "estimate" || key == "cond" {
                     continue;
                 }
+                // Keep the leading `$` of expressions such as `$id + '.0'`.
+                // A standalone argument can still substitute into raw tag parameters.
+                if let Some(name) = value.strip_prefix('$') {
+                    if let Some(argument) = args.get(name) {
+                        value.clone_from(argument);
+                    }
+                    continue;
+                }
                 // 替换所有 $param_name 形式的引用
                 let mut result = String::new();
                 let mut chars = value.chars().peekable();
@@ -241,7 +249,7 @@ mod tests {
     }
 
     #[test]
-    fn test_macro_expansion() {
+    fn macro_expansion_preserves_compound_value_expressions() {
         let content = r#"
 *test_macro
 [var name="result" data="$param0 + ' ' + $param1"]
@@ -258,7 +266,7 @@ mod tests {
 
         let expanded = registry.expand("test_macro", &args).unwrap();
         assert_eq!(expanded.len(), 1);
-        assert_eq!(expanded[0].get("data"), Some("'Hello' + ' ' + 'World'"));
+        assert_eq!(expanded[0].get("data"), Some("$param0 + ' ' + $param1"));
     }
 
     #[test]
