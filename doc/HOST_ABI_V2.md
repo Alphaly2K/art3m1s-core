@@ -580,14 +580,15 @@ RGBA8 字形图集，将字形四边形按消息层顺序放进帧包；图集�
 |---|---|
 | `play` | `playback_id`、`replaces`（旧播放 ID 或 null）、`channel`（`bgm`、`se`、`voice`）、`id`（脚本通道，BGM 为 null）、资产 `key`、`loop`、可选 A/B 循环 `loop_key`、`gain`、`pan`、`fade_ms`、`buffer_ms`、`skippable`、`crossfade`。`loop_key`、`gain`、`pan`、`buffer_ms` 未指定时为 null。 |
 | `stop` / `gain` / `pan` | `playback_ids`、渐变 `time_ms`、`value`（`stop` 为 null） |
-| `volume` | `channel`（`bgm`、`se`、`video`）、`level`（0–1000，1000 为原始音量） |
+| `volume` | `channel`（`master`、`bgm`、`se`、`voice`、`video`）、`level`（0–1000，1000 为原始音量） |
 | `stop_all` | `fade_ms` |
 | `restore` | `plays`：一组完整的 `play` metadata。Host 停止当前会话的音频，再从起点开始播放列表中的新 ID。空列表表示静音。`stop_video` 为 true 时同时停止当前视频。 |
 
 `playback_id`、`replaces`、`playback_ids` 的元素及 u64 时间均使用十进制字符串。Host 按事件
 顺序处理命令，从资产命名空间读取并播放。完成引导段后按非空 `loop_key` 循环；交叉淡入时
 平滑替换 `replaces`。通道音量在新会话中从 1000 开始，适用于该通道的所有现有和后续播放，
-包括淡出中的曲目；它与轨道增益、Host 音量及静音状态分别处理。`se` 与 `voice` 相互独立。
+包括淡出中的曲目。`master` 是脚本总音量，适用于所有通道，与应用总音量、轨道增益及静音状态
+分别处理。`se` 与 `voice` 相互独立。
 `submit_playback_status(handle, epoch, playback_id, status)` 在下一次受理
 新帧时应用；每次播放可报一次 `Started`、一次终态。`Ended` 触发注册的完成处理器；失败和取消
 也解除对应等待。`[wait se=… time=N]` 从 Core 应用 `Started` 的帧计时。停止、替换或重载后，旧

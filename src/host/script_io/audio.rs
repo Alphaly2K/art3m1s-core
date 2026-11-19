@@ -10,6 +10,49 @@ pub const MEDIA_AUDIO_COMMAND: MessageKind = MessageKind {
 
 const MAX_PLAYBACKS: usize = 1024;
 
+#[derive(Clone, Copy)]
+pub(super) enum LuaVolumeChannel {
+    Master,
+    Bgm,
+    Se,
+    Voice,
+}
+
+impl LuaVolumeChannel {
+    const ALL: [Self; 4] = [Self::Master, Self::Bgm, Self::Se, Self::Voice];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Master => "master",
+            Self::Bgm => "bgm",
+            Self::Se => "se",
+            Self::Voice => "voice",
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct LuaVolumes([Option<u16>; 4]);
+
+impl LuaVolumes {
+    pub(super) fn set(&mut self, channel: LuaVolumeChannel, volume: f32) {
+        if volume.is_finite() {
+            self.0[channel as usize] = Some((volume.clamp(0.0, 1.0) * 1000.0).round() as u16);
+        }
+    }
+
+    pub(super) fn flush(&mut self, transport: &mut SessionTransport) -> Result<(), ProtocolError> {
+        for channel in LuaVolumeChannel::ALL {
+            let pending = &mut self.0[channel as usize];
+            if let Some(level) = *pending {
+                emit_volume(transport, channel.name(), level)?;
+                *pending = None;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Channel {
     Bgm,
@@ -234,14 +277,17 @@ impl Audio {
 
 impl ScriptIoSession {
     pub(super) fn sync_audio_bus_volumes(&mut self) -> Result<(), ProtocolError> {
-        if !self.media_enabled
-            || self.scene.is_none()
-            || self.project_loading
-            || !matches!(self.shutdown, Shutdown::Open)
-        {
+        let Some(scene) = &self.scene else {
+            return Ok(());
+        };
+        if !self.media_enabled || self.project_loading || !matches!(self.shutdown, Shutdown::Open) {
             return Ok(());
         }
-        let channels = [("bgm", "s.bgmvol"), ("se", "s.sevol"), ("video", "s.videovol")];
+        let channels = [
+            ("bgm", "s.bgmvol"),
+            ("se", "s.sevol"),
+            ("video", "s.videovol"),
+        ];
         let levels = {
             let vars = self.interpreter.variables_handle();
             let vars = vars.lock().unwrap();
@@ -256,13 +302,10 @@ impl ScriptIoSession {
             if self.audio.bus_volumes[index].unwrap_or(1000) == level {
                 continue;
             }
-            emit(
-                &mut self.transport,
-                json!({"op":"volume","channel":channel,"level":level}),
-            )?;
+            emit_volume(&mut self.transport, channel, level)?;
             self.audio.bus_volumes[index] = Some(level);
         }
-        Ok(())
+        scene.flush_lua_volumes(&mut self.transport)
     }
 
     pub(in crate::host) fn submit_playback_status(
@@ -595,6 +638,17 @@ impl Play<'_> {
             },
         ))
     }
+}
+
+fn emit_volume(
+    transport: &mut SessionTransport,
+    channel: &str,
+    level: u16,
+) -> Result<(), ProtocolError> {
+    emit(
+        transport,
+        json!({"op":"volume","channel":channel,"level":level}),
+    )
 }
 
 fn emit(transport: &mut SessionTransport, metadata: Value) -> Result<(), ProtocolError> {

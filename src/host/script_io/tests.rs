@@ -2829,14 +2829,18 @@ fn audio_feedback_uses_playback_identity_and_resumes_its_wait_after_callback_io(
         ("save".into(), "system.dat".into()),
         (
             1,
-            serde_json::to_vec(&HashMap::from([("bgmvol", asb_interpreter::Value::Int(600))]))
-                .unwrap(),
+            serde_json::to_vec(&HashMap::from([(
+                "bgmvol",
+                asb_interpreter::Value::Int(600),
+            )]))
+            .unwrap(),
         ),
     );
     host.asset(
         "boot.iet",
         br#"*top
 [var name=s.sevol data=800]
+[calllua function=configure_audio]
 [splay file=:bgm/theme_a.ogg loop=1 gain=450]
 [setonsoundfinish id=fx label=finished call=1]
 [seplay id=fx file=old.ogg]
@@ -2853,6 +2857,13 @@ fn audio_feedback_uses_playback_identity_and_resumes_its_wait_after_callback_io(
 [return]
 [lua]
 __engine:setMagicPath{'bgm', 'sound'}
+function configure_audio(e)
+  e:setMasterVolume(0.5)
+  e:setBgmVolume(0.1)
+  e:setBgmVolume(0.45)
+  e:setSeVolume(1.1)
+  e:setVoiceVolume(0.25)
+end
 function verify(e)
   assert(not finished)
   finished=true
@@ -2924,7 +2935,14 @@ end
         }
     }
     assert_eq!(record(PROJECT_READY), json!({}));
-    for (channel, level) in [("bgm", 600), ("se", 800)] {
+    for (channel, level) in [
+        ("bgm", 600),
+        ("se", 800),
+        ("master", 500),
+        ("bgm", 450),
+        ("se", 1000),
+        ("voice", 250),
+    ] {
         assert_eq!(step(1, 0), ScriptIoProgress::WouldBlock);
         assert_eq!(
             record(MEDIA_AUDIO_COMMAND),

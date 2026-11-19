@@ -162,6 +162,7 @@ impl ScriptIoSession {
 #[derive(Default)]
 struct SceneProjection {
     compositor: Compositor,
+    lua_volumes: audio::LuaVolumes,
     input: InputFrame,
     magic_paths: crate::magic_path::MagicPathTable,
     textures: HashMap<String, Option<Arc<FrameTexture>>>,
@@ -285,6 +286,12 @@ impl SceneProjection {
 #[derive(Default)]
 struct SceneCallbacks(Arc<Mutex<SceneProjection>>);
 
+impl SceneCallbacks {
+    fn set_audio_volume(&self, channel: audio::LuaVolumeChannel, volume: f32) {
+        self.0.lock().unwrap().lua_volumes.set(channel, volume);
+    }
+}
+
 pub(super) struct SceneIo {
     scene: Arc<Mutex<SceneProjection>>,
     pending: Option<PendingAsset>,
@@ -329,6 +336,13 @@ impl TextureRead {
 }
 
 impl SceneIo {
+    pub(super) fn flush_lua_volumes(
+        &self,
+        transport: &mut SessionTransport,
+    ) -> Result<(), ProtocolError> {
+        self.scene.lock().unwrap().lua_volumes.flush(transport)
+    }
+
     pub(super) fn set_control_layer_visible(&self, id: &str, visible: bool) {
         self.scene
             .lock()
@@ -705,6 +719,22 @@ fn decode_texture(bytes: &[u8], available: usize) -> Option<image::RgbaImage> {
 }
 
 impl EngineCallbacks for SceneCallbacks {
+    fn set_master_volume(&self, volume: f32) {
+        self.set_audio_volume(audio::LuaVolumeChannel::Master, volume);
+    }
+
+    fn set_bgm_volume(&self, volume: f32) {
+        self.set_audio_volume(audio::LuaVolumeChannel::Bgm, volume);
+    }
+
+    fn set_se_volume(&self, volume: f32) {
+        self.set_audio_volume(audio::LuaVolumeChannel::Se, volume);
+    }
+
+    fn set_voice_volume(&self, volume: f32) {
+        self.set_audio_volume(audio::LuaVolumeChannel::Voice, volume);
+    }
+
     fn resolve_emote_model_path(&self, path: &str) -> asb_interpreter::Result<String> {
         self.resolve_emote_path(path)
     }
