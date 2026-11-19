@@ -277,6 +277,36 @@ queue. The tested DXVK configurations running under CrossOver did not
 expose either Win32 external memory or Metal object export. The companion
 MoltenVK from `v3.1.1-macos.4` passed the native IOSurface probe.
 
+`scripts/test-host-dxvk-native.sh` tests D3D11 rendering into a Host-owned
+BGRA `CVPixelBuffer` through an imported IOSurface. It uses native DXVK and
+MoltenVK in one process without Wine. The probe enables `VK_EXT_metal_objects`
+before creating the D3D11 device, wraps a Vulkan image backed by the IOSurface
+and compares two GPU clears directly in the original pixel buffer. The layout
+handoff materializes deferred clears before the D3D11 completion query.
+
+For the tested Apple Silicon build, start at `metalsharp/DXVK-MacOS`
+`v3.1.1-macos.4` (`e847475b8ea97b92bc65385bad0eb88ef1f79ebf`) with its
+submodules initialized. Apply the native build fixes from DXVK PR 5962
+(`f43c43747e0c66114ed7592050e4f1ccdd03d582`) and the loader fixes from
+DXVK commit `cbd2206d72d3d9dd9941d5d868bb03a858e85f9b`. In
+`src/dxgi/dxgi_ngx.cpp`, guard `NvidiaExtensionRequested` and
+`TrustNgxCertificate` with `_WIN64`, matching the existing guard at their
+call sites. Build with Meson, Ninja, Apple Clang, glslang and SDL3:
+
+```sh
+meson setup build-native --buildtype release \
+  -Denable_d3d8=false -Denable_d3d9=false -Denable_d3d10=false \
+  -Dnative_sdl3=enabled -Dnative_sdl2=disabled -Dnative_glfw=disabled
+ninja -C build-native src/d3d11/libdxvk_d3d11.0.dylib src/dxgi/libdxvk_dxgi.0.dylib
+```
+
+From this repository, run the probe with `ARTEMIS_DXVK_NATIVE_SOURCE` and
+`ARTEMIS_DXVK_NATIVE_BUILD` pointing to that source and build, and
+`ARTEMIS_MOLTENVK_DYLIB` set to the absolute path to the companion MoltenVK
+1.4.3 library. The probe uses a private DXVK adapter interface to request
+the device extension, so the source headers and libraries must match. Shader
+compilation, scene draws, and Flutter engine presentation are separate stages.
+
 To test transfer from Wine to a Flutter texture, set
 `FLUTTER_MACOS_FRAMEWORK_DIR` to the directory containing
 `FlutterMacOS.framework`, select the bottle, and run:
