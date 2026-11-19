@@ -127,7 +127,8 @@ static HRESULT quad_vertex(ID3D11ShaderReflection *pixel, UINT count, ID3DBlob *
 }
 
 static HRESULT reflect_uniforms(ID3D11ShaderReflection *reflection, const char *name,
-                                ArtDxbcHeader *header, ArtDxbcUniform *uniforms) {
+                                ArtDxbcHeader *header, ArtDxbcUniform *uniforms, unsigned char *defaults,
+                                int legacy) {
     ID3D11ShaderReflectionConstantBuffer *buffer = reflection->lpVtbl->GetConstantBufferByName(reflection, name);
     D3D11_SHADER_BUFFER_DESC desc;
     if (!buffer || FAILED(buffer->lpVtbl->GetDesc(buffer, &desc)) || desc.Size > ART_DXBC_MAX_CONSTANTS ||
@@ -142,21 +143,36 @@ static HRESULT reflect_uniforms(ID3D11ShaderReflection *reflection, const char *
         D3D11_SHADER_TYPE_DESC shape;
         ArtDxbcUniform *uniform = &uniforms[header->uniforms];
         if (!type || FAILED(type->lpVtbl->GetDesc(type, &shape)) || shape.Type != D3D_SVT_FLOAT ||
-            (shape.Class != D3D_SVC_SCALAR && shape.Class != D3D_SVC_VECTOR) || shape.Elements ||
-            !shape.Columns || shape.Columns > 4 || field.Size != shape.Columns * 4 ||
+            (shape.Class != D3D_SVC_SCALAR && shape.Class != D3D_SVC_VECTOR) ||
+            !shape.Columns || shape.Columns > 4 ||
+            shape.Elements > ART_DXBC_MAX_CONSTANTS / 16 ||
+            (shape.Elements && (!defaults || (field.StartOffset & 15))) ||
             (field.StartOffset & 3) || (uint64_t)field.StartOffset + field.Size > desc.Size ||
             !copy_name(uniform->name, field.Name)) {
             fprintf(stderr, "Unsupported b0 field: %s\n", field.Name ? field.Name : "<unnamed>");
             return E_NOTIMPL;
         }
         uniform->offset = field.StartOffset;
-        uniform->components = shape.Columns;
+        uniform->components = shape.Columns | (shape.Elements << 8);
+        const uint32_t span = art_dxbc_uniform_span(uniform->components);
+        if (field.Size < span || field.Size > ((span + 15) & ~15u) ||
+            (!shape.Elements && field.Size != span)) {
+            fprintf(stderr, "Unsupported b0 layout: %s\n", field.Name);
+            return E_NOTIMPL;
+        }
+        if (defaults && field.DefaultValue) {
+            memcpy(defaults + field.StartOffset, field.DefaultValue, span);
+        } else if (legacy && !shape.Elements && ((!strcmp(field.Name, "alpha") && shape.Columns == 1) ||
+                   (!strcmp(field.Name, "colorMultiply") && shape.Columns == 3))) {
+            const float identity[] = {1.0f, 1.0f, 1.0f};
+            memcpy(defaults + field.StartOffset, identity, span);
+        }
         ++header->uniforms;
     }
     return S_OK;
 }
 
-static HRESULT write_effect(const void *data, uint32_t bytes, int paired) {
+static HRESULT write_effect(const void *data, uint32_t bytes, int paired, int legacy) {
     ID3D11ShaderReflection *reflection = NULL;
     ID3DBlob *vertex = NULL;
     uint32_t vertex_bytes = 0;
@@ -165,6 +181,7 @@ static HRESULT write_effect(const void *data, uint32_t bytes, int paired) {
     ArtDxbcHeader header = {paired ? ART_DXBC_EFFECT_PAIR_MAGIC : ART_DXBC_EFFECT_MAGIC, bytes, 0, 0, 0};
     ArtDxbcTexture textures[ART_DXBC_TEXTURE_SLOTS] = {0};
     ArtDxbcUniform uniforms[ART_DXBC_MAX_UNIFORMS] = {0};
+    unsigned char defaults[ART_DXBC_MAX_CONSTANTS] = {0};
     D3D11_SHADER_DESC desc;
     status = reflection->lpVtbl->GetDesc(reflection, &desc);
     if (FAILED(status)) goto done;
@@ -173,14 +190,16 @@ static HRESULT write_effect(const void *data, uint32_t bytes, int paired) {
         status = reflection->lpVtbl->GetResourceBindingDesc(reflection, i, &binding);
         if (FAILED(status)) goto done;
         if (binding.Type == D3D_SIT_CBUFFER && binding.BindPoint == 0 && binding.BindCount == 1) {
-            status = reflect_uniforms(reflection, binding.Name, &header, uniforms);
+            status = reflect_uniforms(reflection, binding.Name, &header, uniforms, paired ? defaults : NULL, legacy);
             if (FAILED(status)) goto done;
         } else if (binding.Type == D3D_SIT_TEXTURE && binding.Dimension == D3D_SRV_DIMENSION_TEXTURE2D &&
                    binding.BindCount == 1 && binding.BindPoint < ART_DXBC_TEXTURE_SLOTS &&
                    header.textures < ART_DXBC_TEXTURE_SLOTS &&
                    copy_name(textures[header.textures].name, binding.Name)) {
             textures[header.textures++].slot = binding.BindPoint;
-        } else if (binding.Type != D3D_SIT_SAMPLER || binding.BindPoint || binding.BindCount != 1) {
+        } else if (binding.Type != D3D_SIT_SAMPLER || binding.BindCount != 1 ||
+                   binding.BindPoint >= (legacy ? ART_DXBC_TEXTURE_SLOTS : 1) ||
+                   (binding.uFlags & D3D_SIF_COMPARISON_SAMPLER)) {
             fprintf(stderr, "Unsupported shader resource: %s\n", binding.Name ? binding.Name : "<unnamed>");
             status = E_NOTIMPL;
             goto done;
@@ -196,12 +215,15 @@ static HRESULT write_effect(const void *data, uint32_t bytes, int paired) {
         }
         vertex_bytes = (uint32_t)length;
     }
+    uint32_t default_bytes = header.constant_bytes;
+    while (default_bytes && !defaults[default_bytes - 1]) --default_bytes;
     if (fwrite(&header, sizeof(header), 1, stdout) != 1 ||
         fwrite(textures, sizeof(*textures), header.textures, stdout) != header.textures ||
         fwrite(uniforms, sizeof(*uniforms), header.uniforms, stdout) != header.uniforms ||
         fwrite(data, 1, bytes, stdout) != bytes ||
         (paired && (fwrite(&vertex_bytes, sizeof(vertex_bytes), 1, stdout) != 1 ||
                     fwrite(ID3D10Blob_GetBufferPointer(vertex), 1, vertex_bytes, stdout) != vertex_bytes)) ||
+        (default_bytes && fwrite(defaults, 1, header.constant_bytes, stdout) != header.constant_bytes) ||
         fflush(stdout) != 0) status = E_FAIL;
 done:
     if (vertex) ID3D10Blob_Release(vertex);
@@ -230,8 +252,26 @@ int main(int argc, char **argv) {
 
     ID3DBlob *code = NULL, *diagnostics = NULL;
     const char *profile = effect ? "ps_5_0" : argv[1];
-    const HRESULT status = D3DCompile(source, length, "artemis.hlsl", NULL, NULL, "main", profile,
-                                      0, 0, &code, &diagnostics);
+    int legacy = 0;
+    HRESULT status = D3DCompile(source, length, "artemis.hlsl", NULL, NULL, "main", profile,
+                                0, 0, &code, &diagnostics);
+    if (paired && FAILED(status)) {
+        ID3DBlob *legacy_code = NULL, *legacy_diagnostics = NULL;
+        HRESULT legacy_status = D3DCompile(source, length, "artemis.hlsl", NULL, NULL, "ps", profile,
+                                    D3DCOMPILE_ENABLE_BACKWARDS_COMPATIBILITY, 0,
+                                    &legacy_code, &legacy_diagnostics);
+        if (SUCCEEDED(legacy_status) && legacy_code) {
+            if (code) ID3D10Blob_Release(code);
+            if (diagnostics) ID3D10Blob_Release(diagnostics);
+            code = legacy_code;
+            diagnostics = legacy_diagnostics;
+            status = legacy_status;
+            legacy = 1;
+        } else {
+            if (legacy_code) ID3D10Blob_Release(legacy_code);
+            report_diagnostics(legacy_diagnostics);
+        }
+    }
     free(source);
     report_diagnostics(diagnostics);
     int result = 1;
@@ -240,7 +280,7 @@ int main(int argc, char **argv) {
         const size_t bytes = ID3D10Blob_GetBufferSize(code);
         if (bytes >= 4 && bytes <= ART_DXBC_MAX_BYTECODE && memcmp(data, "DXBC", 4) == 0) {
             if (effect) {
-                const HRESULT reflected = write_effect(data, (uint32_t)bytes, paired);
+                const HRESULT reflected = write_effect(data, (uint32_t)bytes, paired, legacy);
                 result = FAILED(reflected);
                 if (result) fprintf(stderr, "Shader reflection failed (0x%08lx)\n", (unsigned long)(DWORD)reflected);
             } else {

@@ -3,7 +3,6 @@
 #include "artemis_dxvk_device.hpp"
 #include "artemis_dxbc_effect.hpp"
 
-#include <algorithm>
 #include <cstdio>
 
 using dxvk::Com;
@@ -15,7 +14,7 @@ static void require(bool success, const char *message) {
 struct ArtDxvkContext {
     artemis::DxvkDevice host;
     Com<ID3D11RasterizerState> rasterizer;
-    Com<ID3D11SamplerState> sampler;
+    Com<ID3D11SamplerState> point_sampler, linear_sampler;
     void *metal_device = host.metal_device();
 
     ArtDxvkContext() {
@@ -30,12 +29,12 @@ struct ArtDxvkContext {
         sampler_desc.AddressU = sampler_desc.AddressV = sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
         sampler_desc.MaxAnisotropy = 1;
         sampler_desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
-        require(SUCCEEDED(device->CreateSamplerState(&sampler_desc, &sampler)), "Cannot create sampler");
+        require(SUCCEEDED(device->CreateSamplerState(&sampler_desc, &point_sampler)), "Cannot create point sampler");
+        sampler_desc.Filter = D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+        require(SUCCEEDED(device->CreateSamplerState(&sampler_desc, &linear_sampler)), "Cannot create linear sampler");
         auto *context = host.context();
         context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
         context->RSSetState(rasterizer.ptr());
-        ID3D11SamplerState *active_sampler = sampler.ptr();
-        context->PSSetSamplers(0, 1, &active_sampler);
     }
 
     ~ArtDxvkContext() { host.context()->ClearState(); }
@@ -45,14 +44,23 @@ struct ArtDxvkProgram {
     ID3D11Device *owner;
     artemis::DxbcEffect effect;
     const int fore, mask, user;
+    const bool combined_samplers;
     Com<ID3D11VertexShader> vertex;
     Com<ID3D11PixelShader> pixel;
     Com<ID3D11Buffer> constants;
     std::vector<char> data;
 
+    int slot(std::string_view texture, std::string_view sampler) const {
+        const int separate = effect.texture_slot(texture), combined = effect.texture_slot(sampler);
+        require(separate < 0 || combined < 0, "Duplicate DXVK texture role");
+        return separate >= 0 ? separate : combined;
+    }
+
     ArtDxvkProgram(ID3D11Device *device, std::string_view artifact)
-        : owner(device), effect(artifact), fore(effect.texture_slot("textureFore")),
-          mask(effect.texture_slot("textureMask")), user(effect.texture_slot("textureUser")),
+        : owner(device), effect(artifact), fore(slot("textureFore", "samplerFore")),
+          mask(slot("textureMask", "samplerMask")), user(slot("textureUser", "samplerUser")),
+          combined_samplers(effect.texture_slot("samplerFore") >= 0 || effect.texture_slot("samplerMask") >= 0 ||
+                            effect.texture_slot("samplerUser") >= 0),
           data(effect.constant_bytes()) {
         require(effect.texture_count() == uint32_t((fore >= 0) + (mask >= 0) + (user >= 0)),
                 "Unsupported DXVK texture binding");
@@ -145,7 +153,7 @@ int art_dxvk_draw(ArtDxvkContext *context, ArtDxvkProgram *program, const ArtDxv
     require(context && program && targets && (uniforms || !count), "Invalid DXVK draw arguments");
     auto *device = context->host.device();
     require(program->owner == device && targets->owner == device, "DXVK draw uses objects from different devices");
-    std::fill(program->data.begin(), program->data.end(), 0);
+    program->effect.reset_uniforms(program->data);
     for (size_t i = 0; i < count; ++i) {
         const auto &uniform = uniforms[i];
         require(uniform.name != nullptr, "DXVK uniform is missing a name");
@@ -165,6 +173,10 @@ int art_dxvk_draw(ArtDxvkContext *context, ArtDxvkProgram *program, const ArtDxv
         resources[program->user] = user_view.ptr();
     }
     auto *draw = context->host.context();
+    std::array<ID3D11SamplerState *, ART_DXBC_TEXTURE_SLOTS> samplers{};
+    if (program->combined_samplers) samplers.fill(context->linear_sampler.ptr());
+    else samplers[0] = context->point_sampler.ptr();
+    draw->PSSetSamplers(0, samplers.size(), samplers.data());
     auto *buffer = program->constants.ptr();
     if (buffer) draw->UpdateSubresource(buffer, 0, nullptr, program->data.data(), 0, 0);
     draw->PSSetConstantBuffers(0, 1, &buffer);

@@ -325,15 +325,21 @@ both stages into `ADE2`. It supports optional `SV_Position` and `float2`
 `TEXCOORD0` and `TEXCOORD1` inputs. Both texture coordinates use the quad's
 normalized coordinates. The compiler checks the output registers and
 masks against the pixel inputs and rejects unsupported signatures. Both
-modes accept one sampler at `s0`, 2D textures at `t0` through `t3`, and
-float scalars and vectors in `b0`. They create no graphics device. The
+modes accept a sampler at `s0`, 2D textures at `t0` through `t3`, and
+float scalars and vectors in `b0`. `effect-pair` also accepts the legacy
+`ps` entry point with up to four ordinary sampler slots and float arrays
+in `b0`. These compile modes create no graphics device. The
 native [DXVK pass interface](../tools/host-bindings/d3d11/artemis_dxvk_pass.h)
 prepares an ADE2 program from Host-owned bytes, independently of any
 texture. A single context may reuse multiple programs and replace the
 foreground/output IOSurface pair without preparing the programs again.
 Use all three objects on the owner thread and destroy the programs and
 targets before destroying the context. The pass binds foreground, mask,
-user textures, and parameters by reflected name.
+user textures, and parameters by reflected name. Combined legacy samplers
+use linear filtering with clamped coordinates; separate samplers use point
+filtering. The Host restores reflected initial values before applying the
+current frame's overrides. Legacy `alpha` and `colorMultiply` default to
+the multiplicative identity when the source gives no initial value.
 Metal writes the foreground into a separate IOSurface on the same GPU.
 The probe transitions the imported foreground image before the first Metal
 write, waits for Metal completion before sampling, and waits for D3D11
@@ -342,9 +348,9 @@ result, an update to the same foreground surface, and a constant change
 with that foreground held steady. Metal copies each DXVK result to a
 separate presentation IOSurface on the GPU. Only the final pixel
 comparison reads the presentation buffer on the CPU. The `--hlsl` probe
-switches between two programs and replaces the DXVK targets before reusing
-the first program. It checks the new output and the retained presentation
-buffer. The probe requires neither game assets nor Flutter.
+switches between modern and legacy programs, replaces the DXVK targets,
+and checks reflected defaults, frame overrides, and retained output.
+The probe requires neither game assets nor Flutter.
 
 Use `--arfp` in place of `--hlsl` to run Core's three-frame scene fixture.
 The probe compiles the first packet's HLSL once. Metal renders the group's
@@ -368,6 +374,9 @@ Keep the five dylibs together when moving the runtime and include its
 `libart3m1s_artemis_dxvk_host.dylib` from the application's runtime directory
 and sign the dylibs with the app's signing identity when packaging them.
 The runtime consumes ADE2 bytes and needs no Wine or compiler to draw.
+Package the compiler and bridge from the same revision when distributing
+effects with reflected initial values or array constants. The updated
+bridge still accepts existing ADE2 artifacts.
 Set `ARTEMIS_DXVK_RUNTIME_DIR` to the assembled directory and run
 `bash scripts/test-host-dxvk-native.sh --arfp` to check the packaged libraries.
 To generate the fixture's ADE2 without CrossOver, set

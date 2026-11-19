@@ -134,6 +134,7 @@ else
     fi
     printf '%s\n' 'float4 main() : SV_Target { return float4(0, 0, 1, 1); }' |
       compile_effect effect-pair > "$scratch/alternate.ade"
-    run_native "$executable" effect.ade alternate.ade
+    compile_effect effect-pair < tools/host-smoke/shaders/legacy-effect.hlsl > "$scratch/legacy.ade"
+    run_native "$executable" effect.ade alternate.ade legacy.ade
   fi
 fi

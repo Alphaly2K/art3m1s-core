@@ -111,7 +111,7 @@ struct Presentation {
     }
 };
 
-static void draw_effect(const char *effect, const char *alternate) {
+static void draw_effect(const char *effect, const char *alternate, const char *legacy) {
     std::unique_ptr<ArtDxvkContext, decltype(&art_dxvk_context_destroy)> context(art_dxvk_context_create(),
                                                                                 art_dxvk_context_destroy);
     check(bool(context), "create DXVK context");
@@ -145,14 +145,33 @@ static void draw_effect(const char *effect, const char *alternate) {
     draw_primary(replacement, changed, 0);
     check_pixels(replacement.presentation.get(), 3, pixels[2]);
     check_pixels(original.presentation.get(), 2, pixels[1]);
-    std::puts("Native DXVK reused one device across two programs and a replaced presentation target");
+
+    auto combined = load_program(context.get(), legacy);
+    const uint8_t legacy_mask[] = {0, 0, 0, 255, 0, 128, 0, 255}, legacy_user[] = {5, 128, 11, 255};
+    const uint8_t default_pixel[] = {11, 80, 17, 255}, custom_pixel[] = {11, 96, 17, 128};
+    const float weights[] = {1, 0.25f}, alpha = 0.5f;
+    const ArtDxvkUniform overrides[] = {
+        {reinterpret_cast<const uint8_t *>("weights"), 7, weights, 2},
+        {reinterpret_cast<const uint8_t *>("alpha"), 5, &alpha, 1},
+        {reinterpret_cast<const uint8_t *>("unused"), 6, &alpha, 1},
+    };
+    for (size_t i = 0; i < 3; ++i) {
+        check(art_dxvk_draw(context.get(), combined.get(), replacement.targets.get(), {legacy_mask, 2, 1},
+                            {legacy_user, 1, 1}, i == 1 ? overrides : nullptr, i == 1 ? 3 : 0) == 0,
+              "render HLSL with combined samplers and reflected defaults");
+        replacement.present();
+        check_pixels(replacement.presentation.get(), 4 + i, i == 1 ? custom_pixel : default_pixel);
+    }
+    draw_primary(replacement, changed, 0);
+    check_pixels(replacement.presentation.get(), 7, pixels[2]);
+    std::puts("Native DXVK verified modern and legacy programs, shared targets, and constant overrides");
 }
 
 int main(int argc, char **argv) try {
     if (argc == 1) clear_surfaces();
-    else if (argc == 3) draw_effect(argv[1], argv[2]);
+    else if (argc == 4) draw_effect(argv[1], argv[2], argv[3]);
     else {
-        std::fputs("Usage: artemis-dxvk-native [effect.ade alternate.ade]\n", stderr);
+        std::fputs("Usage: artemis-dxvk-native [effect.ade alternate.ade legacy.ade]\n", stderr);
         return 2;
     }
 } catch (const std::exception &error) {

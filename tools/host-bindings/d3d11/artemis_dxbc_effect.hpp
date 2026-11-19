@@ -3,6 +3,7 @@
 
 #include "artemis_dxbc_effect.h"
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <stdexcept>
@@ -30,6 +31,11 @@ public:
             uint32_t bytes = 0;
             read(artifact, &bytes, sizeof(bytes));
             vertex_bytecode_ = read_bytecode(artifact, bytes);
+            if (!artifact.empty()) {
+                require(artifact.size() == header_.constant_bytes);
+                defaults_.assign(artifact.begin(), artifact.end());
+                artifact = {};
+            }
         }
         require(artifact.empty());
 
@@ -42,13 +48,17 @@ public:
         }
         for (size_t i = 0; i < uniforms_.size(); ++i) {
             const auto &field = uniforms_[i];
-            require(name_valid(field.name) && !(field.offset & 3) && field.components >= 1 && field.components <= 4 &&
-                uint64_t(field.offset) + field.components * 4 <= header_.constant_bytes);
+            const auto elements = art_dxbc_uniform_elements(field.components);
+            const auto columns = art_dxbc_uniform_columns(field.components);
+            const auto span = art_dxbc_uniform_span(field.components);
+            require(name_valid(field.name) && !(field.offset & 3) && columns >= 1 && columns <= 4 &&
+                (!elements || (header_.magic == ART_DXBC_EFFECT_PAIR_MAGIC && !(field.offset & 15))) &&
+                uint64_t(field.offset) + span <= header_.constant_bytes);
             for (size_t j = 0; j < i; ++j) {
                 const auto &other = uniforms_[j];
                 require(std::strcmp(field.name, other.name) != 0 &&
-                    (field.offset + field.components * 4 <= other.offset ||
-                     other.offset + other.components * 4 <= field.offset));
+                    (field.offset + span <= other.offset ||
+                     other.offset + art_dxbc_uniform_span(other.components) <= field.offset));
             }
         }
     }
@@ -66,14 +76,24 @@ public:
         return -1;
     }
 
+    void reset_uniforms(std::vector<char> &block) const {
+        if (defaults_.empty()) std::fill(block.begin(), block.end(), 0);
+        else std::copy(defaults_.begin(), defaults_.end(), block.begin());
+    }
+
     bool set_uniform(std::vector<char> &block, std::string_view name, const float *values, size_t count) const {
         for (const auto &field : uniforms_) {
             if (name != field.name) continue;
-            if (!values || count != field.components || block.size() != constant_bytes()) return false;
-            std::memcpy(block.data() + field.offset, values, count * sizeof(float));
+            const auto columns = art_dxbc_uniform_columns(field.components);
+            const auto elements = art_dxbc_uniform_elements(field.components);
+            if (!values || count != columns * (elements ? elements : 1) || block.size() != constant_bytes()) return false;
+            for (uint32_t i = 0; i < (elements ? elements : 1); ++i) {
+                std::memcpy(block.data() + field.offset + i * 16, values + i * columns, columns * sizeof(float));
+            }
             return true;
         }
-        return false;
+        // A declared effect parameter may have been optimized out by the compiler.
+        return true;
     }
 
 private:
@@ -102,6 +122,7 @@ private:
     ArtDxbcHeader header_{};
     std::array<ArtDxbcTexture, ART_DXBC_TEXTURE_SLOTS> textures_{};
     std::vector<ArtDxbcUniform> uniforms_;
+    std::vector<char> defaults_;
     std::string_view bytecode_, vertex_bytecode_;
 };
 
