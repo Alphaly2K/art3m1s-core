@@ -71,4 +71,12 @@ metal = [
     "dep:objc2-quartz-core",
 ]
 runtime-shader = ["dep:shaderc", "dep:spirv-cross2"]
+metal-dxvk = [
+    "metal",
+    "dep:libloading",
+    "objc2-core-foundation/CFDictionary",
+    "objc2-core-foundation/CFNumber",
+    "objc2-core-foundation/CFString",
+    "objc2-io-surface/objc2-core-foundation",
+]
 vulkan = ["runtime-shader", "dep:ash", "dep:image", "dep:log", "dep:naga"]

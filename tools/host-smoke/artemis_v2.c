@@ -6,6 +6,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef ARTEMIS_DXVK_HOST_SMOKE
+#include "art3m1s_metal_host_v1.h"
+void *metal_create_pixel_buffer(uint32_t width, uint32_t height);
+IOSurfaceRef metal_pixel_buffer_surface(void *buffer);
+void metal_free_pixel_buffer(void *buffer);
+int32_t metal_read_pixel_buffer(void *buffer, uint8_t *rgba, uint64_t size);
+#endif
+
 _Static_assert(sizeof(ArtApiHeader) == 24, "API table prefix");
 _Static_assert(offsetof(ArtMessage, session_epoch) == 16, "message epoch");
 _Static_assert(offsetof(ArtStepInfo, monotonic_ns) == 16, "step clock");
@@ -45,6 +53,17 @@ static const char shader[] = HLSL_RESOURCES
     "float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target { " HLSL_BODY;
 static const char shader_sequence_source[] = HLSL_RESOURCES
     "float4 main(float2 uv : TEXCOORD0) : SV_Target { " HLSL_BODY;
+#ifdef ARTEMIS_DXVK_HOST_SMOKE
+static int shader_host_sprites;
+static const char shader_host_sprites_boot[] = "*top\n[lyshader id=paint file=paint.hlsl]\n"
+    "[lyc id=1 width=2 height=4 color=ff112233]\n"
+    SHADER_BINDINGS
+    "[lyc id=2 width=2 height=4 color=ff114466]\n"
+    "[lyprop id=2 left=2 shader=paint shaderconstant=\"tint,param\" tint=\"0,1,0.5,1\" "
+    "param=0 mask=mask shadertexture=textureUser textureUser=user]\n"
+    "[lyc id=3 width=1 height=1 color=ffabcdef]\n"
+    "[flip]\n[caption data=ready]\n[stop]\n";
+#endif
 #define GLSL_BODY \
     "uniform sampler2D textureFore; uniform sampler2D samplerMask;" \
     "uniform sampler2D textureUser; uniform vec4 tint;\n" \
@@ -107,6 +126,9 @@ static void service_io(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt,
         asset = shader_sequence ? shader_sequence_boot : shader_frame == HLSL ? shader_boot : shader_frame ? glsl_boot : boot;
     if (shader_frame == HLSL && strstr(metadata, "\"key\":\"paint.hlsl\""))
         asset = shader_sequence ? shader_sequence_source : shader;
+#ifdef ARTEMIS_DXVK_HOST_SMOKE
+    if (shader_host_sprites && strstr(metadata, "\"key\":\"boot.iet\"")) asset = shader_host_sprites_boot;
+#endif
     if (strstr(metadata, "\"key\":\"paint.frag\"")) {
         if (shader_frame == GLSL) asset = glsl;
         if (shader_frame == GLES) asset = gles;
@@ -198,6 +220,65 @@ static unsigned pump(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt, uint64_t f
     return 0;
 }
 
+#ifdef ARTEMIS_DXVK_HOST_SMOKE
+static int shader_host_smoke(const ArtRuntimeApiV2 *api, const ArtFrameApiV2 *frames,
+                             ArtRuntimeHandle rt, const char *directory, const char *artifact) {
+    ArtMetalHost *host = NULL;
+    assert(art3m1s_metal_host_v1_create_dxvk(frames, rt, directory, &host) == ART_OK);
+    FILE *file = fopen(artifact, "rb");
+    assert(file && fseek(file, 0, SEEK_END) == 0);
+    long length = ftell(file);
+    assert(length > 0 && fseek(file, 0, SEEK_SET) == 0);
+    uint8_t *ade = malloc((size_t)length);
+    assert(ade && fread(ade, 1, (size_t)length, file) == (size_t)length && fclose(file) == 0);
+    assert(art3m1s_metal_host_v1_prepare_ade2(host, text(shader_sequence_source),
+                                             (ArtBytes){ ade, (uint64_t)length }) == ART_OK);
+    free(ade);
+
+    void *surface = metal_create_pixel_buffer(4, 4);
+    assert(surface && art3m1s_metal_host_v1_set_surface(host, metal_pixel_buffer_surface(surface)) == ART_OK);
+    const uint8_t expected[][2][4] = {
+        {{5, 24, 24, 255}, {5, 41, 37, 255}},
+        {{0, 17, 13, 255}, {0, 34, 26, 255}},
+        {{0, 34, 26, 255}, {0, 17, 13, 255}},
+    };
+    const uint8_t overlay[] = {0xab, 0xcd, 0xef, 255};
+    const unsigned frame_count = shader_host_sprites ? 1 : 3;
+    unsigned turn = 0;
+    uint64_t after = 0;
+    for (uint64_t id = 1; id <= 16 && turn < frame_count; ++id) {
+        if (pump(api, rt, id) != 1) continue;
+        uint64_t presented = 0;
+        assert(art3m1s_metal_host_v1_present(host, after, &presented) == ART_OK);
+        assert(presented > after);
+        after = presented;
+        uint8_t presentation[64], capture[64];
+        assert(metal_read_pixel_buffer(surface, presentation, sizeof(presentation)) == 0);
+        assert(art3m1s_metal_host_v1_capture(host, after, 4, 4, capture, sizeof(capture)) == ART_OK);
+        for (size_t pixel = 0; pixel < 16; ++pixel) {
+            const uint8_t *color = shader_host_sprites
+                ? (pixel == 0 ? overlay : pixel % 4 < 2 ? expected[0][0] : expected[1][1])
+                : expected[turn][pixel / 8];
+            if (memcmp(presentation + pixel * 4, color, 4)) {
+                const uint8_t *actual = presentation + pixel * 4;
+                fprintf(stderr, "DXVK Host frame %u pixel %zu: RGBA %u,%u,%u,%u\n",
+                        turn, pixel, actual[0], actual[1], actual[2], actual[3]);
+                return 1;
+            }
+        }
+        assert(!memcmp(capture, presentation, sizeof(capture)));
+        ++turn;
+    }
+    assert(turn == frame_count);
+    assert(art3m1s_metal_host_v1_destroy(host) == ART_OK);
+    metal_free_pixel_buffer(surface);
+    assert(api->destroy(rt) == ART_OK);
+    puts(shader_host_sprites ? "Metal Host DXVK composited two sprite effects and an overlay in order"
+                            : "Metal Host DXVK presentation and capture matched three Core frames");
+    return 0;
+}
+#endif
+
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--shader-frame")) shader_frame = HLSL;
     else if (argc == 2 && !strcmp(argv[1], "--shader-sequence")) {
@@ -207,6 +288,13 @@ int main(int argc, char **argv) {
     else if (argc == 2 && !strcmp(argv[1], "--glsl-frame")) shader_frame = GLSL;
     else if (argc == 2 && !strcmp(argv[1], "--gles-frame")) shader_frame = GLES;
     else if (argc == 2 && !strcmp(argv[1], "--gles100-frame")) shader_frame = GLES100;
+#ifdef ARTEMIS_DXVK_HOST_SMOKE
+    else if (argc == 4 && (!strcmp(argv[1], "--shader-host") || !strcmp(argv[1], "--shader-host-sprites"))) {
+        shader_frame = HLSL;
+        shader_sequence = 1;
+        shader_host_sprites = !strcmp(argv[1], "--shader-host-sprites");
+    }
+#endif
     else if (argc != 1) return 2;
     const char *source = getenv("ARTEMIS_GL_SMOKE_SOURCE");
     if (source && shader_frame == GLES100) {
@@ -242,6 +330,9 @@ int main(int argc, char **argv) {
                                .ini_bytes = text(shader_frame ? shader_ini : ini),
                                .platform_utf8 = text("windows") };
     assert(api->open_project(rt, &project) == ART_OK);
+#ifdef ARTEMIS_DXVK_HOST_SMOKE
+    if (argc == 4) return shader_host_smoke(api, frames, rt, argv[2], argv[3]);
+#endif
     if (shader_frame) {
         unsigned emitted = 0;
         const unsigned expected = shader_sequence ? 3 : 1;

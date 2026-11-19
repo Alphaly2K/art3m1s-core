@@ -39,6 +39,8 @@ use objc2_metal::{
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 mod core_video;
+#[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
+mod dxvk;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ptr::NonNull;
@@ -350,6 +352,8 @@ pub struct MetalBackend {
     mask_targets: Vec<PrivateRenderTarget>,
     pipelines: HashMap<PipelineKey, MetalPipeline>,
     runtime_shaders: ShaderRegistry<MetalShader>,
+    #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
+    dxvk: Option<dxvk::Effects>,
     source: Option<Box<AssetSource>>,
     surface: Option<MetalSurface>,
     next_texture_id: u64,
@@ -465,6 +469,8 @@ impl MetalBackend {
             mask_targets: Vec::new(),
             pipelines: HashMap::new(),
             runtime_shaders: ShaderRegistry::default(),
+            #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
+            dxvk: None,
             source: None,
             surface: None,
             next_texture_id: 1,
@@ -2438,6 +2444,12 @@ impl GpuBackend for MetalBackend {
         name: &str,
         source: &[u8],
     ) -> Result<ShaderId, ShaderCompileError> {
+        #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
+        if let Some(dxvk) = &mut self.dxvk {
+            return dxvk.register(name, source).ok_or_else(|| {
+                ShaderCompileError::new(name, "no cached ADE2 artifact for this shader")
+            });
+        }
         let compiled = ShaderCompiler::compile_hlsl(name, source)?;
         let source = NSString::from_str(&compiled.msl);
         let library = self
@@ -2467,6 +2479,10 @@ impl GpuBackend for MetalBackend {
     }
 
     fn unregister_shader(&mut self, name: &str) -> bool {
+        #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
+        if let Some(dxvk) = &mut self.dxvk {
+            return dxvk.unregister(name);
+        }
         let Some((id, _shader)) = self.runtime_shaders.remove(name) else {
             return false;
         };
@@ -2519,6 +2535,22 @@ impl GpuBackend for MetalBackend {
 }
 
 impl MetalBackend {
+    /// # Safety
+    /// `directory` must contain a trusted DXVK runtime. Call before drawing.
+    #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
+    pub unsafe fn enable_dxvk(&mut self, directory: &std::path::Path) -> Result<(), String> {
+        self.dxvk = Some(dxvk::Effects::open(directory, &self.device)?);
+        Ok(())
+    }
+
+    #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
+    pub fn prepare_ade2(&mut self, source: &[u8], artifact: &[u8]) -> Result<(), String> {
+        self.dxvk
+            .as_mut()
+            .ok_or("DXVK is not enabled")?
+            .cache(source, artifact)
+    }
+
     fn drain_profile_stats(&self) -> GpuProfileStats {
         let texture_gpu_bytes = self.textures.values().fold(0u64, |sum, texture| {
             sum.saturating_add(texture.desc.extent.rgba8_len().unwrap_or(0) as u64)
@@ -2561,7 +2593,7 @@ impl MetalBackend {
             log::warn!("[MetalBackend] render called without an active frame");
             return repaint;
         };
-        let command_buffer = active.command_buffer.clone();
+        let mut command_buffer = active.command_buffer.clone();
         let target = active.target.clone();
         let result = (|| {
             match repaint.damage() {
@@ -2569,7 +2601,7 @@ impl MetalBackend {
                 Some(rect) => self.encode_clear_rect(&command_buffer, &target, rect)?,
             }
             self.encode_range(
-                &command_buffer,
+                &mut command_buffer,
                 &target,
                 frame,
                 0,
@@ -2583,6 +2615,7 @@ impl MetalBackend {
             }
             Ok::<(), String>(())
         })();
+        self.active_frame.as_mut().unwrap().command_buffer = command_buffer;
         if let Err(error) = result {
             log::warn!("[MetalBackend] render encoding failed: {error}");
         }
@@ -2593,7 +2626,7 @@ impl MetalBackend {
     #[allow(clippy::too_many_arguments)]
     fn encode_range(
         &mut self,
-        command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+        command_buffer: &mut CommandBuffer,
         target: &PrivateRenderTarget,
         frame: &DrawList,
         start: usize,
@@ -2611,7 +2644,7 @@ impl MetalBackend {
                         next_shader_group(frame, candidate, end, group_limit).is_some()
                     })
                     .unwrap_or(end);
-                self.encode_draw_batch(
+                self.encode_scene_batch(
                     command_buffer,
                     target,
                     &frame.commands[index..batch_end],
@@ -2671,12 +2704,17 @@ impl MetalBackend {
                 stencil: None,
                 native_emote: None,
             };
+            #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
+            let group_source =
+                self.apply_dxvk(command_buffer, Some(&group.effect), &group_target.texture);
+            #[cfg(not(all(target_os = "macos", feature = "metal-dxvk")))]
+            let group_source: Option<Texture> = None;
             self.encode_draw(
                 command_buffer,
                 target,
                 &composite,
                 damage,
-                Some(&group_target.texture),
+                Some(group_source.as_ref().unwrap_or(&group_target.texture)),
                 mask_texture.as_ref(),
                 None,
                 None,
@@ -2684,6 +2722,136 @@ impl MetalBackend {
             index = group.end;
         }
         Ok(())
+    }
+
+    fn encode_scene_batch(
+        &mut self,
+        command_buffer: &mut CommandBuffer,
+        target: &PrivateRenderTarget,
+        commands: &[DrawCommand],
+        damage: Option<[f32; 4]>,
+    ) -> Result<(), String> {
+        #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
+        if self.dxvk.is_some() {
+            let mut start = 0;
+            for (index, command) in commands.iter().enumerate() {
+                if !self.is_dxvk_effect(command.shader.as_ref()) {
+                    continue;
+                }
+                self.encode_draw_batch(command_buffer, target, &commands[start..index], damage)?;
+                let source = self
+                    .textures
+                    .get(&command.texture)
+                    .map(|t| t.raw.clone())
+                    .ok_or("missing DXVK sprite texture")?;
+                let output = self.apply_dxvk(command_buffer, command.shader.as_ref(), &source);
+                self.encode_draw(
+                    command_buffer,
+                    target,
+                    command,
+                    damage,
+                    output.as_ref(),
+                    None,
+                    None,
+                    None,
+                )?;
+                start = index + 1;
+            }
+            return self.encode_draw_batch(command_buffer, target, &commands[start..], damage);
+        }
+        self.encode_draw_batch(command_buffer, target, commands, damage)
+    }
+
+    #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
+    fn is_dxvk_effect(&self, effect: Option<&ShaderEffect>) -> bool {
+        effect
+            .zip(self.dxvk.as_ref())
+            .is_some_and(|(effect, dxvk)| dxvk.contains(&effect.name))
+    }
+
+    #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
+    fn apply_dxvk(
+        &mut self,
+        command_buffer: &mut CommandBuffer,
+        effect: Option<&ShaderEffect>,
+        source: &Texture,
+    ) -> Option<Texture> {
+        let effect = effect.filter(|effect| self.is_dxvk_effect(Some(effect)))?;
+        match self.run_dxvk(command_buffer, effect, source) {
+            Ok(output) => Some(output),
+            Err(error) => {
+                log::warn!("[MetalBackend] DXVK effect {} failed: {error}", effect.name);
+                None
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
+    fn run_dxvk(
+        &mut self,
+        command_buffer: &mut CommandBuffer,
+        effect: &ShaderEffect,
+        source: &Texture,
+    ) -> Result<Texture, String> {
+        let extent = Extent2D::new(source.width() as u32, source.height() as u32);
+        let foreground = self
+            .dxvk
+            .as_mut()
+            .unwrap()
+            .foreground(&self.device, extent)?
+            .clone();
+        let copy = DrawCommand {
+            texture: TextureId(0),
+            size: TextureInfo {
+                width: extent.width,
+                height: extent.height,
+            },
+            transform: glam::Affine2::IDENTITY,
+            opacity: 1.0,
+            blend: BlendMode::Alpha,
+            color: ColorFilter::default(),
+            clip: ClipRect {
+                uv_offset: [0.0, 0.0],
+                uv_scale: [1.0, 1.0],
+                quad_size: [extent.width as f32, extent.height as f32],
+            },
+            clip_bounds: None,
+            shader: None,
+            mesh: None,
+            stencil: None,
+            native_emote: None,
+        };
+        self.encode_draw(
+            command_buffer,
+            &foreground,
+            &copy,
+            None,
+            Some(source),
+            None,
+            Some(PipelineBlend::Replace),
+            Some(extent),
+        )?;
+
+        // Finish earlier Metal reads of the shared output and the current foreground write.
+        let next = self
+            .queue
+            .commandBuffer()
+            .ok_or("cannot resume Metal encoding after DXVK")?;
+        let submitted = std::mem::replace(command_buffer, next);
+        submitted.commit();
+        submitted.waitUntilCompleted();
+        if submitted.status() != MTLCommandBufferStatus::Completed {
+            return Err(format_command_error(&submitted));
+        }
+        let texture = |id: Option<TextureId>| {
+            id.and_then(|id| self.textures.get(&id))
+                .map(|texture| &texture.raw)
+        };
+        self.dxvk.as_ref().unwrap().draw(
+            effect,
+            texture(effect.mask_texture),
+            texture(effect.user_texture),
+        )
     }
 
     fn ensure_group_target(&mut self, depth: usize) -> Result<PrivateRenderTarget, String> {

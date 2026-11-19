@@ -103,6 +103,17 @@ else
   compile_effect effect-pair < "$effect_src" > "$scratch/effect.ade"
   if [[ $mode == --arfp ]]; then
     run_native "$executable" frames effect.ade
+    if [[ -n $runtime_dir ]]; then
+      cargo build --quiet --locked --manifest-path crates/artemis-metal-host/Cargo.toml --target-dir target
+      host_lib="$PWD/target/debug"
+      "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -DARTEMIS_DXVK_HOST_SMOKE -Idoc/abi \
+        tools/host-smoke/artemis_v2.c tools/host-smoke/metal_abi.c \
+        -L"$core_lib" -lart3m1s_core -Wl,-rpath,"$core_lib" \
+        -L"$host_lib" -lart3m1s_artemis_metal_host -Wl,-rpath,"$host_lib" \
+        -framework CoreFoundation -framework CoreVideo -o "$scratch/metal-host"
+      run_native "$scratch/metal-host" --shader-host "$runtime_dir" effect.ade
+      run_native "$scratch/metal-host" --shader-host-sprites "$runtime_dir" effect.ade
+    fi
   else
     if printf '%s\n' 'float4 main(float3 normal : NORMAL0) : SV_Target { return float4(normal, 1); }' |
         compile_effect effect-pair > "$scratch/unsupported.ade" 2> "$scratch/unsupported.log"; then

@@ -363,6 +363,13 @@ Set `ARTEMIS_DXVK_RUNTIME_DIR` to the assembled directory and run
 `bash scripts/test-host-dxvk-native.sh --arfp` to check the packaged libraries.
 CrossOver is used only to generate the fixture's ADE2 input in this check.
 
+The [macOS frame Host](abi/art3m1s_metal_host_v1.h) can create a DXVK
+renderer from that directory. Before drawing, pass each compiled effect and
+its exact HLSL source to `art3m1s_metal_host_v1_prepare_ade2`. The caller can
+release both byte buffers after the call. A session can reuse the program for
+multiple layers and frames. An effect with no prepared program draws without
+the effect. Present and capture use the same programs and frame composition.
+
 `ADE1` begins with five little-endian `u32` values: magic (`ADE1`), DXBC
 length, `b0` byte size, texture count, and uniform count. Each texture has
 a `u32` slot and a 256-byte NUL-terminated name. Each uniform has a `u32`

@@ -365,6 +365,72 @@ unsafe extern "C" fn art3m1s_metal_host_v1_create_angle(
     }
 }
 
+#[unsafe(no_mangle)]
+unsafe extern "C" fn art3m1s_metal_host_v1_create_dxvk(
+    table: *const c_void,
+    runtime: u64,
+    directory: *const c_char,
+    out: *mut *mut ArtMetalHost,
+) -> i32 {
+    unsafe {
+        create_host(table, runtime, out, || {
+            if directory.is_null() {
+                return Err(ARGUMENT);
+            }
+            let directory = Path::new(CStr::from_ptr(directory).to_str().map_err(|_| ARGUMENT)?);
+            if !directory.is_absolute() {
+                return Err(ARGUMENT);
+            }
+            let mut backend = MetalBackend::new(1, 1).map_err(|_| STATE)?;
+            backend.enable_dxvk(directory).map_err(|error| {
+                eprintln!("Artemis DXVK initialization failed: {error}");
+                UNSUPPORTED
+            })?;
+            Ok(Some((
+                Extent2D::new(1, 1),
+                Renderer::Metal(SpriteRenderer::new(backend)),
+            )))
+        })
+    }
+}
+
+#[repr(C)]
+struct ArtBytes {
+    data: *const u8,
+    size: u64,
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn art3m1s_metal_host_v1_prepare_ade2(
+    host: *mut ArtMetalHost,
+    source: ArtBytes,
+    artifact: ArtBytes,
+) -> i32 {
+    unsafe {
+        with_host(host, |host| {
+            let bytes = |value: ArtBytes| {
+                if value.data.is_null() || value.size == 0 || value.size > isize::MAX as u64 {
+                    return Err(ARGUMENT);
+                }
+                Ok(std::slice::from_raw_parts(value.data, value.size as usize))
+            };
+            let (source, artifact) = (bytes(source)?, bytes(artifact)?);
+            let Some((_, Renderer::Metal(renderer))) = &mut host.renderer else {
+                return Err(UNSUPPORTED);
+            };
+            renderer
+                .backend_mut()
+                .prepare_ade2(source, artifact)
+                .map_err(|error| {
+                    eprintln!("Artemis ADE2 preparation failed: {error}");
+                    ARGUMENT
+                })?;
+            renderer.clear_cached_shaders();
+            Ok(())
+        })
+    }
+}
+
 unsafe fn create_host(
     table: *const c_void,
     runtime: u64,
