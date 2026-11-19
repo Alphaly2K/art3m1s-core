@@ -77,6 +77,7 @@ pub(super) struct Audio {
     serial: u64,
     voice_serial: u64,
     bus_volumes: [Option<u16>; 3],
+    system_gains: HashMap<String, i32>,
     active: BTreeMap<Channel, Playback>,
     finish_handlers: HashMap<String, Vec<Tag>>,
     pending: Vec<(u64, PlaybackStatus)>,
@@ -276,7 +277,7 @@ impl Audio {
 }
 
 impl ScriptIoSession {
-    pub(super) fn sync_audio_bus_volumes(&mut self) -> Result<(), ProtocolError> {
+    pub(super) fn sync_audio_levels(&mut self) -> Result<(), ProtocolError> {
         let Some(scene) = &self.scene else {
             return Ok(());
         };
@@ -288,22 +289,18 @@ impl ScriptIoSession {
             ("se", "s.sevol"),
             ("video", "s.videovol"),
         ];
-        let levels = {
+        {
             let vars = self.interpreter.variables_handle();
             let vars = vars.lock().unwrap();
-            channels.map(|(_, name)| {
-                vars.get(name)
-                    .and_then(asb_interpreter::Value::as_float)
-                    .filter(|value| value.is_finite())
-                    .map_or(1000, |value| value.round().clamp(0.0, 1000.0) as u16)
-            })
-        };
-        for (index, ((channel, _), level)) in channels.into_iter().zip(levels).enumerate() {
-            if self.audio.bus_volumes[index].unwrap_or(1000) == level {
-                continue;
+            for (index, (channel, name)) in channels.into_iter().enumerate() {
+                let level = vars.get(name).and_then(gain_level).unwrap_or(1000) as u16;
+                if self.audio.bus_volumes[index].unwrap_or(1000) == level {
+                    continue;
+                }
+                emit_volume(&mut self.transport, channel, level)?;
+                self.audio.bus_volumes[index] = Some(level);
             }
-            emit_volume(&mut self.transport, channel, level)?;
-            self.audio.bus_volumes[index] = Some(level);
+            self.audio.sync_system_gains(&vars, &mut self.transport)?;
         }
         scene.flush_lua_volumes(&mut self.transport)
     }
@@ -505,11 +502,7 @@ impl ScriptIoSession {
     }
 
     fn se_gain(&self, id: &str) -> Option<i32> {
-        self.interpreter
-            .get_variable(&format!("s.segain.{id}"))?
-            .as_string()
-            .parse()
-            .ok()
+        gain_level(&self.interpreter.get_variable(&format!("s.segain.{id}"))?)
     }
 }
 
@@ -531,6 +524,26 @@ enum Control {
 }
 
 impl Audio {
+    fn sync_system_gains(
+        &mut self,
+        vars: &asb_interpreter::VariableStore,
+        transport: &mut SessionTransport,
+    ) -> Result<(), ProtocolError> {
+        let pending: BTreeMap<_, _> = vars
+            .iter_system()
+            .filter_map(|(key, value)| {
+                let id = key.strip_prefix("segain.")?;
+                let level = gain_level(value)?;
+                (!id.is_empty() && self.system_gains.get(id) != Some(&level)).then_some((id, level))
+            })
+            .collect();
+        for (id, level) in pending {
+            self.control(transport, Some(id), Control::Gain(level, 0))?;
+            self.system_gains.insert(id.to_owned(), level);
+        }
+        Ok(())
+    }
+
     fn play(
         &mut self,
         transport: &mut SessionTransport,
@@ -649,6 +662,13 @@ fn emit_volume(
         transport,
         json!({"op":"volume","channel":channel,"level":level}),
     )
+}
+
+fn gain_level(value: &asb_interpreter::Value) -> Option<i32> {
+    let value = value.as_float()?;
+    value
+        .is_finite()
+        .then(|| value.round().clamp(0.0, 1000.0) as i32)
 }
 
 fn emit(transport: &mut SessionTransport, metadata: Value) -> Result<(), ProtocolError> {

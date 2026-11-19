@@ -2840,6 +2840,7 @@ fn audio_feedback_uses_playback_identity_and_resumes_its_wait_after_callback_io(
         "boot.iet",
         br#"*top
 [var name=s.sevol data=800]
+[var name=s.segain.fx data=299.6]
 [calllua function=configure_audio]
 [splay file=:bgm/theme_a.ogg loop=1 gain=450]
 [setonsoundfinish id=fx label=finished call=1]
@@ -2847,7 +2848,9 @@ fn audio_feedback_uses_playback_identity_and_resumes_its_wait_after_callback_io(
 [seplay id=fx file=new.ogg]
 [wait se=fx time=50]
 [var name=s.bgmvol data=250]
+[var name=s.segain.fx data=550.4]
 [caption data=timed]
+[sefade id=fx gain=325 time=30]
 [wait se=fx]
 [caption data=ended]
 [stop]
@@ -2957,9 +2960,11 @@ end
     assert_eq!(step(1, 0), ScriptIoProgress::WouldBlock);
     let old = record(MEDIA_AUDIO_COMMAND);
     assert_eq!(old["key"], "old.ogg");
+    assert_eq!(old["gain"], 300);
     assert_eq!(step(1, 0), ScriptIoProgress::Event);
     let current = record(MEDIA_AUDIO_COMMAND);
     assert_eq!(current["key"], "new.ogg");
+    assert_eq!(current["gain"], 300);
     assert_eq!(current["replaces"], old["playback_id"]);
     assert_ne!(id(&old), id(&current));
     assert!(is_stale(feedback(id(&old), PlaybackStatus::Ended)));
@@ -2975,8 +2980,13 @@ end
         record(MEDIA_AUDIO_COMMAND),
         json!({"op":"volume","channel":"bgm","level":250})
     );
-    assert_eq!(step(4, 70_000_000), ScriptIoProgress::Event);
+    let gain_change = |gain, time| json!({"op":"gain","playback_ids":[current["playback_id"]],"value":gain,"time_ms":time});
+    assert_eq!(step(4, 70_000_000), ScriptIoProgress::WouldBlock);
+    assert_eq!(record(MEDIA_AUDIO_COMMAND), gain_change(550, "0"));
+    assert_eq!(step(4, 70_000_000), ScriptIoProgress::WouldBlock);
     assert_eq!(record(UI_CAPTION), json!({"text":"timed"}));
+    assert_eq!(step(4, 70_000_000), ScriptIoProgress::Event);
+    assert_eq!(record(MEDIA_AUDIO_COMMAND), gain_change(325, "30"));
 
     feedback(id(&current), PlaybackStatus::Ended).unwrap();
     assert!(is_stale(feedback(id(&current), PlaybackStatus::Ended)));
