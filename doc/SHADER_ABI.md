@@ -281,3 +281,9 @@ across an update, a resize, and a detach. Omit `--d3d11` for the D3D9 variant.
 This run uses a CPU copy and calls the texture directly. Flutter engine presentation,
 shared GPU surfaces from Wine, and full-size frame throughput need separate
 validation.
+
+Add `--worker` to the D3D11 command to generate the frames from an ARFP
+fixture instead. The SDK reuses one HLSL program for three draws, checks
+each readback against expected pixels, then passes the frames to the same
+Flutter texture probe. This catches pixel changes from a uniform update,
+resizing, and the lifetime of buffers retained across later draws.

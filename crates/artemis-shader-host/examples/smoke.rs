@@ -4,7 +4,8 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut arguments = std::env::args_os().skip(1);
+    let mut arguments = std::env::args_os().skip(1).peekable();
+    let stream = arguments.next_if(|arg| arg == "--stream-bgra").is_some();
     let executable = arguments.next().ok_or("expected worker executable")?;
     let mut process = Command::new(executable)
         .args(arguments)
@@ -13,14 +14,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .spawn()?;
     let stdin = process.stdin.take().unwrap();
     let stdout = process.stdout.take().unwrap();
-    let result = (|| smoke(Worker::connect(stdout, stdin)?))();
+    let result = (|| {
+        let mut worker = Worker::connect(stdout, stdin)?;
+        if stream {
+            let path = std::env::var_os("ARTEMIS_D3D11_FRAME")
+                .ok_or(Error::Argument("set ARTEMIS_D3D11_FRAME to stream pixels"))?;
+            draw_frame(
+                &mut worker,
+                &std::fs::read(path)?,
+                Some(&mut std::io::stdout().lock()),
+            )
+        } else {
+            smoke(worker)
+        }
+    })();
     if result.is_err() {
         let _ = process.kill();
     }
     let status = process.wait()?;
     result?;
     assert!(status.success(), "worker did not exit after EOF: {status}");
-    println!("D3D11 SDK passed compile, redraw, invalid uniform, and release checks");
+    if !stream {
+        println!("D3D11 SDK passed compile, redraw, invalid uniform, and release checks");
+    }
     Ok(())
 }
 
@@ -83,7 +99,7 @@ fn smoke<R: std::io::Read, W: std::io::Write>(mut worker: Worker<R, W>) -> Resul
         measure(&mut worker)?;
     }
     if let Some(path) = std::env::var_os("ARTEMIS_D3D11_FRAME") {
-        draw_frame(&mut worker, &std::fs::read(path)?)?;
+        draw_frame(&mut worker, &std::fs::read(path)?, None)?;
     }
     Ok(())
 }
@@ -91,6 +107,7 @@ fn smoke<R: std::io::Read, W: std::io::Write>(mut worker: Worker<R, W>) -> Resul
 fn draw_frame<R: std::io::Read, W: std::io::Write>(
     worker: &mut Worker<R, W>,
     bytes: &[u8],
+    mut stream: Option<&mut dyn std::io::Write>,
 ) -> Result<(), Error> {
     let length = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
     let (packet, mut rgba) = bytes.split_at(length);
@@ -123,7 +140,7 @@ fn draw_frame<R: std::io::Read, W: std::io::Write>(
             bgra,
         })
     };
-    let draw = FrameEffectDraw {
+    let mut draw = FrameEffectDraw {
         width: 4,
         height: 4,
         alpha_blend: false,
@@ -140,18 +157,36 @@ fn draw_frame<R: std::io::Read, W: std::io::Write>(
     };
     let mut changed = effect.clone();
     changed.uniforms.insert("param".into(), vec![0.0]);
-    for (effect, expected) in [(effect, [24, 24, 5, 255]), (&changed, [13, 17, 0, 255])] {
+    let frames = [
+        (4, 4, effect, [24, 24, 5, 255]),
+        (4, 4, &changed, [13, 17, 0, 255]),
+        (6, 8, effect, [24, 24, 5, 255]),
+    ];
+    let count = if stream.is_some() { frames.len() } else { 2 };
+    for (index, (width, height, effect, expected)) in frames.into_iter().take(count).enumerate() {
+        draw.width = width;
+        draw.height = height;
         let pixels = worker.draw_frame_effect(&program, effect, &draw, image)?;
-        for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+        for (offset, pixel) in pixels.chunks_exact(4).enumerate() {
             assert!(
                 pixel == expected,
-                "D3D11 ARFP pixel {index}: expected {expected:?}, got {pixel:?}"
+                "D3D11 ARFP frame {index}, pixel {offset}: expected {expected:?}, got {pixel:?}"
             );
         }
+        if let Some(stream) = stream.as_deref_mut() {
+            for word in [index as u32 + 1, width, height] {
+                stream.write_all(&word.to_le_bytes())?;
+            }
+            stream.write_all(&pixels)?;
+        }
     }
-    println!(
-        "D3D11 reused the ARFP program with foreground, mask, user texture, and updated uniforms"
-    );
+    if let Some(stream) = stream {
+        stream.flush()?;
+    } else {
+        println!(
+            "D3D11 reused the ARFP program with foreground, mask, user texture, and updated uniforms"
+        );
+    }
     worker.release_frame_effect(&program)
 }
 

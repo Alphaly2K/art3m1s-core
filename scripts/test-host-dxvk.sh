@@ -7,7 +7,7 @@ if [[ $(uname -s) != Darwin ]]; then
   exit 2
 fi
 backend=${1:-dxvk}
-usage() { printf '%s\n' 'Usage: test-host-dxvk.sh [dxvk|wined3d] [--d3d11] [--iosurface|--worker|--interop]' >&2; exit 2; }
+usage() { printf '%s\n' 'Usage: test-host-dxvk.sh [dxvk|wined3d] [--d3d11] [--iosurface] [--worker] [--interop]' >&2; exit 2; }
 [[ $backend == dxvk || $backend == wined3d ]] || usage
 if [[ $# -gt 0 ]]; then shift; fi
 api=d3d9
@@ -23,7 +23,9 @@ for option; do
     *) usage ;;
   esac
 done
-if ((iosurface + worker + interop > 1)) || [[ $api != d3d11 && ( $worker == 1 || $interop == 1 ) ]]; then usage; fi
+if [[ $interop == 1 && ( $iosurface == 1 || $worker == 1 ) ]] ||
+   [[ $api != d3d11 && ( $worker == 1 || $interop == 1 ) ]] ||
+   [[ $worker == 1 && $iosurface == 1 && $backend != dxvk ]]; then usage; fi
 crossover=${CROSSOVER_ROOT:-/Applications/CrossOver.app/Contents/SharedSupport/CrossOver}
 : "${CX_BOTTLE:?Set CX_BOTTLE to a dedicated CrossOver test bottle}"
 cc=${ARTEMIS_D3D_CC:-${ARTEMIS_D3D9_CC:-x86_64-w64-mingw32-gcc}}
@@ -90,12 +92,17 @@ run_wine() (
   CX_GRAPHICS_BACKEND=$graphics_backend DXVK_LOG_LEVEL=info MVK_CONFIG_LOG_LEVEL=3 \
     "$crossover/bin/wine" "${wine_args[@]}" "artemis-$api.exe" "$@"
 )
+run_worker() (
+  cd "$scratch"
+  CX_GRAPHICS_BACKEND=$graphics_backend DXVK_LOG_LEVEL=info MVK_CONFIG_LOG_LEVEL=3 \
+    "$client" "$@" "$crossover/bin/wine" "${wine_args[@]}" "artemis-$api.exe"
+)
 status=0
 if [[ $worker == 1 ]]; then
   cargo build --quiet --locked --manifest-path crates/artemis-shader-host/Cargo.toml \
     --target-dir target/shader-host --example smoke
   client="$PWD/target/shader-host/debug/examples/smoke"
-  if [[ ${ARTEMIS_D3D11_ARFP:-0} == 1 ]]; then
+  if [[ ${ARTEMIS_D3D11_ARFP:-0} == 1 || $iosurface == 1 ]]; then
     core_build=${ART3M1S_V2_TARGET_DIR:-target/host-v2}
     cargo build --quiet --locked --lib --manifest-path crates/artemis-core/Cargo.toml --target-dir "$core_build"
     core_lib=$(cd "$core_build/debug" && pwd)
@@ -104,10 +111,11 @@ if [[ $worker == 1 ]]; then
     "$scratch/arfp" --shader-frame > "$scratch/frame"
     export ARTEMIS_D3D11_FRAME="$scratch/frame"
   fi
-  (cd "$scratch"
-   CX_GRAPHICS_BACKEND=$graphics_backend DXVK_LOG_LEVEL=info MVK_CONFIG_LOG_LEVEL=3 \
-     "$client" "$crossover/bin/wine" "${wine_args[@]}" "artemis-$api.exe") \
-     2> "$scratch/result.log" || status=$?
+  if [[ $iosurface == 1 ]]; then
+    run_worker --stream-bgra 2> "$scratch/result.log" | "$scratch/readback-texture" || status=$?
+  else
+    run_worker 2> "$scratch/result.log" || status=$?
+  fi
 elif [[ $iosurface == 1 ]]; then
   run_wine --stream-bgra 2> "$scratch/result.log" | "$scratch/readback-texture" || status=$?
 else
