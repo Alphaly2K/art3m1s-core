@@ -52,6 +52,24 @@ private final class Registry: NSObject, FlutterTextureRegistry {
     }
 }
 
+@MainActor private final class VideoFixture: ArtemisVideoSource {
+    private let pixels: [CVPixelBuffer]
+    private(set) var reads = 0
+    var terminalState: String? { reads == pixels.count ? "ended" : nil }
+
+    init(_ pixels: [CVPixelBuffer]) { self.pixels = pixels }
+
+    func frame() -> CVPixelBuffer? {
+        guard reads < pixels.count else { return nil }
+        defer { reads += 1 }
+        return pixels[reads]
+    }
+
+    func setVolume(_ volume: Float) {}
+    func setSuspended(_ suspended: Bool) {}
+    func close() {}
+}
+
 @main struct ArtemisFlutterSmoke {
     @MainActor static func main() throws {
         let paths = CommandLine.arguments.dropFirst()
@@ -152,6 +170,45 @@ private final class Registry: NSObject, FlutterTextureRegistry {
         try expect(messenger.call("present") is String && registry.notifications == [0, 1], "New texture did not redraw")
         _ = try messenger.call("close")
         try expect(registry.textures.isEmpty && registry.removed == [0, 1], "Did not unregister textures")
+        try exerciseLayerVideoDelivery(registry)
         print("Artemis Flutter channel smoke passed")
+    }
+
+    @MainActor private static func exerciseLayerVideoDelivery(_ registry: Registry) throws {
+        func pixelBuffer(_ bgra: [UInt8]) throws -> CVPixelBuffer {
+            var pixels: CVPixelBuffer?
+            guard CVPixelBufferCreate(nil, 1, 1, kCVPixelFormatType_32BGRA, nil, &pixels) == kCVReturnSuccess,
+                  let pixels,
+                  CVPixelBufferLockBaseAddress(pixels, []) == kCVReturnSuccess else {
+                throw Failure(detail: "Cannot allocate video fixture pixels")
+            }
+            defer { CVPixelBufferUnlockBaseAddress(pixels, []) }
+            guard let bytes = CVPixelBufferGetBaseAddress(pixels) else {
+                throw Failure(detail: "Video fixture has no writable pixels")
+            }
+            bgra.withUnsafeBytes { bytes.copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
+            return pixels
+        }
+        let source = try VideoFixture([pixelBuffer([3, 2, 1, 255]), pixelBuffer([6, 5, 4, 255])])
+        let video = ArtemisFlutterVideo(epoch: 7, fullscreen: false, source: source)
+        defer { video.close(registry) }
+        func submit(hostFrame: UInt64, frame: String, pixel: [UInt8], accepts: Bool) throws {
+            let delivered = try video.deliverLayerFrame(playbackID: 9, hostFrameID: hostFrame) { message in
+                let args = try JSONSerialization.jsonObject(with: message.metadata) as? [String: Any]
+                try expect(message.epoch == 7 && args?["playback_id"] as? String == "9" &&
+                           args?["frame_id"] as? String == frame && message.blob == Data(pixel),
+                           "Layer video retry changed its identity or pixels")
+                return accepts
+            }
+            try expect(delivered == accepts, "Layer video delivery misreported the submit result")
+        }
+        try submit(hostFrame: 1, frame: "1", pixel: [1, 2, 3, 255], accepts: false)
+        try submit(hostFrame: 2, frame: "1", pixel: [1, 2, 3, 255], accepts: true)
+        try expect(source.reads == 1, "Retry consumed another decoder frame")
+        try submit(hostFrame: 3, frame: "2", pixel: [4, 5, 6, 255], accepts: false)
+        try expect(video.terminalState(after: 3) == nil, "End overtook a blocked layer frame")
+        try submit(hostFrame: 4, frame: "2", pixel: [4, 5, 6, 255], accepts: true)
+        try expect(video.terminalState(after: 4) == nil && video.terminalState(after: 5) == "ended",
+                   "End did not wait until Core advanced past the submitted layer frame")
     }
 }

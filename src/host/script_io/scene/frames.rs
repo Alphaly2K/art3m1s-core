@@ -109,15 +109,7 @@ impl SceneProjection {
         let mut text_for = |id: &str| text_commands.remove(id).unwrap_or_default();
         let mut emote = self.emote.commands(|texture| textures.record(texture));
         let mut emote_for = |id: &str| emote.remove(id).unwrap_or_default();
-        let files: HashMap<_, _> = self
-            .edited
-            .files(scene)
-            .chain(
-                self.video_frames
-                    .keys()
-                    .map(|id| (id.clone(), crate::video::video_layer_texture_name(id))),
-            )
-            .collect();
+        let files: HashMap<_, _> = self.edited.files(scene).collect();
         let mut frame = build::build_frame_with_content(
             scene,
             self.compositor.clock_ms(),
@@ -236,10 +228,7 @@ impl SceneProjection {
                 .then(|| {
                     scene
                         .get(&key.layer_id)
-                        .filter(|layer| {
-                            self.video_frames.contains_key(&key.layer_id)
-                                || layer.file.as_deref().is_some_and(|file| !file.is_empty())
-                        })
+                        .filter(|layer| layer.file.as_deref().is_some_and(|file| !file.is_empty()))
                         .and_then(|layer| layer.mask.as_deref())
                         .and_then(|mask| textures.assets.get(mask)?.clone())
                         .filter(|mask| {

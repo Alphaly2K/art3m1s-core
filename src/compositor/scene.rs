@@ -332,6 +332,18 @@ impl Scene {
         self.nodes.values()
     }
 
+    pub(crate) fn strip_video_bindings(&mut self) {
+        for layer in self.nodes.values_mut() {
+            if layer
+                .file
+                .as_deref()
+                .is_some_and(crate::video::is_video_layer_texture_name)
+            {
+                layer.file = None;
+            }
+        }
+    }
+
     /// 收集当前场景中所有图层引用的纹理文件名称。
     ///
     /// 除图层直接绑定的 `file` 外，还包括：

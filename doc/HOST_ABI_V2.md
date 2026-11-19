@@ -607,7 +607,10 @@ Media kind=2 交付视频命令。`op=play` 带有十进制字符串 `playback_i
 图层视频使用 `submit_video_frame` 提交连续的 `frame_id`、尺寸和紧密排列的自上而下 RGBA8
 像素。Core 复制像素；同一播放只接受递增的帧 ID，下一受理逻辑帧只使用最新的一份。过期帧
 和终态后的帧返回 `Stale`。单张帧最多 64 MiB，当前和待用数据合计最多 128 MiB；已借出的
-帧有自己的有效期。图层视频随场景帧绘制；旧借用不因新画面或播放完成而改变。
+帧有自己的有效期。如果推进逻辑帧能释放足够空间，提交返回 `WOULD_BLOCK`，Host 可在推进后
+按原帧 ID 和像素重试；否则超预算返回 `LIMIT`。自然结束会解除目标图层上仍指向该视频的绑定；
+Host 可以先等最后一帧提交成功并进入下一逻辑帧，再回报 `Ended`。旧借用不因新画面或播放
+完成而改变。
 
 `[httpget]` 和 `[httppost]` 在声明 `ART_HOST_CAP_HTTP` 后发出 `ui.http_request`。
 `file_data` 的每组是字段名与 asset 逻辑 key，由 Host 读取字节。服务结果沿用原请求身份。

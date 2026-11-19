@@ -4,6 +4,9 @@ use crate::compositor::{Compositor, TextureInfo, TweenHandler};
 use crate::host::frame::FrameTexture;
 use crate::host::input::InputFrame;
 use crate::host::media::VideoFrame;
+use crate::video::{
+    VIDEO_LAYER_TEXTURE_PREFIX, is_video_layer_texture_name, video_layer_texture_name,
+};
 use asb_interpreter::event::{LayerEvent, WaitReason};
 use asb_interpreter::lua_engine::EngineCallbacks;
 use std::io::Cursor;
@@ -182,6 +185,42 @@ struct SceneProjection {
 }
 
 impl SceneProjection {
+    fn check_video_frame_budget(
+        &self,
+        id: &str,
+        bytes: usize,
+        budget: usize,
+    ) -> Result<(), ProtocolError> {
+        let used: usize = self
+            .video_frames
+            .values()
+            .chain(
+                self.pending_video_frames
+                    .iter()
+                    .filter_map(|(layer, pixels)| (layer != id).then_some(pixels)),
+            )
+            .map(|texture| texture.rgba.len())
+            .sum();
+        if bytes <= budget.saturating_sub(used) {
+            return Ok(());
+        }
+        // An unchanged retry can only succeed if promoting the pending frames frees space.
+        let after_step: usize = self
+            .video_frames
+            .iter()
+            .filter_map(|(id, pixels)| {
+                (!self.pending_video_frames.contains_key(id)).then_some(pixels)
+            })
+            .chain(self.pending_video_frames.values())
+            .map(|texture| texture.rgba.len())
+            .sum();
+        if bytes <= budget.saturating_sub(after_step) {
+            Err(ProtocolError::WouldBlock)
+        } else {
+            Err(ProtocolError::Limit)
+        }
+    }
+
     fn set_control_layer_visible(&mut self, id: &str, visible: bool) {
         self.apply(&Event::Layer(LayerEvent::SetProperty {
             id: id.to_owned(),
@@ -257,23 +296,23 @@ impl SceneProjection {
             Event::LayerEdit { mode, file, .. } if mode == "blend" => [file.as_deref(), None, None],
             _ => [None, None, None],
         };
-        files
-            .into_iter()
-            .flatten()
-            .filter(|file| !file.is_empty() && !self.textures.contains_key(*file))
+        files.into_iter().flatten().filter(|file| {
+            !file.is_empty()
+                && !is_video_layer_texture_name(file)
+                && !self.textures.contains_key(*file)
+        })
     }
 
     fn layer_info(&self, layer: &crate::compositor::Layer) -> HashMap<String, String> {
         layer_info_entry(
             layer,
             self.compositor.clock_ms(),
-            self.video_frames
-                .get(&layer.id)
-                .or_else(|| {
-                    layer
-                        .file
-                        .as_deref()
-                        .and_then(|file| self.textures.get(file)?.as_ref())
+            layer
+                .file
+                .as_deref()
+                .and_then(|file| match file.strip_prefix(VIDEO_LAYER_TEXTURE_PREFIX) {
+                    Some(id) => self.video_frames.get(id),
+                    None => self.textures.get(file)?.as_ref(),
                 })
                 .map(|texture| TextureInfo {
                     width: texture.width,
@@ -366,7 +405,9 @@ impl SceneIo {
 
     pub(super) fn attach_video_layer(&self, id: &str) {
         let mut scene = self.scene.lock().unwrap();
-        scene.compositor.set_layer_file(id, None);
+        scene
+            .compositor
+            .set_layer_file(id, Some(video_layer_texture_name(id)));
         scene.edited.remove(id);
         scene.video_frames.remove(id);
         scene.pending_video_frames.remove(id);
@@ -375,8 +416,12 @@ impl SceneIo {
 
     pub(super) fn clear_video_layer(&self, id: &str) {
         let mut scene = self.scene.lock().unwrap();
+        scene
+            .compositor
+            .clear_layer_file_if_matches(id, &video_layer_texture_name(id));
         scene.pending_video_frames.remove(id);
-        scene.dirty |= scene.video_frames.remove(id).is_some();
+        scene.video_frames.remove(id);
+        scene.dirty = true;
     }
 
     pub(super) fn submit_video_pixels(
@@ -397,20 +442,7 @@ impl SceneIo {
             return Err(ProtocolError::Limit);
         }
         let mut scene = self.scene.lock().unwrap();
-        let used: usize = scene
-            .video_frames
-            .values()
-            .chain(
-                scene
-                    .pending_video_frames
-                    .iter()
-                    .filter_map(|(layer, pixels)| (layer != id).then_some(pixels)),
-            )
-            .map(|texture| texture.rgba.len())
-            .sum();
-        if frame.rgba.len() > MAX_TEXTURE_BYTES - used {
-            return Err(ProtocolError::WouldBlock);
-        }
+        scene.check_video_frame_budget(id, frame.rgba.len(), MAX_TEXTURE_BYTES)?;
         let revision = scene
             .video_revision
             .checked_add(1)
@@ -482,7 +514,9 @@ impl SceneIo {
     }
 
     pub(super) fn save_snapshot(&self) -> crate::compositor::Scene {
-        self.scene.lock().unwrap().compositor.snapshot_for_host()
+        let mut snapshot = self.scene.lock().unwrap().compositor.snapshot_for_host();
+        snapshot.strip_video_bindings();
+        snapshot
     }
 
     pub(super) fn restore_snapshot(
@@ -703,6 +737,40 @@ impl SceneIo {
                 .insert(std::mem::take(&mut read.file), texture);
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn video_budget_only_retries_when_promotion_can_free_space() {
+        let mut scene = SceneProjection::default();
+        let texture = |width| {
+            Arc::new(FrameTexture {
+                revision: 1,
+                width,
+                height: 1,
+                rgba: vec![0; width as usize * 4].into(),
+            })
+        };
+        scene.video_frames.insert("first".into(), texture(6));
+        assert_eq!(
+            scene.check_video_frame_budget("second", 12, 32),
+            Err(ProtocolError::Limit)
+        );
+        scene
+            .pending_video_frames
+            .insert("first".into(), texture(1));
+        assert_eq!(
+            scene.check_video_frame_budget("second", 12, 32),
+            Err(ProtocolError::WouldBlock)
+        );
+        scene
+            .video_frames
+            .extend(scene.pending_video_frames.drain());
+        assert_eq!(scene.check_video_frame_budget("second", 12, 32), Ok(()));
     }
 }
 

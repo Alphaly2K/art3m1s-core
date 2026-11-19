@@ -3007,6 +3007,7 @@ end
 #[test]
 fn host_video_layers_publish_immutable_frames_and_resume_media_waits() {
     use crate::host::{
+        input::HostInput,
         media::{PlaybackStatus, VideoFrame},
         runtime::{self, RuntimeError},
     };
@@ -3024,9 +3025,12 @@ fn host_video_layers_publish_immutable_frames_and_resume_media_waits() {
         "boot.iet",
         br#"*top
 [lyc id=1.80]
-[lyprop id=1.80 left=12 top=4]
+[lyprop id=1.80 left=12 top=4 clickablethreshold=128]
+[lyevent id=1.80 type=click handler=caption data=video_clicked]
 [setonvideofinish id=1.80 label=finish call=1]
 [video id=1.80 file=overlay.ogv]
+[wait time=3 input=0]
+[lyc id=1.80 width=1 height=1 color=ffff0000]
 [wait video=1.80]
 [caption data=layer_done]
 [video file=ending.mp4 skip=2]
@@ -3129,7 +3133,23 @@ fn host_video_layers_publish_immutable_frames_and_resume_media_waits() {
     let blank = runtime::acquire_latest(handle, 0).unwrap().unwrap();
     assert!(blank.sprites.is_empty());
     drop(blank);
+    runtime::submit_input(
+        handle,
+        epoch,
+        &[
+            HostInput::Pointer { x: 12, y: 4 },
+            HostInput::Key {
+                code: 1,
+                down: true,
+            },
+        ],
+    )
+    .unwrap();
     assert_eq!(step(2), ScriptIoProgress::Event);
+    assert_eq!(
+        drain(&poll()),
+        [(UI_CAPTION.kind, json!({"text":"video_clicked"}))]
+    );
     let first = runtime::acquire_latest(handle, 0).unwrap().unwrap();
     assert_eq!(first.sprites[0].layer_id, "1.80");
     assert_eq!(first.sprites[0].transform[4..], [12.0, 4.0]);
@@ -3152,9 +3172,24 @@ fn host_video_layers_publish_immutable_frames_and_resume_media_waits() {
     drop(next);
     assert!(poll().is_empty());
 
-    runtime::submit_playback_status(handle, epoch, layer, PlaybackStatus::Ended).unwrap();
-    assert!(stale(submit(4, &next_pixel)));
+    submit(4, &next_pixel).unwrap();
     assert_eq!(step(4), ScriptIoProgress::Event);
+    let replaced = runtime::acquire_latest(handle, previous).unwrap().unwrap();
+    assert_eq!(replaced.sprites[0].layer_id, "1.80");
+    assert_eq!(
+        replaced
+            .texture(replaced.sprites[0].texture)
+            .unwrap()
+            .rgba(),
+        [255, 0, 0, 255]
+    );
+    let replacement_id = replaced.render_frame_id;
+    drop(replaced);
+    assert!(poll().is_empty());
+
+    runtime::submit_playback_status(handle, epoch, layer, PlaybackStatus::Ended).unwrap();
+    assert!(stale(submit(5, &next_pixel)));
+    assert_eq!(step(5), ScriptIoProgress::Event);
     let records = drain(&poll());
     assert_eq!(records.len(), 3);
     assert_eq!(records[0], (UI_CAPTION.kind, json!({"text":"callback"})));
@@ -3162,15 +3197,17 @@ fn host_video_layers_publish_immutable_frames_and_resume_media_waits() {
     assert_eq!(records[2].0, MEDIA_VIDEO_COMMAND.kind);
     assert_eq!(records[2].1["layer"], Value::Null);
     assert_eq!(records[2].1["skip"], 2);
-    let blank = runtime::acquire_latest(handle, previous).unwrap().unwrap();
-    assert!(blank.sprites.is_empty());
-    drop(blank);
+    assert!(
+        runtime::acquire_latest(handle, replacement_id)
+            .unwrap()
+            .is_none()
+    );
     drop(first);
     let fullscreen = playback(&records[2].1);
     runtime::submit_playback_status(handle, epoch, fullscreen, PlaybackStatus::Cancelled).unwrap();
-    assert_eq!(step(4), ScriptIoProgress::Event);
-    assert!(poll().is_empty());
     assert_eq!(step(5), ScriptIoProgress::Event);
+    assert!(poll().is_empty());
+    assert_eq!(step(6), ScriptIoProgress::Event);
     assert_eq!(
         drain(&poll()),
         [(UI_CAPTION.kind, json!({"text":"full_done"}))]
@@ -3314,6 +3351,61 @@ fn test_font() -> Vec<u8> {
         font.resize(font.len().next_multiple_of(4), 0);
     }
     font
+}
+
+#[test]
+fn numbered_load_ignores_transient_video_textures_in_legacy_saves() {
+    let (mut saver, _, mut host) = playback_project(
+        br#"*top
+[lyc id=still file=still]
+[video id=movie file=overlay.ogv]
+[save file=slot]
+[calllua function=mark]
+[stop]
+[lua]
+function mark() restored=true end
+[/lua]
+"#,
+    );
+    let pixel = [8, 16, 32, 255];
+    host.asset("still.png", &png_bytes(1, 1, &pixel));
+    drive_display_snapshot(&mut saver, &mut host, playback_frame(1, 0));
+    let key = ("save".into(), "slot".into());
+    let mut save: crate::save::SaveData = serde_json::from_slice(&host.files[&key].1).unwrap();
+    let snapshot = save.scene.as_mut().unwrap();
+    assert!(snapshot.get("movie").unwrap().file.is_none());
+    snapshot.set_file(
+        "movie",
+        Some(crate::video::video_layer_texture_name("movie")),
+    );
+    host.files
+        .insert(key, (2, serde_json::to_vec(&save).unwrap()));
+    host.asset("load.iet", b"*top\n[load file=slot]\n[stop]\n");
+
+    let mut loader = session(2, TransportLimits::default(), 4096);
+    loader
+        .open_queued_project(
+            b"[WINDOWS]\nWIDTH=320\nHEIGHT=200\nBOOT=load.iet\n",
+            "windows",
+            None,
+        )
+        .unwrap();
+    drive_display_snapshot(&mut loader, &mut host, playback_frame(1, 0));
+    let frame = loader.frames.latest_snapshot().unwrap();
+    assert_eq!(frame.sprites.len(), 1);
+    assert_eq!(frame.sprites[0].layer_id, "still");
+    assert_eq!(
+        frame.texture(frame.sprites[0].texture).unwrap().rgba(),
+        pixel
+    );
+    assert!(
+        loader
+            .interpreter()
+            .lua()
+            .globals()
+            .get::<bool>("restored")
+            .unwrap()
+    );
 }
 
 #[test]

@@ -1766,12 +1766,13 @@ impl ScriptIoSession {
 
     fn prepare_numbered_load_scene(
         &mut self,
-        load: Box<PreparedLoad>,
+        mut load: Box<PreparedLoad>,
     ) -> Result<ScenarioStep, ScriptIoError> {
-        if let (Some(scene), Some(snapshot)) = (&self.scene, &load.file.save.scene) {
+        if let (Some(scene), Some(snapshot)) = (&self.scene, &mut load.file.save.scene) {
             if !snapshot.valid_host_snapshot() {
                 return Ok(self.fail_numbered_load(IoFailure::IoError, "invalid saved scene tree"));
             }
+            snapshot.strip_video_bindings();
             let mut remaining =
                 match scene.missing_snapshot_textures(snapshot, &load.file.layer_edits) {
                     Ok(files) => files,
