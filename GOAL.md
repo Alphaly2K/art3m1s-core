@@ -124,6 +124,16 @@ Flutter 静态检查和 181 项测试通过。
 动态读、写入拒绝、保存、纹理呈现和关闭，Flutter 静态检查和 181 项测试通过。Dart 直连绑定
 与 Flutter 通道共用文件服务，原有 Dart 动态库冒烟通过。
 
+应用仓库的 `97f53d4` 让 macOS 窗口关闭等待会话保存及原生关闭回报。发布版窗口探针验证
+全屏、最小化和恢复保留同一游戏会话，并在应用退出响应前读回末次存档标记。
+
+`dart run tool/build.dart macos --release --artemis-v2` 已通过 Apple Silicon 发布构建。
+显式传入 `ARTEMIS_V2_DXVK_RUNTIME_DIR` 和 `ARTEMIS_V2_HLSL_COMPILER_DIR` 后，包内包含
+DXVK、MoltenVK、HLSL 编译器、许可和编译器源码。严格签名验证通过，独立 Core 仅导出
+`art3m1s_get_api_v2`。直接使用包内动态库验证了 HLSL 半透明合成、GLSL 画面及后台取样、
+ANGLE 程序缓存跨进程复用，以及 WMV 解码和音频时间戳。macOS 仍以 v1 为默认，完整游戏的
+着色器与媒体兼容性仍需扩大验证。
+
 ## 已完成：Flutter 方法通道与共享纹理适配
 
 macOS Runner 适配器负责调用 v2 会话并管理 Flutter 纹理。Swift 与 Dart 通过方法通道交换事件
