@@ -123,10 +123,25 @@ impl Script {
             // docs/spec/script_syntax.md；预处理器注入的
             // [onlinehead]text[onlineend] 也依赖此规则）
             if line.contains('[') {
-                let segments = split_line_segments(line);
+                let mut segments = split_line_segments(line);
+                let mut wrapped = false;
+                if let [LineSegment::Text(text)] = segments.as_slice()
+                    && let Some(open) = text.strip_prefix('[')
+                    && let Some((end, tag, rest)) = wrapped_tag(open, &lines[line_idx + 1..])
+                {
+                    line_idx += end + 1;
+                    wrapped = true;
+                    segments = vec![LineSegment::Tag(tag)];
+                    segments.extend(split_line_segments(rest));
+                }
 
-                for segment in segments {
-                    let inner = match &segment {
+                for (index, segment) in segments.iter().enumerate() {
+                    let line_num = if wrapped && index != 0 {
+                        line_idx + 1
+                    } else {
+                        line_num
+                    };
+                    let inner = match segment {
                         LineSegment::Tag(inner) => inner.as_str(),
                         LineSegment::Text(text) => {
                             let text = text.trim();
@@ -306,6 +321,30 @@ pub(crate) fn split_line_segments(line: &str) -> Vec<LineSegment> {
     }
 
     segments
+}
+
+fn wrapped_tag<'a>(open: &str, remaining: &[&'a str]) -> Option<(usize, String, &'a str)> {
+    let mut tag = open.to_owned();
+    let mut quoted = open.matches('"').count() % 2 != 0;
+    for (offset, line) in remaining.iter().enumerate() {
+        let line = line.trim();
+        // Keep an unmatched bracket as text unless the following lines look
+        // like parameter assignments or close the current tag.
+        if !quoted && !line.is_empty() && !line.starts_with(']') && !line.contains('=') {
+            return None;
+        }
+        tag.push('\n');
+        for (index, ch) in line.char_indices() {
+            match ch {
+                '"' => quoted = !quoted,
+                '[' if !quoted => return None,
+                ']' if !quoted => return Some((offset, tag, &line[index + 1..])),
+                _ => {}
+            }
+            tag.push(ch);
+        }
+    }
+    None
 }
 
 /// 解析指令内容
@@ -559,6 +598,40 @@ mod tests {
         let script = Script::parse("test", "[rt] // 注释 [rp]").unwrap();
         let tags: Vec<&str> = script.instructions.iter().map(|i| i.tag.as_str()).collect();
         assert_eq!(tags, vec!["rt"]);
+    }
+
+    #[test]
+    fn wrapped_tag_keeps_bracketed_parameters_and_following_instructions() {
+        let source = concat!(
+            "[fontdefault\n",
+            "    face=\"Example [Book].ttf\"\n",
+            "    width=320\n",
+            "][fontinit]\n",
+            "[caption data=ready]\n",
+            "[unmatched text\n",
+            "[stop]\n",
+        );
+        let script = Script::parse("test", source).unwrap();
+        let tags: Vec<_> = script
+            .instructions
+            .iter()
+            .map(|i| (i.tag.as_str(), i.line))
+            .collect();
+        assert_eq!(
+            tags,
+            [
+                ("fontdefault", 1),
+                ("fontinit", 4),
+                ("caption", 5),
+                ("__text", 6),
+                ("stop", 7)
+            ]
+        );
+        assert_eq!(
+            script.instructions[0].get("face"),
+            Some("Example [Book].ttf")
+        );
+        assert_eq!(script.instructions[0].get("width"), Some("320"));
     }
 
     #[test]

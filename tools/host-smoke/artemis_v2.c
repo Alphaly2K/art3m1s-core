@@ -19,7 +19,8 @@ _Static_assert(offsetof(ArtMessage, session_epoch) == 16, "message epoch");
 _Static_assert(offsetof(ArtStepInfo, monotonic_ns) == 16, "step clock");
 
 static const char ini[] = "[WINDOWS]\nWIDTH=640\nHEIGHT=480\nBOOT=boot.iet\nSAVEPATH=C:\\Profiles\\Game\n";
-static const char boot[] = "*top\n[lyc id=1 width=2 height=1 color=ff112233]\n"
+static const char boot[] = "*top\n[debug mode=1 level=1]\n[debugprint data=boot]\n"
+                           "[lyc id=1 width=2 height=1 color=ff112233]\n"
                            "[takess]\n[savess file=thumb]\n"
                            "[httpget url=https://example.invalid/status varname_code=t.http]\n"
                            "[caption data=ready]\n[@]\n[caption data=advanced]\n[stop]\n";

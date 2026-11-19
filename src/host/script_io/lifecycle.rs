@@ -82,6 +82,17 @@ impl ScriptIoSession {
                 ScriptIoProgress::Event if matches!(self.scenario_event, Some(Event::Exit)) => {
                     self.notify_exit().map(Some)
                 }
+                ScriptIoProgress::Event
+                    if matches!(
+                        self.scenario_event,
+                        Some(Event::DebugConfig { .. } | Event::DebugPrint { .. })
+                    ) =>
+                {
+                    if let Some(Event::DebugPrint { data, .. }) = &self.scenario_event {
+                        crate::core_debug!("[debugprint] {}", data);
+                    }
+                    self.resume_scenario().map(|()| None)
+                }
                 ScriptIoProgress::Event if self.has_frame_wait() => self.advance_frame_wait(frame),
                 ScriptIoProgress::Event if self.waiting_for_transition() => {
                     self.advance_transition_wait(frame)

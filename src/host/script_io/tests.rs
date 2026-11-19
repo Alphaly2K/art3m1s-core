@@ -895,6 +895,10 @@ fn boot_reads_its_entry_and_optional_text_or_binary_macros_through_the_host() {
             "*start\n[hello]\n[caption data=boot]",
             Some(b"*hello\n[caption data=macro]\n[return]".as_slice()),
         ),
+        (
+            "[hello]\n*menu\n[caption data=boot]\n[jump label=start]\n*start",
+            Some(b"*hello\n[caption data=macro]\n[return]".as_slice()),
+        ),
         ("*_start\n[caption data=boot]", None),
         ("[caption data=boot]", None),
     ] {

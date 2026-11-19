@@ -3099,6 +3099,11 @@ impl Interpreter {
 
     fn position_boot(&mut self, script: &str) -> Result<()> {
         let script_obj = self.scripts.get(script).unwrap();
+        if self.uses_host_resources() && !script_obj.labels.values().any(|&line| line == 0) {
+            // A BOOT preamble can initialize the project before its first label.
+            self.set_start_position(script, 0);
+            return Ok(());
+        }
         let start_label =
             if self.uses_host_resources() && script_obj.get_label_line("top").is_some() {
                 "top"
