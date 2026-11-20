@@ -20,14 +20,24 @@ struct FontOverride {
     bytes: Option<Arc<[u8]>>,
 }
 
+#[derive(Default)]
+struct ScriptDebugConfig {
+    mode: AtomicI32,
+    level: AtomicI32,
+}
+
+static LEGACY_SCRIPT_DEBUG: ScriptDebugConfig = ScriptDebugConfig {
+    mode: AtomicI32::new(0),
+    level: AtomicI32::new(0),
+};
+
 struct SessionState {
     events: HostEvents,
     debug: AtomicBool,
     profile_io: AtomicBool,
     io_counters: Mutex<crate::ffi::HostFfiProfile>,
     damage_visualization: AtomicBool,
-    script_debug_mode: AtomicI32,
-    script_debug_level: AtomicI32,
+    script_debug: ScriptDebugConfig,
     font: Mutex<FontOverride>,
 }
 
@@ -53,8 +63,7 @@ impl HostSession {
                 profile_io: AtomicBool::new(false),
                 io_counters: Mutex::default(),
                 damage_visualization: AtomicBool::new(false),
-                script_debug_mode: AtomicI32::new(0),
-                script_debug_level: AtomicI32::new(0),
+                script_debug: ScriptDebugConfig::default(),
                 font: Mutex::default(),
             }),
             legacy: false,
@@ -248,35 +257,30 @@ impl HostSession {
         .unwrap_or(TextInjectResult::Unchanged)
     }
 
-    pub(crate) fn set_script_debug_config(&self, mode: Option<i32>, level: Option<i32>) {
+    fn script_debug(&self) -> &ScriptDebugConfig {
         if self.legacy {
-            crate::ffi::set_script_debug_config(mode, level);
-            return;
+            &LEGACY_SCRIPT_DEBUG
+        } else {
+            &self.state.script_debug
         }
+    }
+
+    pub(crate) fn set_script_debug_config(&self, mode: Option<i32>, level: Option<i32>) {
+        let config = self.script_debug();
         if let Some(mode) = mode {
-            self.state.script_debug_mode.store(mode, Ordering::Relaxed);
+            config.mode.store(mode, Ordering::Relaxed);
         }
         if let Some(level) = level {
-            self.state
-                .script_debug_level
-                .store(level, Ordering::Relaxed);
+            config.level.store(level, Ordering::Relaxed);
         }
     }
 
     pub(crate) fn script_debug_mode(&self) -> i32 {
-        if self.legacy {
-            crate::ffi::script_debug_mode()
-        } else {
-            self.state.script_debug_mode.load(Ordering::Relaxed)
-        }
+        self.script_debug().mode.load(Ordering::Relaxed)
     }
 
     pub(crate) fn script_debug_level(&self) -> i32 {
-        if self.legacy {
-            crate::ffi::script_debug_level()
-        } else {
-            self.state.script_debug_level.load(Ordering::Relaxed)
-        }
+        self.script_debug().level.load(Ordering::Relaxed)
     }
 
     pub(crate) fn script_debug_print_allowed(&self, level: i32) -> bool {
@@ -323,6 +327,31 @@ impl Drop for SessionScope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn script_debug_config_gates_debugprint_output() {
+        let legacy = HostSession::legacy();
+        let second_legacy = HostSession::legacy();
+        let isolated = HostSession::new();
+        legacy.set_script_debug_config(Some(0), Some(0));
+        assert!(!legacy.script_debug_print_allowed(0));
+
+        legacy.set_script_debug_config(Some(1), None);
+        assert!(second_legacy.script_debug_print_allowed(0));
+        assert!(!legacy.script_debug_print_allowed(1));
+        assert!(!isolated.script_debug_print_allowed(0));
+
+        legacy.set_script_debug_config(None, Some(2));
+        assert!(legacy.script_debug_print_allowed(2));
+        assert!(!legacy.script_debug_print_allowed(3));
+
+        isolated.set_script_debug_config(Some(2), Some(3));
+        assert!(isolated.script_debug_print_allowed(3));
+        isolated.reset_project();
+        assert!(!isolated.script_debug_print_allowed(0));
+        assert!(legacy.script_debug_print_allowed(2));
+        legacy.set_script_debug_config(Some(0), Some(0));
+    }
 
     #[test]
     fn nested_scopes_restore_diagnostics_and_keep_font_state_local() {

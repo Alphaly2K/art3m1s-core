@@ -34,7 +34,7 @@ mod siglus_output;
 ))]
 use std::ffi::c_void;
 use std::ffi::{c_char, c_int};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 // ── Global debug flag ──────────────────────────────────────────
@@ -96,43 +96,6 @@ fn finish_profile_io(started: Option<std::time::Instant>, bytes: usize) {
         value.bytes = value.bytes.saturating_add(bytes as u64);
         cell.set(value);
     });
-}
-
-// ── 脚本 [debug] 标签的日志模式/级别 ───────────────────────────
-//
-// 文档语义：mode 0=禁用日志（产品版）、1=输出到控制台、2=IPC 输出（Windows
-// 遗留，这里与 1 同样走宿主日志回调）；level 控制输出级别。启动默认
-// mode=0 level=0。[debugprint] 只有在 mode!=0 且自身 level 不超过当前
-// level 设置时才输出。存成进程级原子量：日志配置本就是全局的，且
-// CoreRuntime 结构体不归本模块管。
-
-static SCRIPT_DEBUG_MODE: AtomicI32 = AtomicI32::new(0);
-static SCRIPT_DEBUG_LEVEL: AtomicI32 = AtomicI32::new(0);
-
-/// 应用 `[debug]` 标签：mode/level 缺省时保持之前设置（文档行为）。
-pub fn set_script_debug_config(mode: Option<i32>, level: Option<i32>) {
-    if let Some(mode) = mode {
-        SCRIPT_DEBUG_MODE.store(mode, Ordering::Relaxed);
-    }
-    if let Some(level) = level {
-        SCRIPT_DEBUG_LEVEL.store(level, Ordering::Relaxed);
-    }
-}
-
-pub fn script_debug_mode() -> i32 {
-    SCRIPT_DEBUG_MODE.load(Ordering::Relaxed)
-}
-
-pub fn script_debug_level() -> i32 {
-    SCRIPT_DEBUG_LEVEL.load(Ordering::Relaxed)
-}
-
-/// `[debugprint level=N]` 是否应输出。
-///
-/// mode=0 一律不输出；level=0 是"仅脚本日志"档，故门控取
-/// `N <= 当前 level`（debugprint 属于脚本日志，level=0 时也放行 N=0）。
-pub fn script_debug_print_allowed(level: i32) -> bool {
-    script_debug_mode() != 0 && level <= script_debug_level()
 }
 
 /// 从 catch_unwind 的 payload 提取 panic message。
@@ -1307,10 +1270,7 @@ mod tests {
         assert!(super::begin_profile_io().is_some());
     }
 
-    use super::{
-        font_override, log_suppressed_by_filter, script_debug_print_allowed, set_font_override,
-        set_log_filter, set_script_debug_config,
-    };
+    use super::{font_override, log_suppressed_by_filter, set_font_override, set_log_filter};
 
     /// 日志过滤钩子是进程级状态，单测里串行验证后卸载，避免影响其它测试。
     #[test]
@@ -1330,37 +1290,6 @@ mod tests {
         // 卸载后恢复放行
         set_log_filter(None);
         assert!(!log_suppressed_by_filter("I", "noisy line"));
-    }
-
-    /// 全局原子量的门控逻辑放在同一个测试里串行验证，避免并行测试互踩。
-    #[test]
-    fn script_debug_config_gates_debugprint_output() {
-        // 启动默认 mode=0 level=0：任何 debugprint 都不输出。
-        set_script_debug_config(Some(0), Some(0));
-        assert!(!script_debug_print_allowed(0));
-        assert!(!script_debug_print_allowed(3));
-
-        // mode=1 level=0：仅放行 level<=0 的脚本日志。
-        set_script_debug_config(Some(1), None);
-        assert!(script_debug_print_allowed(0));
-        assert!(!script_debug_print_allowed(1));
-
-        // level=2：放行 0..=2，拦下 3。
-        set_script_debug_config(None, Some(2));
-        assert!(script_debug_print_allowed(2));
-        assert!(!script_debug_print_allowed(3));
-
-        // mode/level 缺省时保持之前设置（文档："缺省=保持之前设置"）。
-        set_script_debug_config(None, None);
-        assert!(script_debug_print_allowed(2));
-
-        // mode=2（IPC 模式）也按"非 0 即输出"处理。
-        set_script_debug_config(Some(2), Some(3));
-        assert!(script_debug_print_allowed(3));
-
-        // 回到禁用态，避免影响其它依赖默认值的行为。
-        set_script_debug_config(Some(0), Some(0));
-        assert!(!script_debug_print_allowed(0));
     }
 
     #[test]
