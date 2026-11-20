@@ -519,20 +519,20 @@ mod tests {
 
     #[test]
     fn font_window_and_text_state_are_available_without_callbacks() {
+        use crate::host::{HostSession, TextInjectResult};
+
         let _guard = TEST_LOCK.lock().unwrap();
         let events = reset();
+        let legacy = HostSession::legacy();
         let fonts = b"Font A\nFont B";
         assert_eq!(
             unsafe { art3m1s_set_font_list_v1(ptr(&events), 0, 0, fonts.as_ptr(), fonts.len()) },
             1
         );
-        assert_eq!(
-            events.query_font_list(false, false),
-            Some(vec!["Font A".to_string(), "Font B".to_string()])
-        );
+        assert_eq!(legacy.query_font_list(false, false), ["Font A", "Font B"]);
 
         unsafe { art3m1s_set_window_state_v1(ptr(&events), 0b11) };
-        assert_eq!(events.query_window_state(), Some((true, true)));
+        assert_eq!(legacy.query_window_state(), (true, true));
 
         let replacements = br#"{"hello":"translated","bad":1}"#;
         assert_eq!(
@@ -546,12 +546,20 @@ mod tests {
             1
         );
         assert_eq!(
-            events.text_replacement("hello").as_deref(),
-            Some("translated")
+            legacy.text_injection("hello"),
+            TextInjectResult::Replaced("translated".into())
         );
-        assert_eq!(events.text_replacement("bad"), None);
+        assert_eq!(legacy.text_injection("bad"), TextInjectResult::Unchanged);
         unsafe { art3m1s_set_text_translation_enabled_v1(ptr(&events), 1) };
-        assert!(events.text_translation_enabled());
+        assert_eq!(legacy.text_injection("missing"), TextInjectResult::Pending);
+
+        let isolated = HostSession::new();
+        assert_eq!(isolated.query_window_state(), (false, false));
+        assert!(isolated.query_font_list(false, false).is_empty());
+        assert_eq!(
+            isolated.text_injection("hello"),
+            TextInjectResult::Unchanged
+        );
     }
 
     #[test]

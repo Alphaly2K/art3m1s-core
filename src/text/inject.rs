@@ -103,14 +103,13 @@ impl std::fmt::Debug for InjectionChain {
 ///
 /// 宿主通过 `art3m1s_set_text_replacements_v1` 提前提交替换表；
 /// 未命中时 [`TextInject::inject`] 返回 `None`（保持原文，或由异步翻译事件接管）。
-/// runtime 默认把它挂在注入链首位。
 #[cfg(feature = "legacy")]
 pub struct FfiTextInject;
 
 #[cfg(feature = "legacy")]
 impl TextInject for FfiTextInject {
     fn inject(&self, text: &str) -> Option<String> {
-        crate::ffi::inject_text(text)
+        crate::host_events::legacy_active_events()?.text_replacement(text)
     }
 
     fn name(&self) -> &str {

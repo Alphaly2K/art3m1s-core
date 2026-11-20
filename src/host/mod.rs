@@ -30,4 +30,4 @@ pub use provider::ResourceProvider;
 #[cfg(feature = "legacy")]
 pub use session::HostSession;
 #[cfg(feature = "legacy")]
-pub(crate) use session::current_session;
+pub(crate) use session::{TextInjectResult, current_session};

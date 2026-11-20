@@ -230,14 +230,6 @@ pub fn log(level: &str, msg: &str) {
     }
 }
 
-pub fn emit_ui_command(kind: &str, payload: serde_json::Value) {
-    if let Some(events) =
-        crate::host_events::legacy_active_events().filter(|events| events.enabled())
-    {
-        events.push_ui(kind, &payload.to_string());
-    }
-}
-
 #[macro_export]
 macro_rules! core_info {
     ($($arg:tt)*) => { $crate::ffi::log("I", &format!($($arg)*)); };
@@ -257,42 +249,6 @@ macro_rules! core_debug {
 #[macro_export]
 macro_rules! core_error {
     ($($arg:tt)*) => { $crate::ffi::log("E", &format!($($arg)*)); };
-}
-
-// ── Text replacement state ─────────────────────────────────────
-//
-// 汉化/本地化补丁入口：Host 预先提交精确替换表；未命中且在线翻译开启时，
-// core 保留原文并通过 UI event 发送 `text_translate` 请求，完成后由
-// `art3m1s_runtime_submit_text_translation` 尝试热替换当前页面文本。
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TextInjectResult {
-    Unchanged,
-    Replaced(String),
-    Pending,
-}
-
-/// 把一段文本交给宿主注入回调；Pending 只表示排队，不阻塞 runtime。
-pub fn request_text_injection(text: &str) -> TextInjectResult {
-    let Some(events) = crate::host_events::legacy_active_events() else {
-        return TextInjectResult::Unchanged;
-    };
-    if let Some(replaced) = events.text_replacement(text) {
-        return TextInjectResult::Replaced(replaced);
-    }
-    if events.text_translation_enabled() {
-        TextInjectResult::Pending
-    } else {
-        TextInjectResult::Unchanged
-    }
-}
-
-/// 旧同步接口：异步 pending 对旧调用方表现为不替换。
-pub fn inject_text(text: &str) -> Option<String> {
-    match request_text_injection(text) {
-        TextInjectResult::Replaced(text) => Some(text),
-        TextInjectResult::Unchanged | TextInjectResult::Pending => None,
-    }
 }
 
 // ── Runtime font override ──────────────────────────────────────
@@ -364,33 +320,6 @@ pub(crate) unsafe extern "C" fn art3m1s_set_angle_path(path: *const c_char) {
     if let Ok(s) = unsafe { std::ffi::CStr::from_ptr(path).to_str() } {
         let _ = crate::backend::set_angle_path_prefix(s);
     }
-}
-
-// ── Clipboard ────────────────────────────────────────────────────
-
-/// `e:writeClipboard` 的核心侧出口：经 ui_command 转发宿主
-/// （Flutter Clipboard.setData）。原版仅 Windows；非 Windows 宿主可忽略。
-pub fn write_clipboard(text: &str) {
-    emit_ui_command("write_clipboard", serde_json::json!({ "string": text }));
-}
-
-// ── 字体枚举 / 窗口状态 ────────────────────────────────────────────
-//
-// `var system=get_font` 与 `fullscreen`/`minimize` 读取 Host 经
-// `art3m1s_set_font_list_v1` / `art3m1s_set_window_state_v1` 推送的状态。
-
-/// 查询可用字体族列表。Host 未推送时返回空列表。
-pub fn query_font_list(monospace: bool, vertical: bool) -> Vec<String> {
-    crate::host_events::legacy_active_events()
-        .and_then(|events| events.query_font_list(monospace, vertical))
-        .unwrap_or_default()
-}
-
-/// 查询窗口状态：`(全屏, 最小化)`。Host 未推送时返回 `(false, false)`。
-pub fn query_window_state() -> (bool, bool) {
-    crate::host_events::legacy_active_events()
-        .and_then(|events| events.query_window_state())
-        .unwrap_or((false, false))
 }
 
 // ── Query helpers ────────────────────────────────────────────────

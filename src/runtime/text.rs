@@ -212,9 +212,9 @@ impl CoreRuntime {
         let injected = match event {
             Event::ScenarioText { content, .. } => {
                 let host_text = match self.host.text_injection(content) {
-                    crate::ffi::TextInjectResult::Unchanged => content.clone(),
-                    crate::ffi::TextInjectResult::Replaced(text) => text,
-                    crate::ffi::TextInjectResult::Pending => {
+                    crate::host::TextInjectResult::Unchanged => content.clone(),
+                    crate::host::TextInjectResult::Replaced(text) => text,
+                    crate::host::TextInjectResult::Pending => {
                         let ruby = self.text_renderer.as_ref().and_then(|renderer| {
                             let state = renderer.font_state();
                             let active = state

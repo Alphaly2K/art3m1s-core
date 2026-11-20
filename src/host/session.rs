@@ -1,12 +1,18 @@
 use super::events::HostEvents;
 use super::media::HostMediaCommandKind;
-use crate::ffi::TextInjectResult;
 use serde::Serialize;
 use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TextInjectResult {
+    Unchanged,
+    Replaced(String),
+    Pending,
+}
 
 #[derive(Default)]
 struct FontOverride {
@@ -162,20 +168,26 @@ impl HostSession {
         Some((font.generation, font.bytes.clone()?))
     }
 
-    pub(crate) fn enabled(&self) -> bool {
+    fn with_events<T>(&self, operation: impl FnOnce(&HostEvents) -> T) -> Option<T> {
         if self.legacy {
-            crate::host_events::legacy_active_events().is_some_and(|events| events.enabled())
+            super::events::legacy_active_events()
+                .as_ref()
+                .map(operation)
         } else {
-            self.events().enabled()
+            Some(operation(self.events()))
         }
     }
 
+    pub(crate) fn enabled(&self) -> bool {
+        self.with_events(HostEvents::enabled).unwrap_or(false)
+    }
+
     pub(crate) fn emit_ui(&self, kind: &str, payload: serde_json::Value) {
-        if self.legacy {
-            crate::ffi::emit_ui_command(kind, payload);
-        } else {
-            self.events().push_ui(kind, &payload.to_string());
-        }
+        self.with_events(|events| {
+            if events.enabled() {
+                events.push_ui(kind, &payload.to_string());
+            }
+        });
     }
 
     pub(crate) fn emit_media<T: Serialize>(&self, kind: HostMediaCommandKind, payload: T) {
@@ -187,11 +199,11 @@ impl HostSession {
                 );
                 serde_json::json!({})
             });
-            if let Some(events) =
-                crate::host_events::legacy_active_events().filter(|events| events.enabled())
-            {
-                events.push_media(kind.as_str(), &payload.to_string());
-            }
+            self.with_events(|events| {
+                if events.enabled() {
+                    events.push_media(kind.as_str(), &payload.to_string());
+                }
+            });
             return;
         }
         match serde_json::to_string(&payload) {
@@ -212,34 +224,28 @@ impl HostSession {
     }
 
     pub(crate) fn query_font_list(&self, monospace: bool, vertical: bool) -> Vec<String> {
-        if self.legacy {
-            crate::ffi::query_font_list(monospace, vertical)
-        } else {
-            self.events()
-                .query_font_list(monospace, vertical)
-                .unwrap_or_default()
-        }
+        self.with_events(|events| events.query_font_list(monospace, vertical))
+            .flatten()
+            .unwrap_or_default()
     }
 
     pub(crate) fn query_window_state(&self) -> (bool, bool) {
-        if self.legacy {
-            crate::ffi::query_window_state()
-        } else {
-            self.events().query_window_state().unwrap_or_default()
-        }
+        self.with_events(HostEvents::query_window_state)
+            .flatten()
+            .unwrap_or_default()
     }
 
     pub(crate) fn text_injection(&self, text: &str) -> TextInjectResult {
-        if self.legacy {
-            return crate::ffi::request_text_injection(text);
-        }
-        if let Some(replacement) = self.events().text_replacement(text) {
-            TextInjectResult::Replaced(replacement)
-        } else if self.events().text_translation_enabled() {
-            TextInjectResult::Pending
-        } else {
-            TextInjectResult::Unchanged
-        }
+        self.with_events(|events| {
+            if let Some(replacement) = events.text_replacement(text) {
+                TextInjectResult::Replaced(replacement)
+            } else if events.text_translation_enabled() {
+                TextInjectResult::Pending
+            } else {
+                TextInjectResult::Unchanged
+            }
+        })
+        .unwrap_or(TextInjectResult::Unchanged)
     }
 
     pub(crate) fn set_script_debug_config(&self, mode: Option<i32>, level: Option<i32>) {
