@@ -1116,26 +1116,7 @@ impl GlRenderer {
                         })
                 })
                 .collect::<Vec<_>>();
-            if !mesh_vertices.is_empty() {
-                let floats = std::slice::from_raw_parts(
-                    mesh_vertices.as_ptr() as *const f32,
-                    mesh_vertices.len() * 4,
-                );
-                gl.bind_vertex_array(Some(self.mesh_vao));
-                gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.mesh_vbo));
-                gl.buffer_data_u8_slice(
-                    glow::ARRAY_BUFFER,
-                    bytemuck_cast(floats),
-                    glow::DYNAMIC_DRAW,
-                );
-                if self.profiling_enabled.get() {
-                    self.profile_dynamic_mesh_uploaded_bytes.set(
-                        self.profile_dynamic_mesh_uploaded_bytes
-                            .get()
-                            .saturating_add(std::mem::size_of_val(floats) as u64),
-                    );
-                }
-            }
+            self.upload_mesh(&mesh_vertices);
             gl.bind_vertex_array(Some(self.vao));
 
             self.render_range(
@@ -1161,6 +1142,66 @@ impl GlRenderer {
         }
         self.last_damage_overlay = visualize_damage.then_some(current_region);
         repaint_region
+    }
+
+    unsafe fn upload_mesh(&self, vertices: &[[f32; 4]]) {
+        if vertices.is_empty() {
+            return;
+        }
+        unsafe {
+            let floats =
+                std::slice::from_raw_parts(vertices.as_ptr().cast::<f32>(), vertices.len() * 4);
+            self.gl.bind_vertex_array(Some(self.mesh_vao));
+            self.gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.mesh_vbo));
+            self.gl.buffer_data_u8_slice(
+                glow::ARRAY_BUFFER,
+                bytemuck_cast(floats),
+                glow::DYNAMIC_DRAW,
+            );
+            if self.profiling_enabled.get() {
+                self.profile_dynamic_mesh_uploaded_bytes.set(
+                    self.profile_dynamic_mesh_uploaded_bytes
+                        .get()
+                        .saturating_add(std::mem::size_of_val(floats) as u64),
+                );
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    fn draw_into_metal(
+        &self,
+        command: &DrawCommand,
+        viewport: (i32, i32),
+        damage: Option<[f32; 4]>,
+    ) -> Result<(), String> {
+        let gl = &self.gl;
+        unsafe {
+            gl.viewport(0, 0, viewport.0, viewport.1);
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::STENCIL_TEST);
+            gl.disable(glow::CULL_FACE);
+            gl.color_mask(true, true, true, true);
+            let mesh = command
+                .mesh
+                .as_ref()
+                .filter(|mesh| !mesh.vertices.is_empty())
+                .map(|mesh| {
+                    self.upload_mesh(&mesh.vertices);
+                    (0, mesh.vertices.len() as i32)
+                });
+            gl.bind_vertex_array(Some(self.vao));
+            // Metal maps its first memory row to GL y=0, like our group targets.
+            self.draw_one(command, mesh, false, viewport, damage);
+            gl.disable(glow::SCISSOR_TEST);
+            gl.bind_vertex_array(None);
+            gl.use_program(None);
+            let error = gl.get_error();
+            if error != glow::NO_ERROR {
+                return Err(format!("GLSL draw into Metal failed: GL {error:#x}"));
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn render_damage(&mut self, frame: &DrawList, damage: [f32; 4]) -> RenderRegion {

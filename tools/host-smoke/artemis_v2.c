@@ -60,6 +60,7 @@ static const char shader_sequence_source[] = HLSL_RESOURCES
 #ifdef ARTEMIS_DXVK_HOST_SMOKE
 static int shader_host_sprites;
 static int shader_host_legacy_alpha;
+static int shader_host_mixed;
 static const char shader_host_sprites_boot[] = "*top\n[lyshader id=paint file=paint.hlsl]\n"
     "[lyc id=1 width=2 height=4 color=ff112233]\n"
     SHADER_BINDINGS
@@ -81,6 +82,26 @@ static const char shader_host_legacy_alpha_source[] =
     "void ps(float2 uv : TEXCOORD0, out float4 color : COLOR0) {\n"
     "    float4 fore = tex2D(samplerFore, uv);\n"
     "    color = float4(1.0 - fore.rgb, fore.a * alpha);\n"
+    "}\n";
+static const char shader_host_mixed_boot[] = "*top\n[lyshader id=paint file=paint.hlsl]\n"
+    "[lyshader id=back file=back.frag]\n"
+    "[lyc id=1 width=2 height=4 color=ff112233]\n"
+    SHADER_BINDINGS
+    "[lyc id=2 width=2 height=4 color=ff114466]\n"
+    "[lyprop id=2 left=2 shader=paint shaderconstant=\"tint,param\" tint=\"0,1,0.5,1\" "
+    "param=0 mask=mask shadertexture=textureUser textureUser=user]\n"
+    "[lyc id=3 width=4 height=2 color=ffffffff]\n[lyprop id=3 shader=back]\n"
+    "[lyc id=4.child width=2 height=2 color=ffffffff]\n"
+    "[lyprop id=4.child left=2 top=2]\n[lyprop id=4 shader=back]\n"
+    "[lyc id=5 width=1 height=1 color=ffabcdef]\n"
+    "[flip]\n[caption data=ready]\n[stop]\n";
+static const char shader_host_mixed_glsl[] =
+    "varying mediump vec2 resultCoord0, resultCoord1;\n"
+    "uniform sampler2D textureBack, textureFore;\n"
+    "void main() {\n"
+    "    float a = texture2D(textureFore, resultCoord1).a;\n"
+    "    vec3 color = texture2D(textureBack, resultCoord0).rgb + vec3(32.0 / 255.0, 0.0, 0.0);\n"
+    "    gl_FragColor = vec4(color * a, a);\n"
     "}\n";
 #endif
 #define GLSL_BODY \
@@ -147,6 +168,10 @@ static void service_io(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt,
         asset = shader_sequence ? shader_sequence_source : shader;
 #ifdef ARTEMIS_DXVK_HOST_SMOKE
     if (shader_host_sprites && strstr(metadata, "\"key\":\"boot.iet\"")) asset = shader_host_sprites_boot;
+    if (shader_host_mixed) {
+        if (strstr(metadata, "\"key\":\"boot.iet\"")) asset = shader_host_mixed_boot;
+        if (strstr(metadata, "\"key\":\"back.frag\"")) asset = shader_host_mixed_glsl;
+    }
     if (shader_host_legacy_alpha) {
         if (strstr(metadata, "\"key\":\"boot.iet\"")) asset = shader_host_legacy_alpha_boot;
         if (strstr(metadata, "\"key\":\"paint.hlsl\"")) asset = shader_host_legacy_alpha_source;
@@ -263,7 +288,13 @@ static unsigned pump(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt, uint64_t f
 static int shader_host_smoke(const ArtRuntimeApiV2 *api, const ArtFrameApiV2 *frames,
                              ArtRuntimeHandle rt, const char *directory, const char *artifact) {
     ArtMetalHost *host = NULL;
-    assert(art3m1s_metal_host_v1_create_dxvk(frames, rt, directory, &host) == ART_OK);
+    if (shader_host_mixed) {
+        const char *angle = getenv("ARTEMIS_GL_SMOKE_ANGLE_DIR");
+        assert(angle && art3m1s_metal_host_v1_create_mixed(frames, rt, directory, angle, &host) == ART_OK);
+        assert(art3m1s_metal_host_v1_prepare_glsl(host, text(shader_host_mixed_glsl)) == ART_OK);
+    } else {
+        assert(art3m1s_metal_host_v1_create_dxvk(frames, rt, directory, &host) == ART_OK);
+    }
     FILE *file = fopen(artifact, "rb");
     assert(file && fseek(file, 0, SEEK_END) == 0);
     long length = ftell(file);
@@ -285,7 +316,7 @@ static int shader_host_smoke(const ArtRuntimeApiV2 *api, const ArtFrameApiV2 *fr
     };
     const uint8_t overlay[] = {0xab, 0xcd, 0xef, 255};
     const uint8_t cyan_over_bg[] = {16, 160, 176, 255}, bg[] = {32, 64, 96, 255};
-    const unsigned frame_count = shader_host_sprites || shader_host_legacy_alpha ? 1 : 3;
+    const unsigned frame_count = shader_host_sprites || shader_host_legacy_alpha || shader_host_mixed ? 1 : 3;
     unsigned turn = 0;
     uint64_t after = 0;
     for (uint64_t id = 1; id <= 16 && turn < frame_count; ++id) {
@@ -303,6 +334,13 @@ static int shader_host_smoke(const ArtRuntimeApiV2 *api, const ArtFrameApiV2 *fr
                 : expected[turn][pixel / 8];
             const uint8_t *actual = presentation + pixel * 4;
             if (shader_host_legacy_alpha) color = pixel / 4 < 2 ? cyan_over_bg : bg;
+            uint8_t mixed[4];
+            if (shader_host_mixed) {
+                const int right = pixel % 4 >= 2;
+                memcpy(mixed, right ? expected[1][1] : expected[0][0], sizeof(mixed));
+                if (pixel / 4 < 2 || right) mixed[0] += 32;
+                color = pixel == 0 ? overlay : mixed;
+            }
             const int tolerance = shader_host_legacy_alpha ? 1 : 0;
             if (abs(actual[0] - color[0]) > tolerance || abs(actual[1] - color[1]) > tolerance ||
                 abs(actual[2] - color[2]) > tolerance || actual[3] != color[3]) {
@@ -319,6 +357,7 @@ static int shader_host_smoke(const ArtRuntimeApiV2 *api, const ArtFrameApiV2 *fr
     metal_free_pixel_buffer(surface);
     assert(api->destroy(rt) == ART_OK);
     puts(shader_host_legacy_alpha ? "Metal Host DXVK composited a legacy shader over transparent and translucent regions"
+         : shader_host_mixed ? "Metal Host composited DXVK and GLSL sprites and groups in order"
          : shader_host_sprites ? "Metal Host DXVK composited two sprite effects and an overlay in order"
                             : "Metal Host DXVK presentation and capture matched three Core frames");
     return 0;
@@ -339,11 +378,12 @@ int main(int argc, char **argv) {
         return fputs(shader_host_legacy_alpha_source, stdout) < 0;
     }
     else if (argc == 4 && (!strcmp(argv[1], "--shader-host") || !strcmp(argv[1], "--shader-host-sprites") ||
-                         !strcmp(argv[1], "--shader-host-legacy-alpha"))) {
+                         !strcmp(argv[1], "--shader-host-legacy-alpha") || !strcmp(argv[1], "--shader-host-mixed"))) {
         shader_frame = HLSL;
         shader_sequence = 1;
         shader_host_sprites = !strcmp(argv[1], "--shader-host-sprites");
         shader_host_legacy_alpha = !strcmp(argv[1], "--shader-host-legacy-alpha");
+        shader_host_mixed = !strcmp(argv[1], "--shader-host-mixed");
     }
 #endif
     else if (argc != 1) return 2;
@@ -378,6 +418,9 @@ int main(int argc, char **argv) {
     if (shader_frame == HLSL) info.renderer_caps |= ART_RENDERER_CAP_HLSL;
     else if (shader_frame) info.renderer_caps |= ART_RENDERER_CAP_GLSL;
     if (shader_sequence) info.renderer_caps |= ART_RENDERER_CAP_GROUP;
+#ifdef ARTEMIS_DXVK_HOST_SMOKE
+    if (shader_host_mixed) info.renderer_caps = ART_MIXED_HOST_V1_RENDERER_CAPS;
+#endif
     ArtRuntimeHandle rt = 0;
     assert(api->create(&info, &rt) == ART_OK && rt != 0);
     ArtProjectInfo project = { .struct_size = sizeof(project),

@@ -219,7 +219,11 @@ GLSL 启动预热和运行时首次加载共用会话内程序缓存。ANGLE 探
 
 macOS Host 已验证 Metal 与 ANGLE 共用 GPU 纹理。Metal 命令队列写入私有纹理，GLSL 直接采样
 并将结果写入另一张 Metal 纹理；逐像素检查覆盖颜色通道和行方向，处理过程无需 CPU 像素拷贝。
-下一步将这条路径接入 Metal 场景合成，在同一帧验证 HLSL 与 GLSL 的绘制顺序和背景采样。
+
+macOS Host 已能在同一帧执行 DXVK 的 HLSL 与 ANGLE 的 GLSL。Core 帧协议不变，Host 负责在
+图层之间交接 GPU 纹理。原生 C 冒烟验证 GLSL 精灵和组效果按顺序取样 DXVK 图层，后续 Metal
+覆盖层、呈现和截图逐像素一致。Flutter 识别混合资源项目并在首帧前预热两种语言；真实 Runner
+的冷、热缓存验证与 Swift SDK 冒烟通过。下一步验证混合帧在游戏分辨率下的同步成本和发行样本覆盖。
 
 ## 已完成：Flutter 方法通道与共享纹理适配
 

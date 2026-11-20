@@ -66,24 +66,96 @@ impl GlBackend {
         handle: std::ptr::NonNull<std::ffi::c_void>,
         draw: impl FnOnce(&mut Self, TextureId) -> Result<T, String>,
     ) -> Result<T, String> {
-        struct View(Rc<glow::Context>, glow::Texture);
-        impl Drop for View {
+        unsafe {
+            self.with_metal_textures([Some(handle)], |backend, [id]| draw(backend, id.unwrap()))
+        }
+    }
+
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    pub(crate) fn contains_shader(&self, name: &str) -> bool {
+        self.shader_ids.contains_key(name)
+    }
+
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    pub(crate) unsafe fn draw_metal_effect(
+        &mut self,
+        target: std::ptr::NonNull<std::ffi::c_void>,
+        inputs: [Option<std::ptr::NonNull<std::ffi::c_void>>; 3],
+        stage: Extent2D,
+        extent: Extent2D,
+        mut command: crate::draw::DrawCommand,
+        damage: Option<[f32; 4]>,
+    ) -> Result<(), String> {
+        self.set_native_surface(NativeSurface {
+            kind: NativeSurfaceKind::AppleMetalTexture,
+            handle: target.as_ptr(),
+            extent,
+        })?;
+        let result = unsafe {
+            self.with_metal_textures(inputs, |backend, [fore, mask, user]| {
+                command.texture = fore.ok_or("missing Metal effect foreground")?;
+                let effect = command.shader.as_mut().ok_or("missing GLSL effect")?;
+                effect.mask_texture = mask;
+                effect.user_texture = user;
+                backend.platform_context.bind_external_surface()?;
+                backend.renderer.set_stage_size(stage.width, stage.height);
+                backend.renderer.draw_into_metal(
+                    &command,
+                    (extent.width as i32, extent.height as i32),
+                    damage,
+                )
+            })
+        };
+        self.clear_native_surface();
+        result
+    }
+
+    #[cfg(target_os = "macos")]
+    unsafe fn with_metal_textures<const N: usize, T>(
+        &mut self,
+        handles: [Option<std::ptr::NonNull<std::ffi::c_void>>; N],
+        draw: impl FnOnce(&mut Self, [Option<TextureId>; N]) -> Result<T, String>,
+    ) -> Result<T, String> {
+        struct Views<const N: usize>(Rc<glow::Context>, [Option<glow::Texture>; N]);
+        impl<const N: usize> Drop for Views<N> {
             fn drop(&mut self) {
                 unsafe {
                     self.0.finish();
-                    self.0.delete_texture(self.1);
+                    for texture in self.1.into_iter().flatten() {
+                        self.0.delete_texture(texture);
+                    }
                 }
             }
         }
 
-        let texture = unsafe {
+        let mut views = Views(Rc::clone(&self.gl), [None; N]);
+        unsafe {
             let previous = self.gl.get_parameter_texture(glow::TEXTURE_BINDING_2D);
-            let result = self.platform_context.import_metal_texture(handle);
+            let result = handles
+                .into_iter()
+                .zip(&mut views.1)
+                .try_for_each(|(handle, texture)| {
+                    if let Some(handle) = handle {
+                        *texture = Some(self.platform_context.import_metal_texture(handle)?);
+                        for wrap in [glow::TEXTURE_WRAP_S, glow::TEXTURE_WRAP_T] {
+                            self.gl.tex_parameter_i32(
+                                glow::TEXTURE_2D,
+                                wrap,
+                                glow::CLAMP_TO_EDGE as i32,
+                            );
+                        }
+                    }
+                    Ok::<(), String>(())
+                });
             self.gl.bind_texture(glow::TEXTURE_2D, previous);
-            result?
-        };
-        let _view = View(Rc::clone(&self.gl), texture);
-        draw(self, TextureId(texture.0.get().into()))
+            result?;
+        }
+        draw(
+            self,
+            views
+                .1
+                .map(|texture| texture.map(|texture| TextureId(texture.0.get().into()))),
+        )
     }
 
     pub fn new(config: platform::GfxBackend, width: u32, height: u32) -> Result<Self, String> {

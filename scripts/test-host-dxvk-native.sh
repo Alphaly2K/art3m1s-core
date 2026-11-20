@@ -121,6 +121,9 @@ else
         -framework CoreFoundation -framework CoreVideo -o "$scratch/metal-host"
       run_native "$scratch/metal-host" --shader-host "$runtime_dir" effect.ade
       run_native "$scratch/metal-host" --shader-host-sprites "$runtime_dir" effect.ade
+      if [[ -n ${ARTEMIS_GL_SMOKE_ANGLE_DIR:-} ]]; then
+        run_native "$scratch/metal-host" --shader-host-mixed "$runtime_dir" effect.ade
+      fi
       if [[ -n ${ARTEMIS_DXVK_SMOKE_LEGACY_ALPHA_SOURCE:-} ]]; then
         export ARTEMIS_DXVK_SMOKE_LEGACY_ALPHA_SOURCE
         compile_effect effect-pair < "$ARTEMIS_DXVK_SMOKE_LEGACY_ALPHA_SOURCE" > "$scratch/legacy-alpha.ade"

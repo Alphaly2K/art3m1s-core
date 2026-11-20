@@ -355,6 +355,8 @@ pub struct MetalBackend {
     mask_targets: Vec<PrivateRenderTarget>,
     pipelines: HashMap<PipelineKey, MetalPipeline>,
     runtime_shaders: ShaderRegistry<MetalShader>,
+    #[cfg(all(target_os = "macos", feature = "gl"))]
+    angle_effects: Option<super::gl::GlBackend>,
     #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
     dxvk: Option<dxvk::Effects>,
     source: Option<Box<AssetSource>>,
@@ -472,6 +474,8 @@ impl MetalBackend {
             mask_targets: Vec::new(),
             pipelines: HashMap::new(),
             runtime_shaders: ShaderRegistry::default(),
+            #[cfg(all(target_os = "macos", feature = "gl"))]
+            angle_effects: None,
             #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
             dxvk: None,
             source: None,
@@ -2481,7 +2485,27 @@ impl GpuBackend for MetalBackend {
         Ok(id)
     }
 
+    #[cfg(all(target_os = "macos", feature = "gl"))]
+    fn register_glsl_shader(
+        &mut self,
+        name: &str,
+        source: &[u8],
+    ) -> Result<ShaderId, ShaderCompileError> {
+        self.with_angle(|angle| angle.register_glsl_shader(name, source))
+            .ok_or_else(|| ShaderCompileError::new(name, "ANGLE effects are not enabled"))?
+    }
+
     fn unregister_shader(&mut self, name: &str) -> bool {
+        #[cfg(all(target_os = "macos", feature = "gl"))]
+        if self
+            .angle_effects
+            .as_ref()
+            .is_some_and(|angle| angle.contains_shader(name))
+        {
+            return self
+                .with_angle(|angle| angle.unregister_shader(name))
+                .unwrap_or(false);
+        }
         #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
         if let Some(dxvk) = &mut self.dxvk {
             return dxvk.unregister(name);
@@ -2538,6 +2562,32 @@ impl GpuBackend for MetalBackend {
 }
 
 impl MetalBackend {
+    #[cfg(all(target_os = "macos", feature = "gl"))]
+    pub fn enable_angle_effects(&mut self, directory: &std::path::Path) -> Result<(), String> {
+        self.angle_effects = Some(super::gl::GlBackend::new_host_angle(directory, 1, 1)?);
+        Ok(())
+    }
+
+    #[cfg(all(target_os = "macos", feature = "gl"))]
+    pub fn set_glsl_cache(&mut self, directory: &std::path::Path) -> bool {
+        self.with_angle(|angle| angle.set_glsl_cache(directory))
+            .unwrap_or(false)
+    }
+
+    #[cfg(all(target_os = "macos", feature = "gl"))]
+    pub fn prepare_glsl(&mut self, source: &[u8]) -> Option<Result<(), String>> {
+        self.with_angle(|angle| angle.prepare_glsl(source))
+    }
+
+    #[cfg(all(target_os = "macos", feature = "gl"))]
+    fn with_angle<T>(&mut self, work: impl FnOnce(&mut super::gl::GlBackend) -> T) -> Option<T> {
+        let angle = self.angle_effects.as_mut()?;
+        angle.begin_access();
+        let result = work(angle);
+        angle.end_access();
+        Some(result)
+    }
+
     /// # Safety
     /// `directory` must contain a trusted DXVK runtime. Call before drawing.
     #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
@@ -2587,6 +2637,8 @@ impl MetalBackend {
         visualize_damage: bool,
         clear: [f32; 4],
     ) -> RenderRegion {
+        #[cfg(all(target_os = "macos", feature = "gl"))]
+        let damage = damage.filter(|_| self.angle_effects.is_none());
         let current_region = RenderRegion::from_damage(damage);
         let repaint = self
             .last_damage_overlay
@@ -2707,6 +2759,22 @@ impl MetalBackend {
                 stencil: None,
                 native_emote: None,
             };
+            #[cfg(all(target_os = "macos", feature = "gl"))]
+            if self.is_angle_effect(composite.shader.as_ref()) {
+                let mut angle_command = composite.clone();
+                angle_command.shader = Some(group.effect.clone());
+                if self.encode_angle_effect(
+                    command_buffer,
+                    target,
+                    &angle_command,
+                    damage,
+                    Some(&group_target.texture),
+                    mask_texture.as_ref(),
+                ) {
+                    index = group.end;
+                    continue;
+                }
+            }
             #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
             let (group_source, blend_override) = {
                 let straight = self
@@ -2744,6 +2812,95 @@ impl MetalBackend {
     }
 
     fn encode_scene_batch(
+        &mut self,
+        command_buffer: &mut CommandBuffer,
+        target: &PrivateRenderTarget,
+        commands: &[DrawCommand],
+        damage: Option<[f32; 4]>,
+    ) -> Result<(), String> {
+        #[cfg(all(target_os = "macos", feature = "gl"))]
+        if self.angle_effects.is_some() {
+            let mut start = 0;
+            for (index, command) in commands.iter().enumerate() {
+                if self.is_angle_effect(command.shader.as_ref()) {
+                    self.encode_metal_batch(
+                        command_buffer,
+                        target,
+                        &commands[start..index],
+                        damage,
+                    )?;
+                    if !self.encode_angle_effect(
+                        command_buffer,
+                        target,
+                        command,
+                        damage,
+                        None,
+                        None,
+                    ) {
+                        self.encode_draw_batch(
+                            command_buffer,
+                            target,
+                            std::slice::from_ref(command),
+                            damage,
+                        )?;
+                    }
+                    start = index + 1;
+                }
+            }
+            return self.encode_metal_batch(command_buffer, target, &commands[start..], damage);
+        }
+        self.encode_metal_batch(command_buffer, target, commands, damage)
+    }
+
+    #[cfg(all(target_os = "macos", feature = "gl"))]
+    fn is_angle_effect(&self, effect: Option<&ShaderEffect>) -> bool {
+        effect
+            .zip(self.angle_effects.as_ref())
+            .is_some_and(|(effect, angle)| angle.contains_shader(&effect.name))
+    }
+
+    #[cfg(all(target_os = "macos", feature = "gl"))]
+    fn encode_angle_effect(
+        &mut self,
+        command_buffer: &mut CommandBuffer,
+        target: &PrivateRenderTarget,
+        command: &DrawCommand,
+        damage: Option<[f32; 4]>,
+        foreground: Option<&Texture>,
+        mask: Option<&Texture>,
+    ) -> bool {
+        let result = (|| {
+            let effect = command.shader.as_ref().ok_or("missing GLSL effect")?;
+            let texture = |id| self.textures.get(&id).map(|texture| &texture.raw);
+            let fore = foreground
+                .or_else(|| texture(command.texture))
+                .ok_or("missing GLSL foreground")?;
+            let mask = mask.or_else(|| effect.mask_texture.and_then(texture));
+            let user = effect.user_texture.and_then(texture);
+            let pointer = |texture: &Texture| NonNull::from(&**texture).cast();
+            let inputs = [Some(pointer(fore)), mask.map(pointer), user.map(pointer)];
+            let stage = self.scene_size;
+            self.submit_effect_inputs(command_buffer)?;
+            self.with_angle(|angle| unsafe {
+                angle.draw_metal_effect(
+                    pointer(&target.texture),
+                    inputs,
+                    stage,
+                    target.extent,
+                    command.clone(),
+                    damage,
+                )
+            })
+            .ok_or("ANGLE effects are not enabled")?
+        })();
+        if let Err(error) = result {
+            log::warn!("[MetalBackend] GLSL effect failed: {error}");
+            return false;
+        }
+        true
+    }
+
+    fn encode_metal_batch(
         &mut self,
         command_buffer: &mut CommandBuffer,
         target: &PrivateRenderTarget,
@@ -2812,7 +2969,7 @@ impl MetalBackend {
             }
         }
         if ready.iter().any(|&encoded| encoded)
-            && let Err(error) = self.submit_dxvk_inputs(command_buffer)
+            && let Err(error) = self.submit_effect_inputs(command_buffer)
         {
             log::warn!("[MetalBackend] DXVK foreground submission failed: {error}");
             ready.fill(false);
@@ -2862,7 +3019,7 @@ impl MetalBackend {
         let effect = effect.filter(|effect| self.is_dxvk_effect(Some(effect)))?;
         let result = self
             .encode_dxvk_input(command_buffer, 0, source, unpremultiply_input)
-            .and_then(|()| self.submit_dxvk_inputs(command_buffer))
+            .and_then(|()| self.submit_effect_inputs(command_buffer))
             .and_then(|()| self.draw_dxvk(0, effect));
         match result {
             Ok(output) => Some(output),
@@ -2926,13 +3083,13 @@ impl MetalBackend {
         )
     }
 
-    #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
-    fn submit_dxvk_inputs(&self, command_buffer: &mut CommandBuffer) -> Result<(), String> {
-        // Finish previous Metal reads of the outputs and the new foreground writes.
+    #[cfg(all(target_os = "macos", any(feature = "metal-dxvk", feature = "gl")))]
+    fn submit_effect_inputs(&self, command_buffer: &mut CommandBuffer) -> Result<(), String> {
+        // Finish Metal writes before the effect reads the target or shared inputs.
         let next = self
             .queue
             .commandBuffer()
-            .ok_or("cannot resume Metal encoding after DXVK")?;
+            .ok_or("cannot resume Metal encoding after shader effect")?;
         let submitted = std::mem::replace(command_buffer, next);
         submitted.commit();
         submitted.waitUntilCompleted();

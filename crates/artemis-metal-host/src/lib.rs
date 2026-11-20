@@ -394,6 +394,41 @@ unsafe extern "C" fn art3m1s_metal_host_v1_create_dxvk(
     }
 }
 
+#[unsafe(no_mangle)]
+unsafe extern "C" fn art3m1s_metal_host_v1_create_mixed(
+    table: *const c_void,
+    runtime: u64,
+    dxvk_directory: *const c_char,
+    angle_directory: *const c_char,
+    out: *mut *mut ArtMetalHost,
+) -> i32 {
+    unsafe {
+        create_host(table, runtime, out, || {
+            let directory = |value: *const c_char| {
+                if value.is_null() {
+                    return Err(ARGUMENT);
+                }
+                let path = Path::new(CStr::from_ptr(value).to_str().map_err(|_| ARGUMENT)?);
+                path.is_absolute().then_some(path).ok_or(ARGUMENT)
+            };
+            let dxvk = directory(dxvk_directory)?;
+            let angle = directory(angle_directory)?;
+            let mut backend = MetalBackend::new(1, 1).map_err(|_| STATE)?;
+            backend
+                .enable_dxvk(dxvk)
+                .and_then(|()| backend.enable_angle_effects(angle))
+                .map_err(|error| {
+                    eprintln!("Artemis mixed renderer initialization failed: {error}");
+                    UNSUPPORTED
+                })?;
+            Ok(Some((
+                Extent2D::new(1, 1),
+                Renderer::Metal(SpriteRenderer::new(backend)),
+            )))
+        })
+    }
+}
+
 #[repr(C)]
 struct ArtBytes {
     data: *const u8,
@@ -450,14 +485,12 @@ unsafe extern "C" fn art3m1s_metal_host_v1_set_glsl_cache(
             }
             let (_, renderer) = host.renderer.as_mut().ok_or(UNSUPPORTED)?;
             renderer.access(|renderer| {
-                let Renderer::Angle(renderer) = renderer else {
-                    return Err(UNSUPPORTED);
-                };
-                renderer
-                    .backend_mut()
-                    .set_glsl_cache(directory)
-                    .then_some(())
-                    .ok_or(UNSUPPORTED)
+                match renderer {
+                    Renderer::Angle(renderer) => renderer.backend_mut().set_glsl_cache(directory),
+                    Renderer::Metal(renderer) => renderer.backend_mut().set_glsl_cache(directory),
+                }
+                .then_some(())
+                .ok_or(UNSUPPORTED)
             })
         })
     }
@@ -475,17 +508,18 @@ unsafe extern "C" fn art3m1s_metal_host_v1_prepare_glsl(
                 return Err(ARGUMENT);
             }
             let (_, renderer) = host.renderer.as_mut().ok_or(UNSUPPORTED)?;
-            renderer.access(|renderer| match renderer {
-                Renderer::Angle(renderer) => {
-                    renderer
+            renderer.access(|renderer| {
+                let result = match renderer {
+                    Renderer::Angle(renderer) => renderer.backend_mut().prepare_glsl(source),
+                    Renderer::Metal(renderer) => renderer
                         .backend_mut()
                         .prepare_glsl(source)
-                        .map_err(|error| {
-                            eprintln!("Artemis GLSL preparation failed: {error}");
-                            ARGUMENT
-                        })
-                }
-                Renderer::Metal(_) => Err(UNSUPPORTED),
+                        .ok_or(UNSUPPORTED)?,
+                };
+                result.map_err(|error| {
+                    eprintln!("Artemis GLSL preparation failed: {error}");
+                    ARGUMENT
+                })
             })
         })
     }

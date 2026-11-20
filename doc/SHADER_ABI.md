@@ -436,7 +436,12 @@ To supply precompiled effects, store them at
 digest of the exact HLSL bytes read by the Host. They take precedence over
 compilation. DXVK requires a usable runtime plus either a bundled compiler or
 usable project effects. Other Metal sessions use the normal Metal renderer.
-Explicit ANGLE sessions use GLSL.
+Explicit ANGLE sessions use GLSL. For a session that needs both languages,
+negotiate `ART_MIXED_HOST_V1_RENDERER_CAPS` and call
+`art3m1s_metal_host_v1_create_mixed` with both runtime directories. Use the
+same ADE2 and GLSL preparation calls. Effects run in frame order, so GLSL can
+sample the scene after earlier DXVK effects. The Flutter Runner selects this
+mode for projects with both languages when both runtimes are available.
 
 The Flutter project's `tool/integration_tests/artemis_v2_dxvk_smoke.dart`
 checks presentation, screenshots and source changes. Build it as the Runner's
@@ -446,6 +451,8 @@ shader source in that fixture to check project-supplied artifacts. With the
 compiler bundled, set `ARTEMIS_DXVK_TEST_CACHE_TOKEN` to a new alphanumeric
 token for a cold launch. Launch again with the same token and
 `ARTEMIS_DXVK_TEST_WARM=1` to verify reuse across processes.
+With ANGLE also bundled, set `ARTEMIS_DXVK_TEST_MIXED=1` to verify that GLSL
+samples earlier HLSL pixels in both the presented texture and a screenshot.
 Set `ARTEMIS_DXVK_TEST_LEGACY=1` on both launches to exercise combined
 samplers and reflected defaults. Set `ARTEMIS_DXVK_TEST_1080P=1` to use a
 1920×1080 stage and print project-open and steady presentation timings with
