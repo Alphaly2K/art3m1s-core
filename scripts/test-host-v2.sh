@@ -11,16 +11,7 @@ esac
 build_dir="${ART3M1S_V2_TARGET_DIR:-target/host-v2}"
 cargo build --locked --lib --manifest-path crates/artemis-core/Cargo.toml --target-dir "$build_dir" "$@"
 lib_dir="$(cd "$build_dir/debug" && pwd)"
-library="$lib_dir/libart3m1s_core.$extension"
-if [[ "$extension" == dylib ]]; then
-  exports="$(nm -gU "$library" | awk '{print $NF}' | sed 's/^_//')"
-else
-  exports="$(nm -D --defined-only "$library" | awk '{print $NF}')"
-fi
-if [[ "$exports" != art3m1s_get_api_v2 ]]; then
-  printf 'Unexpected v2 exports:\n%s\n' "$exports" >&2
-  exit 1
-fi
+bash scripts/check-artemis-exports.sh v2 "$lib_dir/libart3m1s_core.$extension"
 
 printf '#include "art3m1s_core_v2.draft.h"\n' |
   "${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror -pedantic -Idoc/abi -x c++ -fsyntax-only -

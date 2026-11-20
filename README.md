@@ -63,11 +63,11 @@ cargo fmt --check
 cargo build --release
 ```
 
-默认 features 包含 GL、原生 Metal、实验 Vulkan、`rfvp-engine` 和
-`krkr-engine`，不包含 `ffmpeg`。未提供上游 source/build 目录时，KRKR 仅回退到
-不可运行的 bootstrap shim。只用无 GPU 的核心模块时
-`cargo build --no-default-features`。需要商业游戏资源的兼容性测试默认不执行，见
-[tests/README.md](tests/README.md)。
+根目录构建默认启用 Artemis v1 和 GL。原生 Metal、实验 Vulkan、FFmpeg 及其他引擎
+通过相应 feature 启用。Artemis v2 的独立构建由 Host 提供 IO 和画面输出，可运行
+`cargo build --release --manifest-path crates/artemis-core/Cargo.toml`，接入方式见
+[Host 接入指南](doc/HOST_INTEGRATION.md#artemis-v2-c-预览)。
+需要商业游戏资源的兼容性测试默认不执行，见 [tests/README.md](tests/README.md)。
 
 KRKR 的当前构建层次如下：
 

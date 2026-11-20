@@ -522,10 +522,12 @@ DXT5 的 PSB 提交资源读取。Host 通过帧内 CPU 图集、材质、网格
 
 C Host 分别声明 `ART_RENDERER_CAP_HLSL`、`ART_RENDERER_CAP_GLSL`，可同时启用。`[lyshader]`
 按解析后的逻辑路径识别语言：`.glsl`、`.frag`、`.fsh`、`.fs` 属于 GLSL，其余路径沿用 HLSL。
-源码记录只使用 Host 声明支持的语言，原有 HLSL 记录保持字节兼容。Host 以
-`(runtime, epoch, shader_revision)` 缓存平台程序，按本帧效果绑定纹理和常量。源码和效果随帧
-借用，重载保留旧帧的原始语言和源码。源码缺失或编译失败时直接绘制精灵，组内已有的其他效果
-继续执行。编译和绑定约定见 [Runtime Shader ABI](SHADER_ABI.md)。
+源码记录只使用 Host 声明支持的语言，原有 HLSL 记录保持字节兼容。Host 可以在启动预算内
+预热已知的源码。运行时取得尚未预热的源码时，Host 按需加载缓存或编译。两种准备方式都为同一
+帧绘制路径提供程序。跨会话的编译产物缓存须按语言、源码内容和编译环境区分。Host 以
+`(runtime, epoch, shader_revision)` 缓存会话中的程序绑定，按本帧效果绑定纹理和常量。
+源码和效果随帧借用，重载保留旧帧的原始语言和源码。源码缺失或编译失败时直接绘制精灵，
+组内已有的其他效果继续执行。编译和绑定约定见 [Runtime Shader ABI](SHADER_ABI.md)。
 
 `[lyshader]` 请求未协商的语言时，Core 继续推进，不读取该源码，并发送诊断 domain=7、kind=1。
 metadata 包含 `language`（`hlsl` 或 `glsl`）、脚本中的 `id` 和解析后的逻辑资源 `key`；无需回复。
