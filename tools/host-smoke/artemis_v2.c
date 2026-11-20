@@ -373,6 +373,13 @@ static int shader_host_smoke(const ArtRuntimeApiV2 *api, const ArtFrameApiV2 *fr
 }
 #endif
 
+static void check_api_header(const ArtApiHeader *header, uint32_t id, size_t minimum_size) {
+    assert(header->magic == ART_API_MAGIC);
+    assert(header->struct_size >= minimum_size);
+    assert(header->interface_id == id);
+    assert(header->abi_major == ART_ABI_V2_MAJOR);
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--shader-frame")) shader_frame = HLSL;
     else if (argc == 2 && !strcmp(argv[1], "--shader-sequence")) {
@@ -411,10 +418,18 @@ int main(int argc, char **argv) {
         if (fclose(shader_file) || !valid) return 2;
     }
     const ArtRootApiV2 *root = NULL;
-    assert(art3m1s_get_api_v2(ART_ABI_V2_MAJOR, sizeof(*root), &root) == ART_OK);
-    assert(root && root->header.magic == ART_API_MAGIC);
-    const void *table = NULL;
+    assert(art3m1s_get_api_v2(ART_ABI_V2_MAJOR, sizeof(ArtApiHeader), &root) == ART_OK);
+    assert(root);
+    check_api_header(&root->header, 0, sizeof(*root));
+    const ArtRootApiV2 *incompatible_root = root;
+    assert(art3m1s_get_api_v2(ART_ABI_V2_MAJOR + 1, sizeof(ArtApiHeader), &incompatible_root) == ART_E_UNSUPPORTED);
+    assert(!incompatible_root);
+    incompatible_root = root;
+    assert(art3m1s_get_api_v2(ART_ABI_V2_MAJOR, UINT32_MAX, &incompatible_root) == ART_E_UNSUPPORTED);
+    assert(!incompatible_root);
+    const void *table = root;
     assert(root->query_interface(99, ART_ABI_V2_MAJOR, 0, &table) == ART_E_UNSUPPORTED);
+    assert(!table);
     uint64_t needed = 0;
     assert(root->copy_last_error(NULL, 0, &needed) == ART_E_BUFFER);
     uint8_t error[120];
@@ -422,8 +437,14 @@ int main(int argc, char **argv) {
     assert(root->copy_last_error(error, sizeof(error), &needed) == ART_OK);
     assert(root->query_interface(ART_INTERFACE_RUNTIME, ART_ABI_V2_MAJOR, sizeof(ArtRuntimeApiV2), &table) == ART_OK);
     const ArtRuntimeApiV2 *api = table;
+    assert(api);
+    check_api_header(&api->header, ART_INTERFACE_RUNTIME, sizeof(*api));
+    assert(root->query_interface(ART_INTERFACE_FRAME, ART_ABI_V2_MAJOR, UINT32_MAX, &table) == ART_E_UNSUPPORTED);
+    assert(!table);
     assert(root->query_interface(ART_INTERFACE_FRAME, ART_ABI_V2_MAJOR, sizeof(ArtFrameApiV2), &table) == ART_OK);
     const ArtFrameApiV2 *frames = table;
+    assert(frames);
+    check_api_header(&frames->header, ART_INTERFACE_FRAME, sizeof(*frames));
 
     ArtCreateInfo info = { .struct_size = sizeof(info), .host_service_caps = ART_HOST_CAP_IO | ART_HOST_CAP_HTTP,
                            .renderer_caps = ART_RENDERER_CAP_SPRITE | ART_RENDERER_CAP_SCREENSHOT };
