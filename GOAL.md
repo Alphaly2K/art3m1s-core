@@ -1105,7 +1105,11 @@ Flutter 媒体与帧循环 12 项定向测试、静态分析和 macOS 发布版 
 macOS 重建后通过独立 C/C++ ABI 和 Metal 冒烟，核对规则转场、E-Mote、组效果、截图和共享表面。
 独立 Core 的 263 项单元测试及 Rust Host 通过。legacy 的 447 项单元测试通过，跳过 2 项。
 
-使用本地 Core `fa28074` 和 Flutter `ef4795c` 构建 macOS 发布版预览。ZIP 解包后通过签名、
+Flutter `be7bf73` 在文件读取时应用 HLSL 和 GLSL 的预热预算。优先级最高的资源超出预算时
+跳过预热该资源，运行时仍按原路径处理。10 项 Flutter 定向回归和 macOS Runner 冷热缓存、
+运行时着色器及混合像素验证通过。
+
+使用本地 Core `fa28074` 和 Flutter `be7bf73` 构建 macOS 发布版预览。ZIP 解包后通过签名、
 独立 C ABI、媒体解码及 DXVK 与 GLSL 的混合像素验证。当前源码的 Windows GNU DLL 仅导出
 v2 查询入口，兼容层 C 冒烟通过。Windows MSVC 原生 CI 待运行，当前 GitHub CLI 凭据无效。
 
