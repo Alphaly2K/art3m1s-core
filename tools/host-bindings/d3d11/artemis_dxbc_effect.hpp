@@ -57,15 +57,18 @@ public:
             const auto elements = art_dxbc_uniform_elements(field.components);
             const auto columns = art_dxbc_uniform_columns(field.components);
             const auto span = art_dxbc_uniform_span(field.components);
+            const bool in_first_buffer = field.offset < first_buffer_bytes_;
             require(name_valid(field.name) && !(field.offset & 3) && columns >= 1 && columns <= 4 &&
                 (!elements || (header_.magic == ART_DXBC_EFFECT_PAIR_MAGIC && !(field.offset & 15))) &&
-                uint64_t(field.offset) + span <= (field.offset < first_buffer_bytes_
-                    ? first_buffer_bytes_ : header_.constant_bytes));
+                uint64_t(field.offset) + span <= (in_first_buffer ? first_buffer_bytes_ : header_.constant_bytes));
             for (size_t j = 0; j < i; ++j) {
                 const auto &other = uniforms_[j];
-                require(std::strcmp(field.name, other.name) != 0 &&
-                    (field.offset + span <= other.offset ||
-                     other.offset + art_dxbc_uniform_span(other.components) <= field.offset));
+                require(field.offset + span <= other.offset ||
+                        other.offset + art_dxbc_uniform_span(other.components) <= field.offset);
+                if (std::strcmp(field.name, other.name) == 0) {
+                    require(field.components == other.components &&
+                            in_first_buffer != (other.offset < first_buffer_bytes_));
+                }
             }
         }
     }
@@ -101,7 +104,6 @@ public:
             for (uint32_t i = 0; i < (elements ? elements : 1); ++i) {
                 std::memcpy(block.data() + field.offset + i * 16, values + i * columns, columns * sizeof(float));
             }
-            return true;
         }
         // A declared effect parameter may have been optimized out by the compiler.
         return true;

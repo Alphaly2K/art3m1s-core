@@ -496,7 +496,9 @@ byte size in the header. A shader that uses `b1` stores the combined size of
 `b0` and `b1` in the header. Its tail contains both initial blocks in slot
 order, followed by a little-endian `u32` giving the `b0` size. A size of zero
 means the shader binds only `b1`. Both blocks are 16-byte aligned and uniform
-offsets are relative to the start of the combined block. An older Host can load
+offsets are relative to the start of the combined block. A uniform name may
+appear once in each block if the float layouts match. Setting the uniform
+updates both locations. An older Host can load
 ADE2 artifacts that use only `b0`. Artifacts that use `b1` require a Host that
 supports the boundary word. The Host restores the initial constants on every
 draw, or starts with zeroes if the tail is absent, before applying frame parameters.

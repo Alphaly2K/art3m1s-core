@@ -1,5 +1,6 @@
 #include <CoreVideo/CoreVideo.h>
 #include "artemis_dxvk_metal_writer.h"
+#include "../host-bindings/d3d11/artemis_dxbc_effect.h"
 #include "../host-bindings/d3d11/artemis_dxvk_device.hpp"
 #include "../host-bindings/d3d11/artemis_dxvk_pass.h"
 
@@ -191,12 +192,25 @@ static void draw_effect(const char *effect, const char *alternate, const char *l
     draw_constants(dual.get(), &dual_overrides[1], 1, 11, red);
     draw_constants(dual.get(), nullptr, 0, 12, yellow);
 
+    auto aliased_artifact = artifact;
+    const auto second_uniform = sizeof(ArtDxbcHeader) + sizeof(ArtDxbcUniform);
+    const auto second_name = second_uniform + offsetof(ArtDxbcUniform, name);
+    check(aliased_artifact.size() >= second_name + ART_DXBC_NAME_BYTES &&
+          std::memcmp(aliased_artifact.data() + second_name, "green", sizeof("green")) == 0,
+          "find the b1 uniform record");
+    std::memset(aliased_artifact.data() + second_name, 0, ART_DXBC_NAME_BYTES);
+    std::memcpy(aliased_artifact.data() + second_name, "red", sizeof("red"));
+    auto aliased = load_program(context.get(), aliased_artifact);
+    draw_constants(aliased.get(), nullptr, 0, 13, yellow);
+    draw_constants(aliased.get(), &dual_overrides[0], 1, 14, black);
+    draw_constants(aliased.get(), nullptr, 0, 15, yellow);
+
     artifact[artifact.size() - 4] |= 1;
     Program invalid(art_dxvk_program_create(context.get(), artifact.data(), artifact.size()), art_dxvk_program_destroy);
     check(!invalid, "reject an unaligned constant buffer boundary");
 
     draw_primary(replacement, changed, 0);
-    check_pixels(replacement.presentation.get(), 13, pixels[2]);
+    check_pixels(replacement.presentation.get(), 16, pixels[2]);
     std::puts("Native DXVK verified modern and legacy programs, shared targets, and constant overrides in b0 and b1");
 }
 
