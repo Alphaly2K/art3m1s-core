@@ -380,24 +380,6 @@ pub(crate) unsafe extern "C" fn art3m1s_set_angle_path(path: *const c_char) {
     }
 }
 
-// ── Native file host ───────────────────────────────────────────
-
-pub fn file_reader_registered() -> bool {
-    crate::host_files::is_mounted()
-}
-
-pub fn request_write(path: &str, data: &[u8]) -> Result<(), String> {
-    crate::host_files::write(path, data)
-}
-
-pub fn request_delete(path: &str) -> Result<(), String> {
-    crate::host_files::delete(path)
-}
-
-pub fn request_file_mtime(path: &str) -> Option<[i64; 6]> {
-    crate::host_files::file_mtime(path)
-}
-
 // ── Clipboard ────────────────────────────────────────────────────
 
 /// `e:writeClipboard` 的核心侧出口：经 ui_command 转发宿主
@@ -440,7 +422,7 @@ fn read_chunk(path: &str, offset: u64, buf: &mut [u8]) -> Option<usize> {
 const CHUNK: usize = 65536;
 const MAX_SINGLE: u64 = 16 * 1024 * 1024;
 
-pub fn request_file(path: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn request_file(path: &str) -> Result<Vec<u8>, String> {
     let total = query_size(path).ok_or_else(|| format!("not found: {path}"))?;
     if total == 0 {
         return Ok(Vec::new());
@@ -469,13 +451,6 @@ pub fn request_file(path: &str) -> Result<Vec<u8>, String> {
         return Err(format!("short read: {path} ({off} of {total} bytes)"));
     }
     Ok(buf)
-}
-
-pub fn request_asset(path: &str) -> Option<Vec<u8>> {
-    request_file(path).ok()
-}
-pub fn query_asset_size(path: &str) -> Option<u64> {
-    query_size(path)
 }
 
 // ── Runtime control FFI ─────────────────────────────────────────
