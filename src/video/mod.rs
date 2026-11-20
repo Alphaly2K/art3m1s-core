@@ -22,6 +22,7 @@
 pub mod engine;
 pub mod state;
 
+#[cfg(any(test, not(feature = "legacy"), feature = "host-abi-v2"))]
 pub(crate) use engine::VIDEO_LAYER_TEXTURE_PREFIX;
 pub use engine::{
     VideoBackend, VideoConfig, VideoFinishEvent, VideoFinishHandler, VideoState,

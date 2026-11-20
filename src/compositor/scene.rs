@@ -164,6 +164,7 @@ impl Scene {
         *self = other;
     }
 
+    #[cfg(any(test, not(feature = "legacy"), feature = "host-abi-v2"))]
     pub(crate) fn valid_host_snapshot(&self) -> bool {
         let mut linked = std::collections::HashSet::new();
         for root in &self.roots {
@@ -332,6 +333,7 @@ impl Scene {
         self.nodes.values()
     }
 
+    #[cfg(any(test, not(feature = "legacy"), feature = "host-abi-v2"))]
     pub(crate) fn strip_video_bindings(&mut self) {
         for layer in self.nodes.values_mut() {
             if layer

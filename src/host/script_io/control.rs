@@ -1,3 +1,4 @@
+use super::ui::UI_AVOID;
 use super::*;
 use crate::host::input::{InputFrame, OVERRIDE_IS_DOWN, OVERRIDE_IS_DOWN_EDGE};
 use asb_interpreter::WaitReason;

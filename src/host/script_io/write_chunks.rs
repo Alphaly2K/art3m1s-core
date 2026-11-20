@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(any(test, not(feature = "legacy")))]
 pub const IO_WRITE_ABORT: MessageKind = MessageKind {
     domain: Domain::Io,
     kind: 6,
@@ -127,6 +128,7 @@ impl ScriptIoSession {
             .map(|remaining| remaining.min(limits.blob_bytes))
     }
 
+    #[cfg(test)]
     pub(super) fn pending_write_abort(&self) -> Result<Option<MessageBody>, ProtocolError> {
         let Some(Operation::ChunkedWrite(write)) = &self.operation else {
             return Ok(None);

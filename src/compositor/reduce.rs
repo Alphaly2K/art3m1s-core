@@ -183,12 +183,14 @@ impl Compositor {
         scene
     }
 
+    #[cfg(any(test, not(feature = "legacy"), feature = "host-abi-v2"))]
     pub(crate) fn snapshot_for_host(&self) -> Scene {
         let mut scene = self.scene_snapshot_with_animations();
         scene.host_clock_ms = Some(self.clock_ms);
         scene
     }
 
+    #[cfg(any(test, not(feature = "legacy"), feature = "host-abi-v2"))]
     pub(crate) fn restore_host_snapshot(&mut self, mut scene: Scene) {
         self.reset_for_load();
         if let Some(clock_ms) = scene.host_clock_ms.take() {
@@ -277,6 +279,7 @@ impl Compositor {
         self.clock_ms
     }
 
+    #[cfg(any(test, not(feature = "legacy"), feature = "host-abi-v2"))]
     pub(crate) fn collecting_tweens(&self) -> bool {
         self.tween_set_pending.is_some()
     }

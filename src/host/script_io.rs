@@ -17,16 +17,19 @@ mod video;
 mod wait;
 mod write_chunks;
 
-pub use audio::MEDIA_AUDIO_COMMAND;
-pub use http::{UI_HTTP_CANCEL, UI_HTTP_REQUEST};
+#[cfg(any(test, not(feature = "legacy")))]
+pub use self::{
+    audio::MEDIA_AUDIO_COMMAND,
+    http::{UI_HTTP_CANCEL, UI_HTTP_REQUEST},
+    lifecycle::{RUNTIME_CLOSED, RUNTIME_EXIT_REQUESTED},
+    persistence::RUNTIME_PERSISTENCE_RESULT,
+    screenshot::{RENDER_CAPTURE, RENDER_SAVE_CAPTURE},
+    translation::UI_TRANSLATE,
+    ui::{UI_AVOID, UI_CAPTION, UI_DIALOG, UI_WINDOW_ACTION},
+    video::MEDIA_VIDEO_COMMAND,
+    write_chunks::IO_WRITE_ABORT,
+};
 use lifecycle::Shutdown;
-pub use lifecycle::{RUNTIME_CLOSED, RUNTIME_EXIT_REQUESTED};
-pub use persistence::RUNTIME_PERSISTENCE_RESULT;
-pub use screenshot::{RENDER_CAPTURE, RENDER_SAVE_CAPTURE};
-pub use translation::UI_TRANSLATE;
-pub use ui::{UI_AVOID, UI_CAPTION, UI_DIALOG, UI_WINDOW_ACTION};
-pub use video::MEDIA_VIDEO_COMMAND;
-pub use write_chunks::IO_WRITE_ABORT;
 
 use super::frame::FrameShaderLanguage;
 use super::protocol::*;
@@ -134,6 +137,7 @@ pub struct HostFrame {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ExecutionMode {
     Idle,
+    #[cfg(test)]
     Chunk,
     Scenario,
 }
@@ -141,6 +145,7 @@ enum ExecutionMode {
 enum BootRestore {
     ReadTagIni,
     TagIni,
+    #[cfg(test)]
     Start,
     Globals,
     Settings,
@@ -150,7 +155,7 @@ enum BootRestore {
 enum EventFilterWork {
     Queued(String, HashMap<String, String>),
     Running(IoTask),
-    Ready(EventFilterDecision),
+    Ready(#[cfg_attr(not(test), allow(dead_code))] EventFilterDecision),
 }
 
 enum SaveTarget {
@@ -282,6 +287,7 @@ pub struct ScriptIoSession {
     interpreter: Interpreter,
     transport: SessionTransport,
     script_print: diagnostic::ScriptPrint,
+    #[cfg(test)]
     task: Option<IoTask>,
     operation: Option<Operation>,
     identity: Option<RequestIdentity>,
@@ -352,6 +358,7 @@ impl ScriptIoSession {
             interpreter,
             transport,
             script_print,
+            #[cfg(test)]
             task: None,
             operation: None,
             identity: None,
@@ -402,9 +409,11 @@ impl ScriptIoSession {
         })
     }
 
+    #[cfg(test)]
     pub fn interpreter(&self) -> &Interpreter {
         &self.interpreter
     }
+    #[cfg(test)]
     pub fn state(&self) -> TransportState {
         self.transport.state()
     }
@@ -467,6 +476,7 @@ impl ScriptIoSession {
     }
 
     /// Update script-visible time without running Lua in unframed mode.
+    #[cfg(test)]
     pub fn set_host_time(&mut self, time: HostTime) -> Result<(), ScriptIoError> {
         if self.frame.is_some() {
             return Err(ProtocolError::State.into());
@@ -482,6 +492,7 @@ impl ScriptIoSession {
 
     /// Replace the current chunk and invalidate its outstanding IO. Compilation
     /// errors leave the old task intact. Globals in the same interpreter persist.
+    #[cfg(test)]
     pub fn open_chunk(&mut self, source: &[u8], name: &str) -> Result<u64, ScriptIoError> {
         let task = IoTask::compile(self.interpreter.lua(), source, name)?;
         let epoch = self.transport.begin_session()?;
@@ -521,6 +532,7 @@ impl ScriptIoSession {
 
     /// Start a fresh scenario VM from Host-supplied AST/IET/ASB bytes. Loading
     /// Lua blocks and calllua execute through the same IO continuation driver.
+    #[cfg(test)]
     pub fn open_scenario(
         &mut self,
         source: &[u8],
@@ -535,6 +547,7 @@ impl ScriptIoSession {
 
     /// Start a fresh VM by restoring available system settings before reading
     /// BOOT and the default macro file. Host IO progresses only in `step`.
+    #[cfg(test)]
     pub fn open_boot(&mut self, name: &str) -> Result<u64, ScriptIoError> {
         logical_key(name)?;
         let mut interpreter = self.scenario_interpreter()?;
@@ -580,6 +593,7 @@ impl ScriptIoSession {
         Ok(epoch)
     }
 
+    #[cfg(test)]
     fn scenario_interpreter(&self) -> Result<Interpreter, ScriptIoError> {
         self.configured_interpreter(self.interpreter.config().clone())
     }
@@ -604,7 +618,10 @@ impl ScriptIoSession {
     ) -> Result<u64, ScriptIoError> {
         let epoch = self.transport.begin_session_with_body(body)?;
         self.interpreter = interpreter;
-        self.task = None;
+        #[cfg(test)]
+        {
+            self.task = None;
+        }
         self.operation = None;
         self.identity = None;
         self.completed = false;
@@ -639,12 +656,14 @@ impl ScriptIoSession {
         Ok(epoch)
     }
 
+    #[cfg(test)]
     pub fn pending_event(&self) -> Option<&Event> {
         self.scenario_event.as_ref()
     }
 
     /// Queue one already matched event for filtering. Runs only in `step`.
     /// The caller dispatches the original binding only on DispatchDefault.
+    #[cfg(test)]
     pub fn submit_event_filter(
         &mut self,
         name: &str,
@@ -681,6 +700,7 @@ impl ScriptIoSession {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn take_event_filter_decision(&mut self) -> Option<EventFilterDecision> {
         if let Some(EventFilterWork::Ready(decision)) = self.event_filter {
             self.event_filter = None;
@@ -827,6 +847,7 @@ impl ScriptIoSession {
         self.transport.submit_replies(replies)
     }
 
+    #[cfg(test)]
     pub fn cancel_pending(&mut self) -> Result<(), ProtocolError> {
         if self.operation.is_none() {
             return Err(ProtocolError::State);
@@ -1036,6 +1057,7 @@ impl ScriptIoSession {
                 }
             }
             let (request, shader_language) = match self.mode {
+                #[cfg(test)]
                 ExecutionMode::Chunk => {
                     let task = self.task.as_mut().unwrap();
                     if task.step(response.take())? == IoProgress::Completed {
@@ -1281,6 +1303,7 @@ impl ScriptIoSession {
                     path: "tag.ini".into(),
                 }));
             }
+            #[cfg(test)]
             BootRestore::Start => {
                 self.boot_restore = Some(BootRestore::Globals);
                 return Ok(Some(IoRequest::Read {
@@ -1326,7 +1349,9 @@ impl ScriptIoSession {
             BootRestore::Globals => (BootRestore::Settings, SYSTEM_FILE),
             BootRestore::Settings => (BootRestore::ReadHistory, AREAD_FILE),
             BootRestore::ReadHistory => return Ok(None),
-            BootRestore::Start | BootRestore::ReadTagIni => unreachable!(),
+            #[cfg(test)]
+            BootRestore::Start => unreachable!(),
+            BootRestore::ReadTagIni => unreachable!(),
         };
         self.boot_restore = Some(next);
         Ok(Some(IoRequest::Read {

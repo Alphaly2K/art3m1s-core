@@ -391,6 +391,7 @@ impl SessionTransport {
     /// Atomically replace the project session. The first new control record is
     /// session_changed; old requests, accepted replies and undelivered output go
     /// away together. Runtime-lifetime IDs and diagnostic loss counts survive.
+    #[cfg(test)]
     pub fn begin_session(&mut self) -> Result<u64, ProtocolError> {
         self.begin_session_with_body(MessageBody::default())
     }

@@ -114,9 +114,10 @@ enum Family {
 }
 
 fn classify(message: &Message) -> Result<Family, Failure> {
+    const INPUT_DOMAIN: u16 = Domain::Input as u16;
     match (message.domain, message.kind, message.request_id) {
         (3, 1 | 2 | 4 | 5, 1..) | (4, 2 | 5 | 7, 1..) | (6, 1 | 2, 1..) => Ok(Family::Reply),
-        (2, 1..=6, 0) => Ok(Family::Input),
+        (INPUT_DOMAIN, 1..=6, 0) => Ok(Family::Input),
         (1 | 5, 16 | 17, 0) => Ok(Family::Control),
         _ => Err(Failure::new(UNSUPPORTED, "unknown submitted message")),
     }

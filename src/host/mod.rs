@@ -1,23 +1,27 @@
 //! Native host boundary modules.
 
 #[cfg(feature = "host-abi-v2")]
-pub mod abi;
+mod abi;
 #[cfg(not(feature = "legacy"))]
 pub mod api;
 #[cfg(feature = "legacy")]
 pub mod events;
 #[cfg(feature = "legacy")]
 pub mod files;
-pub mod frame;
-pub mod input;
+#[cfg(any(test, not(feature = "legacy"), feature = "host-abi-v2"))]
+pub(crate) mod frame;
+pub(crate) mod input;
 #[cfg(feature = "legacy")]
 pub(crate) mod logging;
 pub mod media;
-pub mod protocol;
+#[cfg(any(test, not(feature = "legacy"), feature = "host-abi-v2"))]
+mod protocol;
 #[cfg(feature = "legacy")]
 mod provider;
-pub mod runtime;
-pub mod script_io;
+#[cfg(any(test, not(feature = "legacy"), feature = "host-abi-v2"))]
+pub(crate) mod runtime;
+#[cfg(any(test, not(feature = "legacy"), feature = "host-abi-v2"))]
+mod script_io;
 #[cfg(feature = "legacy")]
 mod session;
 

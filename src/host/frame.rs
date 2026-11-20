@@ -7,10 +7,11 @@ use std::sync::Arc;
 
 mod packet;
 pub use art3m1s_render::artemis::{
-    FRAME_PACKET_VERSION, FrameGroup, FramePacket, FramePacketError, FrameShader,
-    FrameShaderEffect, FrameShaderLanguage, FrameSprite, FrameTextureDescriptor, FrameTransition,
-    SpriteBlend,
+    FRAME_PACKET_VERSION, FrameGroup, FrameShader, FrameShaderEffect, FrameShaderLanguage,
+    FrameSprite, FrameTransition, SpriteBlend,
 };
+#[cfg(test)]
+pub use art3m1s_render::artemis::{FramePacket, FrameTextureDescriptor};
 
 fn remap_effect(effect: &mut FrameShaderEffect, textures: &[usize]) {
     effect.mask = effect.mask.map(|index| textures[index]);
@@ -52,6 +53,7 @@ impl FrameSnapshot {
     }
 
     /// Texture indices in this frame refer to this table.
+    #[cfg(test)]
     pub fn textures(&self) -> impl ExactSizeIterator<Item = &FrameTexture> {
         self.textures.iter().map(Arc::as_ref)
     }

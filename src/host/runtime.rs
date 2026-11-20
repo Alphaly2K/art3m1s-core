@@ -136,7 +136,8 @@ pub const HOST_CAP_HTTP: u64 = 8;
 pub const HOST_CAP_TRANSLATION: u64 = 16;
 pub const HOST_CAP_CHUNKED_WRITES: u64 = 32;
 pub const HOST_CAP_PROJECT_SAVE_PATH: u64 = 64;
-pub(super) const HOST_CAPS: u64 = HOST_CAP_IO | HOST_CAP_UI
+pub(super) const HOST_CAPS: u64 = HOST_CAP_IO
+    | HOST_CAP_UI
     | HOST_CAP_MEDIA
     | HOST_CAP_HTTP
     | HOST_CAP_TRANSLATION
@@ -144,6 +145,7 @@ pub(super) const HOST_CAPS: u64 = HOST_CAP_IO | HOST_CAP_UI
     | HOST_CAP_PROJECT_SAVE_PATH;
 
 /// Create a runtime owned by the calling thread. Destroy it before that thread exits.
+#[cfg(test)]
 pub fn create(
     random_seed: u64,
     limits: TransportLimits,
