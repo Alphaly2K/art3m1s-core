@@ -29,6 +29,9 @@ static const char boot[] = "*top\n[lua]\n"
                            "[var system=fullscreen name=t.fs]\n[var system=minimize name=t.min]\n"
                            "[if estimate=\"$t.fs == 1 && t.min == 1\"]\n[caption data=advanced]\n[/if]\n"
                            "[stop]\n";
+static const char video_boot[] = "*top\n[video file=probe.wmv]\n[caption data=advanced]\n[stop]\n";
+static const char *boot_source = boot;
+static char video_playback[21];
 #define SHADER_SCENE \
     "[lyc id=1 width=4 height=4 color=ff112233]\n"
 #define SHADER_BINDINGS \
@@ -165,7 +168,7 @@ static void service_io(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt,
                        const char *metadata) {
     const char *asset = NULL;
     if (strstr(metadata, "\"key\":\"boot.iet\""))
-        asset = shader_sequence ? shader_sequence_boot : shader_frame == HLSL ? shader_boot : shader_frame ? glsl_boot : boot;
+        asset = shader_sequence ? shader_sequence_boot : shader_frame == HLSL ? shader_boot : shader_frame ? glsl_boot : boot_source;
     if (shader_frame == HLSL && strstr(metadata, "\"key\":\"paint.hlsl\""))
         asset = shader_sequence ? shader_sequence_source : shader;
 #ifdef ARTEMIS_DXVK_HOST_SMOKE
@@ -210,7 +213,7 @@ static void service_io(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt,
     }
 }
 
-enum { SAVED_GLOBALS = 32, SAVED_SYSTEM = 64, CLOSED = 128, SCRIPT_PRINTED = 256 };
+enum { SAVED_GLOBALS = 32, SAVED_SYSTEM = 64, CLOSED = 128, SCRIPT_PRINTED = 256, VIDEO_PLAYED = 512 };
 
 static unsigned pump(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt, uint64_t frame_id) {
     ArtStepInfo step = { .struct_size = sizeof(step), .host_frame_id = frame_id,
@@ -272,6 +275,18 @@ static unsigned pump(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt, uint64_t f
             } else if (domain == ART_DOMAIN_UI && kind == ART_UI_CAPTION) {
                 if (strstr(metadata, "\"ready\"")) observed |= 1;
                 if (strstr(metadata, "\"advanced\"")) observed |= 2;
+            } else if (domain == ART_DOMAIN_MEDIA && kind == ART_MEDIA_VIDEO_COMMAND) {
+                static const char field[] = "\"playback_id\":\"";
+                const char *id = strstr(metadata, field);
+                assert(request == 0 && strstr(metadata, "\"op\":\"play\"") &&
+                       strstr(metadata, "\"key\":\"probe.wmv\"") && strstr(metadata, "\"layer\":null"));
+                assert(id && !(observed & VIDEO_PLAYED));
+                id += sizeof(field) - 1;
+                size_t digits = strspn(id, "0123456789");
+                assert(digits > 0 && digits < sizeof(video_playback) && id[digits] == '\"');
+                memcpy(video_playback, id, digits);
+                video_playback[digits] = '\0';
+                observed |= VIDEO_PLAYED;
             } else if (domain == ART_DOMAIN_RUNTIME && kind == ART_RUNTIME_CLOSED_EVENT) {
                 assert(!strcmp(metadata, "{\"save_status\":\"written\"}"));
                 observed |= CLOSED;
@@ -291,6 +306,40 @@ static unsigned pump(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt, uint64_t f
     }
     assert(!"Host fixture did not settle");
     return 0;
+}
+
+static void check_video_wait(const ArtRuntimeApiV2 *api, const ArtProjectInfo *project) {
+    ArtCreateInfo create = { .struct_size = sizeof(create), .host_service_caps = ART_HOST_CAP_IO | ART_HOST_CAP_MEDIA };
+    ArtRuntimeHandle runtime = 0;
+    assert(api->create(&create, &runtime) == ART_OK);
+    boot_source = video_boot;
+    assert(api->open_project(runtime, project) == ART_OK);
+    assert(pump(api, runtime, 1) == VIDEO_PLAYED);
+    assert(strtoull(video_playback, NULL, 10) > INT64_MAX);
+
+    ArtRuntimeState state = { .struct_size = sizeof(state) };
+    assert(api->get_state(runtime, &state) == ART_OK);
+    uint64_t epoch = state.session_epoch;
+    char metadata[96];
+    int size = snprintf(metadata, sizeof(metadata),
+        "{\"playback_id\":\"%s\",\"status\":\"started\"}", video_playback);
+    assert(size > 0 && (size_t)size < sizeof(metadata));
+    ArtMessage feedback = message(ART_DOMAIN_MEDIA, ART_MEDIA_PLAYBACK_STATUS, epoch, 0, metadata);
+    assert(api->submit(runtime, &feedback, 1) == ART_OK);
+    assert(api->submit(runtime, &feedback, 1) == ART_E_STALE);
+    assert(pump(api, runtime, 2) == 0);
+
+    size = snprintf(metadata, sizeof(metadata),
+        "{\"playback_id\":\"%s\",\"status\":\"ended\"}", video_playback);
+    assert(size > 0 && (size_t)size < sizeof(metadata));
+    feedback.metadata_utf8 = text(metadata);
+    assert(api->submit(runtime, &feedback, 1) == ART_OK);
+    assert(api->submit(runtime, &feedback, 1) == ART_E_STALE);
+    assert(pump(api, runtime, 3) == 2);
+    assert(api->open_project(runtime, project) == ART_OK);
+    assert(api->submit(runtime, &feedback, 1) == ART_E_STALE);
+    assert(api->destroy(runtime) == ART_OK);
+    boot_source = boot;
 }
 
 #ifdef ARTEMIS_DXVK_HOST_SMOKE
@@ -549,6 +598,7 @@ int main(int argc, char **argv) {
     assert(pump(api, rt, 1) == (SAVED_GLOBALS | SAVED_SYSTEM | CLOSED));
     assert(api->get_state(rt, &state.prefix) == ART_OK && state.prefix.state == ART_RUNTIME_CLOSED);
     assert(api->destroy(rt) == ART_OK);
+    check_video_wait(api, &project);
     puts("Artemis v2 Host smoke passed");
     return 0;
 }

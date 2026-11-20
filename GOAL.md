@@ -1060,6 +1060,10 @@ macOS CI 可在无 Metal 设备的环境中编译独立 Swift Host 样例，核�
 预览 ZIP 解包后的签名、v2 C ABI、媒体解码和混合渲染通过。Windows x64 GNU 重新构建的
 DLL 只导出 v2 查询入口，并通过兼容层 C 冒烟。Windows MSVC 原生任务仍待运行。
 
+独立 C Host 冒烟使用全屏视频命令中超过有符号 64 位上限的播放 ID，确认开播回报保留等待、
+结束回报解除等待，并拒绝重复和旧 epoch 回报。独立 macOS 库、预览 ZIP 内的库和 Windows GNU
+兼容层测试均通过。
+
 Debian 13 ARM64 客体运行独立 Core 的依赖检查、ELF 导出及 C ABI 冒烟。Mesa EGL 的离屏软件
 渲染通过 GLSL ES 1.00 和 3.00 的帧、背景取样、组效果像素及 EGL 上下文恢复验证。
 同一探针使用公开试玩归档的移动端和 Switch 反色程序，也得到预期像素。
