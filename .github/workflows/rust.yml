@@ -50,6 +50,9 @@ jobs:
       run: ./scripts/test-host-v2.ps1
     - name: Test standalone Artemis Core
       run: cargo test --locked --tests --manifest-path crates/artemis-core/Cargo.toml --target-dir target/host-v2
+    - name: Compile the Swift Host against the v2 C headers
+      if: runner.os == 'macOS'
+      run: bash scripts/test-host-v2-swift.sh --compile-only
     - name: Verify generated C# ABI bindings
       if: runner.os == 'macOS'
       run: python3 tools/host-bindings/csharp/generate.py --check

@@ -712,7 +712,8 @@ Swift 应用可使用 [ArtemisMacSession](../tools/host-bindings/swift/ArtemisMa
 收到 `ART_RUNTIME_CLOSED_EVENT` 后调用 `close()` 释放会话。
 
 `bash scripts/test-host-v2-swift.sh` 使用真实的 Core 和 Metal 动态库验证上述 Swift 接入，
-需要 macOS 和 Metal 设备，无需 Flutter 或外部游戏文件。
+需要 macOS 和 Metal 设备，无需 Flutter 或外部游戏文件。传入 `--compile-only` 可在 macOS
+上只验证 Swift 接入代码与 C 头文件能否一同编译。
 
 macOS Flutter Runner 可将 [ArtemisFlutterHost](../tools/host-bindings/swift/ArtemisFlutterHost.swift)
 注册到平台线程上的 messenger，并提供打包后的 v2 Core 和 Metal 库路径。Dart 端通过
