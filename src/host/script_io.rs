@@ -2142,7 +2142,17 @@ impl ScriptIoSession {
 
     fn message(&self, operation: &Operation) -> (MessageKind, String, Vec<u8>) {
         match operation {
-            Operation::Stat { namespace, key, .. } => (IO_STAT, json!({"namespace":namespace,"key":key}).to_string(), vec![]),
+            Operation::Stat {
+                namespace,
+                key,
+                purpose,
+            } => {
+                let mut metadata = json!({"namespace": namespace, "key": key});
+                if matches!(purpose, StatPurpose::Read(Some(_))) {
+                    metadata["max_read_bytes"] = json!(MAX_SHADER_SOURCE_BYTES.to_string());
+                }
+                (IO_STAT, metadata.to_string(), vec![])
+            }
             Operation::Read {
                 namespace,
                 key,

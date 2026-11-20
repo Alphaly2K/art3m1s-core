@@ -346,7 +346,7 @@ request ID、epoch 和 runtime 均由信封/提交描述符携带。
 
 | 消息 | metadata | blob |
 |---|---|---|
-| stat 请求 | `namespace: "asset"/"save"`，`key: string` | 空 |
+| stat 请求 | `namespace: "asset"/"save"`、`key: string`，资产读取可选 `max_read_bytes` | 空 |
 | stat 成功 | `status: "ok"`，`found: bool`；found=true 时还需 `size`、`revision`，可选 `modified_utc_ms` | 空 |
 | read 请求 | namespace、key、revision、offset、length；可选 `shader_language` | 空 |
 | read 成功 | `status: "ok"`、revision、`eof: bool` | 读取的原始字节 |
@@ -362,6 +362,9 @@ modified_utc_ms 为规范十进制 i64 字符串，表示 UTC Unix 毫秒；缺�
 累计数据必须与 stat 大小一致，准确到达文件末尾时 eof=true。revision/EOF/大小不一致的
 结果返回 ARGUMENT，原请求仍等待 Host 修正。Host 发现资源变化时可返回 io_error，让
 脚本进入原有失败分支。空文件在 stat 后即可完成读取。
+
+`max_read_bytes` 是十进制 u64 字符串，表示本次读取允许的文件大小。需要在 stat 阶段
+读取内容的 Host 可以据此限制预读。只查询元数据的 Host 可以直接返回实际大小。
 
 `shader_language` 可在读取着色器资产的各块中出现，值为 `hlsl` 或 `glsl`，包含由读档
 触发的读取。Host 可根据它准备着色器程序。该字段不改变文件内容、读取范围或回复要求。

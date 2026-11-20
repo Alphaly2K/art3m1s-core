@@ -4090,6 +4090,7 @@ end
             for request in requests(session) {
                 if request.metadata["key"] == "oversized.fx" {
                     assert_eq!(request.identity.service, IO_STAT);
+                    assert_eq!(request.metadata["max_read_bytes"], "262144");
                 }
                 session.submit_replies(&[host.complete(&request)]).unwrap();
             }
