@@ -70,7 +70,7 @@ static int probe_audio(const ArtMediaHostApiV1 *api, const char *path, int delay
 }
 
 int main(int argc, char **argv) {
-    if (argc < 5) return 1;
+    if (argc != 6) return 1;
     void *library = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
     if (!library) {
         fprintf(stderr, "%s\n", dlerror());
@@ -100,13 +100,11 @@ int main(int argc, char **argv) {
         fputs("Delayed WMV audio did not preserve its initial offset and midstream gap.\n", stderr);
         return 1;
     }
-    for (int i = 5; i < argc; ++i) {
-        ArtMediaAudio *silent = NULL;
-        if (api->open_audio(argv[i], &silent) != 0 || silent) {
-            api->close_audio(silent);
-            fputs("Silent Theora video did not report an absent audio track.\n", stderr);
-            return 1;
-        }
+    ArtMediaAudio *silent = NULL;
+    if (api->open_audio(argv[5], &silent) != 0 || silent) {
+        api->close_audio(silent);
+        fputs("Silent Theora video did not report an absent audio track.\n", stderr);
+        return 1;
     }
     dlclose(library);
     puts("Artemis media Host decode smoke passed");

@@ -729,9 +729,9 @@ Ogg 视频。该库用现有 FFmpeg 动态库构建，提供时间戳、RGBA 帧
 音视频时间戳以同一个容器起点为零，保留音轨相对于视频的启动偏移；PCM 块之间的空档表示静音。
 设置 `FFMPEG_DIR` 指向 FFmpeg SDK 后运行 `bash scripts/test-host-v2-media.sh` 可验证独立解码库。
 用 `bash scripts/test-host-v2-media.sh --bundle APP_BUNDLE` 可直接验证 macOS 应用内的解码库。
-两个模式均用 FFmpeg 命令行生成合成影片，包内验证无需 FFmpeg SDK 或游戏文件。
-该检查会生成带音轨偏移和时间戳空档的 WMV；`FFMPEG_CLI` 可指定额外支持 `libtheora` 的
-FFmpeg CLI，以同时验证 Ogg 视频。设置 `ARTEMIS_MEDIA_SWIFT_SMOKE=1` 可额外静音运行约
+两个模式均用 FFmpeg 命令行生成带音轨偏移和时间戳空档的合成 WMV，并使用仓库自带的
+无音轨 Ogg Theora 验证片段。包内验证无需 FFmpeg SDK 或游戏文件。设置
+`ARTEMIS_MEDIA_SWIFT_SMOKE=1` 可额外静音运行约
 19 秒的 Swift 调度探针，检查起播、轮询停顿后的追帧、暂停恢复和自然结束。该探针需要 macOS
 音频会话，无需 Flutter 窗口。
 在 macOS 14.2 或以上的桌面会话中再设置 `ARTEMIS_MEDIA_DEVICE_SMOKE=1`，可用低音量播放
