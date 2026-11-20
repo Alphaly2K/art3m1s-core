@@ -915,6 +915,10 @@ macOS Flutter Host 在每次打开时选择随机种子，并在同一次打开�
 Swift 探针确认旧 Host 的两次启动随机序列相同，新 Host 的两次序列不同，覆盖 DXVK 加载失败
 后回退 Metal。参考 Swift 通道的纹理和媒体冒烟通过。
 
+macOS 预览工作流在上传前解包最终 ZIP，验证启动器权限、签名、依赖和包内 Core ABI。使用
+发布参数本地重建基础包后，ZIP 复验及使用解包库的 Swift 通道、ANGLE 像素和截图冒烟通过。
+缺启动器的 ZIP 会被拒绝。远端工作流尚未运行。
+
 后续继续审计聚合 crate 的 Rust 公共接口与调用方，保持 legacy 与独立 v2 产物分离。生产默认
 切换仍待原版游戏的着色器、媒体及存档对照，以及 Linux EGL 和 Windows MSVC 原生验证。
 
