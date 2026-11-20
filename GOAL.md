@@ -201,6 +201,10 @@ Runner 复跑后 320×180 的两次标题画面逐像素一致。独立 Core 286
 Swift 媒体探针增加显式设备输出验证。用合成 WMV 音轨在 macOS 桌面运行，Core Audio 在暂停前
 和恢复后均报告活动输出流，413 帧送达，最大观测滞后约 18 毫秒。发行游戏的设备听感仍待实听。
 
+在当前主分支复验 Windows x64 GNU 产物。C++ 头文件、C ABI 冒烟及兼容层中的 286 项独立 Core
+测试通过，PE 仍只导出 `art3m1s_get_api_v2`。独立 Core 的依赖约束检查通过；Linux 和 Windows
+MSVC 原生执行仍待验证。
+
 ## 已完成：Flutter 方法通道与共享纹理适配
 
 macOS Runner 适配器负责调用 v2 会话并管理 Flutter 纹理。Swift 与 Dart 通过方法通道交换事件
