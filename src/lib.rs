@@ -435,20 +435,15 @@ fn caption_probe_on_event(
 }
 
 #[cfg(feature = "legacy")]
-pub fn probe_caption_from_bytes(ini_content: &[u8], platform: &str) -> Option<String> {
-    probe_caption_from_bytes_with_resources(ini_content, platform, None)
-}
-
-#[cfg(feature = "legacy")]
-pub fn probe_caption_from_bytes_with_resources(
+fn probe_caption_from_bytes_with_resources(
     ini_content: &[u8],
     platform: &str,
-    resources: Option<&crate::host_files::HostResources>,
+    resources: &crate::host_files::HostResources,
 ) -> Option<String> {
     use std::sync::{Arc, Mutex};
 
     let project = Project::open_from_bytes("", ini_content, platform).ok()?;
-    let mut interpreter = project.create_interpreter_with_resources(resources);
+    let mut interpreter = project.create_interpreter_with_resources(Some(resources));
 
     let caption: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let caption_cb = Arc::clone(&caption);
@@ -459,13 +454,6 @@ pub fn probe_caption_from_bytes_with_resources(
     // [stop]/对话框/文本等真正阻塞点停下。
     let _ = interpreter.run();
     caption.lock().unwrap().take()
-}
-
-/// Load one owned font file through the FFI bridge. The active text renderer
-/// owns the returned bytes, so destroying a runtime releases its font data.
-#[cfg(feature = "legacy")]
-pub fn load_font_ffi(path: &str) -> std::result::Result<Vec<u8>, String> {
-    crate::ffi::request_file(path)
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -708,8 +696,6 @@ mod tests {
     fn caption_capture_mechanism_grabs_caption_before_stop() {
         use std::sync::{Arc, Mutex};
 
-        // 复现 probe_caption_from_bytes 的核心机制：一段带 [caption] 的脚本，用捕获
-        // 回调抓到第一个 Caption 事件（在 [stop] 阻塞前）并暂停。证明探测思路成立。
         let mut interp = Interpreter::new(InterpreterConfig::default());
         interp
             .load_script("boot", "*top\n[caption data=\"探测标题\"]\n[stop]\n")

@@ -634,11 +634,11 @@ pub unsafe extern "C" fn art3m1s_runtime_load_project_bytes(
     }
 }
 
-/// Headless 探测游戏 caption（导入时用；见 [`crate::probe_caption_from_bytes`]）。
+/// Headless 探测游戏 caption（导入时用）。
 /// 只跑解释器到发出第一个 `[caption]` 即停，不建 GL/compositor，近乎瞬时。把 caption 的
 /// UTF-8 写入 `out_buf`（≤`out_cap`），返回写入字节数；无 caption / 缓冲不足 / 出错返回 0。
 /// 宿主须在调用前把文件供给（目录/pfs）指向该游戏，否则 boot 脚本读不到直接返回 0。
-pub unsafe extern "C" fn art3m1s_probe_caption(
+unsafe extern "C" fn art3m1s_probe_caption(
     resources: *mut crate::host_files::HostResources,
     ini_content: *const u8,
     ini_len: usize,
@@ -660,7 +660,7 @@ pub unsafe extern "C" fn art3m1s_probe_caption(
         return 0;
     };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        crate::probe_caption_from_bytes_with_resources(ini, plat, Some(resources))
+        crate::probe_caption_from_bytes_with_resources(ini, plat, resources)
     }));
     let caption = match result {
         Ok(Some(c)) => c,
