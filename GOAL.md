@@ -946,6 +946,10 @@ Core 构建只启用 Artemis 帧数据格式；绘制适配器由 Host 的渲染
 Host 集成测试通过内存资源启动项目，拒绝跨 runtime 的回复，回报播放完成并在重载时读取旧帧。
 独立 Core 291 项单元测试、依赖门禁、C/Dart 冒烟及 legacy v1 函数表验证通过。
 
+macOS Flutter 预览在上传前用 ZIP 内的媒体 Host 解码合成 WMV，校验 RGBA、PCM、音轨偏移、
+间隙和 EOF。签名发布包解包后通过 C ABI 和媒体探针；缺少包内 FFmpeg 依赖时加载失败，开发
+SDK 的媒体探针仍通过。远端工作流尚未运行。
+
 后续继续审计聚合 crate 的 Rust 公共接口与调用方，保持 legacy 与独立 v2 产物分离。生产默认
 切换仍待原版游戏的着色器、媒体及存档对照，以及 Linux EGL 和 Windows MSVC 原生验证。
 
