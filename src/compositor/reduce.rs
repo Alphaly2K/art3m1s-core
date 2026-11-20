@@ -12,6 +12,7 @@ use crate::compositor::events::{CompositorEvent, IntoCompositorEvent};
 use crate::compositor::lyedit::{self, LayerEditQueue, LayerEditRequest};
 use crate::compositor::scene::{LayerEventHandler, Scene};
 use crate::render_pipeline::draw::TextureProvider;
+#[cfg(feature = "legacy")]
 use crate::render_pipeline::transition::{self, TransitionState};
 use asb_interpreter::event::LayerEvent;
 use std::cell::RefCell;
@@ -95,6 +96,7 @@ pub struct Compositor {
     /// 自上次 `poll_tween_events` 以来产生待处理的缓动完成事件。
     pub(super) pending_tween_events: Vec<TweenHandler>,
     /// `[trans]` 转场状态（交叉淡化等）。
+    #[cfg(feature = "legacy")]
     pub(crate) trans_state: RefCell<Option<TransitionState>>,
     /// `[anime]` 帧动画状态，按图层 ID 索引。
     pub(super) anime_states: HashMap<String, AnimeState>,
@@ -138,6 +140,7 @@ impl Default for Compositor {
             stage_scale: 1.0,
             input_handlers: HashMap::new(),
             pending_tween_events: Vec::new(),
+            #[cfg(feature = "legacy")]
             trans_state: RefCell::new(None),
             anime_states: HashMap::new(),
             tween_set_pending: None,
@@ -256,7 +259,8 @@ impl Compositor {
     pub fn reset_for_load(&mut self) {
         self.scene.replace_with(Scene::new());
         self.pending_tween_events.clear();
-        *self.trans_state.borrow_mut() = None;
+        #[cfg(feature = "legacy")]
+        transition::clear(&self.trans_state);
         self.anime_states.clear();
         self.tween_set_pending = None;
         self.layer_edits.borrow_mut().clear();
@@ -348,6 +352,7 @@ impl Compositor {
                 .any(|layer| !layer.tweens.is_empty());
         self.clock_ms = self.clock_ms.saturating_add(delta_ms);
 
+        #[cfg(feature = "legacy")]
         transition::clear_finished(&self.trans_state, self.clock_ms);
         anim::gc_finished_tweens(
             &mut self.scene,
@@ -382,6 +387,7 @@ impl Compositor {
     /// 用户输入请求跳过进行中的转场（`[trans]` input 参数语义）。
     /// `in_skip_mode` = 引擎当前是否处于跳过状态（input=2 用）。
     /// 返回是否真的清除了转场。
+    #[cfg(feature = "legacy")]
     pub fn skip_transition_by_input(&self, in_skip_mode: bool) -> bool {
         transition::skip_by_input(&self.trans_state, in_skip_mode)
     }
@@ -835,6 +841,7 @@ impl Compositor {
                 },
             ),
             // ── 转场 ──
+            #[cfg(feature = "legacy")]
             CompositorEvent::Trans {
                 trans_type,
                 time,
@@ -855,9 +862,12 @@ impl Compositor {
                 );
             }
             // ── Flip 即刻提交 ──
+            #[cfg(feature = "legacy")]
             CompositorEvent::Flip => {
                 transition::clear(&self.trans_state);
             }
+            #[cfg(not(feature = "legacy"))]
+            CompositorEvent::Trans { .. } | CompositorEvent::Flip => {}
         }
     }
 
@@ -1940,6 +1950,7 @@ mod tests {
         assert_eq!(c.scene().get("91").unwrap().props.visible, Some(true));
     }
 
+    #[cfg(feature = "legacy")]
     #[test]
     fn skip_transition_by_input_clears_active_transition() {
         let mut c = Compositor::new();

@@ -1101,6 +1101,10 @@ Flutter 媒体与帧循环 12 项定向测试、静态分析和 macOS 发布版 
 独立 Core 的 270 项单元测试与 Rust Host、legacy 的 447 项单元测试、Mach-O 导出、独立 C/C++ ABI
 冒烟与依赖检查通过。
 
+旧转场捕获、转场纹理及后处理入口由 legacy 构建提供。独立 Core 使用 ARFP 的转场快照，
+macOS 重建后通过独立 C/C++ ABI 和 Metal 冒烟，核对规则转场、E-Mote、组效果、截图和共享表面。
+独立 Core 的 263 项单元测试及 Rust Host 通过。legacy 的 447 项单元测试通过，跳过 2 项。
+
 后续继续审计聚合 crate 的 Rust 公共接口与调用方，保持 legacy 与独立 v2 产物分离。生产默认
 切换仍待原版游戏的着色器、媒体及存档对照，以及 Windows MSVC 原生验证。
 

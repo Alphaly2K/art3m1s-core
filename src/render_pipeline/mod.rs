@@ -6,10 +6,16 @@
 //! selection.  Concrete backends compile the selected shaders and execute the
 //! passes.
 
+#[cfg(any(feature = "legacy", test))]
 use crate::compositor::build::build_frame_with_content;
+#[cfg(any(feature = "legacy", test))]
 use crate::compositor::reduce::Compositor;
+#[cfg(feature = "legacy")]
 use crate::compositor::scene::Scene;
-pub use art3m1s_render::{draw, hlsl, post_process, shader};
+pub use art3m1s_render::{draw, shader};
+#[cfg(feature = "legacy")]
+pub use art3m1s_render::{hlsl, post_process};
+#[cfg(feature = "legacy")]
 pub mod transition;
 
 pub use draw::{
@@ -17,6 +23,7 @@ pub use draw::{
     ShaderEffect, ShaderGroup, StencilMetadata, TextureId, TextureInfo, TextureOrigin,
     TextureProvider,
 };
+#[cfg(feature = "legacy")]
 pub use post_process::{
     PostProcessContext, PostProcessPass, PostProcessPipeline, RenderDimensions,
     RenderQualityPreset, SceneTarget, UpscaleConfig, UpscaleMode,
@@ -24,15 +31,13 @@ pub use post_process::{
 pub use shader::{ALPHA_MASK_SHADER, GROUP_COMPOSITE_SHADER, RULE_TRANS_SHADER, SPRITE_SHADER};
 
 /// Stateless rendering pipeline view over a [`Compositor`].
+#[cfg(any(feature = "legacy", test))]
 pub struct RenderPipeline<'a> {
     compositor: &'a Compositor,
 }
 
-impl<'a> RenderPipeline<'a> {
-    pub fn new(compositor: &'a Compositor) -> Self {
-        Self { compositor }
-    }
-
+#[cfg(feature = "legacy")]
+impl RenderPipeline<'_> {
     /// Builds the final draw list including transition overlays.
     pub fn build_composited(&self, provider: &mut dyn TextureProvider) -> DrawList {
         self.build_composited_with_text(provider, None)
@@ -139,6 +144,13 @@ impl<'a> RenderPipeline<'a> {
     pub fn skip_transition_by_input(&self, in_skip_mode: bool) -> bool {
         transition::skip_by_input(&self.compositor.trans_state, in_skip_mode)
     }
+}
+
+#[cfg(any(feature = "legacy", test))]
+impl<'a> RenderPipeline<'a> {
+    pub fn new(compositor: &'a Compositor) -> Self {
+        Self { compositor }
+    }
 
     /// Builds only the scene DrawList, with no transition overlay.
     pub fn build(&self, provider: &mut dyn TextureProvider) -> DrawList {
@@ -185,6 +197,7 @@ impl<'a> RenderPipeline<'a> {
     /// The runtime uses this to reconstruct a transition source frame from the
     /// previous image-layer state while supplying text filtered by the current
     /// message-layer visibility.
+    #[cfg(feature = "legacy")]
     pub fn build_scene_with_content(
         &self,
         scene: &Scene,
