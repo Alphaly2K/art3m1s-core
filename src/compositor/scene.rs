@@ -339,7 +339,7 @@ impl Scene {
             if layer
                 .file
                 .as_deref()
-                .is_some_and(crate::video::is_video_layer_texture_name)
+                .is_some_and(crate::video_layer::is_video_layer_texture_name)
             {
                 layer.file = None;
             }

@@ -4,7 +4,7 @@ use crate::compositor::{Compositor, TextureInfo, TweenHandler};
 use crate::host::frame::FrameTexture;
 use crate::host::input::InputFrame;
 use crate::host::media::VideoFrame;
-use crate::video::{
+use crate::video_layer::{
     VIDEO_LAYER_TEXTURE_PREFIX, is_video_layer_texture_name, video_layer_texture_name,
 };
 use asb_interpreter::event::{LayerEvent, WaitReason};

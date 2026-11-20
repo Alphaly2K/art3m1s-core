@@ -3532,7 +3532,7 @@ function mark() restored=true end
     assert!(snapshot.get("movie").unwrap().file.is_none());
     snapshot.set_file(
         "movie",
-        Some(crate::video::video_layer_texture_name("movie")),
+        Some(crate::video_layer::video_layer_texture_name("movie")),
     );
     host.files
         .insert(key, (2, serde_json::to_vec(&save).unwrap()));

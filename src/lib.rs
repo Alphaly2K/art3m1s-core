@@ -13,10 +13,12 @@ macro_rules! legacy_exports {
     )+};
 }
 
-legacy_exports!(audio, compositor, host, render_pipeline, save, text, video);
+legacy_exports!(compositor, host, render_pipeline, save, text);
 
 #[cfg(not(feature = "legacy"))]
 pub use host::api;
+#[cfg(feature = "legacy")]
+pub mod audio;
 #[cfg(feature = "legacy")]
 pub mod backend;
 mod emote_playback;
@@ -58,6 +60,9 @@ pub mod profiler;
 #[cfg(feature = "legacy")]
 pub mod runtime;
 mod script_handler;
+#[cfg(feature = "legacy")]
+pub mod video;
+mod video_layer;
 
 #[cfg(feature = "legacy")]
 pub use art3m1s_emote as emote;

@@ -344,7 +344,7 @@ impl TextureProvider for CpuTextureView<'_> {
         if let Some(texture) = self.atlases.get(name) {
             return Some(self.record(texture.clone()));
         }
-        if let Some(id) = name.strip_prefix(crate::video::VIDEO_LAYER_TEXTURE_PREFIX)
+        if let Some(id) = name.strip_prefix(crate::video_layer::VIDEO_LAYER_TEXTURE_PREFIX)
             && let Some(texture) = self.video.get(id)
         {
             return Some(self.record(texture.clone()));
