@@ -275,20 +275,100 @@ mod tests {
     }
 
     #[test]
-    fn api_v1_required_entries_are_present() {
-        let api = &API_V1;
-        assert!(api.host_events_create.is_some());
-        assert!(api.host_events_destroy.is_some());
-        assert!(api.host_events_enable.is_some());
-        assert!(api.poll_events.is_some());
-        assert!(api.resources_create.is_some());
-        assert!(api.resources_destroy.is_some());
-        assert!(api.resources_mount_directory.is_some());
-        assert!(api.resources_mount_pfs.is_some());
-        assert!(api.runtime_create.is_some());
-        assert!(api.runtime_destroy.is_some());
-        assert!(api.runtime_set_resources.is_some());
-        assert!(api.runtime_advance_and_present.is_some());
-        assert!(api.runtime_feed_key.is_some());
+    fn api_v1_slots_match_the_frozen_layout() {
+        use std::mem::{align_of, offset_of, size_of};
+
+        let inventory: serde_json::Value =
+            serde_json::from_str(include_str!("../../doc/abi/artemis-v1-inventory.json")).unwrap();
+        let slots = inventory["v1_table"]["function_slots_in_order"]
+            .as_array()
+            .unwrap();
+        macro_rules! slot_layout {
+            ($($field:ident),+ $(,)?) => {
+                [$(
+                    (stringify!($field), offset_of!(Art3m1sApiV1, $field), API_V1.$field.is_some()),
+                )+]
+            };
+        }
+        assert_eq!(ART3M1S_API_ABI_MAGIC, 0x415254334D314150);
+        assert_eq!(ART3M1S_API_ABI_VERSION, 1);
+        assert_eq!(offset_of!(Art3m1sApiV1, struct_size), 0);
+        assert_eq!(offset_of!(Art3m1sApiV1, abi_version), 4);
+        assert_eq!(offset_of!(Art3m1sApiV1, magic), 8);
+        let layout = slot_layout!(
+            host_events_create,
+            host_events_destroy,
+            host_events_enable,
+            host_events_next,
+            poll_events,
+            set_font_list,
+            set_window_state,
+            set_text_replacements,
+            set_text_translation_enabled,
+            clear_host_state,
+            resources_create,
+            resources_destroy,
+            resources_clear,
+            resources_mount_directory,
+            resources_mount_pfs,
+            resources_set_save_dir,
+            resources_set_override,
+            resources_clear_overrides,
+            runtime_create,
+            runtime_destroy,
+            runtime_set_resources,
+            runtime_set_runtime_media_enabled,
+            runtime_advance_and_present,
+            runtime_advance_without_render,
+            runtime_stage_width,
+            runtime_stage_height,
+            runtime_load_project,
+            runtime_load_project_bytes,
+            runtime_pixel_buffer_size,
+            runtime_advance_and_render,
+            runtime_set_external_surface,
+            runtime_clear_external_surface,
+            runtime_feed_mouse,
+            runtime_feed_click,
+            runtime_feed_mouse_button,
+            runtime_feed_touch,
+            runtime_feed_key,
+            runtime_submit_dialog,
+            runtime_submit_text_translation,
+            runtime_set_reported_os,
+            runtime_configure_spatial_upscale,
+            runtime_set_render_quality_preset,
+            runtime_set_profiler_enabled,
+            runtime_profiler_snapshot,
+            runtime_set_volume,
+            runtime_notify_video_finished,
+            runtime_notify_sound_finished,
+            runtime_notify_lifecycle,
+            runtime_is_exit_requested,
+            runtime_backend_capabilities,
+            runtime_submit_http_result,
+            runtime_set_string_variable,
+            probe_caption,
+            set_angle_path,
+            set_debug,
+            set_damage_visualization,
+            set_font_override,
+            clear_font_override,
+            runtime_upload_video_layer_frame,
+        );
+        assert_eq!(layout.len(), slots.len());
+        for (index, ((name, offset, present), expected)) in
+            layout.into_iter().zip(slots).enumerate()
+        {
+            assert_eq!(Some(name), expected.as_str());
+            assert_eq!(offset, 16 + index * size_of::<usize>(), "{name}");
+            let available = name != "runtime_set_runtime_media_enabled" || cfg!(feature = "ffmpeg");
+            assert_eq!(present, available, "{name}");
+        }
+        let end = 16 + slots.len() * size_of::<usize>();
+        assert_eq!(
+            size_of::<Art3m1sApiV1>(),
+            end.next_multiple_of(align_of::<Art3m1sApiV1>())
+        );
     }
 }
