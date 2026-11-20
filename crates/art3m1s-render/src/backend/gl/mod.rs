@@ -41,6 +41,9 @@ pub use backend::GlBackend;
 pub use provider::{GlTextureProvider, PlaceholderKind};
 pub use shader::ShaderProfile;
 
+const MAX_GLSL_PROGRAMS: usize = 256;
+const MAX_GLSL_SOURCE_BYTES: usize = 4 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct RenderProfile {
     pub draw_calls: u64,
@@ -94,7 +97,8 @@ pub struct GlRenderer {
     program: glow::Program,
     program_bindings: ProgramBindings,
     custom_programs: HashMap<String, Rc<CustomProgram>>,
-    prepared_glsl: HashMap<Box<[u8]>, Rc<CustomProgram>>,
+    glsl_programs: HashMap<Box<[u8]>, Rc<CustomProgram>>,
+    glsl_source_bytes: usize,
     binary_cache: Option<binary_cache::Cache>,
     profile: ShaderProfile,
     white_texture: glow::Texture,
@@ -224,7 +228,8 @@ impl GlRenderer {
                 program,
                 program_bindings,
                 custom_programs,
-                prepared_glsl: HashMap::new(),
+                glsl_programs: HashMap::new(),
+                glsl_source_bytes: 0,
                 binary_cache: None,
                 profile,
                 white_texture,
@@ -322,15 +327,20 @@ impl GlRenderer {
     }
 
     pub fn register_glsl_shader(&mut self, name: &str, source: &[u8]) -> Result<(), String> {
-        let program = match self.prepared_glsl.get(source) {
-            Some(prepared) => Rc::clone(prepared),
-            None => self.load_glsl(source)?,
-        };
+        let program = self.load_glsl(source)?;
         self.custom_programs.insert(name.into(), program);
         Ok(())
     }
 
-    fn load_glsl(&self, source: &[u8]) -> Result<Rc<CustomProgram>, String> {
+    fn can_cache_glsl(&self, source: &[u8]) -> bool {
+        self.glsl_programs.len() < MAX_GLSL_PROGRAMS
+            && source.len() <= MAX_GLSL_SOURCE_BYTES - self.glsl_source_bytes
+    }
+
+    fn load_glsl(&mut self, source: &[u8]) -> Result<Rc<CustomProgram>, String> {
+        if let Some(program) = self.glsl_programs.get(source) {
+            return Ok(Rc::clone(program));
+        }
         let program = unsafe {
             shader::build_glsl_effect_program(
                 &self.gl,
@@ -339,18 +349,20 @@ impl GlRenderer {
                 self.binary_cache.as_ref(),
             )?
         };
-        Ok(Rc::new(CustomProgram::new(&self.gl, program, true)))
+        let program = Rc::new(CustomProgram::new(&self.gl, program, true));
+        if self.can_cache_glsl(source) {
+            self.glsl_programs
+                .insert(source.into(), Rc::clone(&program));
+            self.glsl_source_bytes += source.len();
+        }
+        Ok(program)
     }
 
     fn prepare_glsl(&mut self, source: &[u8]) -> Result<(), String> {
-        if !self.prepared_glsl.contains_key(source) {
-            if self.prepared_glsl.len() >= 256 {
-                return Err("GLSL prewarm limit reached".into());
-            }
-            let program = self.load_glsl(source)?;
-            self.prepared_glsl.insert(source.into(), program);
+        if !self.glsl_programs.contains_key(source) && !self.can_cache_glsl(source) {
+            return Err("GLSL prewarm limit reached".into());
         }
-        Ok(())
+        self.load_glsl(source).map(|_| ())
     }
 
     pub fn unregister_hlsl_shader(&mut self, name: &str) -> bool {

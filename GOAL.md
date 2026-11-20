@@ -213,6 +213,10 @@ macOS Runner 只把 DXVK 接受的 HLSL 程序记为预热完成。启动编译�
 效果缺失；修复后冷缓存和热缓存下的 Flutter 纹理与脚本截图像素均正确，Flutter 定向回归 8 项通过。
 后续继续核对单会话混合语言的需求及原生 Linux、Windows 验证结果。
 
+GLSL 启动预热和运行时首次加载共用会话内程序缓存。ANGLE 探针用未预热源码绘制，删除磁盘缓存
+后重新绑定，像素一致且未重建缓存。桌面 OpenGL、ANGLE 的 GLSL ES 1.00 与 3.00、跨进程缓存
+复用及损坏恢复也已通过。
+
 ## 已完成：Flutter 方法通道与共享纹理适配
 
 macOS Runner 适配器负责调用 v2 会话并管理 Flutter 纹理。Swift 与 Dart 通过方法通道交换事件

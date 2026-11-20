@@ -40,7 +40,9 @@ if [[ ${ARTEMIS_GL_SMOKE_TEST_CACHE:-} == 1 ]]; then
   printf 'invalid program cache' > "$cache"
   target/debug/artemis-gl-smoke < "$scratch/frame"
   [[ $(wc -c < "$cache") -gt 21 ]]
-  printf '%s\n' 'ANGLE cache: cold creation, warm reuse and corruption recovery passed'
+  ARTEMIS_GL_SMOKE_CACHE_RUNTIME=1 ARTEMIS_GL_SMOKE_CACHE_DIR="$scratch/runtime-cache" \
+    target/debug/artemis-gl-smoke < "$scratch/frame"
+  printf '%s\n' 'ANGLE cache: cold creation, warm reuse, corruption recovery and runtime rebinding passed'
   exit
 fi
 if [[ -n "$gles" ]]; then

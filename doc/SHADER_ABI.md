@@ -113,7 +113,8 @@ Flutter Runner prewarms indexed `.glsl`, `.frag`, `.fsh` and `.fs` files. It
 stores ANGLE program binaries in the application's cache directory. Programs
 match the effective vertex and fragment sources and the GL driver identity.
 If the cache is unavailable or a binary is rejected, the renderer compiles
-from source. Effects discovered during play use the same program loader.
+from source. Effects discovered during play use the same loader and can reuse
+the prepared program when the same source is bound again in that context.
 
 Run `bash scripts/test-host-v2-gl.sh --offline` on macOS with a native
 OpenGL context to check a packet emitted by the Core against expected
@@ -127,7 +128,8 @@ surfaceless platform as the script defaults. The EGL checks also verify that
 closing one renderer restores the other renderer's active context.
 These graphics checks run separately from the default Rust test suite.
 With a macOS ANGLE runtime, set `ARTEMIS_GL_SMOKE_TEST_CACHE=1` to verify
-cache creation, reuse across processes, and recovery from corruption.
+cache creation, reuse across processes, recovery from corruption, and rebinding
+an effect first prepared during play after its disk entry is removed.
 The probe binary `target/debug/artemis-gl-smoke` also accepts a list of GLSL
 files to compile and link in one context. To draw a single external ES 1.00
 effect through ARFP, run the script with `ARTEMIS_GL_SMOKE_SOURCE` set to

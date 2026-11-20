@@ -96,13 +96,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or([5, 24, 24, 255]);
     let mut renderer = SpriteRenderer::new(new_backend(width, height)?);
     renderer.backend_mut().begin_access();
-    if let Some(path) = std::env::var_os("ARTEMIS_GL_SMOKE_CACHE_DIR") {
+    let cache_directory = std::env::var_os("ARTEMIS_GL_SMOKE_CACHE_DIR").map(PathBuf::from);
+    let runtime_cache = std::env::var_os("ARTEMIS_GL_SMOKE_CACHE_RUNTIME").is_some();
+    if let Some(path) = &cache_directory {
         let backend = renderer.backend_mut();
-        assert!(
-            backend.set_glsl_cache(&PathBuf::from(path)),
-            "program binaries unavailable"
-        );
-        backend.prepare_glsl(&effect.shader.source)?;
+        assert!(backend.set_glsl_cache(path), "program binaries unavailable");
+        if !runtime_cache {
+            backend.prepare_glsl(&effect.shader.source)?;
+        }
     }
     renderer.backend_mut().begin_frame(FrameTarget::Main)?;
     renderer.render_packet(1, &packet, |index| Ok(textures[index]), [0.0; 4])?;
@@ -118,6 +119,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         assert!(
             pixel.iter().zip(expected).all(|(&a, b)| a.abs_diff(b) <= 1),
             "expected {expected:?}, got {pixel:?}"
+        );
+    }
+    if runtime_cache {
+        let path = cache_directory.ok_or("runtime cache check needs a cache directory")?;
+        let entries = std::fs::read_dir(&path)?.collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(entries.len(), 1, "first draw must write a program binary");
+        assert_eq!(entries[0].path().extension().unwrap(), "glbin");
+        std::fs::remove_file(entries[0].path())?;
+        renderer.clear_cached_shaders();
+        renderer.backend_mut().begin_frame(FrameTarget::Main)?;
+        renderer.render_packet(1, &packet, |index| Ok(textures[index]), [0.0; 4])?;
+        renderer.backend_mut().end_frame();
+        assert_eq!(
+            renderer
+                .backend_mut()
+                .readback_owned(FrameTarget::Main, extent)?,
+            rgba,
+            "rebound GLSL effect pixels"
+        );
+        assert!(
+            std::fs::read_dir(path)?.next().is_none(),
+            "rebinding the effect must not compile a new program"
         );
     }
     #[cfg(target_os = "macos")]
