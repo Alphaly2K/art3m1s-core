@@ -197,8 +197,9 @@ Siglus 的存档路径目前也仍由原 VM 决定（通常位于游戏目录）
   新宿主只检查 API 表中的函数指针是否为 NULL，不把 feature 差异编码成不同的 ABI 布局。
 - 动态库、ANGLE 和可选媒体库由 Host 打包/加载。媒体库应只加载一份实例，避免重复
   全局状态或 Objective-C 类。构建方式见 [README](../README.md#构建)。
-- `art3m1s_get_api_v1` 必须返回匹配的 `struct_size`、`abi_version` 和 `magic`；否则
-  拒绝读取函数表。可选能力通过函数指针是否为空判断，不再用散装符号探测。
+- `art3m1s_get_api_v1` 的 `out_size` 须覆盖 Host 使用的表布局。确认后再读取表头，并校验
+  `struct_size` 等于 `out_size`、`abi_version` 为 1、`magic` 为 `0x415254334D314150`。
+  可选能力通过函数指针是否为空判断。
 - JSON 的未知字段应忽略；未知命令记录一次诊断。必须回应的已知请求不能静默丢弃。
 
 ## 2. 线程、指针与进程级状态

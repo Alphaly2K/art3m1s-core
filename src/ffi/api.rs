@@ -248,8 +248,8 @@ static API_V1: Art3m1sApiV1 = Art3m1sApiV1 {
 
 /// Returns the process-lifetime v1 API table.
 ///
-/// `out_size` receives the exact struct size known to this build. Hosts must
-/// reject a mismatch before reading any field.
+/// Check that `out_size` covers the table layout the Host uses before reading
+/// the table. The header's `struct_size` must match `out_size`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_get_api_v1(out_size: *mut usize) -> *const Art3m1sApiV1 {
     if !out_size.is_null() {
