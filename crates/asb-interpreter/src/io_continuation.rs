@@ -347,6 +347,20 @@ pub fn install(interpreter: &Interpreter) -> Result<()> {
         lua.create_function(|_, path: String| Ok(IoRequest::Read { path }))?,
     )?;
     helpers.set(
+        "read_module",
+        lua.create_function(|_, path: String| {
+            let path = path.replace('\\', "/");
+            if path.starts_with('/')
+                || path.contains(['\0', ':'])
+                || path.split('/').any(|part| part == "..")
+                || !path.split('/').any(|part| !part.is_empty() && part != ".")
+            {
+                return Err(mlua::Error::external("invalid logical module path"));
+            }
+            Ok(IoRequest::Read { path })
+        })?,
+    )?;
+    helpers.set(
         "exists",
         lua.create_function(|_, path: String| Ok(IoRequest::Exists { path }))?,
     )?;
@@ -392,6 +406,15 @@ pub fn install(interpreter: &Interpreter) -> Result<()> {
         lua.create_function(|lua, (source, name): (mlua::String, String)| {
             lua.load(source.as_bytes().as_ref())
                 .set_name(name)
+                .into_function()
+        })?,
+    )?;
+    helpers.set(
+        "compile_module",
+        lua.create_function(|lua, (source, name): (mlua::String, String)| {
+            lua.load(source.as_bytes().as_ref())
+                .set_name(name)
+                .set_mode(mlua::ChunkMode::Text)
                 .into_function()
         })?,
     )?;
@@ -494,8 +517,10 @@ pub fn install(interpreter: &Interpreter) -> Result<()> {
     let close: mlua::Function = functions.get("close")?;
     file_methods.set("flush", flush)?;
     file_methods.set("close", close)?;
-    lua.globals()
-        .set("io", functions.get::<mlua::Table>("io")?)?;
+    let globals = lua.globals();
+    globals.set("io", functions.get::<mlua::Table>("io")?)?;
+    globals.set("package", functions.get::<mlua::Table>("package")?)?;
+    globals.set("require", functions.get::<mlua::Function>("require")?)?;
     lua.set_named_registry_value("__art3m1s_io_continuation", true)?;
     Ok(())
 }

@@ -190,6 +190,71 @@ impl MemoryHost {
 }
 
 #[test]
+fn require_resumes_against_host_resources_and_caches_per_project() {
+    const SCRIPT: &[u8] = br#"
+*main
+[calllua function=load_modules]
+[caption data=loaded]
+[lua]
+function load_modules()
+    assert(package.cpath == nil and package.loaders == nil)
+    local path = package.path
+    package.path = '/outside/?.lua'
+    local ok, message = pcall(require, 'outside')
+    assert(not ok and tostring(message):find('logical module path', 1, true))
+    package.path = 'modules/?.luau;modules/?.lua'
+    package.preload['built_in'] = function() return false end
+    assert(require('built_in') == false)
+    local module = require('my.main')
+    assert(require('my.main') == module)
+    assert(module_runs == 1)
+    result = module.value
+    local ok, message = pcall(require, 'cycle')
+    assert(not ok and tostring(message):find('cyclic module', 1, true))
+    package.preload['cycle'] = function() return 9 end
+    assert(require('cycle') == 9)
+    package.path = path
+end
+[/lua]
+"#;
+    let mut session = session(1, TransportLimits::default(), 4096);
+    let mut host = MemoryHost::default();
+    host.asset(
+        "modules/my/main.lua",
+        b"module_runs = (module_runs or 0) + 1; return {value = require('nested')}",
+    );
+    host.asset("modules/cycle.luau", b"return require('cycle')");
+    for value in [42, 43] {
+        host.asset("modules/nested.luau", format!("return {value}").as_bytes());
+        host.reads.clear();
+        session.open_scenario(SCRIPT, "modules", "main").unwrap();
+        host.run(&mut session);
+        assert_eq!(
+            session
+                .interpreter()
+                .lua()
+                .globals()
+                .get::<i32>("result")
+                .unwrap(),
+            value
+        );
+        assert_eq!(
+            host.reads
+                .iter()
+                .filter(|(_, offset)| *offset == 0)
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "modules/my/main.lua",
+                "modules/nested.luau",
+                "modules/cycle.luau"
+            ]
+        );
+    }
+    assert_eq!(host.captions, ["loaded", "loaded"]);
+}
+
+#[test]
 fn save_deletion_waits_for_confirmation_and_keeps_assets_separate() {
     let mut session = session(1, TransportLimits::default(), 1024);
     session

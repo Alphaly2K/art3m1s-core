@@ -5,6 +5,43 @@ local function read(path)
     if ok then return data end
     return nil, data, kind
 end
+local package = {path = "?.luau;?.lua", loaded = {}, preload = {}}
+local loading_by_thread = setmetatable({}, {__mode = "k"})
+package.loaded.package = package
+local function load_module(name)
+    local preload = package.preload[name]
+    if preload ~= nil then return preload(name) end
+    local stem = name:gsub("%.", "/")
+    for template in package.path:gmatch("[^;]+") do
+        local path = template:gsub("%?", function() return stem end)
+        local ok, data, kind = yield(h.read_module(path))
+        if ok then return h.compile_module(data, path)(name) end
+        if kind ~= "not_found" then error(data, 0) end
+    end
+    error("module '" .. name .. "' not found", 0)
+end
+local function require_module(name)
+    if type(name) ~= "string" or name == "" then error("expected a module name", 2) end
+    local loaded = package.loaded
+    if loaded[name] ~= nil then return loaded[name] end
+    local thread = coroutine.running() or package
+    local loading = loading_by_thread[thread]
+    if not loading then
+        loading = {}
+        loading_by_thread[thread] = loading
+    end
+    if loading[name] then error("cyclic module '" .. name .. "'", 2) end
+    loading[name] = true
+    local ok, value = pcall(load_module, name)
+    loading[name] = nil
+    if not ok then error(value, 2) end
+    if value == nil then
+        value = loaded[name]
+        if value == nil then value = true end
+    end
+    loaded[name] = value
+    return value
+end
 local function write(path, data)
     return yield(h.write(path, data))
 end
@@ -108,6 +145,7 @@ local function file_query(self, params, resolved)
 end
 return {
     io = io, flush = flush, close = close,
+    package = package, require = require_module,
     file_query = file_query, delete_save = delete_save,
     tag = function(self, params, ...)
         if type(params) == "table" and params[1] == "callnative" then

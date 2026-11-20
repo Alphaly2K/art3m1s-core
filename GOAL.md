@@ -1113,6 +1113,11 @@ Flutter `be7bf73` 在文件读取时应用 HLSL 和 GLSL 的预热预算。优�
 独立 C ABI、媒体解码及 DXVK 与 GLSL 的混合像素验证。当前源码的 Windows GNU DLL 仅导出
 v2 查询入口，兼容层 C 冒烟通过。Windows MSVC 原生 CI 待运行，当前 GitHub CLI 凭据无效。
 
+v2 的 Luau `require` 由 Host IO 提供文本模块。独立 Core 回归覆盖嵌套加载、逻辑路径校验、
+循环错误后重试和项目重开。Rust Host 从内存提供启动模块，macOS 发布版 Flutter Runner 从合成
+归档读取启动模块并完成后续媒体、等待和存档流程。独立 Core 264 项、legacy 448 项和解释器
+245 项单元测试通过，C/C++ ABI、动态导出和独立依赖检查通过。
+
 后续继续审计聚合 crate 的 Rust 公共接口与调用方，保持 legacy 与独立 v2 产物分离。生产默认
 切换仍待原版游戏的着色器、媒体及存档对照，以及 Windows MSVC 原生验证。
 

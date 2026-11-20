@@ -11,7 +11,8 @@ fn rust_host_drives_the_queued_session_and_reads_a_frame() {
         platform: "WINDOWS",
         reported_os: None,
     };
-    const BOOT: &[u8] = b"*top\n[lyc id=1 width=2 height=1 color=ff112233]\n[caption data=ready]\n[seplay id=fx file=tone.ogg]\n[wait se=fx]\n[caption data=ended]\n[stop]\n";
+    const MODULE: &[u8] = b"return 73";
+    const BOOT: &[u8] = b"*top\n[lua]\nassert(require('constants') == 73)\n[/lua]\n[lyc id=1 width=2 height=1 color=ff112233]\n[caption data=ready]\n[seplay id=fx file=tone.ogg]\n[wait se=fx]\n[caption data=ended]\n[stop]\n";
     let runtime = Runtime::new(RuntimeOptions {
         host_capabilities: capabilities::HOST_CAP_IO | capabilities::HOST_CAP_MEDIA,
         renderer_capabilities: capabilities::CAP_SPRITES,
@@ -39,19 +40,25 @@ fn rust_host_drives_the_queued_session_and_reads_a_frame() {
         let step = runtime.step(frame).unwrap();
         while let Some(event) = runtime.poll_event().unwrap() {
             let data: Value = serde_json::from_str(event.body.metadata()).unwrap();
+            let asset = match data["key"].as_str() {
+                Some("boot.iet") => Some(BOOT),
+                Some("constants.lua") => Some(MODULE),
+                _ => None,
+            };
             let response = match event.kind {
-                IO_STAT if data["key"] == "boot.iet" => Some((
-                    json!({"status":"ok", "found":true, "size":BOOT.len().to_string(), "revision":"1"}),
+                IO_STAT => Some((
+                    match asset {
+                        Some(bytes) => {
+                            json!({"status":"ok", "found":true, "size":bytes.len().to_string(), "revision":"1"})
+                        }
+                        None => json!({"status":"ok", "found":false}),
+                    },
                     vec![],
                 )),
-                IO_STAT => Some((json!({"status":"ok", "found":false}), vec![])),
-                IO_READ => {
-                    assert_eq!(data["key"], "boot.iet");
-                    Some((
-                        json!({"status":"ok", "eof":true, "revision":"1"}),
-                        BOOT.to_vec(),
-                    ))
-                }
+                IO_READ => Some((
+                    json!({"status":"ok", "eof":true, "revision":"1"}),
+                    asset.unwrap().to_vec(),
+                )),
                 MEDIA_AUDIO_COMMAND => {
                     assert_eq!(data["op"], "play");
                     playback = Some(data["playback_id"].as_str().unwrap().parse().unwrap());

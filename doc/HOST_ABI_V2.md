@@ -423,6 +423,11 @@ v2 的 Luau 文件调用从当前调用点挂起。包含动态路径的读取�
 epoch、request ID 和 service kind 匹配；队列满时保留当前调用，撤销或重载后旧结果失效。
 等待 IO 期间保留原帧的时钟与输入，继续原帧时不重复执行 `onEnterFrame`。
 
+`require` 通过同一 Host IO 队列加载文本模块。默认按 `?.luau`、`?.lua` 查找，模块名中的点转换为
+目录分隔符。`package.path` 接受以分号分隔的逻辑相对路径模板。`package.preload` 和
+`package.loaded` 在当前项目会话有效。读取、编译、执行失败以及循环依赖会抛出可捕获的错误。
+v2 不提供本机模块加载入口。
+
 `io.open` 失败返回 `nil, message`；`flush` 和 `close` 失败抛出可由 `pcall` 捕获的错误，
 保留待写内容供脚本重试。写入只有在 Host 完成原子提交并确认后才完成。v1 使用同一 Luau
 运行时，保留其同步资源与存档接口。

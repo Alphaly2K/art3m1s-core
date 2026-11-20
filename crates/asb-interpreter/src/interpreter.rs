@@ -12,7 +12,7 @@ use crate::r#macro::MacroRegistry;
 use crate::script::{Instruction, Script};
 use crate::tags::{ExecutionContext, TagRegistry, TagResult};
 use crate::variable::{Value, VariableStore};
-use mlua::{ErrorContext, Lua};
+use mlua::{ErrorContext, Lua, LuaOptions, StdLib};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
@@ -466,7 +466,7 @@ fn same_call_stack(left: &[CallFrame], right: &[CallFrame]) -> bool {
 impl Interpreter {
     /// 创建新的解释器实例
     pub fn new(config: InterpreterConfig) -> Self {
-        Self::initialize(config, |operation, error| {
+        Self::initialize(config, StdLib::ALL_SAFE, |operation, error| {
             #[cfg(feature = "console-diagnostics")]
             {
                 eprintln!("{operation}: {error}");
@@ -480,16 +480,28 @@ impl Interpreter {
 
     /// Create an interpreter and return any Luau setup failure to the caller.
     pub fn try_new(config: InterpreterConfig) -> Result<Self> {
-        Ok(Self::initialize(config, |operation, error| {
+        Self::try_new_with_libs(config, StdLib::ALL_SAFE)
+    }
+
+    /// Initialize a VM whose module reads go through resumable Host I/O.
+    pub fn try_new_hosted(config: InterpreterConfig) -> Result<Self> {
+        let mut interpreter = Self::try_new_with_libs(config, StdLib::ALL_SAFE ^ StdLib::PACKAGE)?;
+        interpreter.enable_resumable_io()?;
+        Ok(interpreter)
+    }
+
+    fn try_new_with_libs(config: InterpreterConfig, libraries: StdLib) -> Result<Self> {
+        Ok(Self::initialize(config, libraries, |operation, error| {
             Err(error.context(operation))
         })?)
     }
 
     fn initialize(
         config: InterpreterConfig,
+        libraries: StdLib,
         on_error: impl Fn(&'static str, mlua::Error) -> mlua::Result<()>,
     ) -> mlua::Result<Self> {
-        let lua = Lua::new();
+        let lua = Lua::new_with(libraries, LuaOptions::default())?;
         let check = |operation, result: mlua::Result<()>| {
             result.or_else(|error| on_error(operation, error))
         };
