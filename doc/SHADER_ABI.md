@@ -108,14 +108,14 @@ arrays of those types. Each value list must contain whole elements and fit
 the active uniform. An effect supplies its fragment color, including any
 opacity or multiply it wants to apply before blending.
 
-The macOS ANGLE Host can prepare project GLSL before its first frame. The
-Flutter Runner prewarms indexed `.glsl`, `.frag`, `.fsh` and `.fs` files
-within source and time budgets. It stores ANGLE program binaries in the
-application's cache directory. Programs
-match the effective vertex and fragment sources and the GL driver identity.
-If the cache is unavailable or a binary is rejected, the renderer compiles
-from source. Effects discovered during play use the same loader and can reuse
-the prepared program when the same source is bound again in that context.
+The Flutter Runner can prewarm indexed `.glsl`, `.frag`, `.fsh` and `.fs`
+files in the macOS ANGLE Host before its first frame, within source and time
+budgets. During play, the Host loads a program when a frame first uses the
+effect. Both paths use the same loader. It reuses programs in the current
+context and stores ANGLE program binaries in the application's cache
+directory. Binaries match the effective vertex and fragment sources and the
+GL driver identity. If the cache is unavailable or a binary is rejected,
+the renderer compiles from source.
 
 The Flutter project's `tool/integration_tests/artemis_v2_angle_smoke.dart`
 checks presentation, transitions and screenshots. With DXVK omitted from the
@@ -438,11 +438,13 @@ and frame composition.
 For the Flutter macOS v2 preview, set `ARTEMIS_V2_DXVK_RUNTIME_DIR` to the
 assembled runtime when building the Runner. Set `ARTEMIS_V2_HLSL_COMPILER_DIR`
 to the native compiler package to bundle automatic compilation. The bundled
-tool prepares indexed `.hlsl` and `.fx` assets before the first frame, subject
-to the startup budget. When the Core marks a runtime read as HLSL, the Host
-can prepare it before replying even if its suffix was outside the startup
-scan. The application cache reuses compiled effects across launches and
-keys entries by the compiler binaries and exact source bytes.
+tool can prepare indexed `.hlsl` and `.fx` assets before the first frame
+within the startup budget. When the Core marks a runtime read as HLSL, the
+Host can prepare it before replying. This covers sources that were absent
+from the startup index, skipped by the budget, or named with another suffix.
+The application cache keys compiled effects by the compiler binaries and
+exact source bytes. Effects prepared at either stage use the same frame
+renderer.
 
 To supply precompiled effects, store them at
 `artemis-shaders/ade2/<source-path>.<sha256>.ade2`, where
