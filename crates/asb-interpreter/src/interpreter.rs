@@ -676,6 +676,39 @@ impl Interpreter {
         Ok(())
     }
 
+    /// Send each Luau `print` call to the caller as tab-separated bytes.
+    /// `None` represents a line larger than the supplied byte limit.
+    pub fn set_print_handler(
+        &self,
+        max_bytes: usize,
+        handler: impl Fn(Option<Vec<u8>>) + Send + 'static,
+    ) -> Result<()> {
+        let globals = self.lua.globals();
+        let tostring: mlua::Function = globals.get("tostring")?;
+        let print = self.lua.create_function(move |_, args: mlua::MultiValue| {
+            let mut line = Some(Vec::new());
+            for (index, value) in args.into_iter().enumerate() {
+                let text: mlua::String = tostring.call(value)?;
+                let bytes = text.as_bytes();
+                if let Some(buffer) = &mut line {
+                    let separator = usize::from(index != 0);
+                    if bytes.len().saturating_add(separator) > max_bytes - buffer.len() {
+                        line = None;
+                    } else {
+                        if separator != 0 {
+                            buffer.push(b'\t');
+                        }
+                        buffer.extend_from_slice(&bytes);
+                    }
+                }
+            }
+            handler(line);
+            Ok(())
+        })?;
+        globals.set("print", print)?;
+        Ok(())
+    }
+
     /// Configure deterministic Host time and random state before loading scripts.
     /// Until the first snapshot, calendar and monotonic time both start at zero.
     pub fn enable_host_services(&mut self, random_seed: u64) -> Result<()> {

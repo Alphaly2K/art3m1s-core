@@ -3,6 +3,7 @@
 
 mod audio;
 mod control;
+mod diagnostic;
 mod http;
 mod lifecycle;
 mod persistence;
@@ -277,6 +278,7 @@ enum Completion {
 pub struct ScriptIoSession {
     interpreter: Interpreter,
     transport: SessionTransport,
+    script_print: diagnostic::ScriptPrint,
     task: Option<IoTask>,
     operation: Option<Operation>,
     identity: Option<RequestIdentity>,
@@ -341,9 +343,12 @@ impl ScriptIoSession {
         let mut interpreter = Interpreter::try_new(config)?;
         interpreter.enable_host_services(0)?;
         io_continuation::install(&interpreter)?;
+        let script_print = diagnostic::ScriptPrint::default();
+        script_print.install(&interpreter, limits)?;
         Ok(Self {
             interpreter,
             transport,
+            script_print,
             task: None,
             operation: None,
             identity: None,
@@ -584,6 +589,7 @@ impl ScriptIoSession {
         interpreter.enable_host_services(self.random_seed)?;
         interpreter.set_host_time(self.host_time)?;
         interpreter.enable_resumable_io()?;
+        self.script_print.install(&interpreter, self.limits())?;
         interpreter.set_callback(|_| CallbackResult::Pause);
         Ok(interpreter)
     }
@@ -877,6 +883,7 @@ impl ScriptIoSession {
             return Ok(ScriptIoProgress::Event);
         }
         let result = self.step_inner();
+        self.script_print.flush(&mut self.transport);
         if result.is_err() {
             self.faulted = true;
         }

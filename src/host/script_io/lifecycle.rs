@@ -92,7 +92,9 @@ impl ScriptIoSession {
         }
 
         // Run the save continuation without consuming device input or advancing a frame.
-        let progress = self.step_inner().inspect_err(|_| self.mark_faulted())?;
+        let progress = self.step_inner();
+        self.script_print.flush(&mut self.transport);
+        let progress = progress.inspect_err(|_| self.mark_faulted())?;
         if progress != ScriptIoProgress::SaveReady {
             return Ok(progress);
         }

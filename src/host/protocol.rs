@@ -499,7 +499,7 @@ impl SessionTransport {
                 bytes
             }
             _ => {
-                self.dropped_diagnostics = self.dropped_diagnostics.saturating_add(1);
+                self.count_dropped_diagnostics(1);
                 return Ok(DiagnosticOutcome::Dropped);
             }
         };
@@ -514,6 +514,10 @@ impl SessionTransport {
         });
         self.last_sequence = sequence;
         Ok(DiagnosticOutcome::Queued)
+    }
+
+    pub(super) fn count_dropped_diagnostics(&mut self, count: u64) {
+        self.dropped_diagnostics = self.dropped_diagnostics.saturating_add(count);
     }
 
     /// Control records have delivery priority. Neither a short buffer nor a

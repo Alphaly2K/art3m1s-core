@@ -19,7 +19,9 @@ _Static_assert(offsetof(ArtMessage, session_epoch) == 16, "message epoch");
 _Static_assert(offsetof(ArtStepInfo, monotonic_ns) == 16, "step clock");
 
 static const char ini[] = "[WINDOWS]\nWIDTH=640\nHEIGHT=480\nBOOT=boot.iet\nSAVEPATH=C:\\Profiles\\Game\n";
-static const char boot[] = "*top\n[debug mode=1 level=1]\n[debugprint data=boot]\n"
+static const char boot[] = "*top\n[lua]\n"
+                           "print('boot', setmetatable({}, {__tostring = function() return 'ready' end}), string.char(255))\n"
+                           "[/lua]\n[debug mode=1 level=1]\n[debugprint data=boot]\n"
                            "[lyc id=1 width=2 height=1 color=ff112233]\n"
                            "[takess]\n[savess file=thumb]\n"
                            "[httpget url=https://example.invalid/status varname_code=t.http]\n"
@@ -208,7 +210,7 @@ static void service_io(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt,
     }
 }
 
-enum { SAVED_GLOBALS = 32, SAVED_SYSTEM = 64, CLOSED = 128 };
+enum { SAVED_GLOBALS = 32, SAVED_SYSTEM = 64, CLOSED = 128, SCRIPT_PRINTED = 256 };
 
 static unsigned pump(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt, uint64_t frame_id) {
     ArtStepInfo step = { .struct_size = sizeof(step), .host_frame_id = frame_id,
@@ -273,6 +275,13 @@ static unsigned pump(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt, uint64_t f
             } else if (domain == ART_DOMAIN_RUNTIME && kind == ART_RUNTIME_CLOSED_EVENT) {
                 assert(!strcmp(metadata, "{\"save_status\":\"written\"}"));
                 observed |= CLOSED;
+            } else if (domain == ART_DOMAIN_DIAGNOSTICS && kind == 2) {
+                static const char line[] = "boot\tready\t\xff";
+                assert(request == 0 && !strcmp(metadata, "{}"));
+                assert(size - 64 - meta_size == sizeof(line) - 1);
+                assert(memcmp(record + 64 + meta_size, line, sizeof(line) - 1) == 0);
+                assert(!(observed & SCRIPT_PRINTED));
+                observed |= SCRIPT_PRINTED;
             }
             offset += size;
         }
@@ -458,7 +467,7 @@ int main(int argc, char **argv) {
     ArtPollResult short_poll = { .struct_size = sizeof(short_poll) };
     assert(api->poll_events(rt, NULL, 0, &short_poll) == ART_E_BUFFER);
     assert(short_poll.required_next_bytes > 0 && short_poll.record_count == 0);
-    assert(pump(api, rt, 1) == (1 | 4 | 8 | 16));
+    assert(pump(api, rt, 1) == (1 | 4 | 8 | 16 | SCRIPT_PRINTED));
 
     struct { ArtRuntimeState prefix; uint64_t tail; } state = {
         .prefix.struct_size = sizeof(state), .tail = UINT64_C(0x123456789abcdef0)
@@ -509,7 +518,7 @@ int main(int argc, char **argv) {
     assert(first.record_count == 1 && first.written_bytes == 64 + sizeof(save_path) - 1);
     assert(little(opened + 8, 4) == ART_RUNTIME_SESSION_CHANGED);
     assert(!memcmp(opened + 64, save_path, sizeof(save_path) - 1));
-    assert(pump(api, rt, 1) == (1 | 4 | 8));
+    assert(pump(api, rt, 1) == (1 | 4 | 8 | SCRIPT_PRINTED));
     ArtMessage shutdown = message(ART_DOMAIN_RUNTIME, ART_RUNTIME_SHUTDOWN, little(opened + 24, 8), 0, "{}");
     assert(api->submit(rt, &shutdown, 1) == ART_OK);
     assert(api->get_state(rt, &state.prefix) == ART_OK && state.prefix.state == ART_RUNTIME_CLOSING);
