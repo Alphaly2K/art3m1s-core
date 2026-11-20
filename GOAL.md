@@ -1174,8 +1174,16 @@ legacy 的 Rust 资源 API 收口到 `HostResources` 实例。进程默认资源
 legacy 单元测试 449 项通过、2 项跳过，资源注入 3 项、全 feature 编译、两套 Mach-O 导出、
 独立 Core 依赖检查和 C/C++ ABI 冒烟通过。
 
-后续继续审计聚合 crate 的 Rust 公共接口与调用方，保持 legacy 与独立 v2 产物分离。生产默认
-切换仍待原版游戏的着色器、媒体及存档对照，以及 Windows MSVC 原生验证。
+主分支 Core `b62ada8` 的原生 CI 整组通过（运行 `44809795550`）。Windows MSVC、macOS
+和 Linux 均通过独立 v2 ABI、Core 测试及 C# 和 Dart Host 冒烟。Linux legacy 构建、导出表
+和回归也通过。
+
+legacy 的 Rust 事件接口收口到 `HostEvents` 实例。v1 兼容层按操作取得当前事件队列。性能采样
+由运行时内部管理，原有启停和 JSON 快照接口保持兼容。生产默认切换仍待原版场景的着色器、
+媒体及存档对照。
+
+Host 在启动阶段按索引和预算预热 HLSL 与 GLSL，运行中发现的其余源码按需查缓存或编译。
+两种语言均从同一 ARFP 帧进入 Host 渲染器，Host 按语言选择执行后端。
 
 ## 后续阶段
 

@@ -316,51 +316,13 @@ fn deactivate(events: &HostEvents) {
     }
 }
 
-fn active_events() -> Option<HostEvents> {
+pub(crate) fn legacy_active_events() -> Option<HostEvents> {
     let mut active = ACTIVE_HOST_EVENTS.lock().unwrap();
     let events = active.as_ref().and_then(Weak::upgrade);
     if events.is_none() {
         *active = None;
     }
     events.map(|inner| HostEvents { inner })
-}
-
-pub fn enabled() -> bool {
-    active_events().is_some_and(|events| events.enabled())
-}
-
-pub fn push_log(level: &str, message: &str) {
-    if let Some(events) = active_events() {
-        events.push_log(level, message);
-    }
-}
-
-pub fn push_media(kind: &str, payload_json: &str) {
-    if let Some(events) = active_events() {
-        events.push_media(kind, payload_json);
-    }
-}
-
-pub fn push_ui(kind: &str, payload_json: &str) {
-    if let Some(events) = active_events() {
-        events.push_ui(kind, payload_json);
-    }
-}
-
-pub fn query_font_list(monospace: bool, vertical: bool) -> Option<Vec<String>> {
-    active_events().and_then(|events| events.query_font_list(monospace, vertical))
-}
-
-pub fn query_window_state() -> Option<(bool, bool)> {
-    active_events().and_then(|events| events.query_window_state())
-}
-
-pub fn text_replacement(source: &str) -> Option<String> {
-    active_events().and_then(|events| events.text_replacement(source))
-}
-
-pub fn text_translation_enabled() -> bool {
-    active_events().is_some_and(|events| events.text_translation_enabled())
 }
 
 fn parse_font_list(bytes: &[u8]) -> Vec<String> {
@@ -616,11 +578,11 @@ mod tests {
     fn enabled_handle_routes_process_events_without_sharing_queue() {
         let _guard = TEST_LOCK.lock().unwrap();
         let first = reset();
-        push_log("I", "first");
+        crate::ffi::log("I", "first");
         assert_eq!(first.next_event_bytes(), EVENT_HEADER_SIZE + "first".len());
 
         let second = reset();
-        push_log("I", "second");
+        crate::ffi::log("I", "second");
         assert_eq!(first.next_event_bytes(), EVENT_HEADER_SIZE + "first".len());
         assert_eq!(
             second.next_event_bytes(),
@@ -628,7 +590,7 @@ mod tests {
         );
 
         second.set_enabled(false);
-        push_log("I", "dropped");
+        crate::ffi::log("I", "dropped");
         assert_eq!(
             second.next_event_bytes(),
             EVENT_HEADER_SIZE + "second".len()

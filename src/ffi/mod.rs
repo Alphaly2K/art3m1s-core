@@ -225,22 +225,24 @@ pub fn log(level: &str, msg: &str) {
     if log_suppressed_by_filter(level, msg) {
         return;
     }
-    if crate::host_events::enabled() {
-        crate::host_events::push_log(level, msg);
+    if let Some(events) = crate::host_events::legacy_active_events() {
+        events.push_log(level, msg);
     }
 }
 
 // ── Media / UI command events ──────────────────────────────────
 
 fn emit_json_command(event_kind: u32, kind: &str, payload: serde_json::Value) {
-    let payload = payload.to_string();
-    if crate::host_events::enabled() {
+    if let Some(events) =
+        crate::host_events::legacy_active_events().filter(|events| events.enabled())
+    {
+        let payload = payload.to_string();
         match event_kind {
             crate::host_events::EVENT_KIND_MEDIA => {
-                crate::host_events::push_media(kind, &payload);
+                events.push_media(kind, &payload);
             }
             crate::host_events::EVENT_KIND_UI => {
-                crate::host_events::push_ui(kind, &payload);
+                events.push_ui(kind, &payload);
             }
             _ => {}
         }
@@ -291,10 +293,13 @@ pub enum TextInjectResult {
 
 /// 把一段文本交给宿主注入回调；Pending 只表示排队，不阻塞 runtime。
 pub fn request_text_injection(text: &str) -> TextInjectResult {
-    if let Some(replaced) = crate::host_events::text_replacement(text) {
+    let Some(events) = crate::host_events::legacy_active_events() else {
+        return TextInjectResult::Unchanged;
+    };
+    if let Some(replaced) = events.text_replacement(text) {
         return TextInjectResult::Replaced(replaced);
     }
-    if crate::host_events::text_translation_enabled() {
+    if events.text_translation_enabled() {
         TextInjectResult::Pending
     } else {
         TextInjectResult::Unchanged
@@ -395,12 +400,16 @@ pub fn write_clipboard(text: &str) {
 
 /// 查询可用字体族列表。Host 未推送时返回空列表。
 pub fn query_font_list(monospace: bool, vertical: bool) -> Vec<String> {
-    crate::host_events::query_font_list(monospace, vertical).unwrap_or_default()
+    crate::host_events::legacy_active_events()
+        .and_then(|events| events.query_font_list(monospace, vertical))
+        .unwrap_or_default()
 }
 
 /// 查询窗口状态：`(全屏, 最小化)`。Host 未推送时返回 `(false, false)`。
 pub fn query_window_state() -> (bool, bool) {
-    crate::host_events::query_window_state().unwrap_or((false, false))
+    crate::host_events::legacy_active_events()
+        .and_then(|events| events.query_window_state())
+        .unwrap_or((false, false))
 }
 
 // ── Query helpers ────────────────────────────────────────────────

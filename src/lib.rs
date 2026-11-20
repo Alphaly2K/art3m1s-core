@@ -56,7 +56,7 @@ pub use project_config::{CoreError, ProjectConfig, Result};
 ))]
 mod platform;
 #[cfg(feature = "legacy")]
-pub mod profiler;
+mod profiler;
 #[cfg(feature = "legacy")]
 pub mod runtime;
 mod script_handler;

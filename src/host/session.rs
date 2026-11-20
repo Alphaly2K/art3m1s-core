@@ -164,7 +164,7 @@ impl HostSession {
 
     pub(crate) fn enabled(&self) -> bool {
         if self.legacy {
-            crate::host_events::enabled()
+            crate::host_events::legacy_active_events().is_some_and(|events| events.enabled())
         } else {
             self.events().enabled()
         }

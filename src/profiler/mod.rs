@@ -102,86 +102,86 @@ impl FrameProfile {
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
-pub struct ProfileTimings {
-    pub ffi_call_ms: f64,
-    pub logic_ms: f64,
-    pub input_ms: f64,
-    pub interpreter_ms: f64,
-    pub events_ms: f64,
-    pub event_runtime_ms: f64,
-    pub event_media_ms: f64,
-    pub event_text_ms: f64,
-    pub event_transition_ms: f64,
-    pub event_compositor_ms: f64,
-    pub event_layer_sync_ms: f64,
-    pub event_drain_ms: f64,
-    pub event_log_ms: f64,
-    pub event_post_ms: f64,
-    pub emote_ms: f64,
-    pub emote_worker_eval_ms: f64,
-    pub emote_scene_publish_ms: f64,
-    pub emote_draw_build_ms: f64,
-    pub emote_mesh_build_ms: f64,
-    pub audio_media_ms: f64,
-    pub compositor_ms: f64,
-    pub text_ms: f64,
-    pub frame_build_ms: f64,
-    pub damage_compute_ms: f64,
-    pub transition_capture_ms: f64,
-    pub texture_upload_ms: f64,
-    pub video_upload_ms: f64,
-    pub gpu_submit_ms: f64,
-    pub present_ms: f64,
-    pub readback_ms: f64,
-    pub host_ffi_ms: f64,
-    pub upscale_cpu_encode_ms: f64,
-    pub upscale_gpu_ms: f64,
+struct ProfileTimings {
+    ffi_call_ms: f64,
+    logic_ms: f64,
+    input_ms: f64,
+    interpreter_ms: f64,
+    events_ms: f64,
+    event_runtime_ms: f64,
+    event_media_ms: f64,
+    event_text_ms: f64,
+    event_transition_ms: f64,
+    event_compositor_ms: f64,
+    event_layer_sync_ms: f64,
+    event_drain_ms: f64,
+    event_log_ms: f64,
+    event_post_ms: f64,
+    emote_ms: f64,
+    emote_worker_eval_ms: f64,
+    emote_scene_publish_ms: f64,
+    emote_draw_build_ms: f64,
+    emote_mesh_build_ms: f64,
+    audio_media_ms: f64,
+    compositor_ms: f64,
+    text_ms: f64,
+    frame_build_ms: f64,
+    damage_compute_ms: f64,
+    transition_capture_ms: f64,
+    texture_upload_ms: f64,
+    video_upload_ms: f64,
+    gpu_submit_ms: f64,
+    present_ms: f64,
+    readback_ms: f64,
+    host_ffi_ms: f64,
+    upscale_cpu_encode_ms: f64,
+    upscale_gpu_ms: f64,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
-pub struct ProfilerSnapshot {
-    pub enabled: bool,
+struct ProfilerSnapshot {
+    enabled: bool,
     /// Kept for older hosts; equivalent to `session_ms`.
-    pub window_ms: u64,
-    pub session_ms: u64,
-    pub sample_window_ms: u64,
-    pub sample_count: u64,
-    pub tick_hz: f64,
-    pub rendered_fps: f64,
-    pub current: ProfileTimings,
-    pub average: ProfileTimings,
-    pub one_percent: ProfileTimings,
+    window_ms: u64,
+    session_ms: u64,
+    sample_window_ms: u64,
+    sample_count: u64,
+    tick_hz: f64,
+    rendered_fps: f64,
+    current: ProfileTimings,
+    average: ProfileTimings,
+    one_percent: ProfileTimings,
     /// Compatibility alias for old hosts. It now contains `one_percent`.
-    pub maximum: ProfileTimings,
-    pub damage_percent: f64,
-    pub current_rendered: bool,
-    pub draw_calls: u64,
-    pub vertices: u64,
-    pub texture_binds: u64,
-    pub draw_list_commands: u64,
-    pub rendered_frames: u64,
-    pub skipped_frames: u64,
-    pub host_ffi_calls_per_second: f64,
-    pub host_ffi_mib_per_second: f64,
-    pub uploaded_mib_per_second: f64,
-    pub video_uploaded_mib_per_second: f64,
-    pub video_uploaded_frames_per_second: f64,
-    pub dynamic_mesh_uploaded_mib_per_second: f64,
-    pub texture_count: u64,
-    pub texture_gpu_mib: f64,
-    pub texture_cpu_mib: f64,
-    pub emote_layers: u64,
-    pub emote_source_mib: f64,
-    pub emote_worker_updates_per_second: f64,
-    pub emote_worker_input_frames_per_second: f64,
-    pub emote_worker_dropped_scenes_per_second: f64,
-    pub emote_sprites: u64,
-    pub emote_mesh_sprites: u64,
-    pub emote_mesh_vertices: u64,
-    pub dropped_samples: u64,
-    pub render_resolution: String,
-    pub output_resolution: String,
-    pub upscale_enabled: bool,
+    maximum: ProfileTimings,
+    damage_percent: f64,
+    current_rendered: bool,
+    draw_calls: u64,
+    vertices: u64,
+    texture_binds: u64,
+    draw_list_commands: u64,
+    rendered_frames: u64,
+    skipped_frames: u64,
+    host_ffi_calls_per_second: f64,
+    host_ffi_mib_per_second: f64,
+    uploaded_mib_per_second: f64,
+    video_uploaded_mib_per_second: f64,
+    video_uploaded_frames_per_second: f64,
+    dynamic_mesh_uploaded_mib_per_second: f64,
+    texture_count: u64,
+    texture_gpu_mib: f64,
+    texture_cpu_mib: f64,
+    emote_layers: u64,
+    emote_source_mib: f64,
+    emote_worker_updates_per_second: f64,
+    emote_worker_input_frames_per_second: f64,
+    emote_worker_dropped_scenes_per_second: f64,
+    emote_sprites: u64,
+    emote_mesh_sprites: u64,
+    emote_mesh_vertices: u64,
+    dropped_samples: u64,
+    render_resolution: String,
+    output_resolution: String,
+    upscale_enabled: bool,
 }
 
 enum Message {
@@ -189,7 +189,7 @@ enum Message {
     Reset(bool),
 }
 
-pub struct RuntimeProfiler {
+pub(crate) struct RuntimeProfiler {
     enabled: Arc<AtomicBool>,
     dropped: Arc<AtomicU64>,
     snapshot: Arc<RwLock<ProfilerSnapshot>>,
@@ -198,7 +198,7 @@ pub struct RuntimeProfiler {
 }
 
 impl RuntimeProfiler {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let enabled = Arc::new(AtomicBool::new(false));
         let dropped = Arc::new(AtomicU64::new(0));
         let snapshot = Arc::new(RwLock::new(ProfilerSnapshot::default()));
@@ -218,7 +218,7 @@ impl RuntimeProfiler {
         }
     }
 
-    pub fn set_enabled(&self, enabled: bool) {
+    pub(crate) fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::Relaxed);
         self.dropped.store(0, Ordering::Relaxed);
         crate::ffi::set_profile_io_enabled(enabled);
@@ -252,7 +252,7 @@ impl RuntimeProfiler {
         }
     }
 
-    pub fn snapshot_json(&self) -> String {
+    pub(crate) fn snapshot_json(&self) -> String {
         let snapshot = self
             .snapshot
             .read()
