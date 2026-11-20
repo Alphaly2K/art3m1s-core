@@ -80,6 +80,7 @@ private final class Registry: NSObject, FlutterTextureRegistry {
         let messenger = Messenger()
         let registry = Registry()
         let angle = paths.count == 3 ? paths[2] : nil
+        try verifyHeadless(corePath: paths[0], missingMetalPath: paths[1] + "/missing")
         let host = ArtemisFlutterHost(registry: registry, corePath: paths[0], metalPath: paths[1],
                                       angleDirectory: angle)
         host.register(messenger: messenger)
@@ -183,6 +184,24 @@ private final class Registry: NSObject, FlutterTextureRegistry {
             try exerciseUnpolledVideoEnd(messenger, registry: registry, open: open, path: clip)
         }
         print("Artemis Flutter channel smoke passed")
+    }
+
+    @MainActor private static func verifyHeadless(corePath: String, missingMetalPath: String) throws {
+        let messenger = Messenger()
+        let registry = Registry()
+        let host = ArtemisFlutterHost(registry: registry, corePath: corePath, metalPath: missingMetalPath)
+        host.register(messenger: messenger)
+        defer { host.close() }
+        let ini = Data("[WINDOWS]\nWIDTH=4\nHEIGHT=4\nBOOT=boot.iet\n".utf8)
+        guard let state = try messenger.call("open", [
+            "ini": FlutterStandardTypedData(bytes: ini), "platform": "windows",
+            "hostCaps": art_swift_io_cap(), "renderer": "none",
+        ]) as? [String: Any], let session = state["session"] as? String else {
+            throw Failure(detail: "Headless session required the renderer library")
+        }
+        let rejected = try messenger.call("surface", ["width": 4, "height": 4], session: session)
+        try expect(rejected is FlutterError && registry.textures.isEmpty, "Headless session registered a texture")
+        _ = try messenger.call("close", session: session)
     }
 
     @MainActor private static func exerciseBackgroundAutosave(_ messenger: Messenger,

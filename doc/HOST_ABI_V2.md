@@ -727,6 +727,8 @@ macOS Flutter Runner 可将 [ArtemisFlutterHost](../tools/host-bindings/swift/Ar
 原生端分配，事件的请求 ID 和 epoch 以十进制字符串传输，metadata 和 blob 以字节传输。应用
 决定何时推进和处理服务，原生端只在成功呈现时通知纹理消费者。应用退出玩家视图时调用
 `session.close()`，Runner 离开时调用 `host.close()` 注销通道并释放剩余会话。
+标题探测使用 `ArtemisFlutterSession.open(headless: true)` 与 `ArtemisFileService.assetsOnly`。
+此模式只需 Core 库。Host 按探测预算推进会话，在收到 `ui.caption` 后关闭会话。
 Runner 可提供 `angleDirectory`，Dart 在 `ArtemisFlutterSession.open(angle: true)` 时选择
 ANGLE/Metal。可选的 `dxvkDirectory` 允许会话使用 Host 提供的 ADE2 程序，`mixedShaders`
 允许同一帧使用 HLSL 与 GLSL。应用在创建会话时协商可用的后端和着色器能力，预热列表可以为空。
