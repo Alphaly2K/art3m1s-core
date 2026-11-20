@@ -73,7 +73,6 @@ version = "0.2.0"
 dependencies = [
  "asb-decrypt",
  "encoding_rs",
- "libc",
  "mlua",
  "serde",
  "serde_json",

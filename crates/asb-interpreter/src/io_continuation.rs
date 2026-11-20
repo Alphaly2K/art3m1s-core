@@ -314,7 +314,7 @@ pub fn install(interpreter: &Interpreter) -> Result<()> {
                         };
                         let text = match time {
                             Some(time) => crate::tags::var_handler::format_update_time(
-                                &crate::luau_polyfill::utc_components_from_seconds(
+                                &crate::host_time::utc_components_from_seconds(
                                     query_variables
                                         .lock()
                                         .unwrap()

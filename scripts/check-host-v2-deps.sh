@@ -30,6 +30,8 @@ cargo tree --locked --all-features --manifest-path crates/artemis-core/Cargo.tom
         reject("Standalone Core must load E-Mote models from Host-provided bytes")
       if (package == "asb-interpreter" && features ~ /,console-diagnostics,/)
         reject("Standalone Core must not enable interpreter console diagnostics")
+      if (package == "asb-interpreter" && features ~ /,system-clock,/)
+        reject("Standalone Core must use Host time and seed")
       if (package == "mlua" || package == "mlua-sys") {
         if (features !~ /,luau,/ || features ~ /,(lua5[1-5]|luajit|luajit52|module),/)
           reject("Standalone Core must use Luau in " package)

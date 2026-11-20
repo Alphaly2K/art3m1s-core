@@ -1,3 +1,4 @@
+use crate::host_time::{DateTimeParts, fallback_unix_time};
 use crate::lua_engine::EngineContext;
 use mlua::{Lua, ObjectLike, UserData, UserDataMethods};
 use std::sync::{Arc, Mutex};
@@ -88,16 +89,20 @@ fn install_os_polyfills(
     environment: crate::host_time::SharedEnvironment,
 ) -> mlua::Result<()> {
     let os_lib: mlua::Table = lua.globals().get("os")?;
+    #[cfg(feature = "system-clock")]
     let clock: mlua::Function = os_lib.get("clock")?;
     let clock_environment = environment.clone();
     os_lib.set(
         "clock",
         lua.create_function(move |_, ()| {
             let time = clock_environment.lock().unwrap().time;
-            match time {
-                Some(time) => Ok(time.monotonic_ms as f64 / 1000.0),
-                None => clock.call::<f64>(()),
+            if let Some(time) = time {
+                return Ok(time.monotonic_ms as f64 / 1000.0);
             }
+            #[cfg(feature = "system-clock")]
+            return clock.call::<f64>(());
+            #[cfg(not(feature = "system-clock"))]
+            Ok(0.0)
         })?,
     )?;
 
@@ -121,7 +126,7 @@ fn install_os_polyfills(
 
             Ok(time
                 .map(|time| time.utc_unix_ms.div_euclid(1000))
-                .unwrap_or_else(current_unix_seconds))
+                .unwrap_or_else(|| fallback_unix_time().as_secs() as i64))
         })?,
     )?;
 
@@ -134,16 +139,16 @@ fn install_os_polyfills(
             let format = if use_utc { &format[1..] } else { &format };
             let seconds = time.unwrap_or_else(|| {
                 host.map(|time| time.utc_unix_ms.div_euclid(1000))
-                    .unwrap_or_else(current_unix_seconds)
+                    .unwrap_or_else(|| fallback_unix_time().as_secs() as i64)
             });
             let parts = if use_utc {
-                utc_datetime_from_unix(seconds)
+                DateTimeParts::from_unix(seconds)
             } else if let Some(host) = host {
-                utc_datetime_from_unix(
+                DateTimeParts::from_unix(
                     seconds.saturating_add(i64::from(host.utc_offset_minutes) * 60),
                 )
             } else {
-                local_datetime_from_unix(seconds).unwrap_or_else(|| utc_datetime_from_unix(seconds))
+                DateTimeParts::from_local_unix(seconds)
             };
 
             if format == "*t" {
@@ -527,66 +532,6 @@ impl UserData for BufferedFile {
     }
 }
 
-fn current_unix_seconds() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-#[derive(Clone, Copy)]
-struct DateTimeParts {
-    year: i64,
-    month: i64,
-    day: i64,
-    hour: i64,
-    minute: i64,
-    second: i64,
-}
-
-#[cfg(unix)]
-fn local_datetime_from_unix(seconds: i64) -> Option<DateTimeParts> {
-    let raw = seconds as libc::time_t;
-    let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
-    let ptr = unsafe { libc::localtime_r(&raw, tm.as_mut_ptr()) };
-    if ptr.is_null() {
-        return None;
-    }
-    let tm = unsafe { tm.assume_init() };
-    Some(DateTimeParts {
-        year: i64::from(tm.tm_year) + 1900,
-        month: i64::from(tm.tm_mon) + 1,
-        day: i64::from(tm.tm_mday),
-        hour: i64::from(tm.tm_hour),
-        minute: i64::from(tm.tm_min),
-        second: i64::from(tm.tm_sec),
-    })
-}
-
-#[cfg(not(unix))]
-fn local_datetime_from_unix(_seconds: i64) -> Option<DateTimeParts> {
-    None
-}
-
-fn utc_datetime_from_unix(seconds: i64) -> DateTimeParts {
-    let days = seconds.div_euclid(86_400);
-    let secs_of_day = seconds.rem_euclid(86_400);
-    let (year, month, day) = civil_from_days(days);
-    DateTimeParts {
-        year,
-        month,
-        day,
-        hour: secs_of_day / 3600,
-        minute: secs_of_day % 3600 / 60,
-        second: secs_of_day % 60,
-    }
-}
-
-pub(crate) fn utc_components_from_seconds(seconds: i64) -> [i64; 6] {
-    let p = utc_datetime_from_unix(seconds);
-    [p.year, p.month, p.day, p.hour, p.minute, p.second]
-}
-
 fn unix_from_utc_parts(year: i64, month: i64, day: i64, hour: i64, min: i64, sec: i64) -> i64 {
     let days = days_from_civil(year, month, day);
     days * 86_400 + hour * 3600 + min * 60 + sec
@@ -621,20 +566,6 @@ fn format_date(format: &str, parts: &DateTimeParts) -> String {
         }
     }
     out
-}
-
-fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
-    let z = days_since_epoch + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = mp + if mp < 10 { 3 } else { -9 };
-    let year = y + if month <= 2 { 1 } else { 0 };
-    (year, month, day)
 }
 
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {

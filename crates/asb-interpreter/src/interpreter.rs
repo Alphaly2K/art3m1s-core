@@ -456,14 +456,6 @@ fn parse_canonical_integer_key(key: &str) -> Option<i64> {
     }
 }
 
-/// 当前时间（毫秒），与 `e:now()` 同源，供 getScriptWaitReason 的 time 键使用。
-fn now_millis_i64() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
-
 fn same_call_stack(left: &[CallFrame], right: &[CallFrame]) -> bool {
     left.len() == right.len()
         && left.iter().zip(right).all(|(actual, expected)| {
@@ -2055,9 +2047,8 @@ impl Interpreter {
                         environment
                             .lock()
                             .unwrap()
-                            .time
-                            .map(|time| time.monotonic_ms.min(i64::MAX as u64) as i64)
-                            .unwrap_or_else(now_millis_i64)
+                            .monotonic_ms()
+                            .min(i64::MAX as u64) as i64
                     });
                 let deadline = now.saturating_add((*milliseconds).min(i64::MAX as u64) as i64);
                 info.insert("time".to_string(), deadline.to_string());
@@ -5226,10 +5217,11 @@ mod tests {
             .load("return __engine:getScriptWaitReason().time")
             .eval()
             .unwrap();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+        let now: i64 = interpreter
+            .lua()
+            .load("return __engine:now()")
+            .eval()
+            .unwrap();
         assert!(
             (time - now).abs() < 10_000,
             "time 应是 now+500ms 附近的时间戳: time={time} now={now}"

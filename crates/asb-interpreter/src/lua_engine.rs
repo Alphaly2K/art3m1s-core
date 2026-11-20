@@ -788,10 +788,7 @@ impl UserData for EngineApi {
         // e:now()
         methods.add_method("now", |_lua, this, _: ()| {
             let environment = this.ctx.lock().unwrap().environment.clone();
-            let time = environment.lock().unwrap().time;
-            Ok(time
-                .map(|time| time.monotonic_ms)
-                .unwrap_or_else(now_millis))
+            Ok(environment.lock().unwrap().monotonic_ms())
         });
         methods.add_method("getFrameNumber", |_lua, this, _: ()| {
             Ok(this.ctx.lock().unwrap().frame_number)
@@ -1423,14 +1420,6 @@ impl UserData for EngineApi {
             }))
         });
     }
-}
-
-/// 当前时间（毫秒）
-fn now_millis() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 /// 把 surface 键参数转成字符串。boot 里 bind/unbindSurface 传入的多为路径字符串，

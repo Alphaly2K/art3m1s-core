@@ -54,6 +54,7 @@ legacy = [
     "dep:ctt-astcenc",
     "art3m1s-emote/filesystem",
     "asb-interpreter/console-diagnostics",
+    "asb-interpreter/system-clock",
 ]
 gl-backend = ["legacy", "art3m1s-render/gl"]
 metal-backend = ["legacy", "runtime-shader", "art3m1s-render/metal"]
