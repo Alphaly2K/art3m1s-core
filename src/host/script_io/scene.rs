@@ -357,18 +357,19 @@ pub(super) enum AssetProgress {
 
 pub(super) struct TextureRead {
     file: String,
-    try_exact: bool,
+    exact_path: Option<String>,
 }
 
 impl TextureRead {
-    pub(super) fn start(file: String) -> (Self, IoRequest) {
+    fn start(file: String, paths: &crate::magic_path::MagicPathTable) -> (Self, IoRequest) {
+        let path = crate::magic_path::resolve_path(paths, &file);
         let request = IoRequest::Read {
-            path: format!("{file}.png"),
+            path: format!("{path}.png"),
         };
         (
             Self {
                 file,
-                try_exact: true,
+                exact_path: Some(path),
             },
             request,
         )
@@ -637,7 +638,7 @@ impl SceneIo {
             if self.scene.lock().unwrap().textures.contains_key(&key) {
                 return None;
             }
-            let (read, request) = TextureRead::start(key);
+            let (read, request) = self.start_texture_read(key);
             self.pending = Some(PendingAsset {
                 event: event.clone(),
                 read,
@@ -648,7 +649,7 @@ impl SceneIo {
         let scene = self.scene.lock().unwrap();
         let mut files = scene.missing_assets(event);
         let file = files.next()?;
-        let (read, request) = TextureRead::start(file.to_owned());
+        let (read, request) = TextureRead::start(file.to_owned(), &scene.magic_paths);
         let mut remaining = VecDeque::new();
         for candidate in files {
             if candidate != file && !remaining.iter().any(|queued| queued == candidate) {
@@ -677,7 +678,7 @@ impl SceneIo {
             return AssetProgress::More(request);
         }
         if !cancelled && let Some(file) = pending.remaining.pop_front() {
-            let (read, request) = TextureRead::start(file);
+            let (read, request) = self.start_texture_read(file);
             pending.read = read;
             self.pending = Some(pending);
             return AssetProgress::More(request);
@@ -687,6 +688,11 @@ impl SceneIo {
         }
         self.scene.lock().unwrap().apply(&pending.event);
         AssetProgress::Applied
+    }
+
+    pub(super) fn start_texture_read(&self, file: String) -> (TextureRead, IoRequest) {
+        let scene = self.scene.lock().unwrap();
+        TextureRead::start(file, &scene.magic_paths)
     }
 
     pub(super) fn complete_texture(
@@ -702,7 +708,6 @@ impl SceneIo {
             _ => None,
         };
         if image.is_none()
-            && read.try_exact
             && !matches!(
                 response,
                 IoResponse::Failed {
@@ -710,11 +715,9 @@ impl SceneIo {
                     ..
                 }
             )
+            && let Some(path) = read.exact_path.take()
         {
-            read.try_exact = false;
-            return Some(IoRequest::Read {
-                path: read.file.clone(),
-            });
+            return Some(IoRequest::Read { path });
         }
         if scene.textures.len() < MAX_TEXTURES {
             let texture = image.and_then(|image| {

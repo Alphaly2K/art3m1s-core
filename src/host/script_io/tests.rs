@@ -4093,6 +4093,57 @@ fn drive_display_snapshot(session: &mut ScriptIoSession, host: &mut MemoryHost, 
 }
 
 #[test]
+fn magic_path_textures_render_and_restore_in_a_new_session() {
+    let pixels = [32, 64, 128, 255];
+    let mask = [128, 0, 0, 255];
+    let (mut saver, _, mut host) = playback_project(
+        br#"*top
+[lyc id=logo file=:pictures/Logo.png mask=:pictures/Mask]
+[takess]
+[save file=slot]
+[stop]
+[lua]
+__engine:setMagicPath{'pictures', 'art/ui'}
+[/lua]
+"#,
+    );
+    host.asset("art/ui/logo.png", &png_bytes(1, 1, &pixels));
+    host.asset("art/ui/mask.png", &png_bytes(1, 1, &mask));
+    let check = |session: &ScriptIoSession| {
+        let frame = session.frames.latest_snapshot().unwrap();
+        let [sprite] = frame.sprites.as_ref() else {
+            panic!("expected the logo sprite");
+        };
+        assert_eq!(sprite.layer_id, "logo");
+        assert_eq!(frame.texture(sprite.texture).unwrap().rgba(), pixels);
+        assert_eq!(frame.texture(sprite.mask.unwrap()).unwrap().rgba(), mask);
+    };
+    drive_display_snapshot(&mut saver, &mut host, playback_frame(1, 0));
+    check(&saver);
+
+    host.asset(
+        "load.iet",
+        br#"*top
+[load file=slot]
+[stop]
+[lua]
+__engine:setMagicPath{'pictures', 'art/ui'}
+[/lua]
+"#,
+    );
+    let mut loader = session(2, TransportLimits::default(), 4096);
+    loader
+        .open_queued_project(
+            b"[WINDOWS]\nWIDTH=4\nHEIGHT=4\nBOOT=load.iet\n",
+            "windows",
+            None,
+        )
+        .unwrap();
+    drive_display_snapshot(&mut loader, &mut host, playback_frame(1, 0));
+    check(&loader);
+}
+
+#[test]
 fn numbered_load_rebuilds_captured_edits_through_host_assets() {
     let base = [0, 50, 200, 255, 71, 24, 8, 255];
     let overlay = [8, 30, 60, 255];

@@ -1604,7 +1604,7 @@ impl ScriptIoSession {
                     return Ok(ScenarioStep::Request(request));
                 }
                 if let Some(file) = remaining.pop_front() {
-                    return Ok(self.read_saved_scene_texture(load, remaining, file));
+                    return self.read_saved_scene_texture(load, remaining, file);
                 }
                 self.restore_numbered_load(load)
             }
@@ -1811,11 +1811,14 @@ impl ScriptIoSession {
                         return Ok(self.fail_numbered_load(kind, error.to_string()));
                     }
                 };
-            if remaining.iter().any(|file| logical_key(file).is_err()) {
+            if remaining
+                .iter()
+                .any(|file| scene.resolve_media_asset(file).is_err())
+            {
                 return Ok(self.fail_numbered_load(IoFailure::Denied, "invalid saved texture path"));
             }
             if let Some(file) = remaining.pop_front() {
-                return Ok(self.read_saved_scene_texture(load, remaining, file));
+                return self.read_saved_scene_texture(load, remaining, file);
             }
         }
         self.restore_numbered_load(load)
@@ -1826,14 +1829,15 @@ impl ScriptIoSession {
         load: Box<PreparedLoad>,
         remaining: VecDeque<String>,
         file: String,
-    ) -> ScenarioStep {
-        let (pending, request) = scene::TextureRead::start(file);
+    ) -> Result<ScenarioStep, ScriptIoError> {
+        let scene = self.scene.as_ref().ok_or(ProtocolError::State)?;
+        let (pending, request) = scene.start_texture_read(file);
         self.numbered_load = Some(NumberedLoadWork::ReadingScene {
             load,
             remaining,
             pending,
         });
-        ScenarioStep::Request(request)
+        Ok(ScenarioStep::Request(request))
     }
 
     fn restore_numbered_load(
