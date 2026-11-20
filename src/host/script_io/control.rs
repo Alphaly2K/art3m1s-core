@@ -425,7 +425,7 @@ impl ScriptIoSession {
             }
             Some(Event::AvoidConfig { file, windowbutton }) => {
                 self.control.avoid_asset =
-                    file.and_then(|file| self.scene.as_ref()?.resolve_media_asset(&file).ok());
+                    file.and_then(|file| self.scene.as_ref()?.resolve_asset_key(&file).ok());
                 self.control.avoid_windowbutton = windowbutton.clamp(0, 2);
                 if self.control.avoid {
                     self.set_avoid(self.control.avoid_asset.is_some());

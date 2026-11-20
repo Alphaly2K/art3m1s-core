@@ -618,10 +618,10 @@ impl Play<'_> {
         id: u64,
         replaces: Option<u64>,
     ) -> Result<(Value, Playback), ProtocolError> {
-        let key = scene.resolve_media_asset(self.file)?;
+        let key = scene.resolve_asset_key(self.file)?;
         let loop_key = if *channel == Channel::Bgm && self.loop_play {
             ab_loop_file(self.file)
-                .map(|file| scene.resolve_media_asset(&file))
+                .map(|file| scene.resolve_asset_key(&file))
                 .transpose()?
         } else {
             None

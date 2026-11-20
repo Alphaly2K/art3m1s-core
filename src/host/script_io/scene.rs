@@ -401,7 +401,7 @@ impl SceneIo {
     }
 
     pub(super) fn transition_rule(&self, name: &str) -> Option<Arc<FrameTexture>> {
-        let key = self.resolve_media_asset(name).ok()?;
+        let key = self.resolve_asset_key(name).ok()?;
         self.scene.lock().unwrap().textures.get(&key)?.clone()
     }
 
@@ -472,7 +472,7 @@ impl SceneIo {
         }
     }
 
-    pub(super) fn resolve_media_asset(&self, name: &str) -> Result<String, ProtocolError> {
+    pub(super) fn resolve_asset_key(&self, name: &str) -> Result<String, ProtocolError> {
         let scene = self.scene.lock().unwrap();
         logical_key(&crate::magic_path::resolve_path(&scene.magic_paths, name))
     }
@@ -634,7 +634,7 @@ impl SceneIo {
             ..
         } = event
         {
-            let key = self.resolve_media_asset(rule).ok()?;
+            let key = self.resolve_asset_key(rule).ok()?;
             if self.scene.lock().unwrap().textures.contains_key(&key) {
                 return None;
             }

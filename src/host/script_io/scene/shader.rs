@@ -147,7 +147,7 @@ impl SceneIo {
         path: &str,
         transport: &mut SessionTransport,
     ) -> Result<Option<IoRequest>, ProtocolError> {
-        let Ok(path) = self.resolve_media_asset(path) else {
+        let Ok(path) = self.resolve_asset_key(path) else {
             return Ok(None);
         };
         if !supports_shader_asset(self.scene.lock().unwrap().shader_caps, &path) {

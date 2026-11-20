@@ -152,7 +152,7 @@ impl ScriptIoSession {
                 if replaces.is_none() && self.video.tracks.len() >= MAX_TRACKS {
                     return Err(ProtocolError::Limit);
                 }
-                let key = scene.resolve_media_asset(file)?;
+                let key = scene.resolve_asset_key(file)?;
                 emit(
                     &mut self.transport,
                     json!({

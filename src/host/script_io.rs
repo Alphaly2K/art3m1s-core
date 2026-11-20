@@ -1813,7 +1813,7 @@ impl ScriptIoSession {
                 };
             if remaining
                 .iter()
-                .any(|file| scene.resolve_media_asset(file).is_err())
+                .any(|file| scene.resolve_asset_key(file).is_err())
             {
                 return Ok(self.fail_numbered_load(IoFailure::Denied, "invalid saved texture path"));
             }
@@ -2039,7 +2039,20 @@ impl ScriptIoSession {
                 return Ok(Some(IoResponse::Transferred));
             }
         };
-        let normalized = logical_key(path)?;
+        let normalized = match &self.scene {
+            Some(scene)
+                if path.starts_with(':')
+                    && matches!(
+                        request,
+                        IoRequest::Read { .. }
+                            | IoRequest::Exists { .. }
+                            | IoRequest::ModifiedTime { .. }
+                    ) =>
+            {
+                scene.resolve_asset_key(path)?
+            }
+            _ => logical_key(path)?,
+        };
         let (namespace, key) = match normalized.strip_prefix(&format!("{}/", self.save_prefix)) {
             Some(key) => ("save", key.to_string()),
             None => ("asset", normalized),

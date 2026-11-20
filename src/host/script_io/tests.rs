@@ -6193,6 +6193,35 @@ end}
 }
 
 #[test]
+fn script_read_only_io_resolves_registered_magic_paths() {
+    let (mut session, _, mut host) = playback_project(
+        br#"*top
+[var system=file_exists name=t.present file=:pack/Entry]
+[calllua function=check]
+[stop]
+[lua]
+__engine:setMagicPath{'pack', 'resources/ui'}
+__engine:setMagicPath{'invalid', '../outside'}
+function check(e)
+    assert(e:var('t.present') == '1')
+    local file = assert(io.open(':pack/Entry', 'rb'))
+    assert(file:read('*a') == 'content')
+    file:close()
+    e:tag{'var', system='file_update_time', name='t.modified', file=':pack/Entry', format='yyyy/MM/dd'}
+    assert(e:var('t.modified') == '1970/01/01')
+    assert(e:file(':invalid/entry') == nil)
+    assert(io.open(':pack/Entry', 'w') == nil)
+end
+[/lua]
+"#,
+    );
+    host.asset("resources/ui/entry", b"content");
+    host.modified_times
+        .insert(("asset".into(), "resources/ui/entry".into()), 0);
+    drive_display_snapshot(&mut session, &mut host, playback_frame(1, 0));
+}
+
+#[test]
 fn scenario_and_lua_file_queries_wait_for_host_data_and_share_legacy_formatting() {
     let mut session = session(1, TransportLimits::default(), 128);
     let mut host = MemoryHost::default();

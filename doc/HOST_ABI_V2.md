@@ -388,8 +388,8 @@ Host 收到通知后停止并清理该事务尚未提交的内容。迟到的分
 完成或失败后继续；Luau 从原调用点返回，成功为 `nil`，失败为 `nil, message, kind`。
 
 namespace 至少区分 asset 与 save；逻辑 key 使用 `/`，拒绝绝对路径、驱动器、NUL 和 `..`。
-Artemis 的大小写兼容查找、归档覆盖顺序、别名和 savepath 需要独立 conformance 样例；
-不能直接照 OS 大小写规则查找，也不能因重构改变已有 patch/sidecar 优先级。
+Core 在发出脚本的只读文件和纹理请求前展开路径别名，并校验展开后的 key。Host 按 Artemis
+的大小写兼容规则和 patch/sidecar 优先级查找资源。
 脚本 savepath 是逻辑子目录，实际游戏隔离根由 Host 决定，禁止两侧重复拼接前缀。
 
 Host 可预提交完整资源元数据索引以同步回答 exists/stat；未缓存的结果表示 Pending，

@@ -262,7 +262,7 @@ impl SceneIo {
     }
 
     fn prepare_font(&self, face: &str) -> Option<(FontRead, IoRequest)> {
-        let key = self.resolve_media_asset(face).ok()?;
+        let key = self.resolve_asset_key(face).ok()?;
         let scene = self.scene.lock().unwrap();
         if scene.text.font_bytes >= MAX_TEXTURE_BYTES
             || scene.text.known_faces.len() >= MAX_FONT_FACES
