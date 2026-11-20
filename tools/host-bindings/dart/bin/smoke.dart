@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:artemis_host_v2/artemis_file_io.dart';
+import 'package:artemis_host_v2/artemis_file_service.dart';
 import 'package:artemis_host_v2/artemis_host.dart';
 
 void require(bool condition, String message) {
@@ -252,6 +253,49 @@ void exerciseHost(
   );
 }
 
+void exerciseMissingStagedWrite(Directory root) {
+  final service = ArtemisFileService(saveRoot: root, readAsset: (_) => null);
+  final saved = File('${root.path}/slot')..writeAsStringSync('previous');
+  ArtemisFileReply? write(int id, int offset, String bytes) => service.handle(
+    ArtemisFileEvent(ART_DOMAIN_IO, ART_IO_WRITE_ATOMIC, 1, true, {
+      'namespace': 'save',
+      'key': 'slot',
+      'transaction_id': '$id',
+      'size': '4',
+      'offset': '$offset',
+    }, utf8.encode(bytes)),
+  );
+  try {
+    service.handle(
+      ArtemisFileEvent(
+        ART_DOMAIN_RUNTIME,
+        ART_RUNTIME_SESSION_CHANGED,
+        1,
+        false,
+        const {},
+        Uint8List(0),
+      ),
+    );
+    require(write(1, 0, 'ab')?.metadata['status'] == 'staged', 'Not staged');
+    final staging = root.listSync().whereType<Directory>().single;
+    staging.listSync().single.deleteSync();
+    require(
+      write(1, 2, 'cd')?.metadata['status'] == 'io_error' &&
+          saved.readAsStringSync() == 'previous' &&
+          !staging.existsSync(),
+      'A write with missing staged bytes must preserve the previous save',
+    );
+    require(
+      write(2, 0, 'ab')?.metadata['status'] == 'staged' &&
+          write(2, 2, 'cd')?.metadata['status'] == 'ok' &&
+          saved.readAsStringSync() == 'abcd',
+      'A fresh transaction could not replace the previous save',
+    );
+  } finally {
+    service.close();
+  }
+}
+
 void exerciseChunkedWrite(
   ArtemisSession session,
   ArtemisSession other,
@@ -453,6 +497,7 @@ void main(List<String> arguments) {
       exerciseHost(other, session, mediaEnabled: false);
       final dir = Directory.systemTemp.createTempSync('artemis-v2-write-');
       try {
+        exerciseMissingStagedWrite(Directory('${dir.path}/recovery'));
         exerciseChunkedWrite(session, other, dir);
       } finally {
         dir.deleteSync(recursive: true);
