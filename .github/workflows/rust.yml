@@ -48,6 +48,23 @@ jobs:
       run: ./scripts/test-host-v2.ps1
     - name: Test standalone Artemis Core
       run: cargo test --locked --tests --manifest-path crates/artemis-core/Cargo.toml --target-dir target/host-v2
+    - name: Verify generated C# ABI bindings
+      if: runner.os == 'macOS'
+      run: python3 tools/host-bindings/csharp/generate.py --check
+    - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+      with:
+        dotnet-version: '8.0.x'
+    - name: Run C# Host smoke on Unix
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        extension=so
+        if [[ "$RUNNER_OS" == macOS ]]; then extension=dylib; fi
+        dotnet run --project tools/host-bindings/csharp/ArtemisSmoke.csproj -- "target/host-v2/debug/libart3m1s_core.$extension"
+    - name: Run C# Host smoke on Windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: dotnet run --project tools/host-bindings/csharp/ArtemisSmoke.csproj -- target/host-v2/debug/art3m1s_core.dll
     - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
       with:
         sdk: '3.13.4'

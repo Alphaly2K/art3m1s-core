@@ -6,4 +6,6 @@
 /crates/*/target/
 /example/docs/
 /tools/host-bindings/dart/.dart_tool/
+/tools/host-bindings/csharp/bin/
+/tools/host-bindings/csharp/obj/
 /tools/host-smoke/target/

@@ -62,6 +62,17 @@ dart run ffigen --config ffigen.yaml
 dart run bin/smoke.dart ../../../target/host-v2/debug/libart3m1s_core.dylib
 ```
 
+C# Host 可把[生成的绑定](../tools/host-bindings/csharp/ArtemisNative.g.cs)加入启用 `unsafe`
+的 C# 9 或更高版本项目。从创建 runtime 的线程调用函数表，在 `release` 前消费借用的帧包和
+纹理。使用 .NET 8 SDK 运行内存示例，参数为已构建的独立 Core 动态库路径。
+
+```sh
+dotnet run --project tools/host-bindings/csharp/ArtemisSmoke.csproj -- target/host-v2/debug/libart3m1s_core.dylib
+```
+
+C 头变更后用 `python3 tools/host-bindings/csharp/generate.py` 重新生成绑定。生成器使用 Clang
+和 Python 3.10 或更高版本。
+
 Rust Host 可用 `art3m1s-render` 的 `artemis` feature 解码和绘制 v2 帧。macOS 离屏示例
 通过 C ABI 借用帧并用 Metal 绘制，需要可访问的 Metal 设备，不需要窗口或游戏素材：
 

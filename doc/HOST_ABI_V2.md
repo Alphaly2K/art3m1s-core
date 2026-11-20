@@ -680,6 +680,7 @@ Rust 消费者，再放入明确 legacy 层或在一次标明破坏性版本中�
 SDK 产物应包含唯一 schema、可编译 C 头、生成的 Dart/Swift/C# 绑定，以及一个不依赖
 Flutter 的最小 Host 样例。平台 IO/render/media 适配器可以复用，但不链接进纯核心。
 不用在每种语言里手写第二份函数顺序、长度类型和 magic。
+生成绑定和内存 Host 的用法见 [Host 接入指南](HOST_INTEGRATION.md#artemis-v2-c-预览)。
 
 独立 C Host 可用 `bash scripts/test-host-v2.sh` 或 `scripts/test-host-v2.ps1` 构建并验证。
 macOS 上可用 `bash scripts/test-host-v2-metal.sh` 运行独立 Metal Host，验证从 C ABI 借用
