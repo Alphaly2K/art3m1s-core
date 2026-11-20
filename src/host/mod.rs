@@ -2,6 +2,8 @@
 
 #[cfg(feature = "host-abi-v2")]
 pub mod abi;
+#[cfg(not(feature = "legacy"))]
+pub mod api;
 #[cfg(feature = "legacy")]
 pub mod events;
 #[cfg(feature = "legacy")]

@@ -778,6 +778,11 @@ impl ScriptIoSession {
         self.transport.poll_events(output)
     }
 
+    #[cfg(not(feature = "legacy"))]
+    pub(super) fn next_event(&mut self) -> Option<super::protocol::RuntimeEvent> {
+        self.transport.next_event()
+    }
+
     /// Service payload validation precedes transport acceptance, so malformed
     /// replies leave the original request available for a corrected response.
     pub fn submit_replies(&mut self, replies: &[HostReply]) -> Result<(), ProtocolError> {

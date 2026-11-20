@@ -7,15 +7,22 @@
 API 文档，也不要求 Host 使用 Dart 或 libmpv。完整签名、返回值和命令字段见
 [FFI_REFERENCE.md](FFI_REFERENCE.md)。
 
-### Artemis Rust Host 接入基础
+### Artemis v2 Rust 预览
 
-Artemis 解释器在所有平台统一使用 Luau。现有 v1 C 函数表保持原布局；v2 可通过预览构建
-接入，契约见 [HOST_ABI_V2.md](HOST_ABI_V2.md)。
+Rust 宿主依赖 `crates/artemis-core` 的 `art3m1s-artemis-core` 包，通过 `art3m1s_core::api`
+创建 `Runtime`。创建线程负责打开项目、推进逻辑、接收事件和提交结果。`poll_event()` 返回自有
+事件；用 `event.reply(body)` 保留原请求身份。遇到背压时重试原回复批次。IO 挂起时继续使用
+原帧号和时钟。渲染器可用 `with_latest_frame()` 在回调内借用 ARFP 数据和纹理；需要延后使用时，
+Host 在回调内复制所需数据。正常保存并关闭时，调用 `request_shutdown()` 后继续处理事件，
+直到收到 `RUNTIME_CLOSED`。
+
+[内存 Rust Host 示例](../crates/artemis-core/tests/rust_host.rs) 演示资源回复、播放完成和帧读取。
+脚本运行在 Luau 上，服务消息与 [C 接口契约](HOST_ABI_V2.md) 共用。
 
 ### Artemis v2 C 预览
 
 使用 `cargo build --locked --manifest-path crates/artemis-core/Cargo.toml` 编译纯 Core 动态库。
-独立清单只产出 C 动态库，无需检出其他引擎。加载库后
+独立构建无需检出其他引擎。加载 C 动态库后
 通过 [C 头文件](abi/art3m1s_core_v2.draft.h) 中的 `art3m1s_get_api_v2` 查询 Runtime 和 Frame 表。
 创建 runtime 的线程负责所有调用；工作线程把结果交回该线程。Host 循环推进逻辑、处理请求并
 借用帧，绘制完释放令牌。只绘制精灵的 Host 可提交 `ART_RENDERER_CAP_SPRITE`；支持旧场景
@@ -107,10 +114,11 @@ provider 接收已解析 magic path 的逻辑 key（`/` 分隔、ASCII 小写）
 
 这是同步 Rust 接口，Host 方法不得重入同一个 runtime，也不应依赖正在等待 core 的 GUI
 线程；它没有注册 native→Dart 回调。renderer 执行现有 DrawList/GpuBackend 契约，窗口、
-GPU 对象和呈现由其实现管理。可用 `cargo build --no-default-features` 构建纯 Core 的
-Rust 队列运行时。默认构建继续提供 v1 C ABI。
+GPU 对象和呈现由其实现管理。聚合包默认构建继续提供 v1 C ABI。
 
-### v2 Rust 会话传输
+### 聚合包中的 v2 开发入口
+
+本节及后续 chunk 和句柄说明用于维护聚合包中的开发入口。独立 Rust Host 使用上面的 `api`。
 
 `host::protocol::SessionTransport` 提供 v2 facade 的纯内存传输组件。创建时传入已校验的
 非零 runtime handle 和 `TransportLimits`；句柄代际、owner 线程和服务 schema 由 facade

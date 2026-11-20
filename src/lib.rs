@@ -6,16 +6,25 @@
 
 #[cfg(feature = "legacy")]
 use asb_interpreter::Interpreter;
-use asb_interpreter::InterpreterConfig;
-use std::collections::HashMap;
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
+#[cfg(feature = "legacy")]
 use std::path::{Component, Path, PathBuf};
 
-pub mod audio;
+macro_rules! legacy_exports {
+    ($($module:ident),+ $(,)?) => {$(
+        #[cfg(feature = "legacy")]
+        pub mod $module;
+        #[cfg(not(feature = "legacy"))]
+        #[allow(dead_code, unused_imports)]
+        mod $module;
+    )+};
+}
+
+legacy_exports!(audio, compositor, host, render_pipeline, save, text, video);
+
+#[cfg(not(feature = "legacy"))]
+pub use host::api;
 #[cfg(feature = "legacy")]
 pub mod backend;
-pub mod compositor;
 mod emote_playback;
 #[cfg(feature = "legacy")]
 pub mod ffi;
@@ -25,15 +34,20 @@ pub mod ffi;
     feature = "vulkan-backend"
 ))]
 pub use ffi::api as ffi_api;
-pub mod host;
 #[cfg(feature = "legacy")]
 pub use host::{events as host_events, files as host_files, media as host_media};
 #[cfg(not(feature = "legacy"))]
 mod core_log;
 #[cfg(not(feature = "legacy"))]
-#[doc(hidden)]
-pub use core_log::emit as __core_log;
+pub(crate) use core_log::{core_debug, core_info, core_warn, emit as __core_log};
 mod magic_path;
+mod project_config;
+#[cfg(feature = "legacy")]
+use project_config::encoding_for_charset;
+#[cfg(not(feature = "legacy"))]
+use project_config::{CoreError, ProjectConfig};
+#[cfg(feature = "legacy")]
+pub use project_config::{CoreError, ProjectConfig, Result};
 #[cfg(all(
     feature = "legacy",
     any(
@@ -45,204 +59,19 @@ mod magic_path;
 mod platform;
 #[cfg(feature = "legacy")]
 pub mod profiler;
-pub mod render_pipeline;
 #[cfg(feature = "legacy")]
 pub mod runtime;
-pub mod save;
 mod script_handler;
-pub mod text;
-pub mod video;
 
 #[cfg(feature = "legacy")]
 pub use art3m1s_emote as emote;
 #[cfg(feature = "legacy")]
 pub use art3m1s_media as media;
+#[cfg(feature = "legacy")]
 pub use asb_interpreter as script;
 #[cfg(feature = "legacy")]
 pub use pfs_upk as archive;
 
-/// Result type used by the core bootstrap layer.
-pub type Result<T> = std::result::Result<T, CoreError>;
-
-/// Errors produced before control reaches the script interpreter.
-#[derive(Debug)]
-pub enum CoreError {
-    Io {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    MissingIniSection {
-        section: String,
-    },
-    MissingIniKey {
-        section: String,
-        key: String,
-    },
-    InvalidIniNumber {
-        section: String,
-        key: String,
-        value: String,
-    },
-    InvalidProjectPath {
-        path: String,
-    },
-    Interpreter(asb_interpreter::Error),
-}
-
-impl Display for CoreError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io { path, source } => {
-                write!(f, "failed to read {}: {}", path.display(), source)
-            }
-            Self::MissingIniSection { section } => {
-                write!(f, "system.ini section [{}] was not found", section)
-            }
-            Self::MissingIniKey { section, key } => {
-                write!(f, "system.ini [{}] is missing key {}", section, key)
-            }
-            Self::InvalidIniNumber {
-                section,
-                key,
-                value,
-            } => {
-                write!(
-                    f,
-                    "system.ini [{}] key {} has invalid number {:?}",
-                    section, key, value
-                )
-            }
-            Self::InvalidProjectPath { path } => {
-                write!(
-                    f,
-                    "project path {:?} must be relative and stay inside the project",
-                    path
-                )
-            }
-            Self::Interpreter(source) => Display::fmt(source, f),
-        }
-    }
-}
-
-impl Error for CoreError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Io { source, .. } => Some(source),
-            Self::Interpreter(source) => Some(source),
-            _ => None,
-        }
-    }
-}
-
-impl From<asb_interpreter::Error> for CoreError {
-    fn from(value: asb_interpreter::Error) -> Self {
-        Self::Interpreter(value)
-    }
-}
-
-/// Parsed startup configuration from one platform section of `system.ini`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProjectConfig {
-    pub platform: String,
-    pub stage_width: u32,
-    pub stage_height: u32,
-    pub fps: u32,
-    pub charset: String,
-    pub boot_script: String,
-    pub frameless: bool,
-    pub resizable: bool,
-    pub fixed_aspect_ratio: bool,
-    pub sidecut: bool,
-    pub power_saving: bool,
-    pub no_save: bool,
-    pub savepath: Option<String>,
-    pub side_picture: Option<String>,
-    pub process_id: Option<String>,
-    pub raw: HashMap<String, String>,
-}
-
-impl ProjectConfig {
-    /// Parse a `system.ini` string and select a platform section such as
-    /// `WINDOWS`, `ANDROID`, `IOS`, or `WASM`.
-    pub fn from_system_ini(contents: &str, platform: &str) -> Result<Self> {
-        let sections = parse_ini(contents);
-        let section = platform.trim().to_ascii_uppercase();
-        let values = sections
-            .get(&section)
-            .ok_or_else(|| CoreError::MissingIniSection {
-                section: section.clone(),
-            })?;
-
-        let stage_width = required_u32(values, &section, "WIDTH")?;
-        let stage_height = required_u32(values, &section, "HEIGHT")?;
-        let boot_script = required_string(values, &section, "BOOT")?;
-
-        Ok(Self {
-            platform: section.clone(),
-            stage_width,
-            stage_height,
-            fps: optional_u32(values, &section, "FPS")?.unwrap_or(60),
-            charset: values
-                .get("CHARSET")
-                .cloned()
-                .unwrap_or_else(|| "Shift_JIS".to_string()),
-            boot_script,
-            frameless: ini_bool(values.get("FRAMELESS")),
-            resizable: ini_bool(values.get("RESIZABLE")),
-            fixed_aspect_ratio: ini_bool(values.get("FIXED_ASPECT_RATIO")),
-            sidecut: ini_bool(values.get("SIDECUT")),
-            power_saving: ini_bool(values.get("POWER_SAVING")),
-            no_save: ini_bool(values.get("NO_SAVE")),
-            savepath: values.get("SAVEPATH").cloned(),
-            side_picture: values.get("SIDE_PICTURE").cloned(),
-            process_id: values.get("PREVENT_MULTIPLE_PROCESS").cloned(),
-            raw: values.clone(),
-        })
-    }
-
-    /// Convert the project config into the interpreter's environment config.
-    pub fn to_interpreter_config(&self, project_root: Option<&Path>) -> InterpreterConfig {
-        let encoding = encoding_for_charset(&self.charset);
-
-        InterpreterConfig {
-            encoding,
-            stage_width: self.stage_width,
-            stage_height: self.stage_height,
-            fps: self.fps,
-            frameless: self.frameless,
-            resizable: self.resizable,
-            fixed_aspect_ratio: self.fixed_aspect_ratio,
-            sidecut: self.sidecut,
-            side_picture: self.side_picture.clone(),
-            power_saving: self.power_saving,
-            no_save: self.no_save,
-            savepath: self.savepath.clone(),
-            datapath: project_root.map(|path| path.display().to_string()),
-            title: None,
-            process_id: self.process_id.clone(),
-            env: self.raw.clone(),
-            // system.ini 段名为大写（WINDOWS/ANDROID/IOS/WASM），脚本机种表用小写键。
-            platform: self.platform.to_ascii_lowercase(),
-            reported_os: None,
-        }
-    }
-
-    /// Parse a raw `system.ini` byte stream.
-    ///
-    /// Artemis treats `CHARSET` as the script and rendered-font-cache encoding,
-    /// and its documented default is Shift_JIS.  The keys needed to discover
-    /// the selected platform section and `CHARSET=` are ASCII-compatible in
-    /// both Shift_JIS and UTF-8, so we first scan those bytes without decoding,
-    /// then decode the whole file with the discovered encoding.
-    pub fn from_system_ini_bytes(contents: &[u8], platform: &str) -> Result<Self> {
-        let charset = detect_ini_charset(contents, platform);
-        let encoding = encoding_for_charset(&charset);
-        let (decoded, _, _) = encoding.decode(contents);
-        Self::from_system_ini(&decoded, platform)
-    }
-}
-
-/// An unpacked Artemis project directory.
 #[cfg(feature = "legacy")]
 #[derive(Debug, Clone)]
 pub struct Project {
@@ -460,152 +289,7 @@ fn probe_caption_from_bytes_with_resources(
 // 私有辅助
 // ═══════════════════════════════════════════════════════════════════
 
-fn parse_ini(contents: &str) -> HashMap<String, HashMap<String, String>> {
-    let mut sections = HashMap::new();
-    let mut current: Option<String> = None;
-
-    for raw_line in contents.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
-            continue;
-        }
-
-        if let Some(section) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-            let name = section.trim().to_ascii_uppercase();
-            sections.entry(name.clone()).or_insert_with(HashMap::new);
-            current = Some(name);
-            continue;
-        }
-
-        let Some(section) = &current else {
-            continue;
-        };
-
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-
-        sections
-            .entry(section.clone())
-            .or_insert_with(HashMap::new)
-            .insert(key.trim().to_ascii_uppercase(), value.trim().to_string());
-    }
-
-    sections
-}
-
-fn encoding_for_charset(charset: &str) -> &'static encoding_rs::Encoding {
-    match charset.trim().to_ascii_uppercase().as_str() {
-        "UTF-8" | "UTF8" => encoding_rs::UTF_8,
-        "SHIFT_JIS" | "SHIFT-JIS" | "SJIS" => encoding_rs::SHIFT_JIS,
-        _ => encoding_rs::SHIFT_JIS,
-    }
-}
-
-fn detect_ini_charset(contents: &[u8], platform: &str) -> String {
-    let section = platform.trim().to_ascii_uppercase();
-    let mut current: Option<String> = None;
-
-    for raw_line in contents.split(|&b| b == b'\n' || b == b'\r') {
-        let line = trim_ascii(raw_line);
-        if line.is_empty() || line[0] == b';' || line[0] == b'#' {
-            continue;
-        }
-
-        if line.starts_with(b"[") && line.ends_with(b"]") {
-            let name = trim_ascii(&line[1..line.len() - 1]);
-            current = Some(ascii_upper_string(name));
-            continue;
-        }
-
-        if current.as_deref() != Some(section.as_str()) {
-            continue;
-        }
-
-        let Some(eq) = line.iter().position(|&b| b == b'=') else {
-            continue;
-        };
-        let key = ascii_upper_string(trim_ascii(&line[..eq]));
-        if key == "CHARSET" {
-            return ascii_lossy(trim_ascii(&line[eq + 1..]));
-        }
-    }
-
-    "Shift_JIS".to_string()
-}
-
-fn trim_ascii(bytes: &[u8]) -> &[u8] {
-    let mut start = 0;
-    let mut end = bytes.len();
-    while start < end && bytes[start].is_ascii_whitespace() {
-        start += 1;
-    }
-    while end > start && bytes[end - 1].is_ascii_whitespace() {
-        end -= 1;
-    }
-    &bytes[start..end]
-}
-
-fn ascii_upper_string(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|&b| (b as char).to_ascii_uppercase())
-        .collect()
-}
-
-fn ascii_lossy(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .take_while(|&&b| b.is_ascii())
-        .map(|&b| b as char)
-        .collect()
-}
-
-fn required_string(values: &HashMap<String, String>, section: &str, key: &str) -> Result<String> {
-    values
-        .get(key)
-        .filter(|value| !value.is_empty())
-        .cloned()
-        .ok_or_else(|| CoreError::MissingIniKey {
-            section: section.to_string(),
-            key: key.to_string(),
-        })
-}
-
-fn required_u32(values: &HashMap<String, String>, section: &str, key: &str) -> Result<u32> {
-    let value = required_string(values, section, key)?;
-    parse_u32(section, key, &value)
-}
-
-fn optional_u32(values: &HashMap<String, String>, section: &str, key: &str) -> Result<Option<u32>> {
-    values
-        .get(key)
-        .map(|value| parse_u32(section, key, value))
-        .transpose()
-}
-
-fn parse_u32(section: &str, key: &str, value: &str) -> Result<u32> {
-    value
-        .trim()
-        .parse()
-        .map_err(|_| CoreError::InvalidIniNumber {
-            section: section.to_string(),
-            key: key.to_string(),
-            value: value.to_string(),
-        })
-}
-
-fn ini_bool(value: Option<&String>) -> bool {
-    value
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "on" | "yes"
-            )
-        })
-        .unwrap_or(false)
-}
-
+#[cfg(feature = "legacy")]
 pub fn resolve_project_path(root: &Path, virtual_path: &str) -> Result<PathBuf> {
     let normalized = virtual_path.replace('\\', "/");
     let relative = Path::new(&normalized);
@@ -642,6 +326,7 @@ fn to_interpreter_error(error: CoreError) -> asb_interpreter::Error {
 
 #[cfg(all(test, feature = "legacy"))]
 mod tests {
+    use asb_interpreter::InterpreterConfig;
     use super::*;
 
     #[test]

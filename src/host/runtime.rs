@@ -13,6 +13,8 @@ use std::thread::{self, ThreadId};
 
 const ARTEMIS_RUNTIME_TAG: u64 = 0xA201 << 48;
 const MAX_RUNTIME_SERIAL: u64 = (1 << 48) - 1;
+#[cfg(any(not(feature = "legacy"), feature = "host-abi-v2"))]
+pub(super) const DEFAULT_MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
@@ -117,22 +119,24 @@ impl Registry {
 
 static RUNTIMES: LazyLock<Mutex<Registry>> = LazyLock::new(|| Mutex::new(Registry::default()));
 
-pub(super) const CAP_SPRITES: u64 = 1;
-pub(super) const CAP_TRANSITIONS: u64 = 2;
-pub(super) const CAP_SCREENSHOTS: u64 = 4;
-pub(super) const CAP_GROUPS: u64 = 8;
-pub(super) const CAP_EMOTE: u64 = 16;
-pub(super) const CAP_HLSL: u64 = 32;
-pub(super) const CAP_GLSL: u64 = 64;
+pub const CAP_SPRITES: u64 = 1;
+pub const CAP_TRANSITIONS: u64 = 2;
+pub const CAP_SCREENSHOTS: u64 = 4;
+pub const CAP_GROUPS: u64 = 8;
+pub const CAP_EMOTE: u64 = 16;
+pub const CAP_HLSL: u64 = 32;
+pub const CAP_GLSL: u64 = 64;
 pub(super) const SHADER_CAPS: u64 = CAP_HLSL | CAP_GLSL;
 pub(super) const RENDERER_CAPS: u64 =
     CAP_SPRITES | CAP_TRANSITIONS | CAP_SCREENSHOTS | CAP_GROUPS | CAP_EMOTE | SHADER_CAPS;
-pub(super) const HOST_CAP_MEDIA: u64 = 4;
-pub(super) const HOST_CAP_HTTP: u64 = 8;
-pub(super) const HOST_CAP_TRANSLATION: u64 = 16;
-pub(super) const HOST_CAP_CHUNKED_WRITES: u64 = 32;
-pub(super) const HOST_CAP_PROJECT_SAVE_PATH: u64 = 64;
-pub(super) const HOST_CAPS: u64 = 0b11
+pub const HOST_CAP_IO: u64 = 1;
+pub const HOST_CAP_UI: u64 = 2;
+pub const HOST_CAP_MEDIA: u64 = 4;
+pub const HOST_CAP_HTTP: u64 = 8;
+pub const HOST_CAP_TRANSLATION: u64 = 16;
+pub const HOST_CAP_CHUNKED_WRITES: u64 = 32;
+pub const HOST_CAP_PROJECT_SAVE_PATH: u64 = 64;
+pub(super) const HOST_CAPS: u64 = HOST_CAP_IO | HOST_CAP_UI
     | HOST_CAP_MEDIA
     | HOST_CAP_HTTP
     | HOST_CAP_TRANSLATION
@@ -321,6 +325,13 @@ pub fn acquire_latest(
 
 pub fn poll_events(handle: RuntimeHandle, output: &mut [u8]) -> Result<PollResult, RuntimeError> {
     with_session(handle, |session| Ok(session.poll_events(output)))
+}
+
+#[cfg(not(feature = "legacy"))]
+pub(super) fn next_event(
+    handle: RuntimeHandle,
+) -> Result<Option<super::protocol::RuntimeEvent>, RuntimeError> {
+    with_session(handle, |session| Ok(session.next_event()))
 }
 
 pub fn submit_replies(handle: RuntimeHandle, replies: &[HostReply]) -> Result<(), RuntimeError> {

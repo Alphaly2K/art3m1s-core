@@ -942,6 +942,10 @@ Core 构建只启用 Artemis 帧数据格式；绘制适配器由 Host 的渲染
 适配器后，纹理上传回滚与 E-Mote 网格回归通过同一个 ARFP 解码和绘制入口。独立依赖门禁、
 291 项 Core 测试、C ABI 冒烟及 macOS Metal 像素和共享 IOSurface 验证通过。
 
+独立 Core 新增 Rust `api` 预览入口，Rust 和 C 共用运行时、事件交付和帧借用。外部 Rust
+Host 集成测试通过内存资源启动项目，拒绝跨 runtime 的回复，回报播放完成并在重载时读取旧帧。
+独立 Core 291 项单元测试、依赖门禁、C/Dart 冒烟及 legacy v1 函数表验证通过。
+
 后续继续审计聚合 crate 的 Rust 公共接口与调用方，保持 legacy 与独立 v2 产物分离。生产默认
 切换仍待原版游戏的着色器、媒体及存档对照，以及 Linux EGL 和 Windows MSVC 原生验证。
 

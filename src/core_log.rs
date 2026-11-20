@@ -13,19 +13,13 @@ pub fn emit(level: &str, message: String) {
     }
 }
 
-#[macro_export]
 macro_rules! core_info {
     ($($arg:tt)*) => { $crate::__core_log("I", format!($($arg)*)); };
 }
-#[macro_export]
 macro_rules! core_warn {
     ($($arg:tt)*) => { $crate::__core_log("W", format!($($arg)*)); };
 }
-#[macro_export]
 macro_rules! core_debug {
     ($($arg:tt)*) => { $crate::__core_log("D", format!($($arg)*)); };
 }
-#[macro_export]
-macro_rules! core_error {
-    ($($arg:tt)*) => { $crate::__core_log("E", format!($($arg)*)); };
-}
+pub(crate) use {core_debug, core_info, core_warn};

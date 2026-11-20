@@ -538,7 +538,7 @@ Rust Host 可启用 `art3m1s-render` 的 `artemis` feature，并自行启用所�
 `SpriteRenderer::render_packet` 提供 runtime 身份和同一个帧 token 的纹理读取函数。像素只在
 缓存未命中时读取，长度须与描述符一致；借用须保持到调用结束。Host 控制 backend 的访问、
 目标、帧开始与结束及呈现；转场需要后端支持捕获当前目标。新设备可以用仍有效的帧借用重新上传。
-直接取得 Rust `FrameLease` 的 Host 使用 `lease.packet()` 解码帧包，从同一 lease 读取纹理。
+通过 Rust `Runtime::with_latest_frame` 取得帧时，用 `packet()` 解码帧包并从该帧读取纹理。
 
 `acquire_latest(after_render_frame_id)` 返回不可变快照和 lease token；无新帧为 NO_DATA。
 快照及所有引用的 CPU 资源版本在 release 前跨 step/reload 保持有效；默认至多两个
@@ -664,10 +664,11 @@ core 只关心影响引擎语义的舞台/资源尺寸和捕获结果。
 
 ## 9. Rust 公开面与 SDK
 
-目标 Rust 稳定入口仅包括 `api::{Runtime, RuntimeOptions, ProjectInfo, InputBatch,
-HostMessage, RuntimeEvent, FrameSnapshot, Error}` 和版本化协议类型。内部 compositor、
-Lua 对象、GPU backend 和缓存不作为稳定 API 承诺；第三方依赖不再从新 facade 整包重导出。
-Rust API 和 C facade 使用同一套消息/生命周期实现，不能维护两种引擎行为。
+独立包的预览 Rust 入口为 `api::{Runtime, RuntimeOptions, ProjectInfo, InputBatch,
+HostMessage, RuntimeEvent, FrameSnapshot, Error}` 和版本化协议类型。Rust 和 C 接口使用同一套
+运行时、消息队列和帧借用规则。Rust 入口交付类型化事件；可靠事件优先于诊断，事件可交给
+工作线程，runtime 由创建线程持有。内部 compositor、Lua 对象、GPU backend 和缓存不从
+该入口公开。
 
 在 v1 兼容期，不直接删掉现有 pub mod/re-export。先记录内部调用者、tests/probes 和真实
 Rust 消费者，再放入明确 legacy 层或在一次标明破坏性版本中收窄。跨 crate 移动不得改变

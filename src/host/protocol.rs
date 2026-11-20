@@ -130,6 +130,38 @@ pub struct HostReply {
     pub body: MessageBody,
 }
 
+#[cfg(not(feature = "legacy"))]
+#[derive(Clone, Debug)]
+pub struct RuntimeEvent {
+    pub kind: MessageKind,
+    pub epoch: u64,
+    pub sequence: u64,
+    pub body: MessageBody,
+    identity: Option<RequestIdentity>,
+    flags: u32,
+}
+
+#[cfg(not(feature = "legacy"))]
+impl RuntimeEvent {
+    /// Whether the Host must complete this request.
+    pub fn requires_reply(&self) -> bool {
+        self.identity.is_some()
+    }
+
+    /// True for reliable delivery; false for diagnostics.
+    pub fn is_critical(&self) -> bool {
+        self.flags & FLAG_CRITICAL != 0
+    }
+
+    /// Builds a reply carrying this request's original runtime, epoch and kind.
+    pub fn reply(&self, body: MessageBody) -> Option<HostReply> {
+        Some(HostReply {
+            identity: self.identity?,
+            body,
+        })
+    }
+}
+
 /// Bytes include the encoded envelope, body lengths, metadata and blob.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QueueBudget {
@@ -520,41 +552,61 @@ impl SessionTransport {
         self.dropped_diagnostics = self.dropped_diagnostics.saturating_add(count);
     }
 
+    fn front_event(&self) -> Option<&Envelope> {
+        self.control
+            .records
+            .front()
+            .or_else(|| self.diagnostics.records.front())
+    }
+
+    fn pop_event(&mut self) -> Option<Envelope> {
+        let record = self.control.pop().or_else(|| self.diagnostics.pop())?;
+        if record.request_id != 0 {
+            self.pending.get_mut(&record.request_id).unwrap().delivered = true;
+        }
+        Some(record)
+    }
+
+    #[cfg(not(feature = "legacy"))]
+    pub(super) fn next_event(&mut self) -> Option<RuntimeEvent> {
+        let record = self.pop_event()?;
+        Some(RuntimeEvent {
+            kind: record.kind,
+            epoch: self.epoch,
+            sequence: record.sequence,
+            body: record.body,
+            identity: (record.request_id != 0).then_some(RequestIdentity {
+                runtime: self.runtime,
+                epoch: self.epoch,
+                request_id: record.request_id,
+                service: record.kind,
+            }),
+            flags: record.flags,
+        })
+    }
+
     /// Control records have delivery priority. Neither a short buffer nor a
     /// partial successful poll consumes the next record that did not fit.
     pub fn poll_events(&mut self, output: &mut [u8]) -> PollResult {
         let mut written = 0;
         let mut count = 0;
         loop {
-            let queue = if self.control.records.is_empty() {
-                &mut self.diagnostics
-            } else {
-                &mut self.control
-            };
-            let Some(record) = queue.records.front() else {
+            let Some(record) = self.front_event() else {
                 break;
             };
             if count == u32::MAX || record.bytes > output.len() - written {
                 break;
             }
-            let record = queue.pop().unwrap();
+            let record = self.pop_event().unwrap();
             record.encode(
                 self.runtime,
                 self.epoch,
                 &mut output[written..written + record.bytes],
             );
-            if record.request_id != 0 {
-                self.pending.get_mut(&record.request_id).unwrap().delivered = true;
-            }
             written += record.bytes;
             count += 1;
         }
-        let required = self
-            .control
-            .records
-            .front()
-            .or_else(|| self.diagnostics.records.front())
-            .map_or(0, |record| record.bytes);
+        let required = self.front_event().map_or(0, |record| record.bytes);
         PollResult {
             status: if count != 0 {
                 PollStatus::Ok

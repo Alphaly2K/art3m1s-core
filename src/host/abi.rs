@@ -29,7 +29,7 @@ const LIMIT: i32 = -8;
 const PANIC: i32 = -9;
 const MAGIC: u64 = 0x415254334D324150;
 const MAJOR: u32 = 2;
-const MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_FILE_BYTES: usize = runtime::DEFAULT_MAX_FILE_BYTES;
 
 type AbiResult = Result<i32, Failure>;
 
