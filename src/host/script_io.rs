@@ -62,6 +62,7 @@ pub const IO_DELETE: MessageKind = MessageKind {
 };
 
 const SAVED_SCRIPT_PREFETCH_BYTES: usize = 64 * 1024 * 1024;
+const MAX_SHADER_SOURCE_BYTES: usize = 256 * 1024;
 
 #[derive(Debug)]
 pub enum ScriptIoError {
@@ -2298,6 +2299,9 @@ impl ScriptIoSession {
                 };
                 if size > self.max_file_bytes {
                     return Ok(Some(failed(IoFailure::Limit, "file exceeds read budget")));
+                }
+                if shader_language.is_some() && size > MAX_SHADER_SOURCE_BYTES {
+                    return Ok(Some(failed(IoFailure::Limit, "shader source exceeds read budget")));
                 }
                 let mut data = Vec::new();
                 if data.try_reserve_exact(size).is_err() {

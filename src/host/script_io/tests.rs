@@ -4037,18 +4037,21 @@ fn transitions_keep_both_scenes_and_obey_time_and_input_policy() {
 fn shader_language_replacement_keeps_old_frames_and_prefetches_bindings() {
     use crate::host::frame::{FramePacket, FrameShaderLanguage};
 
-    let mut session = session(1, TransportLimits::default(), 4096);
+    let oversized = vec![b'x'; 256 * 1024 + 1];
+    let mut session = session(1, TransportLimits::default(), oversized.len());
     let mut host = MemoryHost::default();
     let first_source = b"first shader";
     let second_source = b"second shader";
     let mask = [255, 128, 0, 64];
     let user = [0, 128, 255, 255];
     host.shader_languages = Some(HashMap::from([("first.txt", "hlsl"), ("second.frag", "glsl")]));
+    host.asset("oversized.fx", &oversized);
     host.asset("first.txt", first_source);
     host.asset("second.frag", second_source);
     host.asset("mask.png", &png_bytes(1, 1, &mask));
     host.asset("user.png", &png_bytes(1, 1, &user));
     host.asset("boot.iet", br#"*top
+[lyshader id=test file=oversized.fx]
 [lyshader id=test file=first.txt]
 [lyc id=tile width=4 height=4 color=ffffff]
 [lyprop id=tile shader=test shaderconstant=tint shadertexture=textureUser tint="0.25,0.5,1" mask=mask textureUser=user]
@@ -4085,6 +4088,9 @@ end
                 progress => panic!("unexpected shader progress: {progress:?}"),
             }
             for request in requests(session) {
+                if request.metadata["key"] == "oversized.fx" {
+                    assert_eq!(request.identity.service, IO_STAT);
+                }
                 session.submit_replies(&[host.complete(&request)]).unwrap();
             }
         }

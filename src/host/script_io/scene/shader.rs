@@ -4,7 +4,6 @@ use crate::host::runtime::{CAP_GLSL, CAP_HLSL};
 use crate::render_pipeline::draw::ShaderEffect;
 use std::collections::BTreeMap;
 
-const MAX_SOURCE_BYTES: usize = 256 * 1024;
 const MAX_SHADER_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SHADERS: usize = 256;
 const DIAGNOSTIC_SHADER_UNAVAILABLE: u32 = 1;
@@ -61,7 +60,7 @@ impl SceneShaders {
         let previous = self.sources.get(&id);
         if id.is_empty()
             || source.is_empty()
-            || source.len() > MAX_SOURCE_BYTES
+            || source.len() > MAX_SHADER_SOURCE_BYTES
             || (previous.is_none() && self.sources.len() >= MAX_SHADERS)
         {
             return false;
