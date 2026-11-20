@@ -282,7 +282,7 @@ impl HostResources {
     }
 }
 
-pub fn default_resources() -> &'static HostResources {
+pub(crate) fn default_resources() -> &'static HostResources {
     DEFAULT_RESOURCES.get_or_init(HostResources::new)
 }
 
@@ -603,60 +603,8 @@ fn read_range_with(
     Err(format!("not found: {path}"))
 }
 
-pub fn clear() {
-    default_resources().clear();
-}
-
-pub fn is_mounted() -> bool {
-    default_resources().is_mounted()
-}
-
-pub fn set_save_dir(path: Option<&Path>) -> Result<(), String> {
-    default_resources().set_save_dir(path)
-}
-
-pub fn mount_directory(root: &Path) -> Result<(), String> {
-    default_resources().mount_directory(root)
-}
-
-pub fn mount_pfs(path: &Path, encoding: &str) -> Result<(), String> {
-    default_resources().mount_pfs(path, encoding)
-}
-
-pub fn set_override(path: &str, bytes: Vec<u8>) -> Result<(), String> {
-    default_resources().set_override(path, bytes)
-}
-
-pub fn clear_overrides() {
-    default_resources().clear_overrides();
-}
-
-pub fn query_size(path: &str) -> Result<Option<u64>, String> {
-    default_resources().query_size(path)
-}
-
-pub fn read_file(path: &str) -> Result<Vec<u8>, String> {
-    default_resources().read_file(path)
-}
-
-pub fn read_range(path: &str, offset: u64, output: &mut [u8]) -> Result<usize, String> {
-    default_resources().read_range(path, offset, output)
-}
-
-pub fn write(path: &str, data: &[u8]) -> Result<(), String> {
-    default_resources().write(path, data)
-}
-
-pub fn delete(path: &str) -> Result<(), String> {
-    default_resources().delete(path)
-}
-
-pub fn file_mtime(path: &str) -> Option<[i64; 6]> {
-    default_resources().file_mtime(path)
-}
-
 /// A decoder-facing random-access source over the currently mounted file host.
-pub struct HostFileSource {
+struct HostFileSource {
     path: String,
     resources: HostResources,
 }
@@ -671,11 +619,6 @@ impl MediaSource for HostFileSource {
     fn read_at(&self, offset: u64, output: &mut [u8]) -> Result<usize, String> {
         self.resources.read_range(&self.path, offset, output)
     }
-}
-
-/// Resolve a logical media path against the active directory/PFS mount.
-pub fn open_media_source(path: &str) -> Result<Arc<dyn MediaSource>, String> {
-    default_resources().open_media_source(path)
 }
 
 unsafe fn c_path<'a>(path: *const c_char) -> Result<&'a Path, String> {

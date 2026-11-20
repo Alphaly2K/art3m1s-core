@@ -407,14 +407,19 @@ pub fn query_window_state() -> (bool, bool) {
 
 fn query_size(path: &str) -> Option<u64> {
     let started = begin_profile_io();
-    let result = crate::host_files::query_size(path).ok().flatten();
+    let result = crate::host_files::default_resources()
+        .query_size(path)
+        .ok()
+        .flatten();
     finish_profile_io(started, 0);
     result
 }
 
 fn read_chunk(path: &str, offset: u64, buf: &mut [u8]) -> Option<usize> {
     let started = begin_profile_io();
-    let result = crate::host_files::read_range(path, offset, buf).ok();
+    let result = crate::host_files::default_resources()
+        .read_range(path, offset, buf)
+        .ok();
     finish_profile_io(started, result.unwrap_or(0));
     result
 }

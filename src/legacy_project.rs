@@ -92,7 +92,7 @@ impl Project {
                     ))
                 })
             }));
-        } else if crate::host_files::is_mounted() {
+        } else if crate::host_files::default_resources().is_mounted() {
             interpreter.set_file_loader(Box::new(move |name| {
                 let bytes = crate::ffi::request_file(name).map_err(|m| {
                     asb_interpreter::Error::IoError(std::io::Error::new(
@@ -111,7 +111,7 @@ impl Project {
 
         let tag_ini = if let Some(resources) = resources {
             resources.read_file("tag.ini").ok()
-        } else if crate::host_files::is_mounted() {
+        } else if crate::host_files::default_resources().is_mounted() {
             crate::ffi::request_file("tag.ini").ok()
         } else {
             self.read_file("tag.ini").ok()
