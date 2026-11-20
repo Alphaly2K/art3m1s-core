@@ -862,6 +862,16 @@ impl Compositor {
         match event {
             LayerEvent::Create { id, file } => {
                 self.scene.create(id, Some(file.clone()));
+                if let Some(layer) = self.scene.get_mut(id) {
+                    // [lyc] gives a rebuilt image default placement and visibility.
+                    let props = &mut layer.props;
+                    props.left = None;
+                    props.top = None;
+                    props.x_scale = None;
+                    props.y_scale = None;
+                    props.alpha = None;
+                    props.visible = None;
+                }
             }
             LayerEvent::Create2 { id, file, alpha } => {
                 self.scene.create(id, Some(file.clone()));
@@ -1019,6 +1029,34 @@ mod tests {
 
         c.apply_event(&Event::Layer(LayerEvent::Delete { id: "1".into() }));
         assert!(c.scene().is_empty());
+    }
+
+    #[test]
+    fn lyc_rebuilds_a_hidden_layer_with_default_placement() {
+        let mut c = Compositor::new();
+        let mut provider = MockProvider::new();
+        c.apply_event(&create("1", "picture"));
+        c.apply_event(&Event::Layer(LayerEvent::SetProperties {
+            id: "1".into(),
+            properties: HashMap::from([
+                ("left".into(), "40".into()),
+                ("top".into(), "30".into()),
+                ("xscale".into(), "200".into()),
+                ("yscale".into(), "250".into()),
+                ("alpha".into(), "128".into()),
+                ("visible".into(), "0".into()),
+            ]),
+        }));
+        let hidden = crate::render_pipeline::RenderPipeline::new(&c).build(&mut provider);
+        assert!(hidden.commands.is_empty());
+
+        c.apply_event(&create("1", "picture"));
+        let rebuilt = crate::render_pipeline::RenderPipeline::new(&c).build(&mut provider);
+        let [command] = rebuilt.commands.as_slice() else {
+            panic!("recreated layer did not draw");
+        };
+        assert_eq!(command.transform, glam::Affine2::IDENTITY);
+        assert_eq!(command.opacity, 1.0);
     }
 
     #[test]
