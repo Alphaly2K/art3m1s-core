@@ -621,7 +621,8 @@ RGBA8 字形图集，将字形四边形按消息层顺序放进帧包；图集�
 Media kind=2 交付视频命令。`op=play` 带有十进制字符串 `playback_id`、可空旧播放 ID
 `replaces`、可空图层 ID `layer`、资产 `key`、布尔 `loop`、整数 `skip` 和可空 `delay_margin_ms`。
 `layer=null` 由 Host 全屏呈现；`skip` 的 0、1、2 分别表示禁止跳过、可点击跳过和仅通过菜单
-跳过。`op=stop_all` 停止当前会话的视频。视频沿用音频的开播和终态回报，编号读档停止旧视频。
+跳过。Host 停止被跳过的视频后回报 `Cancelled`。`op=stop_all` 停止当前会话的视频。视频沿用
+音频的开播和终态回报，编号读档停止旧视频。
 
 图层视频使用 `submit_video_frame` 提交连续的 `frame_id`、尺寸和紧密排列的自上而下 RGBA8
 像素。Core 复制像素；同一播放只接受递增的帧 ID，下一受理逻辑帧只使用最新的一份。过期帧
