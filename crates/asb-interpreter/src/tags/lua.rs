@@ -102,6 +102,7 @@ pub fn call_lua_function(
     };
 
     // 探针：记录失败调用（设置 ART3M1S_PROBE=1 启用）
+    #[cfg(feature = "console-diagnostics")]
     if result.is_err() && std::env::var("ART3M1S_PROBE").is_ok() {
         let err_msg = match &result {
             Err(e) => format!("{e}"),

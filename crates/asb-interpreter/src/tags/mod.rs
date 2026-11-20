@@ -572,6 +572,7 @@ struct StopHandler;
 impl TagHandler for StopHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let reason = ctx.instruction.get("0").map(String::from);
+        #[cfg(feature = "console-diagnostics")]
         if std::env::var("ASB_TRACE_STOP").is_ok() {
             eprintln!("[STOP] reason={:?} line={}", reason, ctx.instruction.line);
         }
@@ -733,6 +734,7 @@ struct ExitHandler;
 
 impl TagHandler for ExitHandler {
     fn execute(&self, _ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
+        #[cfg(feature = "console-diagnostics")]
         println!("Exit called");
         Ok(TagResult::Emit(Event::Exit))
     }

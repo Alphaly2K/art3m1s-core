@@ -12,7 +12,7 @@ use crate::r#macro::MacroRegistry;
 use crate::script::{Instruction, Script};
 use crate::tags::{ExecutionContext, TagRegistry, TagResult};
 use crate::variable::{Value, VariableStore};
-use mlua::Lua;
+use mlua::{ErrorContext, Lua};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
@@ -474,7 +474,33 @@ fn same_call_stack(left: &[CallFrame], right: &[CallFrame]) -> bool {
 impl Interpreter {
     /// 创建新的解释器实例
     pub fn new(config: InterpreterConfig) -> Self {
+        Self::initialize(config, |operation, error| {
+            #[cfg(feature = "console-diagnostics")]
+            {
+                eprintln!("{operation}: {error}");
+                Ok(())
+            }
+            #[cfg(not(feature = "console-diagnostics"))]
+            Err(error.context(operation))
+        })
+        .expect("initialize Artemis interpreter")
+    }
+
+    /// Create an interpreter and return any Luau setup failure to the caller.
+    pub fn try_new(config: InterpreterConfig) -> Result<Self> {
+        Ok(Self::initialize(config, |operation, error| {
+            Err(error.context(operation))
+        })?)
+    }
+
+    fn initialize(
+        config: InterpreterConfig,
+        on_error: impl Fn(&'static str, mlua::Error) -> mlua::Result<()>,
+    ) -> mlua::Result<Self> {
         let lua = Lua::new();
+        let check = |operation, result: mlua::Result<()>| {
+            result.or_else(|error| on_error(operation, error))
+        };
 
         // 注入 Pluto 序列化——使用 serde_json 作为持久化后端。
         // Artemis 脚本调用 pluto.persist(refs, tbl) / pluto.unpersist(refs, str)
@@ -492,9 +518,10 @@ impl Interpreter {
             end
         "#;
 
-        if let Err(e) = lua.load(pluto_code).exec() {
-            eprintln!("警告: 注入 Pluto 桩实现失败: {:?}", e);
-        }
+        check(
+            "install Pluto compatibility functions",
+            lua.load(pluto_code).exec(),
+        )?;
 
         // 注册 JSON 编解码函数
         let encode = lua.create_function(|lua, value: mlua::Value| {
@@ -512,23 +539,27 @@ impl Interpreter {
                 .map_err(|e| mlua::Error::external(format!("JSON decode: {e}")))?;
             json_to_lua_value(lua, value)
         });
-        if let Err(e) = encode.and_then(|f| lua.globals().set("__art3m1s_json_encode", f)) {
-            eprintln!("警告: 注册 JSON encode 失败: {:?}", e);
-        }
-        if let Err(e) = decode.and_then(|f| lua.globals().set("__art3m1s_json_decode", f)) {
-            eprintln!("警告: 注册 JSON decode 失败: {:?}", e);
-        }
+        check(
+            "register JSON encoder",
+            encode.and_then(|f| lua.globals().set("__art3m1s_json_encode", f)),
+        )?;
+        check(
+            "register JSON decoder",
+            decode.and_then(|f| lua.globals().set("__art3m1s_json_decode", f)),
+        )?;
 
         // 注入 Artemis 兼容的算术强制转换：字符串自动转数字，非数字字符串视为 0。
         // Artemis 引擎使用定制 Lua，允许 "off" * 5 → 0、"100" + 20 → 120 等。
         // 标准 Lua 5.1 会在这种运算上崩溃，而大量游戏脚本依赖此行为。
-        if let Err(e) = lua.load(ARITHMETIC_COERCION_CODE).exec() {
-            eprintln!("警告: 注入算术强制转换失败: {:?}", e);
-        }
+        check(
+            "install arithmetic compatibility functions",
+            lua.load(ARITHMETIC_COERCION_CODE).exec(),
+        )?;
 
         // 注入探针：注册全局错误追踪器，记录最后发生的 Lua 错误及其调用栈。
-        if let Err(e) = lua
-            .load(
+        check(
+            "install Lua traceback handler",
+            lua.load(
                 r#"
             __artemis_last_error = nil
             function __artemis_traceback(msg)
@@ -537,10 +568,8 @@ impl Interpreter {
             end
         "#,
             )
-            .exec()
-        {
-            eprintln!("警告: 注入错误探针失败: {:?}", e);
-        }
+            .exec(),
+        )?;
 
         let variables = Arc::new(Mutex::new(VariableStore::new()));
         {
@@ -586,12 +615,16 @@ impl Interpreter {
         // 共享同一份变量存储给 engine 上下文，使 e:var 能读到解释器写入的变量。
         engine_ctx_inner.variables = Some(Arc::clone(&variables));
         let engine_ctx = Arc::new(Mutex::new(engine_ctx_inner));
-        if let Err(e) = crate::luau_polyfill::install(&lua, Arc::clone(&engine_ctx)) {
-            eprintln!("警告: 注入 Luau 兼容层失败: {:?}", e);
-        }
-        let _ = crate::lua_engine::init_lua_engine_api(&lua, Arc::clone(&engine_ctx));
+        check(
+            "install Luau compatibility functions",
+            crate::luau_polyfill::install(&lua, Arc::clone(&engine_ctx)),
+        )?;
+        check(
+            "register the Lua engine API",
+            crate::lua_engine::init_lua_engine_api(&lua, Arc::clone(&engine_ctx)),
+        )?;
 
-        Self {
+        Ok(Self {
             config,
             scripts: HashMap::new(),
             tag_ini: crate::script::TagIni::default(),
@@ -626,7 +659,7 @@ impl Interpreter {
             io_resource: None,
             parked_save_queue: None,
             deferred_events: None,
-        }
+        })
     }
 
     /// 设置自定义 Lua engine 回调
@@ -1270,6 +1303,7 @@ impl Interpreter {
                 script.instructions[self.current_line].clone()
             };
 
+            #[cfg(feature = "console-diagnostics")]
             if std::env::var("ASB_TRACE_STEP").is_ok() {
                 eprintln!(
                     "[step] {}:{} tag={} fn={:?}",
@@ -1657,6 +1691,7 @@ impl Interpreter {
                 }
             };
 
+            #[cfg(feature = "console-diagnostics")]
             if std::env::var("ASB_TRACE_FLUSH").is_ok() {
                 eprintln!(
                     "[flush] tag={} fn={:?} params={:?}",
@@ -1755,6 +1790,7 @@ impl Interpreter {
                     // `[call]` 缓存系统脚本，return 必须回到紧随其后的
                     // `[calllua system_starting]`，否则 boot 推进不到 title。
                     let return_line = self.current_line;
+                    #[cfg(feature = "console-diagnostics")]
                     if std::env::var("ASB_TRACE_FLUSH").is_ok() {
                         eprintln!(
                             "[flush-call] file={:?} label={} return_line={} return_script={}",

@@ -4,6 +4,10 @@ version = "0.2.0"
 license = "MPL-2.0"
 edition = "2024"
 
+[features]
+default = ["console-diagnostics"]
+console-diagnostics = []
+
 [dependencies]
 # Luau builds its bundled source automatically. `vendored` would additionally
 # pull in the unused standard Lua and LuaJIT source packages.

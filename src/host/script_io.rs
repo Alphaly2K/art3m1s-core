@@ -338,7 +338,7 @@ impl ScriptIoSession {
             return Err(ProtocolError::Argument("IO byte budgets must be nonzero").into());
         }
         let transport = SessionTransport::new(runtime, limits)?;
-        let mut interpreter = Interpreter::new(config);
+        let mut interpreter = Interpreter::try_new(config)?;
         interpreter.enable_host_services(0)?;
         io_continuation::install(&interpreter)?;
         Ok(Self {
@@ -580,7 +580,7 @@ impl ScriptIoSession {
         &self,
         config: InterpreterConfig,
     ) -> Result<Interpreter, ScriptIoError> {
-        let mut interpreter = Interpreter::new(config);
+        let mut interpreter = Interpreter::try_new(config)?;
         interpreter.enable_host_services(self.random_seed)?;
         interpreter.set_host_time(self.host_time)?;
         interpreter.enable_resumable_io()?;
