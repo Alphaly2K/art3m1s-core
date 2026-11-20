@@ -53,6 +53,39 @@ impl GlBackend {
         self.renderer.prepare_glsl(source)
     }
 
+    /// Sample an existing Metal texture in this ANGLE context without copying its pixels.
+    /// Waits for the GL reads before returning the texture to its producer.
+    ///
+    /// # Safety
+    /// The handle must point to a live Metal texture on ANGLE's device. The
+    /// producer must finish writing before entry. Keep this context current and
+    /// use the sampled texture ID only inside `draw`.
+    #[cfg(target_os = "macos")]
+    pub unsafe fn with_metal_texture<T>(
+        &mut self,
+        handle: std::ptr::NonNull<std::ffi::c_void>,
+        draw: impl FnOnce(&mut Self, TextureId) -> Result<T, String>,
+    ) -> Result<T, String> {
+        struct View(Rc<glow::Context>, glow::Texture);
+        impl Drop for View {
+            fn drop(&mut self) {
+                unsafe {
+                    self.0.finish();
+                    self.0.delete_texture(self.1);
+                }
+            }
+        }
+
+        let texture = unsafe {
+            let previous = self.gl.get_parameter_texture(glow::TEXTURE_BINDING_2D);
+            let result = self.platform_context.import_metal_texture(handle);
+            self.gl.bind_texture(glow::TEXTURE_2D, previous);
+            result?
+        };
+        let _view = View(Rc::clone(&self.gl), texture);
+        draw(self, TextureId(texture.0.get().into()))
+    }
+
     pub fn new(config: platform::GfxBackend, width: u32, height: u32) -> Result<Self, String> {
         let (gl, platform_context, effective_backend) =
             platform::create_offscreen_context(config, width, height)?;

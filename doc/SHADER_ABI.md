@@ -122,7 +122,8 @@ pixels. The probe checks clipped effects on the stage, inside an offscreen
 group, and when compositing a group into its parent. Set `ARTEMIS_GL_SMOKE_ANGLE_DIR` to the
 directory containing ANGLE's EGL and GLES libraries to run the GLSL ES 3.00
 and 1.00 checks through ANGLE/Metal, including presentation into a Host-owned
-IOSurface. On Linux, the same script uses `GlBackend::new_host_egl` to test
+IOSurface and sampling a Metal texture into a separate Metal target. On Linux,
+the same script uses `GlBackend::new_host_egl` to test
 both ES profiles against system EGL, with Mesa software rendering and the
 surfaceless platform as the script defaults. The EGL checks also verify that
 closing one renderer restores the other renderer's active context.

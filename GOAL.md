@@ -217,6 +217,10 @@ GLSL 启动预热和运行时首次加载共用会话内程序缓存。ANGLE 探
 后重新绑定，像素一致且未重建缓存。桌面 OpenGL、ANGLE 的 GLSL ES 1.00 与 3.00、跨进程缓存
 复用及损坏恢复也已通过。
 
+macOS Host 已验证 Metal 与 ANGLE 共用 GPU 纹理。Metal 命令队列写入私有纹理，GLSL 直接采样
+并将结果写入另一张 Metal 纹理；逐像素检查覆盖颜色通道和行方向，处理过程无需 CPU 像素拷贝。
+下一步将这条路径接入 Metal 场景合成，在同一帧验证 HLSL 与 GLSL 的绘制顺序和背景采样。
+
 ## 已完成：Flutter 方法通道与共享纹理适配
 
 macOS Runner 适配器负责调用 v2 会话并管理 Flutter 纹理。Swift 与 Dart 通过方法通道交换事件

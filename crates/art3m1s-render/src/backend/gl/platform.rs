@@ -35,6 +35,14 @@ pub trait GLPlatformContext: Send {
         std::ptr::null()
     }
 
+    #[cfg(target_os = "macos")]
+    unsafe fn import_metal_texture(
+        &self,
+        _handle: std::ptr::NonNull<std::ffi::c_void>,
+    ) -> Result<glow::Texture, String> {
+        Err("Metal texture sampling requires ANGLE/Metal".into())
+    }
+
     /// 保存当前线程的 GL 上下文并把我们的上下文设为 current，返回保存的句柄。
     /// 调用方稍后必须把句柄传给 [`GLPlatformContext::restore`] 以恢复原上下文。
     fn bind_save(&self) -> SavedGlContext;
@@ -430,7 +438,7 @@ fn create_egl(
         const EGL_IOSURFACE_PLANE_ANGLE: EGLint = 0x345A;
         const EGL_TEXTURE_TYPE_ANGLE: EGLint = 0x345C;
         const EGL_TEXTURE_INTERNAL_FORMAT_ANGLE: EGLint = 0x345D;
-        const EGL_MTL_TEXTURE_MGL: EGLint = 0x3456;
+        const EGL_METAL_TEXTURE_ANGLE: EGLint = 0x34A7;
         const GL_BGRA_EXT: EGLint = 0x80E1;
         const GL_UNSIGNED_BYTE: EGLint = 0x1401;
         const GL_TEXTURE_2D: u32 = 0x0DE1;
@@ -445,7 +453,6 @@ fn create_egl(
                 swap_on_present: bool,
             },
             Texture {
-                image: *mut c_void,
                 texture: u32,
                 framebuffer: u32,
             },
@@ -573,10 +580,7 @@ fn create_egl(
                 }
             }
 
-            unsafe fn create_metal_texture_target(
-                &self,
-                handle: *mut c_void,
-            ) -> Result<ExternalSurface, String> {
+            unsafe fn import_metal_texture_name(&self, handle: *mut c_void) -> Result<u32, String> {
                 unsafe {
                     let create_image = self
                         .create_image
@@ -590,7 +594,7 @@ fn create_egl(
                     let image = create_image(
                         self.display,
                         std::ptr::null_mut(),
-                        EGL_MTL_TEXTURE_MGL,
+                        EGL_METAL_TEXTURE_ANGLE,
                         handle,
                         [EGL_NONE].as_ptr(),
                     );
@@ -607,16 +611,26 @@ fn create_egl(
                     (self.gl_bind_texture)(GL_TEXTURE_2D, texture);
                     bind_image(GL_TEXTURE_2D, image);
                     let image_error = (self.gl_get_error)();
+                    // The GL texture retains the storage of its EGLImage sibling.
+                    destroy_image(self.display, image);
                     if texture == 0 || image_error != GL_NO_ERROR {
                         if texture != 0 {
                             (self.gl_delete_textures)(1, &texture);
                         }
-                        destroy_image(self.display, image);
                         return Err(format!(
                             "failed to bind EGLImage to GL texture: GL {image_error:#x}"
                         ));
                     }
+                    Ok(texture)
+                }
+            }
 
+            unsafe fn create_metal_texture_target(
+                &self,
+                handle: *mut c_void,
+            ) -> Result<ExternalSurface, String> {
+                unsafe {
+                    let texture = self.import_metal_texture_name(handle)?;
                     let mut framebuffer = 0;
                     (self.gl_gen_framebuffers)(1, &mut framebuffer);
                     (self.gl_bind_framebuffer)(GL_FRAMEBUFFER, framebuffer);
@@ -634,14 +648,12 @@ fn create_egl(
                             (self.gl_delete_framebuffers)(1, &framebuffer);
                         }
                         (self.gl_delete_textures)(1, &texture);
-                        destroy_image(self.display, image);
                         return Err(format!(
                             "MTLTexture framebuffer is incomplete: GL {status:#x}"
                         ));
                     }
 
                     Ok(ExternalSurface::Texture {
-                        image,
                         texture,
                         framebuffer,
                     })
@@ -650,6 +662,17 @@ fn create_egl(
         }
 
         impl GLPlatformContext for EglCtx {
+            #[cfg(target_os = "macos")]
+            unsafe fn import_metal_texture(
+                &self,
+                handle: std::ptr::NonNull<c_void>,
+            ) -> Result<glow::Texture, String> {
+                let texture = unsafe { self.import_metal_texture_name(handle.as_ptr())? };
+                Ok(glow::NativeTexture(
+                    std::num::NonZeroU32::new(texture).unwrap(),
+                ))
+            }
+
             fn make_current(&self) -> bool {
                 unsafe {
                     (self.make_current)(self.display, self.pbuffer, self.pbuffer, self.ctx) != 0
@@ -792,7 +815,6 @@ fn create_egl(
                                 (self.destroy_surface)(self.display, surface);
                             }
                             ExternalSurface::Texture {
-                                image,
                                 texture,
                                 framebuffer,
                             } => {
@@ -800,9 +822,6 @@ fn create_egl(
                                 (self.gl_bind_framebuffer)(GL_FRAMEBUFFER, 0);
                                 (self.gl_delete_framebuffers)(1, &framebuffer);
                                 (self.gl_delete_textures)(1, &texture);
-                                if let Some(destroy_image) = self.destroy_image {
-                                    destroy_image(self.display, image);
-                                }
                             }
                         }
                     }

@@ -10,5 +10,15 @@ fn main() {
             .compile("artemis_metal_abi");
         println!("cargo:rustc-link-lib=framework=CoreFoundation");
         println!("cargo:rustc-link-lib=framework=CoreVideo");
+        if std::env::var_os("CARGO_FEATURE_GL_SMOKE").is_some() {
+            println!("cargo:rerun-if-changed=metal_texture.m");
+            cc::Build::new()
+                .file("metal_texture.m")
+                .flag("-fobjc-arc")
+                .warnings_into_errors(true)
+                .compile("artemis_gl_metal_texture");
+            println!("cargo:rustc-link-lib=framework=Metal");
+            println!("cargo:rustc-link-lib=framework=Foundation");
+        }
     }
 }

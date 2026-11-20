@@ -416,8 +416,118 @@ fn check_backdrop(
     }
     renderer.clear_cached_shaders();
     renderer.clear_cached_textures();
+    #[cfg(target_os = "macos")]
+    if gles {
+        check_metal_texture_sampling(renderer.backend_mut())?;
+    }
     renderer.backend_mut().end_access();
     println!("Artemis GLSL backdrop: stage and group pixels verified");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn check_metal_texture_sampling(
+    backend: &mut art3m1s_render::backend::gl::GlBackend,
+) -> Result<(), String> {
+    use art3m1s_render::backend::{
+        Extent2D, FrameTarget, GpuBackend, NativeSurface, NativeSurfaceKind,
+    };
+    use art3m1s_render::draw::{
+        BlendMode, ClipRect, DrawCommand, DrawList, ShaderEffect, TextureInfo,
+    };
+    use std::{ffi::c_void, ptr::NonNull};
+
+    unsafe extern "C" {
+        fn metal_smoke_texture_new(pixels: *const u8, private_storage: bool) -> *mut c_void;
+        fn metal_smoke_texture_read(texture: *mut c_void, pixels: *mut u8);
+        fn metal_smoke_texture_free(texture: *mut c_void);
+    }
+    struct MetalTexture(NonNull<c_void>);
+    impl Drop for MetalTexture {
+        fn drop(&mut self) {
+            unsafe { metal_smoke_texture_free(self.0.as_ptr()) }
+        }
+    }
+    let input = std::array::from_fn::<_, 64, _>(|i| {
+        let row = i / 16;
+        let col = i / 4 % 4;
+        [
+            20 + 8 * row as u8,
+            30 + 8 * col as u8,
+            200 - 8 * row as u8,
+            255,
+        ][i % 4]
+    });
+    let make = |pixels: &[u8; 64], private_storage| {
+        NonNull::new(unsafe { metal_smoke_texture_new(pixels.as_ptr(), private_storage) })
+            .map(MetalTexture)
+            .ok_or("cannot create Metal texture")
+    };
+    let input_texture = make(&input, true)?;
+    let output = make(&[0; 64], false)?;
+    let extent = Extent2D::new(4, 4);
+    backend
+        .register_glsl_shader(
+            "metal-input",
+            br#"
+precision mediump float;
+varying vec2 resultCoord;
+uniform sampler2D textureFore;
+void main() { gl_FragColor = texture2D(textureFore, resultCoord).bgra; }
+"#,
+        )
+        .map_err(|error| error.to_string())?;
+    backend.set_native_surface(NativeSurface {
+        kind: NativeSurfaceKind::AppleMetalTexture,
+        handle: output.0.as_ptr(),
+        extent,
+    })?;
+    let drawn = unsafe {
+        backend.with_metal_texture(input_texture.0, |backend, texture| {
+            let mut draw = DrawList::new();
+            draw.push(DrawCommand {
+                texture,
+                size: TextureInfo {
+                    width: 4,
+                    height: 4,
+                },
+                transform: Default::default(),
+                opacity: 1.0,
+                blend: BlendMode::Alpha,
+                color: Default::default(),
+                clip: ClipRect {
+                    uv_offset: [0.0; 2],
+                    uv_scale: [1.0; 2],
+                    quad_size: [4.0; 2],
+                },
+                clip_bounds: None,
+                shader: Some(ShaderEffect {
+                    name: "metal-input".into(),
+                    uniforms: Default::default(),
+                    mask_texture: None,
+                    user_texture: None,
+                }),
+                mesh: None,
+                stencil: None,
+                native_emote: None,
+            });
+            backend.begin_frame(FrameTarget::Main)?;
+            backend.render_with_clear_color(&draw, [0.0; 4]);
+            backend.end_frame();
+            backend.present(None)
+        })
+    };
+    backend.clear_native_surface();
+    backend.unregister_shader("metal-input");
+    drawn?;
+    let mut actual = [0; 64];
+    unsafe { metal_smoke_texture_read(output.0.as_ptr(), actual.as_mut_ptr()) };
+    let mut expected = input;
+    for pixel in expected.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    assert_eq!(actual, expected, "Metal to ANGLE to Metal pixels");
+    println!("Artemis GLSL: sampled a Metal texture and returned Metal pixels");
     Ok(())
 }
 
