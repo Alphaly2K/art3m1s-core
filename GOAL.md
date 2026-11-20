@@ -1011,6 +1011,7 @@ Windows x64 GNU 兼容层通过，两个产物均只导出 `art3m1s_get_api_v2`�
 
 Debian 13 ARM64 客体运行独立 Core 的依赖检查、ELF 导出及 C ABI 冒烟。Mesa EGL 的离屏软件
 渲染通过 GLSL ES 1.00 和 3.00 的帧、背景取样、组效果像素及 EGL 上下文恢复验证。
+同一探针使用公开试玩归档的移动端和 Switch 反色程序，也得到预期像素。
 
 后续继续审计聚合 crate 的 Rust 公共接口与调用方，保持 legacy 与独立 v2 产物分离。生产默认
 切换仍待原版游戏的着色器、媒体及存档对照，以及 Windows MSVC 原生验证。
