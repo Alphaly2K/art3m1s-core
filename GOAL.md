@@ -909,7 +909,11 @@ v2 将 Luau `print` 作为可丢弃的诊断交给 Host，Flutter 按当前会�
 独立 Core 不包含解释器的系统时钟、本地时区或基于时钟的种子回退。日期换算由 Luau 和
 脚本标签共用，legacy 和解释器工具保留原有回退。独立 Core 291 项、C ABI、两种解释器
 配置各 245 项及 legacy 工具编译通过。Luau 的内置数学库初始化仍读取进程时钟，脚本执行前
-由 Host 种子覆盖。macOS Flutter 新会话当前使用固定种子，后续由 Host 为每次打开选择种子。
+由 Host 种子覆盖。
+
+macOS Flutter Host 在每次打开时选择随机种子，并在同一次打开的渲染后端回退中复用。原生
+Swift 探针确认旧 Host 的两次启动随机序列相同，新 Host 的两次序列不同，覆盖 DXVK 加载失败
+后回退 Metal。参考 Swift 通道的纹理和媒体冒烟通过。
 
 后续继续审计聚合 crate 的 Rust 公共接口与调用方，保持 legacy 与独立 v2 产物分离。生产默认
 切换仍待原版游戏的着色器、媒体及存档对照，以及 Linux EGL 和 Windows MSVC 原生验证。

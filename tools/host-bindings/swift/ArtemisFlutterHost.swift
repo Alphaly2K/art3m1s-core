@@ -82,6 +82,7 @@ private enum ArtemisFlutterError: Error {
             }
             let core = try ArtemisMacSession(corePath: corePath, metalPath: metalPath, hostCaps: caps,
                                              screenshots: args["screenshots"] as? Bool ?? false,
+                                             randomSeed: UInt64.random(in: .min ... .max),
                                              angleDirectory: angle)
             do {
                 try core.openProject(ini, platform: platform, reportedOS: args["reportedOS"] as? String)
