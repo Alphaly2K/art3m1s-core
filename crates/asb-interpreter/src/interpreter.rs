@@ -759,7 +759,7 @@ impl Interpreter {
         &mut self,
         response: crate::io_continuation::IoResponse,
     ) -> Result<crate::io_continuation::IoProgress> {
-        use crate::io_continuation::{IoProgress, IoRequest, IoResponse};
+        use crate::io_continuation::{IoFailure, IoProgress, IoRequest, IoResponse};
         if !matches!(response, IoResponse::Read(_) | IoResponse::Failed { .. }) {
             return Err(Error::RuntimeError {
                 line: self.current_line,
@@ -793,10 +793,27 @@ impl Interpreter {
                     Ok(())
                 }
             },
-            IoResponse::Failed { kind, message } => Err(Error::RuntimeError {
-                line: self.current_line,
-                message: format!("Host resource {path}: {}: {message}", kind.as_str()),
-            }),
+            IoResponse::Failed { kind, message } => {
+                if kind == IoFailure::NotFound
+                    && path
+                        .rsplit(['/', '\\'])
+                        .next()
+                        .is_some_and(|name| !name.is_empty() && !name.contains('.'))
+                    && let HostResourceAction::EnterLabel(label) = resource.action
+                {
+                    let target = format!("{path}.iet");
+                    if self.scripts.contains_key(&target) {
+                        self.enter_loaded_script(&target, &label)
+                    } else {
+                        self.request_host_resource(&target, HostResourceAction::EnterLabel(label))
+                    }
+                } else {
+                    Err(Error::RuntimeError {
+                        line: self.current_line,
+                        message: format!("Host resource {path}: {}: {message}", kind.as_str()),
+                    })
+                }
+            }
             _ => unreachable!(),
         };
         if optional {

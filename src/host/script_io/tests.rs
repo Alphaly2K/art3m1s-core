@@ -853,6 +853,10 @@ fn optional_macro_misses_continue_but_required_scene_failures_stop_the_session()
             assert!(session.submit_replies(&[host.complete(&request)]).is_err());
         } else {
             session.submit_replies(&[host.complete(&request)]).unwrap();
+            assert_eq!(session.step().unwrap(), ScriptIoProgress::Waiting);
+            let fallback = requests(&mut session).pop().unwrap();
+            assert_eq!(fallback.metadata["key"], "required.iet");
+            session.submit_replies(&[host.complete(&fallback)]).unwrap();
         }
         let error = session.step().unwrap_err().to_string();
         assert!(error.contains(if cancel { "cancelled" } else { "not_found" }));

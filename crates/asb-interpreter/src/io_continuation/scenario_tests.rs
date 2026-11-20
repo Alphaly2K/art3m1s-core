@@ -196,6 +196,53 @@ fn a_pending_external_read_keeps_its_call_frame_and_rejects_wrong_completion_typ
 }
 
 #[test]
+fn extensionless_scene_targets_reuse_the_resolved_script() {
+    let mut i = Interpreter::default();
+    i.enable_resumable_io().unwrap();
+    i.load_script(
+        "caller.iet",
+        "*main\n[call file=episode label=entry]\n[jump file=episode label=again]\n",
+    )
+    .unwrap();
+    i.start("caller.iet", "main").unwrap();
+    let missing = || IoResponse::Failed {
+        kind: IoFailure::NotFound,
+        message: "file not found".into(),
+    };
+    assert!(matches!(i.run().unwrap(), ExecutionResult::HostIoPending));
+    assert_eq!(
+        i.pending_host_io(),
+        Some(&IoRequest::Read {
+            path: "episode".into()
+        })
+    );
+    assert_eq!(i.resume_host_io(missing()).unwrap(), IoProgress::Waiting);
+    assert_eq!(
+        i.pending_host_io(),
+        Some(&IoRequest::Read {
+            path: "episode.iet".into()
+        })
+    );
+    i.resume_host_io(IoResponse::Read(
+        b"*entry\n[var name=visited data=1]\n[return]\n*again\n[var name=returned data=1]\n[lua]\nload_count=(load_count or 0)+1\n[/lua]\n".to_vec(),
+    ))
+    .unwrap();
+    assert!(matches!(i.run().unwrap(), ExecutionResult::HostIoPending));
+    assert_eq!(i.get_variable("visited").and_then(|v| v.as_int()), Some(1));
+    assert_eq!(
+        i.pending_host_io(),
+        Some(&IoRequest::Read {
+            path: "episode".into()
+        })
+    );
+    assert_eq!(i.resume_host_io(missing()).unwrap(), IoProgress::Completed);
+    assert!(matches!(i.run().unwrap(), ExecutionResult::Completed));
+    assert_eq!(i.current_script(), Some("episode.iet"));
+    assert_eq!(i.get_variable("returned").and_then(|v| v.as_int()), Some(1));
+    assert_eq!(i.lua().globals().get::<i32>("load_count").unwrap(), 1);
+}
+
+#[test]
 fn stack_overrides_and_position_restore_load_missing_scripts_without_running_old_queues() {
     let mut i = Interpreter::default();
     i.enable_resumable_io().unwrap();
