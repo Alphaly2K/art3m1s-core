@@ -110,7 +110,10 @@ unsafe extern "C" fn next_video(video: *mut Video, output: *mut Frame) -> i32 {
             video.last_frame = Some(frame);
             FRAME
         }
-        Ok(None) => END,
+        Ok(None) => {
+            output.pts_us = video.decoder.implicit_hold_end_us();
+            END
+        }
         Err(_) => DECODE_ERROR,
     }))
     .unwrap_or(DECODE_ERROR)

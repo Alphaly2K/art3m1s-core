@@ -3,7 +3,8 @@
 #include <dlfcn.h>
 #include <stdio.h>
 
-static int probe(const ArtMediaHostApiV1 *api, const char *path, unsigned expected_frames) {
+static int probe(const ArtMediaHostApiV1 *api, const char *path, unsigned expected_frames,
+                 uint64_t expected_hold_end_us) {
     ArtMediaVideo *video = api->open_video(path);
     if (!video) return 0;
     ArtMediaFrame frame;
@@ -23,7 +24,7 @@ static int probe(const ArtMediaHostApiV1 *api, const char *path, unsigned expect
         if (++frames > expected_frames) break;
     }
     api->close_video(video);
-    return status == 0 && frames == expected_frames;
+    return status == 0 && frames == expected_frames && frame.pts_us == expected_hold_end_us;
 }
 
 static int probe_audio(const ArtMediaHostApiV1 *api, const char *path, int delayed) {
@@ -70,7 +71,7 @@ static int probe_audio(const ArtMediaHostApiV1 *api, const char *path, int delay
 }
 
 int main(int argc, char **argv) {
-    if (argc != 6) return 1;
+    if (argc != 7) return 1;
     void *library = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
     if (!library) {
         fprintf(stderr, "%s\n", dlerror());
@@ -86,11 +87,15 @@ int main(int argc, char **argv) {
         fputs("The legacy decoder accepted an unsupported container.\n", stderr);
         return 1;
     }
-    for (int i = 3; i < argc; ++i) {
-        if (!probe(api, argv[i], i == 4 ? 144 : 24)) {
+    for (int i = 3; i < 6; ++i) {
+        if (!probe(api, argv[i], i == 4 ? 144 : 24, 0)) {
             fputs("Legacy video did not deliver normalized blue frames and EOF.\n", stderr);
             return 1;
         }
+    }
+    if (!probe(api, argv[6], 2, 1000000)) {
+        fputs("Theora did not preserve its implicit frame hold through EOF.\n", stderr);
+        return 1;
     }
     if (!probe_audio(api, argv[3], 0)) {
         fputs("WMV did not deliver timestamped stereo PCM and EOF.\n", stderr);

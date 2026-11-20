@@ -183,6 +183,7 @@ pub struct FfmpegVideoDecoder {
     timestamp_origin_us: i64,
     frame_rate: Option<Rational>,
     info: VideoStreamInfo,
+    theora_hold_end_us: Option<u64>,
     eof: bool,
 }
 
@@ -331,6 +332,8 @@ impl FfmpegVideoDecoder {
             .ok_or_else(|| "no video stream".to_string())?;
         let stream_index = stream.index();
         let time_base = stream.time_base();
+        let theora_hold_end_us =
+            (legacy_host && stream.parameters().id() == ffmpeg::codec::Id::THEORA).then_some(0);
         let average = stream.avg_frame_rate();
         let rate = if legacy_host && !valid_rate(average) {
             stream.rate()
@@ -375,12 +378,17 @@ impl FfmpegVideoDecoder {
             timestamp_origin_us,
             frame_rate: rate,
             info,
+            theora_hold_end_us,
             eof: false,
         })
     }
 
     pub fn info(&self) -> VideoStreamInfo {
         self.info
+    }
+
+    pub fn implicit_hold_end_us(&self) -> u64 {
+        self.theora_hold_end_us.unwrap_or(0)
     }
 
     pub fn next_rgba_frame(&mut self) -> Result<Option<RgbaVideoFrame>, String> {
@@ -403,6 +411,9 @@ impl FfmpegVideoDecoder {
             .seek(0, ..)
             .map_err(|error| error.to_string())?;
         self.decoder.flush();
+        if let Some(end) = &mut self.theora_hold_end_us {
+            *end = 0;
+        }
         self.eof = false;
         Ok(())
     }
@@ -420,6 +431,20 @@ impl FfmpegVideoDecoder {
                     let mut packet = Packet::empty();
                     match packet.read(&mut self.source.input) {
                         Ok(()) if packet.stream() != self.stream_index => continue,
+                        Ok(()) if packet.size() == 0 && self.theora_hold_end_us.is_some() => {
+                            // Theora uses empty packets to hold the previous image.
+                            if let Some(end) = pts_micros(
+                                packet
+                                    .pts()
+                                    .map(|pts| pts.saturating_add(packet.duration().max(0))),
+                                self.time_base,
+                            ) {
+                                let end =
+                                    end.saturating_sub(self.timestamp_origin_us).max(0) as u64;
+                                let previous = self.implicit_hold_end_us();
+                                self.theora_hold_end_us = Some(previous.max(end));
+                            }
+                        }
                         Ok(()) => {
                             self.decoder
                                 .send_packet(&packet)
