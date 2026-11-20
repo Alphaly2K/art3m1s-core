@@ -666,7 +666,7 @@ unsafe extern "C" fn art3m1s_probe_caption(
         return 0;
     };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        crate::probe_caption_from_bytes_with_resources(ini, plat, resources)
+        crate::legacy_project::probe_caption_from_bytes_with_resources(ini, plat, resources)
     }));
     let caption = match result {
         Ok(Some(c)) => c,
