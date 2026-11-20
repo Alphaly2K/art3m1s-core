@@ -28,8 +28,12 @@ if [[ $mode == --bundle ]]; then
     -framework CoreFoundation -framework CoreVideo -o "$scratch/metal-host"
   cd "$scratch"
   unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH DXVK_WSI_DRIVER SDL_VULKAN_LIBRARY
-  "$scratch/metal-host" --shader-host-mixed-source |
-    "$mac/artemis-hlsl-compile" effect-pair > "$scratch/effect.ade"
+  "$scratch/metal-host" --shader-host-mixed-source > "$scratch/effect.hlsl"
+  "$mac/artemis-hlsl-compile" effect-pair < "$scratch/effect.hlsl" > "$scratch/effect.ade"
+  if [[ ! -s $scratch/effect.ade ]]; then
+    printf '%s\n' 'The bundled HLSL compiler did not emit an effect.' >&2
+    exit 1
+  fi
   ARTEMIS_GL_SMOKE_ANGLE_DIR="$mac" DXVK_LOG_LEVEL=warn MVK_CONFIG_LOG_LEVEL=2 \
     "$scratch/metal-host" --shader-host-mixed "$frameworks" "$scratch/effect.ade"
   exit 0
