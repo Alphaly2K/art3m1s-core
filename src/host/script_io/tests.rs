@@ -3222,6 +3222,50 @@ end
 }
 
 #[test]
+fn rejected_media_paths_leave_scene_and_script_running() {
+    let (mut session, _, mut host) = playback_project(
+        br#"*top
+[lyc id=clip width=2 height=2 color=ff204080]
+[video id=clip file=../outside.mp4]
+[wait video=clip]
+[video file=C:/outside.mp4]
+[seplay id=effect file=../outside.wav]
+[wait se=effect]
+[calllua function=mark]
+[stop]
+[lua]
+function mark() reached = true end
+[/lua]
+"#,
+    );
+    for id in 1..=3 {
+        drive_display_snapshot(&mut session, &mut host, playback_frame(id, id));
+    }
+    assert!(
+        session
+            .interpreter()
+            .lua()
+            .globals()
+            .get::<bool>("reached")
+            .unwrap()
+    );
+    assert!(matches!(
+        session.pending_event(),
+        Some(Event::Wait {
+            reason: asb_interpreter::WaitReason::Stop { .. }
+        })
+    ));
+    let frame = session.frames.latest_snapshot().unwrap();
+    let [sprite] = frame.sprites.as_ref() else {
+        panic!("expected the unchanged clip layer");
+    };
+    assert_eq!(
+        frame.texture(sprite.texture).unwrap().rgba(),
+        [32, 64, 128, 255]
+    );
+}
+
+#[test]
 fn host_video_layers_publish_immutable_frames_and_resume_media_waits() {
     use crate::host::{
         input::HostInput,

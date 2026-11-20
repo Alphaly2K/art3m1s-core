@@ -592,6 +592,7 @@ RGBA8 字形图集，将字形四边形按消息层顺序放进帧包；图集�
 语义，不把 gain=1000 当作百分比。每次播放分配不可复用的 playback_id，脚本通道 ID
 可以重复。Host 回报 started/ended/failed/cancelled 和可选播放时钟；旧播放完成不得停止
 新声音。视频音轨由 Host 解码，不经 core 临时 WAV 路径。
+脚本播放请求的资源键若无效，Core 记录诊断并继续执行，不分配播放 ID，也不替换已有播放。
 
 声明 `ART_HOST_CAP_MEDIA` 后，Core 通过 Media domain=5、kind=1 输出可靠音频命令，blob
 为空。未声明时，Core 跳过音视频播放及读档后的音频恢复，不触发自然播完回调；脚本中的

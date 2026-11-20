@@ -141,6 +141,11 @@ impl ScriptIoSession {
                 delay_margin_ms,
                 ..
             } => {
+                let Ok(key) = scene.resolve_asset_key(file) else {
+                    crate::core_warn!("video playback skipped: invalid asset key");
+                    self.resume_scenario()?;
+                    return Ok(true);
+                };
                 let serial = self
                     .video
                     .serial
@@ -152,7 +157,6 @@ impl ScriptIoSession {
                 if replaces.is_none() && self.video.tracks.len() >= MAX_TRACKS {
                     return Err(ProtocolError::Limit);
                 }
-                let key = scene.resolve_asset_key(file)?;
                 emit(
                     &mut self.transport,
                     json!({

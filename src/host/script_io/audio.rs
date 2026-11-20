@@ -556,10 +556,16 @@ impl Audio {
         };
         let id = next_audio_id(self.serial)?;
         let replaces = self.active.get(&channel).map(|track| track.id);
+        let (record, playback) = match spec.build(scene, &channel, id, replaces) {
+            Err(ProtocolError::Argument(_)) => {
+                crate::core_warn!("audio playback skipped: invalid asset key");
+                return Ok(());
+            }
+            result => result?,
+        };
         if replaces.is_none() && self.active.len() >= MAX_PLAYBACKS {
             return Err(ProtocolError::Limit);
         }
-        let (record, playback) = spec.build(scene, &channel, id, replaces)?;
         emit(transport, record)?;
         self.serial = id;
         self.active.insert(channel, playback);
