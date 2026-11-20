@@ -41,12 +41,12 @@ pub struct Layer {
     pub tweens: Vec<Tween>,
     /// 直接子节点的完整 ID，按插入顺序保存以保证稳定的绘制次序。
     pub children: Vec<String>,
-    /// [lyevent] 注册的事件处理器，按事件类型（click/rollover/rollout/...）索引。
+    /// `[lyevent]` 注册的事件处理器，按事件类型（click/rollover/rollout/...）索引。
     /// 引擎只负责命中后把对应处理器交还解释器执行，不解释其内容。
     pub event_handlers: HashMap<String, LayerEventHandler>,
 }
 
-/// 一个 [lyevent] 注册的图层事件处理器。
+/// 一个 `[lyevent]` 注册的图层事件处理器。
 ///
 /// 完全对应 Artemis `lyevent` 标签语义：命中后引擎执行 `handler` 标签（若有），
 /// 并跳转/调用到 `(file, label)`（若有），其余参数原样透传。引擎不认识其中任何

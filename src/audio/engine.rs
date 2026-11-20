@@ -317,7 +317,7 @@ pub trait AudioBackend {
     /// 播放 BGM。
     ///
     /// BGM 单通道约束：若已有 BGM 在播放，先停止旧 BGM 再播放新曲。
-    /// 需要交叉淡入时使用 [`crossfade_bgm`]。
+    /// 需要交叉淡入时使用 [`Self::crossfade_bgm`]。
     fn play_bgm(&mut self, file: &str, config: &BgmConfig);
 
     /// 停止 BGM，可选淡出。

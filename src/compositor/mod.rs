@@ -8,11 +8,11 @@
 //! - [`props`]：图层属性的 typed 表示与从原始字符串解析。
 //! - [`scene`]：点分层级 ID 的图层树（增删改、子树、继承）。
 //! - [`anim`]：属性缓动与缓动函数。
-//! - [`renderer`]：DrawList 数据结构和纹理解析边界。
+//! - [`DrawList`] 和 [`TextureProvider`] 用于描述绘制与解析纹理。
 //! - [`build`]：把场景树在某时刻压平成 DrawList。
 //! - [`reduce`]：把解释器事件归约到场景状态上的 [`Compositor`]。
-//! - [`transition`]：转场状态与转场捕获/叠加规则。
-//! - [`mock`]：测试用的假后端。
+//! - [`crate::render_pipeline::transition`] 维护旧渲染器的转场状态与捕获规则。
+//! - `mock` 提供测试用的后端。
 
 pub mod anim;
 pub mod build;
