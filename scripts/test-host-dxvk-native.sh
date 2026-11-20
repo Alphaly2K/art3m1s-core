@@ -7,12 +7,33 @@ if [[ $(uname -s) != Darwin ]]; then
   exit 2
 fi
 mode=${1:-}
-if [[ $# -gt 1 || ( -n $mode && $mode != --hlsl && $mode != --arfp ) ]]; then
-  printf '%s\n' 'Usage: test-host-dxvk-native.sh [--hlsl|--arfp]' >&2
+if [[ ( $mode == --bundle && $# != 2 ) ||
+      ( $mode != --bundle && ( $# -gt 1 || ( -n $mode && $mode != --hlsl && $mode != --arfp ) ) ) ]]; then
+  printf '%s\n' 'Usage: test-host-dxvk-native.sh [--hlsl|--arfp|--bundle APP_BUNDLE]' >&2
   exit 2
 fi
 scratch=$(mktemp -d)
 trap 'rm -rf -- "$scratch"' EXIT
+if [[ $mode == --bundle ]]; then
+  contents=$(cd "$2/Contents" && pwd)
+  mac="$contents/MacOS"
+  frameworks="$contents/Frameworks"
+  if [[ ! -x $mac/artemis-hlsl-compile ]]; then
+    printf '%s\n' 'The bundle must include the HLSL compiler and mixed renderer.' >&2
+    exit 2
+  fi
+  "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -DARTEMIS_DXVK_HOST_SMOKE -Idoc/abi \
+    tools/host-smoke/artemis_v2.c tools/host-smoke/metal_abi.c \
+    -L"$mac" -lart3m1s_artemis_core -lart3m1s_artemis_metal_host -Wl,-rpath,"$mac" \
+    -framework CoreFoundation -framework CoreVideo -o "$scratch/metal-host"
+  cd "$scratch"
+  unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH DXVK_WSI_DRIVER SDL_VULKAN_LIBRARY
+  "$scratch/metal-host" --shader-host-mixed-source |
+    "$mac/artemis-hlsl-compile" effect-pair > "$scratch/effect.ade"
+  ARTEMIS_GL_SMOKE_ANGLE_DIR="$mac" DXVK_LOG_LEVEL=warn MVK_CONFIG_LOG_LEVEL=2 \
+    "$scratch/metal-host" --shader-host-mixed "$frameworks" "$scratch/effect.ade"
+  exit 0
+fi
 runtime_dir=${ARTEMIS_DXVK_RUNTIME_DIR:-}
 xcrun clang++ -std=c++17 -fobjc-arc -Wall -Wextra -Werror \
   -c tools/host-smoke/artemis_dxvk_metal_writer.mm -o "$scratch/metal-writer.o"

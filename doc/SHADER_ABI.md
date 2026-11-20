@@ -394,6 +394,10 @@ Set `ARTEMIS_DXVK_RUNTIME_DIR` to the assembled directory and run
 `bash scripts/test-host-dxvk-native.sh --arfp` to check the packaged libraries.
 To generate the fixture's ADE2 without CrossOver, set
 `ARTEMIS_NATIVE_HLSL_COMPILER` to the absolute path of the native compiler.
+Run `bash scripts/test-host-dxvk-native.sh --bundle APP_BUNDLE` to verify a
+packaged compiler and mixed renderer together. The probe compiles a synthetic
+effect and checks the shared surface and capture using the bundle's Core,
+Metal Host, DXVK and ANGLE libraries.
 
 Build and install vkd3d 2.1 separately with GNU Make 4.3 or newer, Bison 3,
 Flex, Perl with JSON, and Vulkan and SPIR-V headers. Use

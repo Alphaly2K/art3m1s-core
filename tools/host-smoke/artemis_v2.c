@@ -383,6 +383,9 @@ int main(int argc, char **argv) {
     else if (argc == 2 && !strcmp(argv[1], "--gles-frame")) shader_frame = GLES;
     else if (argc == 2 && !strcmp(argv[1], "--gles100-frame")) shader_frame = GLES100;
 #ifdef ARTEMIS_DXVK_HOST_SMOKE
+    else if (argc == 2 && !strcmp(argv[1], "--shader-host-mixed-source")) {
+        return fputs(shader_sequence_source, stdout) < 0;
+    }
     else if (argc == 2 && !strcmp(argv[1], "--shader-host-legacy-alpha-source")) {
         return fputs(shader_host_legacy_alpha_source, stdout) < 0;
     }
