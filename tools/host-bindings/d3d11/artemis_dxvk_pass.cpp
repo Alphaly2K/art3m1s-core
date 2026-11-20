@@ -47,7 +47,7 @@ struct ArtDxvkProgram {
     const bool combined_samplers;
     Com<ID3D11VertexShader> vertex;
     Com<ID3D11PixelShader> pixel;
-    Com<ID3D11Buffer> constants;
+    std::array<Com<ID3D11Buffer>, ART_DXBC_CONSTANT_SLOTS> constants;
     std::vector<char> data;
 
     int slot(std::string_view texture, std::string_view sampler) const {
@@ -68,11 +68,14 @@ struct ArtDxvkProgram {
         require(!vs.empty(), "DXVK program requires an ADE2 shader pair");
         require(SUCCEEDED(device->CreateVertexShader(vs.data(), vs.size(), nullptr, &vertex)), "Cannot create vertex shader");
         require(SUCCEEDED(device->CreatePixelShader(ps.data(), ps.size(), nullptr, &pixel)), "Cannot create pixel shader");
-        if (!data.empty()) {
-            D3D11_BUFFER_DESC desc = {};
-            desc.ByteWidth = effect.constant_bytes();
-            desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-            require(SUCCEEDED(device->CreateBuffer(&desc, nullptr, &constants)), "Cannot create shader constants");
+        for (unsigned slot = 0; slot < constants.size(); ++slot) {
+            if (const auto bytes = effect.constant_size(slot)) {
+                D3D11_BUFFER_DESC desc = {};
+                desc.ByteWidth = bytes;
+                desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+                require(SUCCEEDED(device->CreateBuffer(&desc, nullptr, &constants[slot])),
+                        "Cannot create shader constants");
+            }
         }
     }
 };
@@ -179,9 +182,15 @@ int art_dxvk_draw(ArtDxvkContext *context, ArtDxvkProgram *program, const ArtDxv
     if (program->combined_samplers) samplers.fill(context->linear_sampler.ptr());
     else samplers[0] = context->point_sampler.ptr();
     draw->PSSetSamplers(0, samplers.size(), samplers.data());
-    auto *buffer = program->constants.ptr();
-    if (buffer) draw->UpdateSubresource(buffer, 0, nullptr, program->data.data(), 0, 0);
-    draw->PSSetConstantBuffers(0, 1, &buffer);
+    std::array<ID3D11Buffer *, ART_DXBC_CONSTANT_SLOTS> buffers{};
+    for (unsigned slot = 0; slot < buffers.size(); ++slot) {
+        buffers[slot] = program->constants[slot].ptr();
+        if (buffers[slot]) {
+            draw->UpdateSubresource(buffers[slot], 0, nullptr,
+                                    program->data.data() + program->effect.constant_offset(slot), 0, 0);
+        }
+    }
+    draw->PSSetConstantBuffers(0, buffers.size(), buffers.data());
     draw->VSSetShader(program->vertex.ptr(), nullptr, 0);
     draw->PSSetShader(program->pixel.ptr(), nullptr, 0);
     draw->RSSetViewports(1, &targets->viewport);
@@ -194,8 +203,8 @@ int art_dxvk_draw(ArtDxvkContext *context, ArtDxvkProgram *program, const ArtDxv
     draw->OMSetRenderTargets(0, nullptr, nullptr);
     draw->VSSetShader(nullptr, nullptr, 0);
     draw->PSSetShader(nullptr, nullptr, 0);
-    buffer = nullptr;
-    draw->PSSetConstantBuffers(0, 1, &buffer);
+    buffers.fill(nullptr);
+    draw->PSSetConstantBuffers(0, buffers.size(), buffers.data());
     context->host.finish_output(*targets->output);
     return 0;
 } catch (const std::exception &error) {

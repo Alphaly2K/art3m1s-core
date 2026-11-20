@@ -75,14 +75,18 @@ using Program = std::unique_ptr<ArtDxvkProgram, decltype(&art_dxvk_program_destr
 using Targets = std::unique_ptr<ArtDxvkTargets, decltype(&art_dxvk_targets_destroy)>;
 using Writer = std::unique_ptr<ArtMetalWriter, decltype(&art_metal_writer_destroy)>;
 
-static Program load_program(ArtDxvkContext *context, const char *path) {
+static std::vector<uint8_t> read_artifact(const char *path) {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     const auto bytes = file.tellg();
     check(bytes > 0, "open shader artifact");
     std::vector<uint8_t> ade(static_cast<size_t>(bytes));
     file.seekg(0);
     check(bool(file.read(reinterpret_cast<char *>(ade.data()), bytes)), "read shader artifact");
-    Program program(art_dxvk_program_create(context, ade.data(), ade.size()), art_dxvk_program_destroy);
+    return ade;
+}
+
+static Program load_program(ArtDxvkContext *context, const std::vector<uint8_t> &artifact) {
+    Program program(art_dxvk_program_create(context, artifact.data(), artifact.size()), art_dxvk_program_destroy);
     check(bool(program), "prepare DXVK program");
     return program;
 }
@@ -111,12 +115,13 @@ struct Presentation {
     }
 };
 
-static void draw_effect(const char *effect, const char *alternate, const char *legacy) {
+static void draw_effect(const char *effect, const char *alternate, const char *legacy,
+                        const char *dual_constants, const char *second_slot) {
     std::unique_ptr<ArtDxvkContext, decltype(&art_dxvk_context_destroy)> context(art_dxvk_context_create(),
                                                                                 art_dxvk_context_destroy);
     check(bool(context), "create DXVK context");
-    auto primary = load_program(context.get(), effect);
-    auto second = load_program(context.get(), alternate);
+    auto primary = load_program(context.get(), read_artifact(effect));
+    auto second = load_program(context.get(), read_artifact(alternate));
     Presentation original(context.get(), 7, 5);
     const uint8_t initial[] = {17, 34, 51, 255}, changed[] = {17, 68, 102, 255};
     const uint8_t pixels[][4] = {{24, 24, 5, 255}, {255, 0, 0, 255}, {26, 34, 0, 255}};
@@ -146,7 +151,7 @@ static void draw_effect(const char *effect, const char *alternate, const char *l
     check_pixels(replacement.presentation.get(), 3, pixels[2]);
     check_pixels(original.presentation.get(), 2, pixels[1]);
 
-    auto combined = load_program(context.get(), legacy);
+    auto combined = load_program(context.get(), read_artifact(legacy));
     const uint8_t legacy_mask[] = {0, 0, 0, 255, 0, 128, 0, 255}, legacy_user[] = {5, 128, 11, 255};
     const uint8_t default_pixel[] = {11, 80, 17, 255}, custom_pixel[] = {11, 96, 17, 128};
     const float weights[] = {1, 0.25f}, alpha = 0.5f;
@@ -162,16 +167,44 @@ static void draw_effect(const char *effect, const char *alternate, const char *l
         replacement.present();
         check_pixels(replacement.presentation.get(), 4 + i, i == 1 ? custom_pixel : default_pixel);
     }
+    auto artifact = read_artifact(dual_constants);
+    auto dual = load_program(context.get(), artifact);
+    auto only_b1 = load_program(context.get(), read_artifact(second_slot));
+    const float off = 0;
+    const ArtDxvkUniform dual_overrides[] = {
+        {reinterpret_cast<const uint8_t *>("red"), 3, &off, 1},
+        {reinterpret_cast<const uint8_t *>("green"), 5, &off, 1},
+    };
+    const uint8_t yellow[] = {0, 255, 255, 255}, red[] = {0, 0, 255, 255};
+    const uint8_t green[] = {0, 255, 0, 255}, black[] = {0, 0, 0, 255};
+    const auto draw_constants = [&](ArtDxvkProgram *program, const ArtDxvkUniform *overrides,
+                                    size_t count, size_t frame, const uint8_t (&expected)[4]) {
+        check(art_dxvk_draw(context.get(), program, replacement.targets.get(), {}, {}, overrides, count) == 0,
+              "render HLSL with multiple constant buffer slots");
+        replacement.present();
+        check_pixels(replacement.presentation.get(), frame, expected);
+    };
+    draw_constants(dual.get(), nullptr, 0, 7, yellow);
+    draw_constants(dual.get(), dual_overrides, 2, 8, black);
+    draw_constants(only_b1.get(), nullptr, 0, 9, green);
+    draw_constants(only_b1.get(), &dual_overrides[1], 1, 10, black);
+    draw_constants(dual.get(), &dual_overrides[1], 1, 11, red);
+    draw_constants(dual.get(), nullptr, 0, 12, yellow);
+
+    artifact[artifact.size() - 4] |= 1;
+    Program invalid(art_dxvk_program_create(context.get(), artifact.data(), artifact.size()), art_dxvk_program_destroy);
+    check(!invalid, "reject an unaligned constant buffer boundary");
+
     draw_primary(replacement, changed, 0);
-    check_pixels(replacement.presentation.get(), 7, pixels[2]);
-    std::puts("Native DXVK verified modern and legacy programs, shared targets, and constant overrides");
+    check_pixels(replacement.presentation.get(), 13, pixels[2]);
+    std::puts("Native DXVK verified modern and legacy programs, shared targets, and constant overrides in b0 and b1");
 }
 
 int main(int argc, char **argv) try {
     if (argc == 1) clear_surfaces();
-    else if (argc == 4) draw_effect(argv[1], argv[2], argv[3]);
+    else if (argc == 6) draw_effect(argv[1], argv[2], argv[3], argv[4], argv[5]);
     else {
-        std::fputs("Usage: artemis-dxvk-native [effect.ade alternate.ade legacy.ade]\n", stderr);
+        std::fputs("Usage: artemis-dxvk-native [effect.ade alternate.ade legacy.ade dual.ade b1.ade]\n", stderr);
         return 2;
     }
 } catch (const std::exception &error) {

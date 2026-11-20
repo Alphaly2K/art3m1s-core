@@ -27,14 +27,20 @@ public:
             read(artifact, uniforms_.data(), uniforms_.size() * sizeof(ArtDxbcUniform));
         }
         bytecode_ = read_bytecode(artifact, header_.bytecode_bytes);
+        first_buffer_bytes_ = header_.constant_bytes;
         if (header_.magic == ART_DXBC_EFFECT_PAIR_MAGIC) {
-            uint32_t bytes = 0;
-            read(artifact, &bytes, sizeof(bytes));
-            vertex_bytecode_ = read_bytecode(artifact, bytes);
+            uint32_t vertex_bytes = 0;
+            read(artifact, &vertex_bytes, sizeof(vertex_bytes));
+            vertex_bytecode_ = read_bytecode(artifact, vertex_bytes);
             if (!artifact.empty()) {
-                require(artifact.size() == header_.constant_bytes);
-                defaults_.assign(artifact.begin(), artifact.end());
-                artifact = {};
+                const auto bytes = header_.constant_bytes;
+                require(artifact.size() == bytes || artifact.size() == bytes + sizeof(uint32_t));
+                defaults_.assign(artifact.begin(), artifact.begin() + bytes);
+                artifact.remove_prefix(bytes);
+                if (!artifact.empty()) {
+                    read(artifact, &first_buffer_bytes_, sizeof(first_buffer_bytes_));
+                    require(first_buffer_bytes_ < bytes && !(first_buffer_bytes_ & 15));
+                }
             }
         }
         require(artifact.empty());
@@ -53,7 +59,8 @@ public:
             const auto span = art_dxbc_uniform_span(field.components);
             require(name_valid(field.name) && !(field.offset & 3) && columns >= 1 && columns <= 4 &&
                 (!elements || (header_.magic == ART_DXBC_EFFECT_PAIR_MAGIC && !(field.offset & 15))) &&
-                uint64_t(field.offset) + span <= header_.constant_bytes);
+                uint64_t(field.offset) + span <= (field.offset < first_buffer_bytes_
+                    ? first_buffer_bytes_ : header_.constant_bytes));
             for (size_t j = 0; j < i; ++j) {
                 const auto &other = uniforms_[j];
                 require(std::strcmp(field.name, other.name) != 0 &&
@@ -67,6 +74,10 @@ public:
         return {std::exchange(vertex_bytecode_, {}), std::exchange(bytecode_, {})};
     }
     uint32_t constant_bytes() const { return header_.constant_bytes; }
+    uint32_t constant_offset(unsigned slot) const { return slot == 0 ? 0 : first_buffer_bytes_; }
+    uint32_t constant_size(unsigned slot) const {
+        return slot == 0 ? first_buffer_bytes_ : header_.constant_bytes - first_buffer_bytes_;
+    }
     uint32_t texture_count() const { return header_.textures; }
 
     int texture_slot(std::string_view name) const {
@@ -120,6 +131,7 @@ private:
     }
 
     ArtDxbcHeader header_{};
+    uint32_t first_buffer_bytes_ = 0;
     std::array<ArtDxbcTexture, ART_DXBC_TEXTURE_SLOTS> textures_{};
     std::vector<ArtDxbcUniform> uniforms_;
     std::vector<char> defaults_;

@@ -179,6 +179,9 @@ else
     printf '%s\n' 'float4 main() : SV_Target { return float4(0, 0, 1, 1); }' |
       compile_effect effect-pair > "$scratch/alternate.ade"
     compile_effect effect-pair < tools/host-smoke/shaders/legacy-effect.hlsl > "$scratch/legacy.ade"
-    run_native "$executable" effect.ade alternate.ade legacy.ade
+    effect_src=tools/host-smoke/shaders/dual-constants.hlsl
+    compile_effect effect-pair < "$effect_src" > "$scratch/dual.ade"
+    { printf '#define SKIP_B0\n'; cat "$effect_src"; } | compile_effect effect-pair > "$scratch/b1.ade"
+    run_native "$executable" effect.ade alternate.ade legacy.ade dual.ade b1.ade
   fi
 fi

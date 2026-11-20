@@ -490,11 +490,17 @@ pixel DXBC bytes follow the records. `ADE2` uses the same layout with
 magic `ADE2`, then appends a little-endian `u32` vertex bytecode length and
 the vertex DXBC. For array constants, the low byte of the component count
 gives the element's float width, and the upper bytes give the array length;
-elements occupy consecutive 16-byte registers. An optional tail of exactly
-`b0` byte size holds the initial constant block. The Host restores this block
-on every draw, or starts with zeroes if it is absent, before applying frame
-parameters. The compiler and decoder share the limits defined in
-`artemis_dxbc_effect.h`.
+elements occupy consecutive 16-byte registers. For a shader that uses only `b0`,
+the optional tail holds its initial constants. Its length is the constant
+byte size in the header. A shader that uses `b1` stores the combined size of
+`b0` and `b1` in the header. Its tail contains both initial blocks in slot
+order, followed by a little-endian `u32` giving the `b0` size. A size of zero
+means the shader binds only `b1`. Both blocks are 16-byte aligned and uniform
+offsets are relative to the start of the combined block. An older Host can load
+ADE2 artifacts that use only `b0`. Artifacts that use `b1` require a Host that
+supports the boundary word. The Host restores the initial constants on every
+draw, or starts with zeroes if the tail is absent, before applying frame parameters.
+The compiler and decoder share the limits defined in `artemis_dxbc_effect.h`.
 
 To test transfer from Wine to a Flutter texture, set
 `FLUTTER_MACOS_FRAMEWORK_DIR` to the directory containing

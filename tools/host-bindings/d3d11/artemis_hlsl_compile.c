@@ -131,9 +131,11 @@ static HRESULT reflect_uniforms(ID3D11ShaderReflection *reflection, const char *
                                 int legacy) {
     ID3D11ShaderReflectionConstantBuffer *buffer = reflection->lpVtbl->GetConstantBufferByName(reflection, name);
     D3D11_SHADER_BUFFER_DESC desc;
-    if (!buffer || FAILED(buffer->lpVtbl->GetDesc(buffer, &desc)) || desc.Size > ART_DXBC_MAX_CONSTANTS ||
-        (desc.Size & 15) || desc.Variables > ART_DXBC_MAX_UNIFORMS) return E_INVALIDARG;
-    header->constant_bytes = desc.Size;
+    const uint32_t base = header->constant_bytes;
+    if (!buffer || FAILED(buffer->lpVtbl->GetDesc(buffer, &desc)) || !desc.Size ||
+        desc.Size > ART_DXBC_MAX_CONSTANTS - base || (desc.Size & 15) ||
+        desc.Variables > ART_DXBC_MAX_UNIFORMS - header->uniforms) return E_INVALIDARG;
+    header->constant_bytes += desc.Size;
     for (UINT i = 0; i < desc.Variables; ++i) {
         ID3D11ShaderReflectionVariable *variable = buffer->lpVtbl->GetVariableByIndex(buffer, i);
         D3D11_SHADER_VARIABLE_DESC field;
@@ -149,23 +151,23 @@ static HRESULT reflect_uniforms(ID3D11ShaderReflection *reflection, const char *
             (shape.Elements && (!defaults || (field.StartOffset & 15))) ||
             (field.StartOffset & 3) || (uint64_t)field.StartOffset + field.Size > desc.Size ||
             !copy_name(uniform->name, field.Name)) {
-            fprintf(stderr, "Unsupported b0 field: %s\n", field.Name ? field.Name : "<unnamed>");
+            fprintf(stderr, "Unsupported constant field: %s\n", field.Name ? field.Name : "<unnamed>");
             return E_NOTIMPL;
         }
-        uniform->offset = field.StartOffset;
+        uniform->offset = base + field.StartOffset;
         uniform->components = shape.Columns | (shape.Elements << 8);
         const uint32_t span = art_dxbc_uniform_span(uniform->components);
         if (field.Size < span || field.Size > ((span + 15) & ~15u) ||
             (!shape.Elements && field.Size != span)) {
-            fprintf(stderr, "Unsupported b0 layout: %s\n", field.Name);
+            fprintf(stderr, "Unsupported constant layout: %s\n", field.Name);
             return E_NOTIMPL;
         }
         if (defaults && field.DefaultValue) {
-            memcpy(defaults + field.StartOffset, field.DefaultValue, span);
+            memcpy(defaults + uniform->offset, field.DefaultValue, span);
         } else if (legacy && !shape.Elements && ((!strcmp(field.Name, "alpha") && shape.Columns == 1) ||
                    (!strcmp(field.Name, "colorMultiply") && shape.Columns == 3))) {
             const float identity[] = {1.0f, 1.0f, 1.0f};
-            memcpy(defaults + field.StartOffset, identity, span);
+            memcpy(defaults + uniform->offset, identity, span);
         }
         ++header->uniforms;
     }
@@ -182,6 +184,8 @@ static HRESULT write_effect(const void *data, uint32_t bytes, int paired, int le
     ArtDxbcTexture textures[ART_DXBC_TEXTURE_SLOTS] = {0};
     ArtDxbcUniform uniforms[ART_DXBC_MAX_UNIFORMS] = {0};
     unsigned char defaults[ART_DXBC_MAX_CONSTANTS] = {0};
+    const char *buffers[ART_DXBC_CONSTANT_SLOTS] = {0};
+    uint32_t first_buffer_bytes = 0;
     D3D11_SHADER_DESC desc;
     status = reflection->lpVtbl->GetDesc(reflection, &desc);
     if (FAILED(status)) goto done;
@@ -189,9 +193,9 @@ static HRESULT write_effect(const void *data, uint32_t bytes, int paired, int le
         D3D11_SHADER_INPUT_BIND_DESC binding;
         status = reflection->lpVtbl->GetResourceBindingDesc(reflection, i, &binding);
         if (FAILED(status)) goto done;
-        if (binding.Type == D3D_SIT_CBUFFER && binding.BindPoint == 0 && binding.BindCount == 1) {
-            status = reflect_uniforms(reflection, binding.Name, &header, uniforms, paired ? defaults : NULL, legacy);
-            if (FAILED(status)) goto done;
+        if (binding.Type == D3D_SIT_CBUFFER && binding.BindCount == 1 && binding.Name &&
+            binding.BindPoint < (paired ? ART_DXBC_CONSTANT_SLOTS : 1) && !buffers[binding.BindPoint]) {
+            buffers[binding.BindPoint] = binding.Name;
         } else if (binding.Type == D3D_SIT_TEXTURE && binding.Dimension == D3D_SRV_DIMENSION_TEXTURE2D &&
                    binding.BindCount == 1 && binding.BindPoint < ART_DXBC_TEXTURE_SLOTS &&
                    header.textures < ART_DXBC_TEXTURE_SLOTS &&
@@ -204,6 +208,14 @@ static HRESULT write_effect(const void *data, uint32_t bytes, int paired, int le
             status = E_NOTIMPL;
             goto done;
         }
+    }
+    for (UINT slot = 0; slot < ART_DXBC_CONSTANT_SLOTS; ++slot) {
+        if (buffers[slot]) {
+            status = reflect_uniforms(reflection, buffers[slot], &header, uniforms,
+                                      paired ? defaults : NULL, legacy);
+            if (FAILED(status)) goto done;
+        }
+        if (slot == 0) first_buffer_bytes = header.constant_bytes;
     }
     if (paired) {
         status = quad_vertex(reflection, desc.InputParameters, &vertex);
@@ -223,7 +235,9 @@ static HRESULT write_effect(const void *data, uint32_t bytes, int paired, int le
         fwrite(data, 1, bytes, stdout) != bytes ||
         (paired && (fwrite(&vertex_bytes, sizeof(vertex_bytes), 1, stdout) != 1 ||
                     fwrite(ID3D10Blob_GetBufferPointer(vertex), 1, vertex_bytes, stdout) != vertex_bytes)) ||
-        (default_bytes && fwrite(defaults, 1, header.constant_bytes, stdout) != header.constant_bytes) ||
+        ((default_bytes || buffers[1]) &&
+            fwrite(defaults, 1, header.constant_bytes, stdout) != header.constant_bytes) ||
+        (buffers[1] && fwrite(&first_buffer_bytes, sizeof(first_buffer_bytes), 1, stdout) != 1) ||
         fflush(stdout) != 0) status = E_FAIL;
 done:
     if (vertex) ID3D10Blob_Release(vertex);
