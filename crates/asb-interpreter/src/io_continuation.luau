@@ -110,6 +110,9 @@ return {
     io = io, flush = flush, close = close,
     file_query = file_query, delete_save = delete_save,
     tag = function(self, params, ...)
+        if type(params) == "table" and params[1] == "callnative" then
+            return h.unsupported_native_call(params)
+        end
         if type(params) == "table" and params[1] == "var" then
             local s = params.system
             if s == "file_exist" or s == "file_exists" or s == "file_crc" or s == "file_update_time" then

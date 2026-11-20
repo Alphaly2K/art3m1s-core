@@ -247,6 +247,22 @@ pub fn install(interpreter: &Interpreter) -> Result<()> {
         lua.create_function(|_, path: String| Ok(IoRequest::ModifiedTime { path }))?,
     )?;
     let query_variables = interpreter.variables_handle();
+    let native_call_variables = query_variables.clone();
+    helpers.set(
+        "unsupported_native_call",
+        lua.create_function(move |_, params: mlua::Table| {
+            if let Some(raw) = query_param(&params, "result")? {
+                let mut store = native_call_variables.lock().unwrap();
+                let name = crate::ExpressionEvaluator::new(&store)
+                    .resolve_param_str(&raw)
+                    .map_err(mlua::Error::external)?;
+                if !name.is_empty() {
+                    store.set(&name, crate::Value::String(String::new()));
+                }
+            }
+            Ok(())
+        })?,
+    )?;
     let path_variables = query_variables.clone();
     helpers.set(
         "query_path",

@@ -31,6 +31,12 @@ impl ScriptIoSession {
                 let body = MessageBody::new(json!({"command": command}).to_string(), vec![])?;
                 self.transport.notify(UI_WINDOW_ACTION, body)?;
             }
+            Some(Event::CallNative { result, .. }) => {
+                if let Some(name) = result {
+                    self.interpreter
+                        .set_variable(name, asb_interpreter::Value::String(String::new()));
+                }
+            }
             Some(Event::ShowDialog {
                 title,
                 message,

@@ -647,7 +647,8 @@ Host 声明 `ART_HOST_CAP_TRANSLATION` 后可收到后台翻译请求。Core 立
 单段原文连同注音、单段译文分别以 64 KiB UTF-8 为上限；达到队列或请求预算时可跳过翻译，
 剧情继续。Host 可缓存结果，并在会话结束时停止该会话的翻译任务。
 
-callnative、浏览器、剪贴板等行为由 Host
+当前 v2 未提供 `callnative` 服务。遇到该标签时清空指定的字符串结果并继续执行；Lua 的
+`e:tag` 在返回前写入结果，`e:enqueueTag` 在队列执行时写入。浏览器、剪贴板等行为由 Host
 决定支持情况，未实现时必须有明确的反馈规则。
 
 窗口状态、字体列表/字体 blob、文本替换、reported OS、音量等作为 runtime 配置消息。

@@ -2671,6 +2671,44 @@ function advance() trace..='advance;' end
 }
 
 #[test]
+fn unsupported_native_calls_clear_results_and_continue() {
+    let (mut session, _, mut host) = playback_project(
+        br#"*top
+[var name=t.result data=stale]
+[callnative method=example result=t.result]
+[calllua function=check]
+[calllua function=check_deferred]
+[stop]
+[lua]
+function check(e)
+    assert(e:var('t.result') == '')
+    e:tag{'var', name='t.result', data='stale'}
+    e:tag{'callnative', method='example', result='t.result'}
+    assert(e:var('t.result') == '')
+    e:tag{'var', name='t.result', data='stale'}
+    e:enqueueTag{'callnative', method='example', result='t.result'}
+    assert(e:var('t.result') == 'stale')
+end
+function check_deferred(e)
+    assert(e:var('t.result') == '')
+    reached = true
+end
+[/lua]
+"#,
+    );
+    drive_playback_boot(&mut session, &mut host);
+    assert!(
+        session
+            .interpreter()
+            .lua()
+            .globals()
+            .get::<bool>("reached")
+            .unwrap()
+    );
+    assert!(matches!(session.pending_event(), Some(Event::Wait { .. })));
+}
+
+#[test]
 fn right_click_menu_loads_through_host_io_and_returns_to_the_story_wait() {
     let (mut session, epoch, mut host) = playback_project(
         br#"*top
