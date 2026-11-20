@@ -247,16 +247,8 @@ fn emit_json_command(event_kind: u32, kind: &str, payload: serde_json::Value) {
     }
 }
 
-pub fn media_command_callback_registered() -> bool {
-    crate::host_events::enabled()
-}
-
 pub fn emit_media_command(kind: &str, payload: serde_json::Value) {
     emit_json_command(crate::host_events::EVENT_KIND_MEDIA, kind, payload);
-}
-
-pub fn ui_command_callback_registered() -> bool {
-    crate::host_events::enabled()
 }
 
 pub fn emit_ui_command(kind: &str, payload: serde_json::Value) {
@@ -390,10 +382,6 @@ pub(crate) unsafe extern "C" fn art3m1s_set_angle_path(path: *const c_char) {
 
 // ── Native file host ───────────────────────────────────────────
 
-pub fn clear_file_size_cache() {
-    crate::host_files::clear_overrides();
-}
-
 pub fn file_reader_registered() -> bool {
     crate::host_files::is_mounted()
 }
@@ -483,18 +471,8 @@ pub fn request_file(path: &str) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
-pub fn request_file_range(path: &str, offset: u64, len: usize) -> Option<Vec<u8>> {
-    let mut buf = vec![0u8; len];
-    let n = read_chunk(path, offset, &mut buf)?;
-    buf.truncate(n);
-    Some(buf)
-}
-
 pub fn request_asset(path: &str) -> Option<Vec<u8>> {
     request_file(path).ok()
-}
-pub fn request_asset_range(path: &str, offset: u64, len: usize) -> Option<Vec<u8>> {
-    request_file_range(path, offset, len)
 }
 pub fn query_asset_size(path: &str) -> Option<u64> {
     query_size(path)
