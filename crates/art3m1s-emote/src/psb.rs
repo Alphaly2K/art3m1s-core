@@ -1,7 +1,5 @@
 use std::collections::BTreeMap;
-use std::fs;
 use std::ops::Range;
-use std::path::Path;
 use std::sync::Arc;
 
 use crate::{EmoteError, Result};
@@ -133,8 +131,9 @@ pub struct PsbDocument {
 }
 
 impl PsbDocument {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::from_bytes(fs::read(path)?)
+    #[cfg(feature = "filesystem")]
+    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        Self::from_bytes(std::fs::read(path)?)
     }
 
     pub fn from_bytes(data: Vec<u8>) -> Result<Self> {

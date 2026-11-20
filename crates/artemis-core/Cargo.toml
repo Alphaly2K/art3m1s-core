@@ -16,7 +16,7 @@ host-abi-v2 = []
 
 [dependencies]
 asb-interpreter = { path = "../asb-interpreter" }
-art3m1s-emote = { path = "../art3m1s-emote" }
+art3m1s-emote = { path = "../art3m1s-emote", default-features = false }
 art3m1s-log = { path = "../art3m1s-log" }
 art3m1s-render = { path = "../art3m1s-render", features = ["artemis"] }
 ab_glyph = "0.2"

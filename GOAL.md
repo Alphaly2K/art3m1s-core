@@ -894,6 +894,10 @@ continuation/确认/边界回归，无硬件或专有输入依赖。
 方法仍可使用。v1 函数表及 v2 ABI 未改动。macOS legacy 构建、v1 表测试和游戏探针编译通过，
 动态导出仍为 v1 查询入口和 9 个 PFS 符号；独立 v2 的 C/C++、动态导出和 Luau 依赖检查通过。
 
+独立 v2 的 E-Mote 依赖只接收 Host 提供的 PSB 字节。路径读取入口仅在工具和 legacy 构建中启用。
+独立 Core 290 项测试、C ABI 冒烟及 legacy 和 E-Mote 示例编译通过。依赖检查覆盖独立包的全部
+feature，已确认重新启用 E-Mote 磁盘读取时会被拒绝。
+
 后续继续审计聚合 crate 的 Rust 公共接口与调用方，保持 legacy 与独立 v2 产物分离。生产默认
 切换仍待原版游戏的着色器、媒体及存档对照，以及 Linux EGL 和 Windows MSVC 原生验证。
 

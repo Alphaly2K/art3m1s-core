@@ -50,6 +50,7 @@ impl EmoteModel {
         &self.evaluation_identity
     }
 
+    #[cfg(feature = "filesystem")]
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
         Self::from_document(PsbDocument::open(path)?)
     }

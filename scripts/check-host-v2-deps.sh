@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-cargo tree --locked --manifest-path crates/artemis-core/Cargo.toml \
+cargo tree --locked --all-features --manifest-path crates/artemis-core/Cargo.toml \
   --target all --edges normal,build --prefix none --format '{p}|{f}' |
   awk -F '|' '
     function reject(message) {
@@ -26,6 +26,8 @@ cargo tree --locked --manifest-path crates/artemis-core/Cargo.toml \
         if (features !~ /,artemis,/ || features ~ /,(gl|vulkan|metal|metal-dxvk|runtime-shader),/)
           reject("Standalone Core must use the renderer data model without native backends")
       }
+      if (package == "art3m1s-emote" && features ~ /,filesystem,/)
+        reject("Standalone Core must load E-Mote models from Host-provided bytes")
       if (package == "mlua" || package == "mlua-sys") {
         if (features !~ /,luau,/ || features ~ /,(lua5[1-5]|luajit|luajit52|module),/)
           reject("Standalone Core must use Luau in " package)

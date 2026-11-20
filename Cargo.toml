@@ -19,7 +19,7 @@ required-features = ["game-probes"]
 
 [dependencies]
 asb-interpreter = { path = "crates/asb-interpreter" }
-art3m1s-emote = { path = "crates/art3m1s-emote" }
+art3m1s-emote = { path = "crates/art3m1s-emote", default-features = false }
 art3m1s-log = { path = "crates/art3m1s-log" }
 art3m1s-render = { path = "crates/art3m1s-render", features = ["artemis"] }
 pfs-upk-rust = { path = "crates/pfs-upk-rust", optional = true }
@@ -47,7 +47,7 @@ ctt-astcenc = { version = "0.5", optional = true }
 [features]
 default = ["gl-backend"]
 host-abi-v2 = []
-legacy = ["dep:art3m1s-native-render", "dep:pfs-upk-rust", "dep:art3m1s-media", "dep:ctt-astcenc"]
+legacy = ["dep:art3m1s-native-render", "dep:pfs-upk-rust", "dep:art3m1s-media", "dep:ctt-astcenc", "art3m1s-emote/filesystem"]
 gl-backend = ["legacy", "art3m1s-render/gl"]
 metal-backend = ["legacy", "runtime-shader", "art3m1s-render/metal"]
 vulkan-backend = ["legacy", "runtime-shader", "art3m1s-render/vulkan"]
