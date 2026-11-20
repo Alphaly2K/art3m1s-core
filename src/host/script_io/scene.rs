@@ -21,7 +21,7 @@ mod text;
 pub(super) use edit::EditSnapshot;
 pub(super) use edit::LayerEdits;
 pub(super) use shader::SceneShaders;
-pub(super) use shader::supports_shader_asset;
+pub(super) use shader::{shader_language, shader_language_name, supports_shader_asset};
 pub(super) use text::FontRead;
 
 const MAX_TEXTURES: usize = 4096;

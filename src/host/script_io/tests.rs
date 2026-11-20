@@ -93,6 +93,7 @@ struct MemoryHost {
     captions: Vec<String>,
     message_layers: Vec<String>,
     modified_times: HashMap<(String, String), i64>,
+    shader_languages: Option<HashMap<&'static str, &'static str>>,
 }
 
 impl MemoryHost {
@@ -115,6 +116,16 @@ impl MemoryHost {
                 None => reply(request, json!({"status":"ok","found":false}), vec![]),
             },
             IO_READ => {
+                if let Some(languages) = &self.shader_languages {
+                    assert_eq!(
+                        request
+                            .metadata
+                            .get("shader_language")
+                            .and_then(Value::as_str),
+                        languages.get(key.as_str()).copied(),
+                        "unexpected shader language for {key}"
+                    );
+                }
                 let (revision, bytes) = self.files.get(&file_key).unwrap();
                 let offset = request.metadata["offset"]
                     .as_str()
@@ -3912,12 +3923,13 @@ fn shader_language_replacement_keeps_old_frames_and_prefetches_bindings() {
     let second_source = b"second shader";
     let mask = [255, 128, 0, 64];
     let user = [0, 128, 255, 255];
-    host.asset("first.hlsl", first_source);
+    host.shader_languages = Some(HashMap::from([("first.txt", "hlsl"), ("second.frag", "glsl")]));
+    host.asset("first.txt", first_source);
     host.asset("second.frag", second_source);
     host.asset("mask.png", &png_bytes(1, 1, &mask));
     host.asset("user.png", &png_bytes(1, 1, &user));
     host.asset("boot.iet", br#"*top
-[lyshader id=test file=first.hlsl]
+[lyshader id=test file=first.txt]
 [lyc id=tile width=4 height=4 color=ffffff]
 [lyprop id=tile shader=test shaderconstant=tint shadertexture=textureUser tint="0.25,0.5,1" mask=mask textureUser=user]
 [flip]
@@ -4021,6 +4033,10 @@ __engine:setMagicPath{'effects', 'shaders'}
 [/lua]
 "#,
     );
+    host.shader_languages = Some(HashMap::from([
+        ("shaders/original.frag", "glsl"),
+        ("menu.hlsl", "hlsl"),
+    ]));
     host.asset("shaders/original.frag", first);
     host.asset("menu.hlsl", second);
     host.asset("mask.png", &png_bytes(1, 1, &mask));

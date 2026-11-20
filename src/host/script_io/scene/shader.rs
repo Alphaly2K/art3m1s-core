@@ -9,7 +9,7 @@ const MAX_SHADER_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SHADERS: usize = 256;
 const DIAGNOSTIC_SHADER_UNAVAILABLE: u32 = 1;
 
-fn shader_language(asset: &str) -> FrameShaderLanguage {
+pub(in crate::host::script_io) fn shader_language(asset: &str) -> FrameShaderLanguage {
     let leaf = asset.rsplit('/').next().unwrap_or(asset);
     if leaf.rsplit_once('.').is_some_and(|(_, ext)| {
         ["glsl", "frag", "fsh", "fs"]
@@ -19,6 +19,15 @@ fn shader_language(asset: &str) -> FrameShaderLanguage {
         FrameShaderLanguage::Glsl
     } else {
         FrameShaderLanguage::Hlsl
+    }
+}
+
+pub(in crate::host::script_io) fn shader_language_name(
+    language: FrameShaderLanguage,
+) -> &'static str {
+    match language {
+        FrameShaderLanguage::Hlsl => "hlsl",
+        FrameShaderLanguage::Glsl => "glsl",
     }
 }
 
@@ -146,15 +155,12 @@ impl SceneIo {
         id: &str,
         path: &str,
         transport: &mut SessionTransport,
-    ) -> Result<Option<IoRequest>, ProtocolError> {
+    ) -> Result<Option<String>, ProtocolError> {
         let Ok(path) = self.resolve_asset_key(path) else {
             return Ok(None);
         };
         if !supports_shader_asset(self.scene.lock().unwrap().shader_caps, &path) {
-            let language = match shader_language(&path) {
-                FrameShaderLanguage::Hlsl => "hlsl",
-                FrameShaderLanguage::Glsl => "glsl",
-            };
+            let language = shader_language_name(shader_language(&path));
             transport.diagnostic(
                 DIAGNOSTIC_SHADER_UNAVAILABLE,
                 MessageBody::new(
@@ -165,7 +171,7 @@ impl SceneIo {
             return Ok(None);
         }
         self.pending_shader = Some((id.into(), path.clone()));
-        Ok(Some(IoRequest::Read { path }))
+        Ok(Some(path))
     }
 
     pub(in crate::host::script_io) fn complete_shader(&mut self, response: IoResponse) {

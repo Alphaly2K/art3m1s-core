@@ -69,7 +69,7 @@ impl ScriptIoSession {
             Operation::Stat {
                 namespace: "save",
                 key: source,
-                purpose: StatPurpose::Read,
+                purpose: StatPurpose::Read(None),
             },
             SaveFileWork::Reading {
                 destination,

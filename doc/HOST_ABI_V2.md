@@ -347,7 +347,7 @@ request ID、epoch 和 runtime 均由信封/提交描述符携带。
 |---|---|---|
 | stat 请求 | `namespace: "asset"/"save"`，`key: string` | 空 |
 | stat 成功 | `status: "ok"`，`found: bool`；found=true 时还需 `size`、`revision`，可选 `modified_utc_ms` | 空 |
-| read 请求 | namespace、key、revision、offset、length | 空 |
+| read 请求 | namespace、key、revision、offset、length；可选 `shader_language` | 空 |
 | read 成功 | `status: "ok"`、revision、`eof: bool` | 读取的原始字节 |
 | write_atomic 请求 | `namespace: "save"`、key | 整个待提交文件 |
 | write_atomic 成功 | `status: "ok"` | 空 |
@@ -361,6 +361,9 @@ modified_utc_ms 为规范十进制 i64 字符串，表示 UTC Unix 毫秒；缺�
 累计数据必须与 stat 大小一致，准确到达文件末尾时 eof=true。revision/EOF/大小不一致的
 结果返回 ARGUMENT，原请求仍等待 Host 修正。Host 发现资源变化时可返回 io_error，让
 脚本进入原有失败分支。空文件在 stat 后即可完成读取。
+
+`shader_language` 可在读取着色器资产的各块中出现，值为 `hlsl` 或 `glsl`，包含由读档
+触发的读取。Host 可根据它准备着色器程序。该字段不改变文件内容、读取范围或回复要求。
 
 单 blob 写入以 `(runtime, epoch, request_id)` 作为事务身份；Host 原子持久化后确认。
 未声明 `ART_HOST_CAP_CHUNKED_WRITES` 的 Host 只接收该形式；超过消息预算的文件写入失败。

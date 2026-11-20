@@ -950,6 +950,11 @@ macOS Flutter 预览在上传前用 ZIP 内的媒体 Host 解码合成 WMV，校
 间隙和 EOF。签名发布包解包后通过 C ABI 和媒体探针；缺少包内 FFmpeg 依赖时加载失败，开发
 SDK 的媒体探针仍通过。远端工作流尚未运行。
 
+着色器资产读取可携带 `shader_language`，脚本加载和读档恢复的每块读取使用同一标记。
+Flutter 据此为非标准后缀的 HLSL 源码准备 ADE2。独立 Core 291 项、Rust Host 集成测试与
+C ABI 冒烟通过；macOS 发布模式 Runner 的冷、热缓存检查确认首帧补编译、混合 GLSL 和
+脚本截图像素正确。
+
 后续继续审计聚合 crate 的 Rust 公共接口与调用方，保持 legacy 与独立 v2 产物分离。生产默认
 切换仍待原版游戏的着色器、媒体及存档对照，以及 Linux EGL 和 Windows MSVC 原生验证。
 

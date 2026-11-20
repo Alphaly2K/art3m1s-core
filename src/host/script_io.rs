@@ -28,6 +28,7 @@ pub use ui::{UI_AVOID, UI_CAPTION, UI_DIALOG, UI_WINDOW_ACTION};
 pub use video::MEDIA_VIDEO_COMMAND;
 pub use write_chunks::IO_WRITE_ABORT;
 
+use super::frame::FrameShaderLanguage;
 use super::protocol::*;
 use crate::save::read_history::{AREAD_FILE, ReadHistory};
 use asb_interpreter::io_continuation::{
@@ -225,6 +226,7 @@ struct HostSaveFile {
 
 enum ScenarioStep {
     Request(IoRequest),
+    ReadShader(String),
     Progress(ScriptIoProgress),
     Continue,
 }
@@ -238,6 +240,7 @@ enum Operation {
     Read {
         namespace: &'static str,
         key: String,
+        shader_language: Option<FrameShaderLanguage>,
         revision: u64,
         size: usize,
         data: Vec<u8>,
@@ -253,7 +256,7 @@ enum Operation {
 }
 
 enum StatPurpose {
-    Read,
+    Read(Option<FrameShaderLanguage>),
     Exists,
     ModifiedTime,
 }
@@ -1032,7 +1035,7 @@ impl ScriptIoSession {
                     save_files::SaveFileCaller::Lua => response = Some(result),
                 }
             }
-            let request = match self.mode {
+            let (request, shader_language) = match self.mode {
                 ExecutionMode::Chunk => {
                     let task = self.task.as_mut().unwrap();
                     if task.step(response.take())? == IoProgress::Completed {
@@ -1040,16 +1043,20 @@ impl ScriptIoSession {
                         self.completed = true;
                         return Ok(ScriptIoProgress::Completed);
                     }
-                    task.pending_request().unwrap().clone()
+                    (task.pending_request().unwrap().clone(), None)
                 }
                 ExecutionMode::Scenario => match self.step_scenario(response.take())? {
-                    ScenarioStep::Request(request) => request,
+                    ScenarioStep::Request(request) => (request, None),
+                    ScenarioStep::ReadShader(path) => {
+                        let language = scene::shader_language(&path);
+                        (IoRequest::Read { path }, Some(language))
+                    }
                     ScenarioStep::Progress(progress) => return Ok(progress),
                     ScenarioStep::Continue => continue,
                 },
                 ExecutionMode::Idle => return Err(ProtocolError::State.into()),
             };
-            match self.schedule_io(request) {
+            match self.schedule_io(request, shader_language) {
                 Ok(result) => response = result,
                 Err(error) => response = Some(failed(IoFailure::Denied, error.to_string())),
             }
@@ -1196,8 +1203,8 @@ impl ScriptIoSession {
                 if let Event::ShaderLoad { id, file } = &event
                     && let Some(scene) = self.scene.as_mut()
                 {
-                    if let Some(request) = scene.prepare_shader(id, file, &mut self.transport)? {
-                        return Ok(ScenarioStep::Request(request));
+                    if let Some(path) = scene.prepare_shader(id, file, &mut self.transport)? {
+                        return Ok(ScenarioStep::ReadShader(path));
                     }
                     self.interpreter.advance_line();
                     return Ok(ScenarioStep::Continue);
@@ -1790,14 +1797,13 @@ impl ScriptIoSession {
         mut remaining: VecDeque<(String, String)>,
     ) -> Result<ScenarioStep, ScriptIoError> {
         if let Some((id, path)) = remaining.pop_front() {
-            let request = IoRequest::Read { path: path.clone() };
             self.numbered_load = Some(NumberedLoadWork::ReadingSavedShader {
                 load,
                 remaining,
                 id,
-                path,
+                path: path.clone(),
             });
-            return Ok(ScenarioStep::Request(request));
+            return Ok(ScenarioStep::ReadShader(path));
         }
         self.prepare_numbered_load_scene(load)
     }
@@ -2027,7 +2033,11 @@ impl ScriptIoSession {
         self.finish_event_filter(EventFilterDecision::Rejected)
     }
 
-    fn schedule_io(&mut self, request: IoRequest) -> Result<Option<IoResponse>, ProtocolError> {
+    fn schedule_io(
+        &mut self,
+        request: IoRequest,
+        shader_language: Option<FrameShaderLanguage>,
+    ) -> Result<Option<IoResponse>, ProtocolError> {
         let path = match &request {
             IoRequest::Read { path }
             | IoRequest::Exists { path }
@@ -2073,7 +2083,7 @@ impl ScriptIoSession {
             IoRequest::Read { .. } => Operation::Stat {
                 namespace,
                 key,
-                purpose: StatPurpose::Read,
+                purpose: StatPurpose::Read(shader_language.filter(|_| namespace == "asset")),
             },
             IoRequest::Exists { .. } => Operation::Stat {
                 namespace,
@@ -2109,9 +2119,21 @@ impl ScriptIoSession {
     fn message(&self, operation: &Operation) -> (MessageKind, String, Vec<u8>) {
         match operation {
             Operation::Stat { namespace, key, .. } => (IO_STAT, json!({"namespace":namespace,"key":key}).to_string(), vec![]),
-            Operation::Read { namespace, key, revision, size, data } => (IO_READ,
-                json!({"namespace":namespace,"key":key,"revision":revision.to_string(),
-                    "offset":data.len().to_string(),"length":(size-data.len()).min(self.limits().blob_bytes).to_string()}).to_string(), vec![]),
+            Operation::Read {
+                namespace,
+                key,
+                shader_language,
+                revision,
+                size,
+                data,
+            } => {
+                let mut metadata = json!({"namespace":namespace,"key":key,"revision":revision.to_string(),
+                    "offset":data.len().to_string(),"length":(size-data.len()).min(self.limits().blob_bytes).to_string()});
+                if let Some(language) = shader_language {
+                    metadata["shader_language"] = json!(scene::shader_language_name(*language));
+                }
+                (IO_READ, metadata.to_string(), vec![])
+            }
             Operation::Write { key, data } => (IO_WRITE_ATOMIC,
                 write_chunks::write_metadata(key), data.clone()),
             Operation::ChunkedWrite(write) => write.message(),
@@ -2237,7 +2259,14 @@ impl ScriptIoSession {
             (Operation::Stat { .. }, Completion::Stat { found: false, .. }) => {
                 Ok(Some(failed(IoFailure::NotFound, "file not found")))
             }
-            (Operation::Stat { namespace, key, .. }, Completion::Stat { size, revision, .. }) => {
+            (
+                Operation::Stat {
+                    namespace,
+                    key,
+                    purpose: StatPurpose::Read(shader_language),
+                },
+                Completion::Stat { size, revision, .. },
+            ) => {
                 let Ok(size) = usize::try_from(size) else {
                     return Ok(Some(failed(
                         IoFailure::Limit,
@@ -2257,6 +2286,7 @@ impl ScriptIoSession {
                 self.operation = Some(Operation::Read {
                     namespace,
                     key,
+                    shader_language,
                     revision,
                     size,
                     data,
@@ -2267,6 +2297,7 @@ impl ScriptIoSession {
                 Operation::Read {
                     namespace,
                     key,
+                    shader_language,
                     revision,
                     size,
                     mut data,
@@ -2280,6 +2311,7 @@ impl ScriptIoSession {
                 self.operation = Some(Operation::Read {
                     namespace,
                     key,
+                    shader_language,
                     revision,
                     size,
                     data,
