@@ -1152,6 +1152,9 @@ v1 函数表、项目加载及 IO 计数回归、两种构建的 Mach-O 导出�
 快进期间，v2 略过标记为可跳过的音效，保留同 ID 的旧播放。纯内存回归覆盖原通道、
 普通音效和退出快进后的等待。独立 Core 265 项单元测试、Rust Host、C/C++ ABI 冒烟、
 legacy 音效跳过及 v1 函数表测试通过。
+macOS 发布版 Runner 使用该版 Core，通过音频结束、读档恢复、H.264、无音轨 Theora 和
+全屏视频冒烟。Windows x64 GNU 的 v1 与 v2 DLL 均符合各自 PE 导出清单。兼容层通过
+v1 冻结布局及 v2 C ABI 与媒体状态冒烟，Windows MSVC 原生验证仍待运行。
 
 后续继续审计聚合 crate 的 Rust 公共接口与调用方，保持 legacy 与独立 v2 产物分离。生产默认
 切换仍待原版游戏的着色器、媒体及存档对照，以及 Windows MSVC 原生验证。
