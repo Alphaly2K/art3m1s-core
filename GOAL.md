@@ -213,9 +213,9 @@ Runner 复跑后 320×180 的两次标题画面逐像素一致。独立 Core 286
 Swift 媒体探针增加显式设备输出验证。用合成 WMV 音轨在 macOS 桌面运行，Core Audio 在暂停前
 和恢复后均报告活动输出流，413 帧送达，最大观测滞后约 18 毫秒。发行游戏的设备听感仍待实听。
 
-在当前主分支复验 Windows x64 GNU 产物。C++ 头文件、C ABI 冒烟及兼容层中的 286 项独立 Core
-测试通过，PE 仍只导出 `art3m1s_get_api_v2`。独立 Core 的依赖约束检查通过；Linux 和 Windows
-MSVC 原生执行仍待验证。
+在 Core `301ac5d` 的工作区复验 Windows x64 GNU 产物。C++ 头文件检查和 C ABI 冒烟通过，
+兼容层运行 290 项独立 Core 测试通过；PE 只导出 `art3m1s_get_api_v2`。独立 Core 依赖检查通过。
+本机缺少 ARM64 GNU C++ 工具链，Linux 交叉检查未完成；Linux 和 Windows MSVC 原生运行仍待验证。
 
 脚本请求未协商的着色器语言时，Core 发送诊断并继续推进，不请求源码。Flutter `707fb7d` 每个
 项目按语言记录一次。独立 Core 286 项、C 和 Dart 冒烟、Flutter 定向回归 7 项通过。
