@@ -48,6 +48,33 @@ jobs:
       run: ./scripts/test-host-v2.ps1
     - name: Test standalone Artemis Core
       run: cargo test --locked --lib --manifest-path crates/artemis-core/Cargo.toml --target-dir target/host-v2
+    - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
+      with:
+        sdk: '3.13.4'
+    - name: Resolve Dart Host SDK dependencies
+      working-directory: tools/host-bindings/dart
+      run: dart pub get --enforce-lockfile
+    - name: Verify generated Dart ABI bindings
+      if: runner.os == 'macOS'
+      working-directory: tools/host-bindings/dart
+      run: |
+        dart run ffigen --config ffigen.yaml
+        git diff --exit-code -- lib/artemis_v2.dart
+    - name: Run Dart Host smoke on Unix
+      if: runner.os != 'Windows'
+      working-directory: tools/host-bindings/dart
+      shell: bash
+      run: |
+        extension=so
+        if [[ "$RUNNER_OS" == macOS ]]; then extension=dylib; fi
+        dart run bin/smoke.dart "../../../target/host-v2/debug/libart3m1s_core.$extension"
+    - name: Run Dart Host smoke on Windows
+      if: runner.os == 'Windows'
+      working-directory: tools/host-bindings/dart
+      shell: pwsh
+      run: |
+        $library = (Resolve-Path '..\..\..\target\host-v2\debug\art3m1s_core.dll').Path
+        dart run bin/smoke.dart $library
     - name: Install Mesa EGL for the Linux pixel probe
       if: runner.os == 'Linux'
       run: sudo apt-get install -y libegl1 libegl-mesa0 libgl1 libgl1-mesa-dri libgles2
