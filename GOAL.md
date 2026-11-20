@@ -1183,7 +1183,12 @@ legacy 的 Rust 事件接口收口到 `HostEvents` 实例。v1 兼容层按操�
 媒体及存档对照。
 
 Host 在启动阶段按索引和预算预热 HLSL 与 GLSL，运行中发现的其余源码按需查缓存或编译。
-两种语言均从同一 ARFP 帧进入 Host 渲染器，Host 按语言选择执行后端。
+两种语言均从同一 ARFP 帧进入 Host 渲染器，Host 按语言选择执行后端。Core `cc29467` 根据
+Host 返回的大小跳过超限源码的范围读取。回归覆盖脚本继续执行及后续效果绑定。
+
+Core 运行 `44813532785` 的 macOS、Windows MSVC、Linux v2 和 Linux legacy 检查通过。
+Flutter `c1cb91c` 的 Linux 检查（运行 `44816958131`）使用 Flutter 3.47.9，从当前 Core
+构建 PFS 动态库并通过静态分析和完整测试。
 
 ## 后续阶段
 
