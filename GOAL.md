@@ -994,6 +994,7 @@ macOS 发布归档每次验证无音轨 Ogg Theora 的 24 帧像素、时间戳�
 的合成片段，与验证机的 Theora 编码器无关。解包后的 WMV 调度探针送达 413 帧，最大观测
 滞后约 17 ms，暂停前和恢复后均有活动的 Core Audio 输出。包签名、v2 ABI、ADE2 编译及
 DXVK 和 ANGLE 混合绘制同时通过。
+Flutter `ff0f85e` 的发布版 Runner 还验证了无音轨 Theora 的图层像素、截图与自然结束回调。
 
 独立 Core SDK 从 v2 C 头生成 C# 结构、常量与函数表。macOS 实测 C# 主机使用内存资源启动
 项目，获取并释放 ARFP 帧，核对纹理像素。CI 配置已加入生成一致性检查和三个平台的 .NET 8
