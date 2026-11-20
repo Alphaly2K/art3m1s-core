@@ -34,8 +34,8 @@ mod siglus_output;
 ))]
 use std::ffi::c_void;
 use std::ffi::{c_char, c_int};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // ── Global debug flag ──────────────────────────────────────────
 
@@ -212,69 +212,6 @@ macro_rules! core_debug {
 #[macro_export]
 macro_rules! core_error {
     ($($arg:tt)*) => { $crate::ffi::log("E", &format!($($arg)*)); };
-}
-
-// ── Runtime font override ──────────────────────────────────────
-//
-// 汉化/本地化补丁入口：游戏脚本指定的字体可能缺少译文字形（显示为空白）。
-// 宿主安装一份覆盖字体后，所有脚本 face 请求都光栅化到该字体；清除后恢复
-// 脚本字体。进程级全局，对所有 runtime 生效；世代号在每次 set 时递增，
-// runtime 据此检测变更并立即重解当前字体。覆盖只作用于之后光栅化的文本
-// （含异步译文热替换），不回溯已排版的既有字形。
-
-struct FontOverride {
-    generation: u64,
-    bytes: Arc<[u8]>,
-}
-
-static FONT_OVERRIDE: Mutex<Option<FontOverride>> = Mutex::new(None);
-static FONT_OVERRIDE_GENERATION: AtomicU64 = AtomicU64::new(0);
-
-/// 校验并安装覆盖字体（Rust 宿主入口）。字节必须是合法的 sfnt（TTF/OTF）。
-pub fn set_font_override(bytes: Vec<u8>) -> Result<(), String> {
-    ab_glyph::FontRef::try_from_slice(&bytes)
-        .map_err(|error| format!("覆盖字体不是合法的 sfnt 字体: {error}"))?;
-    let generation = FONT_OVERRIDE_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
-    *FONT_OVERRIDE.lock().unwrap() = Some(FontOverride {
-        generation,
-        bytes: bytes.into(),
-    });
-    Ok(())
-}
-
-/// 清除覆盖字体，恢复脚本指定字体（Rust 宿主入口）。
-pub fn clear_font_override() {
-    *FONT_OVERRIDE.lock().unwrap() = None;
-}
-
-/// 当前覆盖字体及其世代号（runtime 内部读取入口）。
-pub(crate) fn font_override() -> Option<(u64, Arc<[u8]>)> {
-    FONT_OVERRIDE
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|override_| (override_.generation, Arc::clone(&override_.bytes)))
-}
-
-/// 安装运行时覆盖字体。`data`/`len` 为字体文件字节（TTF/OTF），core 内部复制。
-/// 返回 1 成功；0 参数无效或字体解析失败。
-pub(crate) unsafe extern "C" fn art3m1s_set_font_override(data: *const u8, len: c_int) -> c_int {
-    if data.is_null() || len <= 0 {
-        return 0;
-    }
-    let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) }.to_vec();
-    match set_font_override(bytes) {
-        Ok(()) => 1,
-        Err(error) => {
-            core_warn!("art3m1s_set_font_override: {error}");
-            0
-        }
-    }
-}
-
-/// 清除运行时覆盖字体，恢复脚本指定字体。
-pub(crate) unsafe extern "C" fn art3m1s_clear_font_override() {
-    clear_font_override();
 }
 
 // ── ANGLE library search path ──────────────────────────────────
@@ -1270,7 +1207,7 @@ mod tests {
         assert!(super::begin_profile_io().is_some());
     }
 
-    use super::{font_override, log_suppressed_by_filter, set_font_override, set_log_filter};
+    use super::{log_suppressed_by_filter, set_log_filter};
 
     /// 日志过滤钩子是进程级状态，单测里串行验证后卸载，避免影响其它测试。
     #[test]
@@ -1290,15 +1227,5 @@ mod tests {
         // 卸载后恢复放行
         set_log_filter(None);
         assert!(!log_suppressed_by_filter("I", "noisy line"));
-    }
-
-    #[test]
-    fn font_override_rejects_invalid_bytes_without_storing() {
-        // 非法字体必须被拒绝且不进全局状态（校验先于存储，世代号不变）。
-        let before = font_override().map(|(generation, _)| generation);
-        assert!(set_font_override(vec![0, 1, 2, 3]).is_err());
-        assert!(set_font_override(Vec::new()).is_err());
-        let after = font_override().map(|(generation, _)| generation);
-        assert_eq!(before, after);
     }
 }

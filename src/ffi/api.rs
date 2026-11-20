@@ -1,13 +1,12 @@
 //! Artemis legacy C ABI, queried through `art3m1s_get_api_v1`.
 
 use crate::ffi::{
-    art3m1s_clear_font_override, art3m1s_probe_caption, art3m1s_runtime_advance_and_present,
-    art3m1s_runtime_advance_and_render, art3m1s_runtime_advance_without_render,
-    art3m1s_runtime_backend_capabilities, art3m1s_runtime_clear_external_surface,
-    art3m1s_runtime_configure_spatial_upscale, art3m1s_runtime_create, art3m1s_runtime_destroy,
-    art3m1s_runtime_feed_click, art3m1s_runtime_feed_key, art3m1s_runtime_feed_mouse,
-    art3m1s_runtime_feed_mouse_button, art3m1s_runtime_feed_touch,
-    art3m1s_runtime_is_exit_requested, art3m1s_runtime_load_project,
+    art3m1s_probe_caption, art3m1s_runtime_advance_and_present, art3m1s_runtime_advance_and_render,
+    art3m1s_runtime_advance_without_render, art3m1s_runtime_backend_capabilities,
+    art3m1s_runtime_clear_external_surface, art3m1s_runtime_configure_spatial_upscale,
+    art3m1s_runtime_create, art3m1s_runtime_destroy, art3m1s_runtime_feed_click,
+    art3m1s_runtime_feed_key, art3m1s_runtime_feed_mouse, art3m1s_runtime_feed_mouse_button,
+    art3m1s_runtime_feed_touch, art3m1s_runtime_is_exit_requested, art3m1s_runtime_load_project,
     art3m1s_runtime_load_project_bytes, art3m1s_runtime_notify_lifecycle,
     art3m1s_runtime_notify_sound_finished, art3m1s_runtime_notify_video_finished,
     art3m1s_runtime_pixel_buffer_size, art3m1s_runtime_profiler_snapshot,
@@ -17,8 +16,9 @@ use crate::ffi::{
     art3m1s_runtime_stage_height, art3m1s_runtime_stage_width, art3m1s_runtime_submit_dialog,
     art3m1s_runtime_submit_http_result, art3m1s_runtime_submit_text_translation,
     art3m1s_runtime_upload_video_layer_frame, art3m1s_set_angle_path,
-    art3m1s_set_damage_visualization, art3m1s_set_debug, art3m1s_set_font_override,
+    art3m1s_set_damage_visualization, art3m1s_set_debug,
 };
+use crate::host::{art3m1s_clear_font_override, art3m1s_set_font_override};
 use crate::host_events::{
     HostEvents, art3m1s_clear_host_state_v1, art3m1s_host_events_create,
     art3m1s_host_events_destroy, art3m1s_host_events_enable_v1, art3m1s_host_events_next_v1,

@@ -20,6 +20,40 @@ struct FontOverride {
     bytes: Option<Arc<[u8]>>,
 }
 
+static LEGACY_FONT_OVERRIDE: Mutex<FontOverride> = Mutex::new(FontOverride {
+    generation: 0,
+    bytes: None,
+});
+
+fn install_font_override(slot: &Mutex<FontOverride>, bytes: Vec<u8>) -> Result<(), String> {
+    ab_glyph::FontRef::try_from_slice(&bytes).map_err(|error| format!("invalid font: {error}"))?;
+    let mut font = slot.lock().unwrap();
+    font.generation = font
+        .generation
+        .checked_add(1)
+        .ok_or("font generation exhausted")?;
+    font.bytes = Some(bytes.into());
+    Ok(())
+}
+
+pub(crate) unsafe extern "C" fn art3m1s_set_font_override(data: *const u8, len: i32) -> i32 {
+    if data.is_null() || len <= 0 {
+        return 0;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) }.to_vec();
+    match install_font_override(&LEGACY_FONT_OVERRIDE, bytes) {
+        Ok(()) => 1,
+        Err(error) => {
+            crate::core_warn!("art3m1s_set_font_override: {error}");
+            0
+        }
+    }
+}
+
+pub(crate) unsafe extern "C" fn art3m1s_clear_font_override() {
+    LEGACY_FONT_OVERRIDE.lock().unwrap().bytes = None;
+}
+
 #[derive(Default)]
 struct ScriptDebugConfig {
     mode: AtomicI32,
@@ -146,34 +180,25 @@ impl HostSession {
         }
     }
 
-    pub fn set_font_override(&self, bytes: Vec<u8>) -> Result<(), String> {
+    fn font_slot(&self) -> &Mutex<FontOverride> {
         if self.legacy {
-            return crate::ffi::set_font_override(bytes);
+            &LEGACY_FONT_OVERRIDE
+        } else {
+            &self.state.font
         }
-        ab_glyph::FontRef::try_from_slice(&bytes)
-            .map_err(|error| format!("invalid font: {error}"))?;
-        let mut font = self.state.font.lock().unwrap();
-        font.generation = font
-            .generation
-            .checked_add(1)
-            .ok_or("font generation exhausted")?;
-        font.bytes = Some(bytes.into());
-        Ok(())
+    }
+
+    /// Install an sfnt font for subsequent text rendered by this session.
+    pub fn set_font_override(&self, bytes: Vec<u8>) -> Result<(), String> {
+        install_font_override(self.font_slot(), bytes)
     }
 
     pub fn clear_font_override(&self) {
-        if self.legacy {
-            crate::ffi::clear_font_override();
-        } else {
-            self.state.font.lock().unwrap().bytes = None;
-        }
+        self.font_slot().lock().unwrap().bytes = None;
     }
 
     pub(crate) fn font_override(&self) -> Option<(u64, Arc<[u8]>)> {
-        if self.legacy {
-            return crate::ffi::font_override();
-        }
-        let font = self.state.font.lock().unwrap();
+        let font = self.font_slot().lock().unwrap();
         Some((font.generation, font.bytes.clone()?))
     }
 
@@ -327,6 +352,19 @@ impl Drop for SessionScope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_override_rejects_invalid_bytes_without_storing() {
+        let legacy = HostSession::legacy();
+        let before = legacy.font_override().map(|(generation, _)| generation);
+        let invalid = [0, 1, 2, 3];
+        assert_eq!(unsafe { art3m1s_set_font_override(invalid.as_ptr(), 4) }, 0);
+        assert_eq!(unsafe { art3m1s_set_font_override(std::ptr::null(), 0) }, 0);
+        assert_eq!(
+            legacy.font_override().map(|(generation, _)| generation),
+            before
+        );
+    }
 
     #[test]
     fn script_debug_config_gates_debugprint_output() {
