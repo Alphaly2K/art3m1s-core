@@ -296,14 +296,16 @@ before creating the D3D11 device, wraps a Vulkan image backed by the IOSurface
 and compares two GPU clears directly in the original pixel buffer. The layout
 handoff materializes deferred clears before the D3D11 completion query.
 
-For the tested Apple Silicon build, start at `metalsharp/DXVK-MacOS`
-`v3.1.1-macos.4` (`e847475b8ea97b92bc65385bad0eb88ef1f79ebf`) with its
-submodules initialized. Apply the native build fixes from DXVK PR 5962
-(`f43c43747e0c66114ed7592050e4f1ccdd03d582`) and the loader fixes from
-DXVK commit `cbd2206d72d3d9dd9941d5d868bb03a858e85f9b`. In
-`src/dxgi/dxgi_ngx.cpp`, guard `NvidiaExtensionRequested` and
-`TrustNgxCertificate` with `_WIN64`, matching the existing guard at their
-call sites. Build with Meson, Ninja, Apple Clang, glslang and SDL3:
+For a clean Apple Silicon runtime and compiler build, install Xcode, Meson,
+Ninja, glslang, SDL3, pkg-config, GNU Make 4.3 or newer, Bison 3, Flex and
+Perl with JSON. Run `bash scripts/build-host-shaders-macos.sh OUTPUT_DIRECTORY`
+from this repository. This creates `dxvk/` and `hlsl/` under the new directory,
+ready to bundle together. The pinned MoltenVK requires macOS 15 or newer.
+Use an SDL3 build for the oldest macOS version you intend to support.
+
+To compile DXVK separately, use the source and patches pinned in the script.
+Initialize the submodules, apply the two upstream changes and the repository's
+runtime and NGX patches. Build with the following settings:
 
 ```sh
 meson setup build-native --buildtype release \
@@ -378,8 +380,9 @@ to the DXVK source and rebuild both native libraries. Run
 `bash scripts/build-host-dxvk-native.sh OUTPUT_DIRECTORY` with the same
 source, build, and MoltenVK variables as the probe. The SDK and native
 libraries must match the architecture of their Host process. The script
-expects `LICENSE.MoltenVK` alongside MoltenVK and SDL3's installed license,
-or an explicit `ARTEMIS_SDL3_LICENSE` path for the latter.
+expects `LICENSE.MoltenVK` alongside MoltenVK. It also includes both statically linked DXVK subproject notices and
+SDL3's installed license. Set `ARTEMIS_SDL3_LICENSE` to use a different path
+for the latter.
 
 Keep the five dylibs together when moving the runtime and include its
 `licenses` directory when distributing it. Load
@@ -397,9 +400,10 @@ To generate the fixture's ADE2 without CrossOver, set
 Run `bash scripts/test-host-dxvk-native.sh --bundle APP_BUNDLE` to verify a
 packaged compiler and mixed renderer together. The probe compiles a synthetic
 effect and checks the shared surface and capture using the bundle's Core,
-Metal Host, DXVK and ANGLE libraries.
+Metal Host, DXVK and ANGLE libraries. Use `--bundle-compile APP_BUNDLE` to
+exercise the packaged compiler on a runner without a graphics device.
 
-Build and install vkd3d 2.1 separately with GNU Make 4.3 or newer, Bison 3,
+To build the compiler separately, build and install vkd3d 2.1 with GNU Make 4.3 or newer, Bison 3,
 Flex, Perl with JSON, and Vulkan and SPIR-V headers. Use
 `--disable-maintainer-mode --disable-tests --without-xcb --without-opengl
 --without-ncurses` for the compiler build. Set `SONAME_LIBVULKAN` if

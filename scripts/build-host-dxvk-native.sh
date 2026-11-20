@@ -36,6 +36,8 @@ bridge=libart3m1s_artemis_dxvk_host.dylib
 cp -L "$build_dir/src/d3d11/$d3d11" "$build_dir/src/dxgi/$dxgi" "$sdl_libdir/$sdl" "$scratch/"
 cp -L "$ARTEMIS_MOLTENVK_DYLIB" "$scratch/$molten"
 cp "$source_dir/LICENSE" "$scratch/licenses/DXVK.txt"
+cp "$source_dir/subprojects/dxbc-spirv/LICENSE" "$scratch/licenses/dxbc-spirv.txt"
+cp "$source_dir/subprojects/libdisplay-info/LICENSE" "$scratch/licenses/libdisplay-info.txt"
 cp "$molten_dir/LICENSE.MoltenVK" "$scratch/licenses/MoltenVK.txt"
 cp "$sdl_license" "$scratch/licenses/SDL3.txt"
 if [[ -f $molten_dir/NOTICE ]]; then

@@ -3,18 +3,22 @@ set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ $(uname -s) != Darwin ]]; then
-  printf '%s\n' 'This check requires macOS and a Metal device.' >&2
+  printf '%s\n' 'This check requires macOS.' >&2
   exit 2
 fi
 mode=${1:-}
-if [[ ( $mode == --bundle && $# != 2 ) ||
-      ( $mode != --bundle && ( $# -gt 1 || ( -n $mode && $mode != --hlsl && $mode != --arfp ) ) ) ]]; then
-  printf '%s\n' 'Usage: test-host-dxvk-native.sh [--hlsl|--arfp|--bundle APP_BUNDLE]' >&2
+bundle=
+if [[ $mode == --bundle || $mode == --bundle-compile ]]; then
+  bundle=1
+fi
+if [[ ( -n $bundle && $# != 2 ) ||
+      ( -z $bundle && ( $# -gt 1 || ( -n $mode && $mode != --hlsl && $mode != --arfp ) ) ) ]]; then
+  printf '%s\n' 'Usage: test-host-dxvk-native.sh [--hlsl|--arfp|{--bundle|--bundle-compile} APP_BUNDLE]' >&2
   exit 2
 fi
 scratch=$(mktemp -d)
 trap 'rm -rf -- "$scratch"' EXIT
-if [[ $mode == --bundle ]]; then
+if [[ -n $bundle ]]; then
   contents=$(cd "$2/Contents" && pwd)
   mac="$contents/MacOS"
   frameworks="$contents/Frameworks"
@@ -30,9 +34,13 @@ if [[ $mode == --bundle ]]; then
   unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH DXVK_WSI_DRIVER SDL_VULKAN_LIBRARY
   "$scratch/metal-host" --shader-host-mixed-source > "$scratch/effect.hlsl"
   "$mac/artemis-hlsl-compile" effect-pair < "$scratch/effect.hlsl" > "$scratch/effect.ade"
-  if [[ ! -s $scratch/effect.ade ]]; then
-    printf '%s\n' 'The bundled HLSL compiler did not emit an effect.' >&2
+  if [[ $(LC_ALL=C head -c 4 "$scratch/effect.ade") != ADE2 ]]; then
+    printf '%s\n' 'The bundled HLSL compiler did not emit an ADE2 effect.' >&2
     exit 1
+  fi
+  printf '%s\n' 'Bundled HLSL compiler emitted ADE2.'
+  if [[ $mode == --bundle-compile ]]; then
+    exit 0
   fi
   ARTEMIS_GL_SMOKE_ANGLE_DIR="$mac" DXVK_LOG_LEVEL=warn MVK_CONFIG_LOG_LEVEL=2 \
     "$scratch/metal-host" --shader-host-mixed "$frameworks" "$scratch/effect.ade"

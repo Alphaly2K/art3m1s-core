@@ -1,0 +1,20 @@
+diff --git a/src/dxgi/dxgi_ngx.cpp b/src/dxgi/dxgi_ngx.cpp
+index 0a4ca58..5242b9b 100644
+--- a/src/dxgi/dxgi_ngx.cpp
++++ b/src/dxgi/dxgi_ngx.cpp
+@@ -14,6 +14,7 @@ namespace dxvk {
+   static std::once_flag s_nvextInit;
+
+
++#ifdef _WIN64
+   static bool NvidiaExtensionRequested() {
+     std::string vendor = Config::getUserConfig().getOption<std::string>("dxgi.customVendorId", "");
+     std::transform(vendor.begin(), vendor.end(), vendor.begin(), [] (unsigned char c) { return std::tolower(c); });
+@@ -47,6 +48,7 @@ namespace dxvk {
+
+     FreeLibrary(crypt32);
+   }
++#endif
+
+
+   // The NVIDIA driver's registry values NGX looks for its core with: NVIDIA Corporation\Global\NGXCore FullPath
