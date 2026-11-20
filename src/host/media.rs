@@ -8,8 +8,6 @@
 //! decoded layer frames enter core through the native frame-upload FFI.
 
 use serde::Serialize;
-#[cfg(feature = "legacy")]
-use serde_json::json;
 
 pub(crate) fn ab_loop_file(file: &str) -> Option<String> {
     let (stem, ext) = match file.rfind('.') {
@@ -78,18 +76,6 @@ impl HostMediaCommandKind {
             Self::VideoAudioPlay => "video_audio_play",
         }
     }
-}
-
-#[cfg(feature = "legacy")]
-pub fn emit<T: Serialize>(kind: HostMediaCommandKind, payload: T) {
-    let payload = serde_json::to_value(payload).unwrap_or_else(|e| {
-        crate::core_warn!(
-            "[host-media] {} payload 序列化失败，降级为空对象: {e}",
-            kind.as_str()
-        );
-        json!({})
-    });
-    crate::ffi::emit_media_command(kind.as_str(), payload);
 }
 
 #[derive(Debug, Serialize)]

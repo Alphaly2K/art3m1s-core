@@ -230,31 +230,12 @@ pub fn log(level: &str, msg: &str) {
     }
 }
 
-// ── Media / UI command events ──────────────────────────────────
-
-fn emit_json_command(event_kind: u32, kind: &str, payload: serde_json::Value) {
+pub fn emit_ui_command(kind: &str, payload: serde_json::Value) {
     if let Some(events) =
         crate::host_events::legacy_active_events().filter(|events| events.enabled())
     {
-        let payload = payload.to_string();
-        match event_kind {
-            crate::host_events::EVENT_KIND_MEDIA => {
-                events.push_media(kind, &payload);
-            }
-            crate::host_events::EVENT_KIND_UI => {
-                events.push_ui(kind, &payload);
-            }
-            _ => {}
-        }
+        events.push_ui(kind, &payload.to_string());
     }
-}
-
-pub fn emit_media_command(kind: &str, payload: serde_json::Value) {
-    emit_json_command(crate::host_events::EVENT_KIND_MEDIA, kind, payload);
-}
-
-pub fn emit_ui_command(kind: &str, payload: serde_json::Value) {
-    emit_json_command(crate::host_events::EVENT_KIND_UI, kind, payload);
 }
 
 #[macro_export]

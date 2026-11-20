@@ -180,7 +180,18 @@ impl HostSession {
 
     pub(crate) fn emit_media<T: Serialize>(&self, kind: HostMediaCommandKind, payload: T) {
         if self.legacy {
-            crate::host_media::emit(kind, payload);
+            let payload = serde_json::to_value(payload).unwrap_or_else(|error| {
+                self.log(
+                    "W",
+                    &format!("serialize media command {}: {error}", kind.as_str()),
+                );
+                serde_json::json!({})
+            });
+            if let Some(events) =
+                crate::host_events::legacy_active_events().filter(|events| events.enabled())
+            {
+                events.push_media(kind.as_str(), &payload.to_string());
+            }
             return;
         }
         match serde_json::to_string(&payload) {
