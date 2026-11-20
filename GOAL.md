@@ -205,6 +205,9 @@ Swift 媒体探针增加显式设备输出验证。用合成 WMV 音轨在 macOS
 测试通过，PE 仍只导出 `art3m1s_get_api_v2`。独立 Core 的依赖约束检查通过；Linux 和 Windows
 MSVC 原生执行仍待验证。
 
+脚本请求未协商的着色器语言时，Core 发送诊断并继续推进，不请求源码。Flutter `707fb7d` 每个
+项目按语言记录一次。独立 Core 286 项、C 和 Dart 冒烟、Flutter 定向回归 7 项通过。
+
 ## 已完成：Flutter 方法通道与共享纹理适配
 
 macOS Runner 适配器负责调用 v2 会话并管理 Flutter 纹理。Swift 与 Dart 通过方法通道交换事件

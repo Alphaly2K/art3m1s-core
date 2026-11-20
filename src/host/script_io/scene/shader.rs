@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 const MAX_SOURCE_BYTES: usize = 256 * 1024;
 const MAX_SHADER_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SHADERS: usize = 256;
+const DIAGNOSTIC_SHADER_UNAVAILABLE: u32 = 1;
 
 fn shader_language(asset: &str) -> FrameShaderLanguage {
     let leaf = asset.rsplit('/').next().unwrap_or(asset);
@@ -144,13 +145,27 @@ impl SceneIo {
         &mut self,
         id: &str,
         path: &str,
-    ) -> Option<IoRequest> {
-        let path = self.resolve_media_asset(path).ok()?;
+        transport: &mut SessionTransport,
+    ) -> Result<Option<IoRequest>, ProtocolError> {
+        let Ok(path) = self.resolve_media_asset(path) else {
+            return Ok(None);
+        };
         if !supports_shader_asset(self.scene.lock().unwrap().shader_caps, &path) {
-            return None;
+            let language = match shader_language(&path) {
+                FrameShaderLanguage::Hlsl => "hlsl",
+                FrameShaderLanguage::Glsl => "glsl",
+            };
+            transport.diagnostic(
+                DIAGNOSTIC_SHADER_UNAVAILABLE,
+                MessageBody::new(
+                    json!({"language": language, "id": id, "key": path}).to_string(),
+                    vec![],
+                )?,
+            )?;
+            return Ok(None);
         }
         self.pending_shader = Some((id.into(), path.clone()));
-        Some(IoRequest::Read { path })
+        Ok(Some(IoRequest::Read { path }))
     }
 
     pub(in crate::host::script_io) fn complete_shader(&mut self, response: IoResponse) {

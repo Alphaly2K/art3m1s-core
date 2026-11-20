@@ -522,6 +522,9 @@ C Host 分别声明 `ART_RENDERER_CAP_HLSL`、`ART_RENDERER_CAP_GLSL`，可同�
 借用，重载保留旧帧的原始语言和源码。源码缺失或编译失败时直接绘制精灵，组内已有的其他效果
 继续执行。编译和绑定约定见 [Runtime Shader ABI](SHADER_ABI.md)。
 
+`[lyshader]` 请求未协商的语言时，Core 继续推进，不读取该源码，并发送诊断 domain=7、kind=1。
+metadata 包含 `language`（`hlsl` 或 `glsl`）、脚本中的 `id` 和解析后的逻辑资源 `key`；无需回复。
+
 编号存档可记录 shader ID 到逻辑源码键的映射。使用截图时记录捕获时的映射。读档提交前，
 Core 通过 Host IO 预读已协商语言的源码及相关采样纹理。已协商的源码不可读时，读档失败并
 保留原场景；未协商语言的效果跳过，不请求其源码。

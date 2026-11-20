@@ -1184,7 +1184,7 @@ impl ScriptIoSession {
                 if let Event::ShaderLoad { id, file } = &event
                     && let Some(scene) = self.scene.as_mut()
                 {
-                    if let Some(request) = scene.prepare_shader(id, file) {
+                    if let Some(request) = scene.prepare_shader(id, file, &mut self.transport)? {
                         return Ok(ScenarioStep::Request(request));
                     }
                     self.interpreter.advance_line();

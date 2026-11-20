@@ -18,6 +18,7 @@ void exerciseHost(
   const ini = '[WINDOWS]\nWIDTH=320\nHEIGHT=200\nBOOT=boot.iet\n';
   final boot = utf8.encode(
     '*top\n[lyc id=1 width=2 height=1 color=ff112233]\n'
+    '[lyshader id=optional file=effect.hlsl]\n'
     '[setonwindowbutton button=1 label=window call=1]\n'
     '[exec command=fullscreen]\n[caption data=${'x' * 5000}]\n'
     'original text\n[wt0]\n[caption data=advanced]\n'
@@ -36,6 +37,7 @@ void exerciseHost(
   final effects = <String>[];
   ArtemisEvent? audioEvent, videoEvent;
   var checkedReplyOwner = false;
+  var warnedShader = false;
   void pump(int frame) {
     for (var turn = 0; turn < 64; turn++) {
       final result = session.step(
@@ -53,6 +55,10 @@ void exerciseHost(
           final metadata = event.metadata;
           switch ((event.domain, event.kind)) {
             case (ART_DOMAIN_IO, ART_IO_STAT):
+              require(
+                metadata['key'] != 'effect.hlsl',
+                'Read an unsupported shader',
+              );
               final found = metadata['key'] == 'boot.iet';
               final reply = event.reply({
                 'status': 'ok',
@@ -104,6 +110,16 @@ void exerciseHost(
               audioEvent = event;
             case (ART_DOMAIN_MEDIA, ART_MEDIA_VIDEO_COMMAND):
               videoEvent = event;
+            case (ART_DOMAIN_DIAGNOSTICS, 1):
+              require(
+                !event.requiresReply &&
+                    event.epoch == epoch &&
+                    metadata['id'] == 'optional' &&
+                    metadata['language'] == 'hlsl' &&
+                    metadata['key'] == 'effect.hlsl',
+                'Unexpected unsupported shader diagnostic',
+              );
+              warnedShader = true;
             default:
               require(
                 !event.requiresReply,
@@ -119,6 +135,7 @@ void exerciseHost(
   }
 
   pump(1);
+  require(warnedShader, 'Missing unsupported shader diagnostic');
   final background = session.step(
     frameId: 2,
     monotonicNs: 2000000,
