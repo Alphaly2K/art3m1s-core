@@ -38,6 +38,8 @@ mod shader;
 mod shader_source;
 
 pub use backend::GlBackend;
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub(crate) use backend::MetalEffectDraw;
 pub use provider::{GlTextureProvider, PlaceholderKind};
 pub use shader::ShaderProfile;
 

@@ -15,6 +15,77 @@ use std::collections::HashSet;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 
+#[cfg(target_os = "macos")]
+type MetalTexture = std::ptr::NonNull<std::ffi::c_void>;
+
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub(crate) struct MetalEffectDraw<'a> {
+    pub command: &'a crate::draw::DrawCommand,
+    pub inputs: [Option<MetalTexture>; 3],
+}
+
+#[cfg(target_os = "macos")]
+struct MetalTextureViews {
+    gl: Rc<glow::Context>,
+    views: Vec<glow::Texture>,
+}
+
+#[cfg(target_os = "macos")]
+impl MetalTextureViews {
+    fn new(gl: &Rc<glow::Context>) -> Self {
+        Self {
+            gl: Rc::clone(gl),
+            views: Vec::new(),
+        }
+    }
+
+    unsafe fn import<const N: usize>(
+        &mut self,
+        context: &dyn GLPlatformContext,
+        handles: [Option<MetalTexture>; N],
+    ) -> Result<[Option<TextureId>; N], String> {
+        let mut ids = [None; N];
+        unsafe {
+            let previous = self.gl.get_parameter_texture(glow::TEXTURE_BINDING_2D);
+            let result = handles
+                .into_iter()
+                .zip(&mut ids)
+                .try_for_each(|(handle, id)| {
+                    if let Some(handle) = handle {
+                        let texture = context.import_metal_texture(handle)?;
+                        self.views.push(texture);
+                        *id = Some(TextureId(texture.0.get().into()));
+                        for wrap in [glow::TEXTURE_WRAP_S, glow::TEXTURE_WRAP_T] {
+                            self.gl.tex_parameter_i32(
+                                glow::TEXTURE_2D,
+                                wrap,
+                                glow::CLAMP_TO_EDGE as i32,
+                            );
+                        }
+                    }
+                    Ok::<(), String>(())
+                });
+            self.gl.bind_texture(glow::TEXTURE_2D, previous);
+            result?;
+        }
+        Ok(ids)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for MetalTextureViews {
+    fn drop(&mut self) {
+        if !self.views.is_empty() {
+            unsafe {
+                self.gl.finish();
+                for texture in self.views.drain(..) {
+                    self.gl.delete_texture(texture);
+                }
+            }
+        }
+    }
+}
+
 /// Reference OpenGL/ANGLE backend.
 ///
 /// This object owns every GL-specific runtime resource: context, persistent
@@ -66,9 +137,9 @@ impl GlBackend {
         handle: std::ptr::NonNull<std::ffi::c_void>,
         draw: impl FnOnce(&mut Self, TextureId) -> Result<T, String>,
     ) -> Result<T, String> {
-        unsafe {
-            self.with_metal_textures([Some(handle)], |backend, [id]| draw(backend, id.unwrap()))
-        }
+        let mut textures = MetalTextureViews::new(&self.gl);
+        let [id] = unsafe { textures.import(self.platform_context.as_ref(), [Some(handle)])? };
+        draw(self, id.unwrap())
     }
 
     #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -77,84 +148,55 @@ impl GlBackend {
     }
 
     #[cfg(all(target_os = "macos", feature = "metal"))]
-    pub(crate) unsafe fn draw_metal_effect(
+    pub(crate) unsafe fn draw_metal_effects(
         &mut self,
-        target: std::ptr::NonNull<std::ffi::c_void>,
-        inputs: [Option<std::ptr::NonNull<std::ffi::c_void>>; 3],
+        target: MetalTexture,
         stage: Extent2D,
         extent: Extent2D,
-        mut command: crate::draw::DrawCommand,
+        draws: &[MetalEffectDraw<'_>],
         damage: Option<[f32; 4]>,
-    ) -> Result<(), String> {
+    ) -> Result<(), (usize, String)> {
         self.set_native_surface(NativeSurface {
             kind: NativeSurfaceKind::AppleMetalTexture,
             handle: target.as_ptr(),
             extent,
-        })?;
-        let result = unsafe {
-            self.with_metal_textures(inputs, |backend, [fore, mask, user]| {
-                command.texture = fore.ok_or("missing Metal effect foreground")?;
-                let effect = command.shader.as_mut().ok_or("missing GLSL effect")?;
-                effect.mask_texture = mask;
-                effect.user_texture = user;
-                backend.platform_context.bind_external_surface()?;
-                backend.renderer.set_stage_size(stage.width, stage.height);
-                backend.renderer.draw_into_metal(
-                    &command,
-                    (extent.width as i32, extent.height as i32),
-                    damage,
-                )
-            })
-        };
+        })
+        .map_err(|error| (0, error))?;
+        let result = (|| {
+            self.platform_context
+                .bind_external_surface()
+                .map_err(|error| (0, error))?;
+            self.renderer.set_stage_size(stage.width, stage.height);
+            let mut textures = MetalTextureViews::new(&self.gl);
+            for (index, draw) in draws.iter().enumerate() {
+                self.draw_imported_effect(&mut textures, draw, extent, damage)
+                    .map_err(|error| (index, error))?;
+            }
+            Ok(())
+        })();
         self.clear_native_surface();
         result
     }
 
-    #[cfg(target_os = "macos")]
-    unsafe fn with_metal_textures<const N: usize, T>(
-        &mut self,
-        handles: [Option<std::ptr::NonNull<std::ffi::c_void>>; N],
-        draw: impl FnOnce(&mut Self, [Option<TextureId>; N]) -> Result<T, String>,
-    ) -> Result<T, String> {
-        struct Views<const N: usize>(Rc<glow::Context>, [Option<glow::Texture>; N]);
-        impl<const N: usize> Drop for Views<N> {
-            fn drop(&mut self) {
-                unsafe {
-                    self.0.finish();
-                    for texture in self.1.into_iter().flatten() {
-                        self.0.delete_texture(texture);
-                    }
-                }
-            }
-        }
-
-        let mut views = Views(Rc::clone(&self.gl), [None; N]);
-        unsafe {
-            let previous = self.gl.get_parameter_texture(glow::TEXTURE_BINDING_2D);
-            let result = handles
-                .into_iter()
-                .zip(&mut views.1)
-                .try_for_each(|(handle, texture)| {
-                    if let Some(handle) = handle {
-                        *texture = Some(self.platform_context.import_metal_texture(handle)?);
-                        for wrap in [glow::TEXTURE_WRAP_S, glow::TEXTURE_WRAP_T] {
-                            self.gl.tex_parameter_i32(
-                                glow::TEXTURE_2D,
-                                wrap,
-                                glow::CLAMP_TO_EDGE as i32,
-                            );
-                        }
-                    }
-                    Ok::<(), String>(())
-                });
-            self.gl.bind_texture(glow::TEXTURE_2D, previous);
-            result?;
-        }
-        draw(
-            self,
-            views
-                .1
-                .map(|texture| texture.map(|texture| TextureId(texture.0.get().into()))),
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    fn draw_imported_effect(
+        &self,
+        textures: &mut MetalTextureViews,
+        draw: &MetalEffectDraw<'_>,
+        extent: Extent2D,
+        damage: Option<[f32; 4]>,
+    ) -> Result<(), String> {
+        let [fore, mask, user] =
+            unsafe { textures.import(self.platform_context.as_ref(), draw.inputs)? };
+        let mut command = draw.command.clone();
+        command.texture = fore.ok_or("missing Metal effect foreground")?;
+        let effect = command.shader.as_mut().ok_or("missing GLSL effect")?;
+        effect.mask_texture = mask;
+        effect.user_texture = user;
+        self.renderer.draw_into_metal(
+            &command,
+            (extent.width as i32, extent.height as i32),
+            damage,
         )
     }
 

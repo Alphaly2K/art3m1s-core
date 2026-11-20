@@ -41,6 +41,8 @@ use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 mod core_video;
 #[cfg(all(target_os = "macos", feature = "metal-dxvk"))]
 mod dxvk;
+#[cfg(all(target_os = "macos", feature = "gl"))]
+use super::gl::MetalEffectDraw;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ptr::NonNull;
@@ -2820,15 +2822,42 @@ impl MetalBackend {
     ) -> Result<(), String> {
         #[cfg(all(target_os = "macos", feature = "gl"))]
         if self.angle_effects.is_some() {
-            let mut start = 0;
-            for (index, command) in commands.iter().enumerate() {
-                if self.is_angle_effect(command.shader.as_ref()) {
-                    self.encode_metal_batch(
-                        command_buffer,
-                        target,
-                        &commands[start..index],
-                        damage,
-                    )?;
+            let mut remaining = commands;
+            while let Some(start) = remaining
+                .iter()
+                .position(|command| self.is_angle_effect(command.shader.as_ref()))
+            {
+                self.encode_metal_batch(command_buffer, target, &remaining[..start], damage)?;
+                let end = remaining[start + 1..]
+                    .iter()
+                    .position(|command| !self.is_angle_effect(command.shader.as_ref()))
+                    .map_or(remaining.len(), |offset| start + 1 + offset);
+                let run = &remaining[start..end];
+                let completed = if run.len() == 1 {
+                    0
+                } else {
+                    let draws = run
+                        .iter()
+                        .map(|command| self.angle_draw(command, None, None))
+                        .collect::<Result<Vec<_>, _>>();
+                    match draws {
+                        Ok(draws) => {
+                            match self.submit_angle_effects(command_buffer, target, &draws, damage)
+                            {
+                                Ok(()) => draws.len(),
+                                Err((completed, error)) => {
+                                    log::warn!("[MetalBackend] GLSL effect batch failed: {error}");
+                                    completed
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            log::warn!("[MetalBackend] GLSL batch preparation failed: {error}");
+                            0
+                        }
+                    }
+                };
+                for command in &run[completed..] {
                     if !self.encode_angle_effect(
                         command_buffer,
                         target,
@@ -2844,10 +2873,10 @@ impl MetalBackend {
                             damage,
                         )?;
                     }
-                    start = index + 1;
                 }
+                remaining = &remaining[end..];
             }
-            return self.encode_metal_batch(command_buffer, target, &commands[start..], damage);
+            return self.encode_metal_batch(command_buffer, target, remaining, damage);
         }
         self.encode_metal_batch(command_buffer, target, commands, damage)
     }
@@ -2869,35 +2898,59 @@ impl MetalBackend {
         foreground: Option<&Texture>,
         mask: Option<&Texture>,
     ) -> bool {
-        let result = (|| {
-            let effect = command.shader.as_ref().ok_or("missing GLSL effect")?;
-            let texture = |id| self.textures.get(&id).map(|texture| &texture.raw);
-            let fore = foreground
-                .or_else(|| texture(command.texture))
-                .ok_or("missing GLSL foreground")?;
-            let mask = mask.or_else(|| effect.mask_texture.and_then(texture));
-            let user = effect.user_texture.and_then(texture);
-            let pointer = |texture: &Texture| NonNull::from(&**texture).cast();
-            let inputs = [Some(pointer(fore)), mask.map(pointer), user.map(pointer)];
-            let stage = self.scene_size;
-            self.submit_effect_inputs(command_buffer)?;
-            self.with_angle(|angle| unsafe {
-                angle.draw_metal_effect(
-                    pointer(&target.texture),
-                    inputs,
-                    stage,
-                    target.extent,
-                    command.clone(),
-                    damage,
-                )
-            })
-            .ok_or("ANGLE effects are not enabled")?
-        })();
+        let result = self.angle_draw(command, foreground, mask).and_then(|draw| {
+            self.submit_angle_effects(command_buffer, target, &[draw], damage)
+                .map_err(|(_, error)| error)
+        });
         if let Err(error) = result {
             log::warn!("[MetalBackend] GLSL effect failed: {error}");
             return false;
         }
         true
+    }
+
+    #[cfg(all(target_os = "macos", feature = "gl"))]
+    fn angle_draw<'a>(
+        &self,
+        command: &'a DrawCommand,
+        foreground: Option<&Texture>,
+        mask: Option<&Texture>,
+    ) -> Result<MetalEffectDraw<'a>, String> {
+        let effect = command.shader.as_ref().ok_or("missing GLSL effect")?;
+        let texture = |id| self.textures.get(&id).map(|texture| &texture.raw);
+        let fore = foreground
+            .or_else(|| texture(command.texture))
+            .ok_or("missing GLSL foreground")?;
+        let mask = mask.or_else(|| effect.mask_texture.and_then(texture));
+        let user = effect.user_texture.and_then(texture);
+        let pointer = |texture: &Texture| NonNull::from(&**texture).cast();
+        Ok(MetalEffectDraw {
+            command,
+            inputs: [Some(pointer(fore)), mask.map(pointer), user.map(pointer)],
+        })
+    }
+
+    #[cfg(all(target_os = "macos", feature = "gl"))]
+    fn submit_angle_effects(
+        &mut self,
+        command_buffer: &mut CommandBuffer,
+        target: &PrivateRenderTarget,
+        draws: &[MetalEffectDraw<'_>],
+        damage: Option<[f32; 4]>,
+    ) -> Result<(), (usize, String)> {
+        let stage = self.scene_size;
+        self.submit_effect_inputs(command_buffer)
+            .map_err(|error| (0, error))?;
+        self.with_angle(|angle| unsafe {
+            angle.draw_metal_effects(
+                NonNull::from(&*target.texture).cast(),
+                stage,
+                target.extent,
+                draws,
+                damage,
+            )
+        })
+        .ok_or_else(|| (0, "ANGLE effects are not enabled".into()))?
     }
 
     fn encode_metal_batch(
