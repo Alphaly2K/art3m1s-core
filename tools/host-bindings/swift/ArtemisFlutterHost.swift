@@ -18,17 +18,19 @@ private enum ArtemisFlutterError: Error {
     private let metalPath: String
     private let mediaPath: String?
     private let angleDirectory: String?
+    private let dxvkDirectory: String?
     private var mediaLibrary: ArtemisLegacyMediaLibrary?
     private let registry: FlutterTextureRegistry
     private var channel: FlutterMethodChannel?
     private var sessions: [String: Session] = [:]
 
     init(registry: FlutterTextureRegistry, corePath: String, metalPath: String, mediaPath: String? = nil,
-         angleDirectory: String? = nil) {
+         angleDirectory: String? = nil, dxvkDirectory: String? = nil) {
         self.corePath = corePath
         self.metalPath = metalPath
         self.mediaPath = mediaPath
         self.angleDirectory = angleDirectory
+        self.dxvkDirectory = dxvkDirectory
         self.registry = registry
     }
 
@@ -80,15 +82,73 @@ private enum ArtemisFlutterError: Error {
                 angle = angleDirectory
             default: throw ArtemisFlutterError.invalidArguments
             }
-            let core = try ArtemisMacSession(corePath: corePath, metalPath: metalPath, hostCaps: caps,
-                                             screenshots: args["screenshots"] as? Bool ?? false,
-                                             randomSeed: UInt64.random(in: .min ... .max),
-                                             angleDirectory: angle)
+            let screenshots = args["screenshots"] as? Bool ?? false
+            let randomSeed = UInt64.random(in: .min ... .max)
+            var dxvk: ArtemisMacSession?
+            var mixed = false
+            var preparedHlsl: [Int] = []
+            let effects = args["hlslEffects"] as? [[String: Any]] ?? []
+            let compileHlsl = args["compileHlsl"] as? Bool == true
+            let requestedMixed = args["mixedShaders"] as? Bool == true
+            if angle == nil || requestedMixed, let dxvkDirectory, compileHlsl || !effects.isEmpty {
+                do {
+                    func openDXVK(angle: String? = nil) throws -> ArtemisMacSession {
+                        try ArtemisMacSession(corePath: corePath, metalPath: metalPath, hostCaps: caps,
+                                              screenshots: screenshots, randomSeed: randomSeed,
+                                              angleDirectory: angle, dxvkDirectory: dxvkDirectory)
+                    }
+                    let candidate: ArtemisMacSession
+                    var candidateMixed = false
+                    if requestedMixed, let angleDirectory {
+                        do {
+                            candidate = try openDXVK(angle: angleDirectory)
+                            candidateMixed = true
+                        } catch {
+                            if angle != nil { throw error }
+                            NSLog("Artemis mixed renderer unavailable: %@", String(describing: error))
+                            candidate = try openDXVK()
+                        }
+                    } else {
+                        candidate = try openDXVK()
+                    }
+                    for (index, effect) in effects.prefix(256).enumerated() {
+                        guard let source = bytes(effect["source"]), let artifact = bytes(effect["artifact"]) else { continue }
+                        do {
+                            try candidate.prepareADE2(source: source, artifact: artifact)
+                            preparedHlsl.append(index)
+                        } catch {
+                            NSLog("Artemis DXVK effect unavailable: %@", String(describing: error))
+                        }
+                    }
+                    if !preparedHlsl.isEmpty || compileHlsl {
+                        dxvk = candidate
+                        mixed = candidateMixed
+                    } else {
+                        try candidate.close()
+                    }
+                } catch {
+                    NSLog("Artemis DXVK unavailable: %@", String(describing: error))
+                }
+            }
+            let core = try dxvk ?? ArtemisMacSession(corePath: corePath, metalPath: metalPath, hostCaps: caps,
+                                                     screenshots: screenshots, randomSeed: randomSeed,
+                                                     angleDirectory: angle)
             do {
+                if mixed || (dxvk == nil && angle != nil) {
+                    let sources = (args["glslSources"] as? [Any] ?? []).prefix(256).compactMap(bytes)
+                    let cacheDirectory = Bundle.main.bundleIdentifier.flatMap { identifier in
+                        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
+                            .appendingPathComponent(identifier, isDirectory: true)
+                            .appendingPathComponent("artemis-angle", isDirectory: true)
+                    }
+                    try core.warmGLSL(sources, cacheDirectory: cacheDirectory)
+                }
                 try core.openProject(ini, platform: platform, reportedOS: args["reportedOS"] as? String)
                 let id = UUID().uuidString
                 var result = try state(core)
                 result["session"] = id
+                result["dxvk"] = dxvk != nil
+                result["preparedHlsl"] = preparedHlsl
                 sessions[id] = Session(core)
                 return result
             } catch {
@@ -103,6 +163,12 @@ private enum ArtemisFlutterError: Error {
         }
         guard let session = sessions[id] else { throw ArtemisFlutterError.closedSession }
         switch call.method {
+        case "prepareHlsl":
+            guard let source = bytes(args["source"]), let artifact = bytes(args["artifact"]) else {
+                throw ArtemisFlutterError.invalidArguments
+            }
+            try session.core.prepareADE2(source: source, artifact: artifact)
+            return nil
         case "surface":
             guard let width = args["width"] as? Int, let height = args["height"] as? Int,
                   (1...16384).contains(width), (1...16384).contains(height) else {
@@ -165,7 +231,8 @@ private enum ArtemisFlutterError: Error {
                 frameID: number(args["frame"], as: UInt64.self),
                 monotonicNS: number(args["monotonicNS"], as: UInt64.self),
                 unixMS: number(args["unixMS"], as: Int64.self),
-                utcOffsetMinutes: number(args["utcOffsetMinutes"], as: Int32.self))
+                utcOffsetMinutes: number(args["utcOffsetMinutes"], as: Int32.self),
+                backgroundAutosave: args["backgroundAutosave"] as? Bool ?? false)
             var result = try state(session.core)
             result["backpressured"] = backpressured
             result["stepFlags"] = Int(step.flags)

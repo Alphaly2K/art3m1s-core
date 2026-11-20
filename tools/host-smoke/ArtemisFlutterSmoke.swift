@@ -88,10 +88,11 @@ private final class Registry: NSObject, FlutterTextureRegistry {
         let ini = Data("[WINDOWS]\nWIDTH=4\nHEIGHT=4\nBOOT=boot.iet\n".utf8)
         let boot = Data("""
         *top
+        [autosave allow=1]
         [lyc id=1 width=4 height=4 color=ffff0000]
         [seplay id=fx file=tone.ogg]
         [caption data=ready]
-        [stop]
+        [wt0]
         """.utf8)
         let open: [String: Any] = ["ini": FlutterStandardTypedData(bytes: ini), "platform": "windows",
                                    "hostCaps": art_swift_io_cap() | UInt64(ArtSwiftMediaCapability)]
@@ -160,6 +161,7 @@ private final class Registry: NSObject, FlutterTextureRegistry {
             }
         }
         try expect(ready && checkedIdentity && checkedPlayback, "Project did not complete the channel checks")
+        try exerciseBackgroundAutosave(messenger, tick: tick)
         try expect(messenger.call("present") is String, "Frame not presented")
         try expect(messenger.call("present") == nil && registry.notifications == [0], "Notified twice for the same frame")
         guard let buffer = registry.textures[0]?.copyPixelBuffer()?.takeRetainedValue() else {
@@ -181,6 +183,42 @@ private final class Registry: NSObject, FlutterTextureRegistry {
             try exerciseUnpolledVideoEnd(messenger, registry: registry, open: open, path: clip)
         }
         print("Artemis Flutter channel smoke passed")
+    }
+
+    @MainActor private static func exerciseBackgroundAutosave(_ messenger: Messenger,
+                                                               tick: [String: Any]) throws {
+        var background = tick
+        background["backgroundAutosave"] = true
+        background["frame"] = 2
+        var written: [String] = []
+        for _ in 0..<8 {
+            guard let state = try messenger.call("step", background) as? [String: Any],
+                  let waits = state["waitFlags"] as? Int,
+                  let events = try messenger.call("poll") as? [[String: Any]] else {
+                throw Failure(detail: "Could not drive background autosave")
+            }
+            try expect(state["frame"] as? String == "1", "Background autosave advanced the Host frame")
+            for event in events where event["request"] as? String != "0" {
+                guard event["domain"] as? Int == Int(ArtSwiftIo),
+                      event["kind"] as? Int == Int(ArtSwiftIoWrite),
+                      let metadata = event["metadata"] as? FlutterStandardTypedData,
+                      let args = try JSONSerialization.jsonObject(with: metadata.data) as? [String: Any],
+                      let key = args["key"] as? String else {
+                    throw Failure(detail: "Unexpected background autosave request")
+                }
+                written.append(key)
+                var reply = event
+                reply["metadata"] = FlutterStandardTypedData(bytes: Data("{\"status\":\"ok\"}".utf8))
+                reply["blob"] = FlutterStandardTypedData(bytes: Data())
+                try expect(messenger.call("submit", ["batch": [reply]]) as? Bool == true,
+                           "Background autosave write acknowledgement was rejected")
+            }
+            if waits & Int(ArtSwiftWaitIo) == 0 {
+                try expect(written == ["__autosave.dat", "saveg.dat", "system.dat"], "Incomplete background autosave")
+                return
+            }
+        }
+        throw Failure(detail: "Background autosave did not finish")
     }
 
     @MainActor private static func exerciseUnpolledVideoEnd(_ messenger: Messenger, registry: Registry,
