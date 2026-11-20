@@ -377,6 +377,9 @@ impl ScriptIoSession {
                     .play(&mut self.transport, media_scene, Channel::Bgm, spec)?;
             }
             Event::SePlay {
+                skippable: true, ..
+            } if self.control.skipping() => {}
+            Event::SePlay {
                 id,
                 file,
                 loop_play,

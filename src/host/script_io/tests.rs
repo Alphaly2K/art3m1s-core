@@ -3122,6 +3122,39 @@ end
 }
 
 #[test]
+fn fast_forward_omits_skippable_se_without_replacing_existing_playback() {
+    let (mut session, _, mut host) = playback_project(
+        br#"*top
+[seplay id=keep file=original.ogg]
+[exec command=skip mode=1]
+[seplay id=keep file=replacement.ogg skippable=1]
+[seplay id=omit file=omitted.ogg skippable=1]
+[seplay id=keep_during_skip file=required.ogg]
+[exec command=skip mode=0]
+[wait se=omit]
+[var name=t.past_wait data=1]
+[stop]
+"#,
+    );
+    drive_playback_boot(&mut session, &mut host);
+
+    let audio = session.audio.snapshot();
+    assert_eq!(
+        audio
+            .se
+            .iter()
+            .map(|track| track.file.as_str())
+            .collect::<Vec<_>>(),
+        ["original.ogg", "required.ogg"]
+    );
+    assert_eq!(
+        session.step_queued_frame(playback_frame(2, 16)).unwrap(),
+        ScriptIoProgress::Event
+    );
+    assert!(session.interpreter.get_variable("t.past_wait").is_some());
+}
+
+#[test]
 fn audio_feedback_uses_playback_identity_and_resumes_its_wait_after_callback_io() {
     use crate::host::{
         media::PlaybackStatus,
