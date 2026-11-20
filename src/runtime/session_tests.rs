@@ -1,10 +1,12 @@
 use super::CoreRuntime;
 use crate::backend::*;
 use crate::compositor::mock::MockProvider;
+use crate::host::frame::FrameLease;
 use crate::host::{HostSession, ResourceProvider};
 use crate::host_events::{EVENT_KIND_LOG, EVENT_KIND_MEDIA, EVENT_KIND_UI};
 use crate::host_files::HostResources;
 use crate::render_pipeline::draw::{DrawList, TextureId, TextureInfo, TextureProvider};
+use art3m1s_render::artemis::{FramePacket, SpriteRenderer};
 use asb_interpreter::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -119,7 +121,7 @@ impl GpuBackend for LogicRenderer {
         panic!("unexpected frame")
     }
     fn clear(&mut self, _: [f32; 4]) {
-        panic!("unexpected clear")
+        assert!(self.1.is_some(), "unexpected clear");
     }
     fn end_frame(&mut self) {
         panic!("unexpected frame")
@@ -185,12 +187,29 @@ impl GpuBackend for LogicRenderer {
     }
 }
 
+fn draw_host_frame(
+    renderer: &mut SpriteRenderer<LogicRenderer>,
+    frame: &FrameLease,
+) -> Result<RenderRegion, String> {
+    let packet = FramePacket::decode(frame.packet()).map_err(|error| error.to_string())?;
+    renderer.render_packet(
+        frame.runtime().as_raw(),
+        &packet,
+        |index| {
+            frame
+                .texture(index)
+                .map(|texture| texture.rgba())
+                .ok_or_else(|| "missing frame texture".into())
+        },
+        [0.0, 0.0, 0.0, 1.0],
+    )
+}
+
 #[test]
 fn host_sprite_renderer_reuses_uploads_and_rolls_back_failed_frames() {
     use crate::host::frame::{
         FramePublisher, FrameSnapshot, FrameSprite, FrameTexture, SpriteBlend,
     };
-    use crate::host::renderer::SpriteRenderer;
     use crate::host::runtime::RuntimeHandle;
     use crate::render_pipeline::draw::BlendMode;
 
@@ -249,8 +268,8 @@ fn host_sprite_renderer_reuses_uploads_and_rolls_back_failed_frames() {
         MockProvider::default(),
         Some(RenderTrace::default()),
     ));
-    renderer.render(&first).unwrap();
-    renderer.render(&first).unwrap();
+    draw_host_frame(&mut renderer, &first).unwrap();
+    draw_host_frame(&mut renderer, &first).unwrap();
     let trace = renderer.backend_mut().1.as_mut().unwrap();
     assert_eq!(trace.uploads.len(), 1);
     let (first_texture, pixels) = &trace.uploads[0];
@@ -281,14 +300,17 @@ fn host_sprite_renderer_reuses_uploads_and_rolls_back_failed_frames() {
         .acquire(runtime, first.render_frame_id)
         .unwrap()
         .unwrap();
-    assert_eq!(renderer.render(&second).unwrap_err(), "test upload failure");
+    assert_eq!(
+        draw_host_frame(&mut renderer, &second).unwrap_err(),
+        "test upload failure"
+    );
     let trace = renderer.backend_mut().1.as_ref().unwrap();
     assert_eq!(trace.retired, [trace.uploads[1].0]);
     assert_eq!(trace.draws.len(), 2);
 
-    renderer.render(&first).unwrap();
+    draw_host_frame(&mut renderer, &first).unwrap();
     assert_eq!(renderer.backend_mut().1.as_ref().unwrap().uploads.len(), 2);
-    renderer.render(&second).unwrap();
+    draw_host_frame(&mut renderer, &second).unwrap();
     let trace = renderer.backend_mut().1.as_ref().unwrap();
     assert_eq!(trace.uploads.len(), 4);
     assert_eq!(trace.uploads[2].1.as_slice(), [99, 99, 19, 255]);
@@ -305,7 +327,6 @@ fn host_sprite_renderer_preserves_emote_mesh_material_and_stencil() {
     use crate::host::frame::{
         FrameGroup, FramePublisher, FrameSnapshot, FrameSprite, FrameTexture, SpriteBlend,
     };
-    use crate::host::renderer::SpriteRenderer;
     use crate::host::runtime::RuntimeHandle;
     use crate::render_pipeline::draw::{BlendMode, NativeEmoteMaterial};
 
@@ -396,7 +417,7 @@ fn host_sprite_renderer_preserves_emote_mesh_material_and_stencil() {
         MockProvider::default(),
         Some(RenderTrace::default()),
     ));
-    renderer.render(&frame).unwrap();
+    draw_host_frame(&mut renderer, &frame).unwrap();
     let trace = renderer.backend_mut().1.as_ref().unwrap();
     let draw = &trace.draws[0];
     assert_eq!(draw.commands[0].blend, BlendMode::NativeAdd);

@@ -57,7 +57,8 @@ naga = { version = "29", optional = true, features = ["wgsl-in", "spv-out"] }
 
 [features]
 default = []
-artemis = ["dep:log"]
+artemis-frame = []
+artemis = ["artemis-frame", "dep:log"]
 gl = ["dep:glow", "dep:image", "dep:libloading", "dep:log"]
 metal = [
     "runtime-shader",

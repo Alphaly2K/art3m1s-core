@@ -12,13 +12,14 @@ pub mod input;
 pub(crate) mod logging;
 pub mod media;
 pub mod protocol;
+#[cfg(feature = "legacy")]
 mod provider;
-pub mod renderer;
 pub mod runtime;
 pub mod script_io;
 #[cfg(feature = "legacy")]
 mod session;
 
+#[cfg(feature = "legacy")]
 pub use provider::ResourceProvider;
 #[cfg(feature = "legacy")]
 pub use session::HostSession;

@@ -3,7 +3,7 @@
 //! This initial crate contains the DrawList, texture, post-process and shader
 //! contracts only. Concrete GL/Metal/Vulkan backends are migrated separately.
 
-#[cfg(feature = "artemis")]
+#[cfg(feature = "artemis-frame")]
 pub mod artemis;
 pub mod backend;
 pub mod draw;

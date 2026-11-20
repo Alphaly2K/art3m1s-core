@@ -68,7 +68,7 @@ macOS 应用也可以用 `cargo build --locked --manifest-path crates/artemis-me
 Swift 应用可使用同一契约中的 `ArtemisMacSession` 管理主线程上的 v2 会话与绘制，应用自行处理
 资源、媒体及纹理注册。使用 `bash scripts/test-host-v2-swift.sh` 运行合成项目的异步 IO 与呈现检查。
 
-Rust Host 通过 `host::ResourceProvider` 提供逻辑资源，通过
+legacy Rust Host 通过 `host::ResourceProvider` 提供逻辑资源，通过
 `CoreRuntime::with_host_backend` 提供 renderer，入口不自行选择平台 GPU：
 
 ```rust,no_run
@@ -209,11 +209,11 @@ IO 挂起期间可继续呈现上次取得的帧。借用跨重载有效；单�
 归还。`packet()` 可读取同一快照的二进制描述，像素继续通过纹理表借用。格式、蒙版和资源
 版本约定见 [帧契约](HOST_ABI_V2.md#7-画面core-帧契约与-host-renderer)。
 
-使用项目自带 GPU 后端时，将 Host 创建的后端传给 `SpriteRenderer::new`。Host 通过
-`backend_mut()` 配置目标及舞台映射，调用 `begin_access` 和 `begin_frame`，
-然后调用 `render(&lease)`。成功后由 Host 结束帧并呈现；出错时也要结束已打开的访问和帧。
-绘制时适配器会清理目标；自定义背景时调用 `render_with_clear_color`，转场的两个场景使用同一颜色。
-清理适配器缓存须在后端上下文可用时调用 `clear_cached_textures()`。
+使用项目自带 GPU 后端时，将 Host 创建的后端传给
+`art3m1s_render::artemis::SpriteRenderer::new`。Host 配置目标并开始帧，然后解码
+`lease.packet()`，调用 `render_packet`，以 `lease.texture(index)` 提供像素。Host 负责结束
+帧和呈现；出错时也要结束已打开的访问和帧。转场两侧使用 `render_packet` 的同一个清屏色。
+清理适配器缓存时须保证后端上下文可用。
 
 句柄入口的 `step` 会自动处理 `[save]` 和编号 `[load]`。Host 按现有 IO 请求读写并回填结果，
 Core 会在继续场景前将 `persistence_result` 排入可靠事件队列。成功读档从恢复后的脚本位置

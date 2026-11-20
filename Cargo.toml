@@ -21,7 +21,7 @@ required-features = ["game-probes"]
 asb-interpreter = { path = "crates/asb-interpreter", default-features = false }
 art3m1s-emote = { path = "crates/art3m1s-emote", default-features = false }
 art3m1s-log = { path = "crates/art3m1s-log" }
-art3m1s-render = { path = "crates/art3m1s-render", features = ["artemis"] }
+art3m1s-render = { path = "crates/art3m1s-render", features = ["artemis-frame"] }
 pfs-upk-rust = { path = "crates/pfs-upk-rust", optional = true }
 art3m1s-media = { path = "crates/art3m1s-media", optional = true }
 art3m1s-native-render = { path = "crates/art3m1s-native-render", optional = true }
@@ -67,5 +67,6 @@ ffmpeg = ["legacy", "art3m1s-media/ffmpeg", "art3m1s-siglus?/uci-ffmpeg"]
 game-probes = ["gl-backend"]
 
 [dev-dependencies]
+art3m1s-render = { path = "crates/art3m1s-render", features = ["artemis"] }
 # 离屏像素回读测试需要在 macOS 上创建一个 CGL headless 上下文。
 glow = "0.16"

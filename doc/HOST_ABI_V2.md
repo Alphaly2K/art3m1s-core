@@ -538,8 +538,7 @@ Rust Host 可启用 `art3m1s-render` 的 `artemis` feature，并自行启用所�
 `SpriteRenderer::render_packet` 提供 runtime 身份和同一个帧 token 的纹理读取函数。像素只在
 缓存未命中时读取，长度须与描述符一致；借用须保持到调用结束。Host 控制 backend 的访问、
 目标、帧开始与结束及呈现；转场需要后端支持捕获当前目标。新设备可以用仍有效的帧借用重新上传。
-直接使用 Core Rust 接口的 Host 仍可通过 `host::renderer::SpriteRenderer::render` 绘制
-`FrameLease`。
+直接取得 Rust `FrameLease` 的 Host 使用 `lease.packet()` 解码帧包，从同一 lease 读取纹理。
 
 `acquire_latest(after_render_frame_id)` 返回不可变快照和 lease token；无新帧为 NO_DATA。
 快照及所有引用的 CPU 资源版本在 release 前跨 step/reload 保持有效；默认至多两个

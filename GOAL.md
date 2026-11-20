@@ -938,6 +938,10 @@ Dart Host SDK 和 Flutter 的分块写入在追加前校验暂存文件长度。
 函数表提供。标题探测、v1 函数表、游戏探针编译及独立 v2 C ABI 冒烟通过；macOS 动态
 导出仍分别是 v1 查询入口和 9 个 PFS 符号，以及独立包的 v2 查询入口。
 
+Core 构建只启用 Artemis 帧数据格式；绘制适配器由 Host 的渲染 crate 提供。移除重复 Rust
+适配器后，纹理上传回滚与 E-Mote 网格回归通过同一个 ARFP 解码和绘制入口。独立依赖门禁、
+291 项 Core 测试、C ABI 冒烟及 macOS Metal 像素和共享 IOSurface 验证通过。
+
 后续继续审计聚合 crate 的 Rust 公共接口与调用方，保持 legacy 与独立 v2 产物分离。生产默认
 切换仍待原版游戏的着色器、媒体及存档对照，以及 Linux EGL 和 Windows MSVC 原生验证。
 

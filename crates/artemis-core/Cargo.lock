@@ -56,7 +56,6 @@ name = "art3m1s-render"
 version = "0.1.0"
 dependencies = [
  "glam",
- "log",
 ]
 
 [[package]]

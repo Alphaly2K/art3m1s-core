@@ -23,8 +23,8 @@ cargo tree --locked --all-features --manifest-path crates/artemis-core/Cargo.tom
         reject("Host dependency in standalone Core: " package)
       }
       if (package == "art3m1s-render") {
-        if (features !~ /,artemis,/ || features ~ /,(gl|vulkan|metal|metal-dxvk|runtime-shader),/)
-          reject("Standalone Core must use the renderer data model without native backends")
+        if (features !~ /,artemis-frame,/ || features ~ /,(artemis|gl|vulkan|metal|metal-dxvk|runtime-shader),/)
+          reject("Standalone Core must use only the Artemis frame data model")
       }
       if (package == "art3m1s-emote" && features ~ /,filesystem,/)
         reject("Standalone Core must load E-Mote models from Host-provided bytes")
