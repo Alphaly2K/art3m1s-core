@@ -424,7 +424,8 @@ Core 在替换剧情前通过 Host IO 读取未加载的当前脚本和调用者
 v2 的 Luau 文件调用从当前调用点挂起。包含动态路径的读取和嵌套 `e:include` 都通过队列
 取回字节；回填后由 `step` 恢复原调用栈，挂起前已执行的代码不会重跑。结果按 runtime、
 epoch、request ID 和 service kind 匹配；队列满时保留当前调用，撤销或重载后旧结果失效。
-等待 IO 期间保留原帧的时钟与输入，继续原帧时不重复执行 `onEnterFrame`。
+等待 IO 期间保留原帧的时钟与输入，继续原帧时不重复执行 `onEnterFrame`。`e:include` 收到
+`not_found` 时直接返回。其他读取错误以及编译和执行错误继续抛给脚本。
 
 `require` 通过同一 Host IO 队列加载文本模块。默认按 `?.luau`、`?.lua` 查找，模块名中的点转换为
 目录分隔符。`package.path` 接受以分号分隔的逻辑相对路径模板。`package.preload` 和

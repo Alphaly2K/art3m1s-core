@@ -642,6 +642,52 @@ mod tests {
     }
 
     #[test]
+    fn missing_include_resumes_but_denied_include_raises() {
+        let i = interpreter();
+        let mut task = IoTask::compile(
+            i.lua(),
+            br#"
+            __engine:include('optional.lua')
+            local ok, message = pcall(function() __engine:include('private.lua') end)
+            assert(not ok and string.find(message, 'permission denied'))
+            resumed = true
+        "#,
+            "main",
+        )
+        .unwrap();
+        assert_eq!(task.step(None).unwrap(), IoProgress::Waiting);
+        assert_eq!(
+            task.pending_request(),
+            Some(&IoRequest::Read {
+                path: "optional.lua".into()
+            })
+        );
+        assert_eq!(
+            task.step(Some(IoResponse::Failed {
+                kind: IoFailure::NotFound,
+                message: "file not found".into(),
+            }))
+            .unwrap(),
+            IoProgress::Waiting
+        );
+        assert_eq!(
+            task.pending_request(),
+            Some(&IoRequest::Read {
+                path: "private.lua".into()
+            })
+        );
+        assert_eq!(
+            task.step(Some(IoResponse::Failed {
+                kind: IoFailure::Denied,
+                message: "permission denied".into(),
+            }))
+            .unwrap(),
+            IoProgress::Completed
+        );
+        assert!(i.lua().globals().get::<bool>("resumed").unwrap());
+    }
+
+    #[test]
     fn close_waits_for_write_confirmation_and_failed_flush_keeps_the_file_retryable() {
         let i = interpreter();
         let mut task = IoTask::compile(

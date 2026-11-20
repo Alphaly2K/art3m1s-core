@@ -178,7 +178,8 @@ return {
         return data
     end,
     include = function(self, path)
-        local data, message = read(path)
+        local data, message, kind = read(path)
+        if kind == "not_found" then return end
         if data == nil then error(message, 2) end
         return h.compile(data, path)()
     end,
