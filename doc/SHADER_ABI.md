@@ -441,9 +441,10 @@ includes the compiler binaries and the exact source bytes.
 To supply precompiled effects, store them at
 `artemis-shaders/ade2/<source-path>.<sha256>.ade2`, where
 `<source-path>` is the project-relative path and `<sha256>` is the lowercase
-digest of the exact HLSL bytes read by the Host. They take precedence over
-compilation. DXVK requires a usable runtime plus either a bundled compiler or
-usable project effects. Other Metal sessions use the normal Metal renderer.
+digest of the exact HLSL bytes read by the Host. The Host looks up a matching
+artifact at startup or when the script first loads the shader. A matching
+project artifact takes precedence over the application cache and compilation.
+The bundled compiler is optional when the project supplies the needed effects.
 Explicit ANGLE sessions use GLSL. For a session that needs both languages,
 negotiate `ART_MIXED_HOST_V1_RENDERER_CAPS` and call
 `art3m1s_metal_host_v1_create_mixed` with both runtime directories. Use the
