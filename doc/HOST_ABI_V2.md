@@ -719,6 +719,8 @@ Ogg 视频。该库用现有 FFmpeg 动态库构建，提供时间戳、RGBA 帧
 FFmpeg CLI，以同时验证 Ogg 视频。设置 `ARTEMIS_MEDIA_SWIFT_SMOKE=1` 可额外静音运行约
 19 秒的 Swift 调度探针，检查起播、轮询停顿后的追帧、暂停恢复和自然结束。该探针需要 macOS
 音频会话，无需 Flutter 窗口。
+在 macOS 14.2 或以上的桌面会话中再设置 `ARTEMIS_MEDIA_DEVICE_SMOKE=1`，可用低音量播放
+合成音轨，并检查本进程在暂停前和恢复后都有活动的 Core Audio 输出流。此模式不录音。
 
 将 `FLUTTER_MACOS_FRAMEWORK_DIR` 指向包含 `FlutterMacOS.framework` 的目录后运行
 `bash scripts/test-host-v2-flutter.sh`，可以验证标准方法编解码器、真实 Core 和 Metal 设备的
