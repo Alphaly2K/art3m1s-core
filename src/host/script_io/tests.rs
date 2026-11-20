@@ -1935,12 +1935,34 @@ __engine:setEventHandler{onSave="save_hook"}
         );
         let request = requests(&mut session).pop().unwrap();
         assert_eq!(request.metadata["key"], expected);
-        session.submit_replies(&[host.complete(&request)]).unwrap();
+        let response = if expected == "system.dat" {
+            reply(&request, json!({"status":"denied"}), vec![])
+        } else {
+            host.complete(&request)
+        };
+        session.submit_replies(&[response]).unwrap();
     }
     assert_eq!(
         session.step_queued_frame(frame).unwrap(),
         ScriptIoProgress::Event
     );
+    let mut event = [0; 256];
+    let poll = session.poll_events(&mut event);
+    assert_eq!(poll.record_count, 1);
+    assert_eq!(
+        u32::from_le_bytes(event[8..12].try_into().unwrap()),
+        RUNTIME_PERSISTENCE_RESULT.kind
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&event[64..poll.written_bytes]).unwrap(),
+        json!({"operation":"autosave", "status":"failed", "reason":"denied", "files_written":2})
+    );
+    assert!(session.at_input_wait());
+    assert_eq!(
+        session.step_queued_frame(playback_frame(4, 48)).unwrap(),
+        ScriptIoProgress::Event
+    );
+    assert_eq!(session.poll_events(&mut event).record_count, 0);
     let (revision, bytes) = &host.files[&key];
     let saved: HostSaveFile = serde_json::from_slice(bytes).unwrap();
     assert_eq!(*revision, 2);

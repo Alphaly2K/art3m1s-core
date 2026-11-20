@@ -267,8 +267,9 @@ Runtime kind=4 为 `runtime_closed`，request_id=0、blob 为空；metadata 为
 `{"save_status":"written"}` 或 `{"save_status":"failed","reason":"…","files_written":1}`。
 `files_written` 是本次关闭期间已经收到持久化确认的文件数。
 Runtime kind=5 为 `persistence_result`，request_id=0、blob 为空。`operation` 为 `save`、
-`load` 或 `autosave`（切后台）；`status` 为 `written`、`restored` 或 `failed`。失败包含 `reason`；保存失败
-还包含 `files_written`，表示此前已确认的文件数。结果先进入可靠队列，再继续场景。
+`load` 或 `autosave`，自动存档包括切后台和剧情输入等待触发的写入。`status` 为 `written`、
+`restored` 或 `failed`。失败包含 `reason`，保存失败还包含 `files_written`，表示此前已确认的
+文件数。结果先进入可靠队列，再继续场景。
 服务请求只使用 IO/UI/media/render domain；其余 service kind 和 payload 由各自 schema 定义。
 高频 input/render 可以使用独立版本化二进制
 body，由 flags/kind 唯一标识。JSON 中的 u64/i64 使用十进制字符串，避免宿主 Number 精度丢失。
