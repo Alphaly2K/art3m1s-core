@@ -1084,6 +1084,10 @@ Debian 13 ARM64 客体运行独立 Core 的依赖检查、ELF 导出及 C ABI �
 macOS 自动选路在缺少 DXVK、存在 ANGLE、预热列表为空时启用 GLSL。Flutter 通道冒烟用运行时读取的
 GLSL 验证了自动及显式 ANGLE 会话，覆盖窗口像素、截图和关闭单独会话后的纹理生命周期。
 
+未打包 DXVK 的 macOS 发布版 Runner 分别使用预热源码、打开项目后才提供的 GLSL 源码完成相同
+转场，并验证 Flutter 纹理像素与脚本截图。macOS 的 v1 表布局与动态导出、独立 v2 的 C ABI
+冒烟与依赖检查、C# 绑定生成检查均通过。
+
 后续继续审计聚合 crate 的 Rust 公共接口与调用方，保持 legacy 与独立 v2 产物分离。生产默认
 切换仍待原版游戏的着色器、媒体及存档对照，以及 Windows MSVC 原生验证。
 

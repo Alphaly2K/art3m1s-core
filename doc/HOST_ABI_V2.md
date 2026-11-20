@@ -724,7 +724,7 @@ macOS Flutter Runner 可将 [ArtemisFlutterHost](../tools/host-bindings/swift/Ar
 `session.close()`，Runner 离开时调用 `host.close()` 注销通道并释放剩余会话。
 Runner 可提供 `angleDirectory`，Dart 在 `ArtemisFlutterSession.open(angle: true)` 时选择
 ANGLE/Metal。可选的 `dxvkDirectory` 允许会话使用 Host 提供的 ADE2 程序，`mixedShaders`
-允许同一帧使用 HLSL 与 GLSL。应用在创建会话时选定后端。
+允许同一帧使用 HLSL 与 GLSL。应用在创建会话时协商可用的后端和着色器能力，预热列表可以为空。
 
 可选提供 `mediaPath` 加载独立的 [媒体 Host](abi/art3m1s_media_host_v1.h)，用于 ASF/WMV 和
 Ogg 视频。该库用现有 FFmpeg 动态库构建，提供时间戳、RGBA 帧和 48 kHz 双声道 PCM；调用者
@@ -744,8 +744,8 @@ Ogg 视频。该库用现有 FFmpeg 动态库构建，提供时间戳、RGBA 帧
 将 `FLUTTER_MACOS_FRAMEWORK_DIR` 指向包含 `FlutterMacOS.framework` 的目录后运行
 `bash scripts/test-host-v2-flutter.sh`，可以验证标准方法编解码器、真实 Core 和 Metal 设备的
 接线。探针独立运行并检查纹理注册、像素、后台存档和关闭，无需启动游戏应用。
-同时设置 `ARTEMIS_GL_SMOKE_ANGLE_DIR` 可验证两个 ANGLE 会话的 GLSL 像素、截图和纹理
-替换，以及关闭其中一个会话后另一个仍可绘制。
+同时设置 `ARTEMIS_GL_SMOKE_ANGLE_DIR` 可验证自动选择及显式选择 ANGLE 的会话。探针在运行时
+提供 GLSL，并检查像素、截图、纹理替换和会话隔离。
 设置 `ARTEMIS_VIDEO_SWIFT_SMOKE=1` 可验证原生 H.264 短片在首次轮询前播完时的像素、
 终态顺序和纹理释放。该检查需要支持 `libx264` 的 FFmpeg，无需游戏资源。
 

@@ -117,6 +117,11 @@ If the cache is unavailable or a binary is rejected, the renderer compiles
 from source. Effects discovered during play use the same loader and can reuse
 the prepared program when the same source is bound again in that context.
 
+The Flutter project's `tool/integration_tests/artemis_v2_angle_smoke.dart`
+checks presentation, transitions and screenshots. With DXVK omitted from the
+Runner, launch it with `ARTEMIS_ANGLE_TEST_RUNTIME=1` to supply the GLSL files
+after opening the project and exercise automatic selection and runtime loading.
+
 Run `bash scripts/test-host-v2-gl.sh --offline` on macOS with a native
 OpenGL context to check a packet emitted by the Core against expected
 pixels. The probe checks clipped effects on the stage, inside an offscreen
