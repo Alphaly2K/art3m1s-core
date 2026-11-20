@@ -81,8 +81,13 @@ private final class Registry: NSObject, FlutterTextureRegistry {
         let registry = Registry()
         let angle = paths.count == 3 ? paths[2] : nil
         try verifyHeadless(corePath: paths[0], missingMetalPath: paths[1] + "/missing")
+        try verifyUnavailableAngle(corePath: paths[0], metalPath: paths[1])
+        let dxvk = ProcessInfo.processInfo.environment["ARTEMIS_DXVK_RUNTIME_DIR"]
+        if let dxvk {
+            try verifyUnavailableAngle(corePath: paths[0], metalPath: paths[1], dxvkDirectory: dxvk)
+        }
         let host = ArtemisFlutterHost(registry: registry, corePath: paths[0], metalPath: paths[1],
-                                      angleDirectory: angle)
+                                      angleDirectory: angle, dxvkDirectory: dxvk)
         host.register(messenger: messenger)
         defer { host.close() }
 
@@ -202,6 +207,35 @@ private final class Registry: NSObject, FlutterTextureRegistry {
         let rejected = try messenger.call("surface", ["width": 4, "height": 4], session: session)
         try expect(rejected is FlutterError && registry.textures.isEmpty, "Headless session registered a texture")
         _ = try messenger.call("close", session: session)
+    }
+
+    @MainActor private static func verifyUnavailableAngle(corePath: String, metalPath: String,
+                                                          dxvkDirectory: String? = nil) throws {
+        let missingDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        let ini = FlutterStandardTypedData(bytes: Data("[WINDOWS]\nWIDTH=4\nHEIGHT=4\nBOOT=boot.iet\n".utf8))
+        for angleDirectory in [nil, missingDirectory] {
+            let messenger = Messenger()
+            let registry = Registry()
+            let host = ArtemisFlutterHost(registry: registry, corePath: corePath, metalPath: metalPath,
+                                          angleDirectory: angleDirectory, dxvkDirectory: dxvkDirectory)
+            host.register(messenger: messenger)
+            defer { host.close() }
+            var options: [String: Any] = [
+                "ini": ini, "platform": "windows", "hostCaps": art_swift_io_cap(), "renderer": "angle",
+            ]
+            try expect(messenger.call("open", options) is FlutterError, "Explicit ANGLE accepted an unavailable runtime")
+            options["mixedShaders"] = true
+            options["hlslOnDemand"] = true
+            guard let state = try messenger.call("open", options) as? [String: Any],
+                  let session = state["session"] as? String else {
+                throw Failure(detail: "Automatic selection did not fall back when ANGLE was unavailable")
+            }
+            try expect(state["dxvk"] as? Bool == (dxvkDirectory != nil), "Unexpected shader renderer after fallback")
+            try expect(messenger.call("surface", ["width": 4, "height": 4], session: session) as? Int == 0,
+                       "Automatic selection did not provide a usable Metal surface")
+            _ = try messenger.call("close", session: session)
+            try expect(registry.textures.isEmpty, "Fallback session leaked its surface")
+        }
     }
 
     @MainActor private static func exerciseBackgroundAutosave(_ messenger: Messenger,

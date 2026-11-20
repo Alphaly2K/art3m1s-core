@@ -458,9 +458,10 @@ negotiate `ART_MIXED_HOST_V1_RENDERER_CAPS` and call
 `art3m1s_metal_host_v1_create_mixed` with both runtime directories. Use the
 same ADE2 and GLSL preparation calls. Effects run in frame order, so GLSL can
 sample the scene after earlier DXVK effects. In automatic mode the Flutter
-Runner can select mixed rendering with an empty prewarm list. When DXVK is
-unavailable, the Runner can select ANGLE so that GLSL discovered during play
-still reaches the renderer.
+Runner can select mixed rendering with an empty prewarm list. If one shader
+backend cannot initialize, automatic selection tries the available single
+backend and can fall back to Metal. An explicit ANGLE selection requires a
+working ANGLE runtime.
 
 The Flutter project's `tool/integration_tests/artemis_v2_dxvk_smoke.dart`
 checks presentation, screenshots and source changes. Build it as the Runner's

@@ -751,8 +751,9 @@ Ogg 视频。该库用现有 FFmpeg 动态库构建，提供时间戳、RGBA 帧
 将 `FLUTTER_MACOS_FRAMEWORK_DIR` 指向包含 `FlutterMacOS.framework` 的目录后运行
 `bash scripts/test-host-v2-flutter.sh`，可以验证标准方法编解码器、真实 Core 和 Metal 设备的
 接线。探针独立运行并检查纹理注册、像素、后台存档和关闭，无需启动游戏应用。
-同时设置 `ARTEMIS_GL_SMOKE_ANGLE_DIR` 可验证自动选择及显式选择 ANGLE 的会话。探针在运行时
-提供 GLSL，并检查像素、截图、纹理替换和会话隔离。
+探针检查 ANGLE 不可用时自动选择回退到 Metal，以及显式选择 ANGLE 时报告错误。
+设置 `ARTEMIS_GL_SMOKE_ANGLE_DIR` 后，探针在运行时提供 GLSL，并检查像素、截图、纹理替换和
+会话隔离。另可用 `ARTEMIS_DXVK_RUNTIME_DIR` 指定 DXVK 运行时，检查自动选路及 DXVK 回退。
 设置 `ARTEMIS_VIDEO_SWIFT_SMOKE=1` 可验证原生 H.264 短片在首次轮询前播完时的像素、
 终态顺序和纹理释放。该检查需要支持 `libx264` 的 FFmpeg，无需游戏资源。
 
