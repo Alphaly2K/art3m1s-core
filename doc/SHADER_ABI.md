@@ -109,8 +109,9 @@ the active uniform. An effect supplies its fragment color, including any
 opacity or multiply it wants to apply before blending.
 
 The macOS ANGLE Host can prepare project GLSL before its first frame. The
-Flutter Runner prewarms indexed `.glsl`, `.frag`, `.fsh` and `.fs` files. It
-stores ANGLE program binaries in the application's cache directory. Programs
+Flutter Runner prewarms indexed `.glsl`, `.frag`, `.fsh` and `.fs` files
+within source and time budgets. It stores ANGLE program binaries in the
+application's cache directory. Programs
 match the effective vertex and fragment sources and the GL driver identity.
 If the cache is unavailable or a binary is rejected, the renderer compiles
 from source. Effects discovered during play use the same loader and can reuse
@@ -449,8 +450,10 @@ Explicit ANGLE sessions use GLSL. For a session that needs both languages,
 negotiate `ART_MIXED_HOST_V1_RENDERER_CAPS` and call
 `art3m1s_metal_host_v1_create_mixed` with both runtime directories. Use the
 same ADE2 and GLSL preparation calls. Effects run in frame order, so GLSL can
-sample the scene after earlier DXVK effects. The Flutter Runner selects this
-mode for projects with both languages when both runtimes are available.
+sample the scene after earlier DXVK effects. In automatic mode the Flutter
+Runner can select mixed rendering with an empty prewarm list. When DXVK is
+unavailable, the Runner can select ANGLE so that GLSL discovered during play
+still reaches the renderer.
 
 The Flutter project's `tool/integration_tests/artemis_v2_dxvk_smoke.dart`
 checks presentation, screenshots and source changes. Build it as the Runner's

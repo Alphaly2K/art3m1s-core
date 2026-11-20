@@ -322,9 +322,10 @@ private final class Registry: NSObject, FlutterTextureRegistry {
         """.utf8)
         let assets = ["boot.iet": boot, "paint.frag": shader]
         let open: [String: Any] = ["ini": FlutterStandardTypedData(bytes: ini), "platform": "windows",
-                                   "hostCaps": art_swift_io_cap(), "renderer": "angle", "screenshots": true]
-        func render() throws -> (session: String, frame: String, texture: Int64) {
-            guard let state = try messenger.call("open", open) as? [String: Any],
+                                   "hostCaps": art_swift_io_cap(), "screenshots": true]
+        func render(_ selection: [String: Any]) throws -> (session: String, frame: String, texture: Int64) {
+            let args = open.merging(selection) { _, value in value }
+            guard let state = try messenger.call("open", args) as? [String: Any],
                   let session = state["session"] as? String,
                   let texture = try messenger.call("surface", ["width": 4, "height": 4], session: session) as? Int else {
                 throw Failure(detail: "Could not open an ANGLE session")
@@ -361,8 +362,8 @@ private final class Registry: NSObject, FlutterTextureRegistry {
             }
             throw Failure(detail: "ANGLE scene never presented")
         }
-        let first = try render()
-        let second = try render()
+        let first = try render(["renderer": "metal", "mixedShaders": true, "hlslOnDemand": true])
+        let second = try render(["renderer": "angle"])
         _ = try messenger.call("close", session: second.session)
         guard let buffer = registry.textures[first.texture]?.copyPixelBuffer()?.takeRetainedValue() else {
             throw Failure(detail: "First ANGLE texture was released with the second session")

@@ -1080,6 +1080,10 @@ Debian 13 ARM64 客体运行独立 Core 的依赖检查、ELF 导出及 C ABI �
 同一探针使用公开试玩归档的移动端和 Switch 反色程序，也得到预期像素。
 在同一 Linux ARM64 环境中，.NET 8 C# Host 从内存启动项目并校验 ARFP 纹理，完成帧释放。
 
+着色器启动预热按资源索引与预算准备，首次运行时发现的 HLSL 和 GLSL 沿用 Host 的编译及缓存流程。
+macOS 自动选路在缺少 DXVK、存在 ANGLE、预热列表为空时启用 GLSL。Flutter 通道冒烟用运行时读取的
+GLSL 验证了自动及显式 ANGLE 会话，覆盖窗口像素、截图和关闭单独会话后的纹理生命周期。
+
 后续继续审计聚合 crate 的 Rust 公共接口与调用方，保持 legacy 与独立 v2 产物分离。生产默认
 切换仍待原版游戏的着色器、媒体及存档对照，以及 Windows MSVC 原生验证。
 
