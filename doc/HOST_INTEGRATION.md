@@ -116,6 +116,9 @@ provider 接收已解析 magic path 的逻辑 key（`/` 分隔、ASCII 小写）
 线程；它没有注册 native→Dart 回调。renderer 执行现有 DrawList/GpuBackend 契约，窗口、
 GPU 对象和呈现由其实现管理。聚合包默认构建继续提供 v1 C ABI。
 
+Rust 调用方可使用 `CoreRuntime`、`HostEvents` 和 `HostResources` 的方法。需要 v1 C ABI 的
+调用方通过 `ffi_api::art3m1s_get_api_v1` 获取函数表。
+
 ### 聚合包中的 v2 开发入口
 
 本节及后续 chunk 和句柄说明用于维护聚合包中的开发入口。独立 Rust Host 使用上面的 `api`。

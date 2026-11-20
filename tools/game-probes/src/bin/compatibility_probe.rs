@@ -1,12 +1,12 @@
 use art3m1s_core::{
     backend::BackendSelection,
     backend::gl::platform::{AngleBackend, GfxBackend},
-    ffi, host_events,
+    ffi_api::art3m1s_get_api_v1,
+    host_events,
     host_files::HostResources,
     runtime::CoreRuntime,
 };
 use std::{
-    ffi::CString,
     path::{Path, PathBuf},
     sync::OnceLock,
     time::{Duration, Instant},
@@ -18,24 +18,12 @@ static HOST_EVENTS: OnceLock<host_events::HostEvents> = OnceLock::new();
 fn drain_host_events() {
     let events = HOST_EVENTS.get().expect("host events initialized");
     loop {
-        let next = unsafe {
-            host_events::art3m1s_host_events_next_v1(
-                events as *const host_events::HostEvents as *mut host_events::HostEvents,
-            )
-        };
+        let next = events.next_event_bytes();
         if next == 0 {
             break;
         }
         let mut bytes = vec![0u8; next];
-        let mut count = 0u32;
-        let written = unsafe {
-            host_events::art3m1s_poll_events_v1(
-                events as *const host_events::HostEvents as *mut host_events::HostEvents,
-                bytes.as_mut_ptr(),
-                bytes.len(),
-                &mut count,
-            )
-        };
+        let (written, count) = events.poll_events(&mut bytes);
         if written == 0 || count == 0 {
             break;
         }
@@ -44,10 +32,10 @@ fn drain_host_events() {
             if offset + 24 > written {
                 break;
             }
-            let kind = u32::from_ne_bytes(bytes[offset + 4..offset + 8].try_into().unwrap());
+            let kind = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap());
             let len =
-                u32::from_ne_bytes(bytes[offset + 16..offset + 20].try_into().unwrap()) as usize;
-            let aux = u32::from_ne_bytes(bytes[offset + 20..offset + 24].try_into().unwrap());
+                u32::from_le_bytes(bytes[offset + 16..offset + 20].try_into().unwrap()) as usize;
+            let aux = u32::from_le_bytes(bytes[offset + 20..offset + 24].try_into().unwrap());
             offset += 24;
             if offset + len > written {
                 break;
@@ -127,7 +115,8 @@ fn main() {
     let events = HOST_EVENTS.get_or_init(host_events::HostEvents::new);
     events.set_enabled(true);
     unsafe {
-        ffi::art3m1s_set_debug(1);
+        let api = &*art3m1s_get_api_v1(std::ptr::null_mut());
+        (api.set_debug.unwrap())(1);
     }
     let ini = resources.read_file("system.ini").unwrap();
     let backend = match std::env::var("ART3M1S_PROBE_BACKEND").as_deref() {
@@ -143,8 +132,8 @@ fn main() {
     let mut rt = CoreRuntime::create(1280, 720, backend).unwrap();
     rt.set_resources(resources.clone());
     if let Ok(os) = std::env::var("ART3M1S_PROBE_OS") {
-        let os = CString::new(os).unwrap();
-        unsafe { ffi::art3m1s_runtime_set_reported_os(&mut rt, os.as_ptr()) };
+        let os = os.trim();
+        rt.set_reported_os((!os.is_empty()).then(|| os.to_owned()));
     }
     let config_section = std::env::var("ART3M1S_PROBE_CONFIG").unwrap_or_else(|_| "WINDOWS".into());
     rt.load_project_bytes(&ini, &config_section).unwrap();

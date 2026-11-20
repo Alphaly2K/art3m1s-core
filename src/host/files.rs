@@ -695,23 +695,23 @@ unsafe fn resources_ref<'a>(resources: *mut HostResources) -> Result<&'a HostRes
     Ok(unsafe { &*resources })
 }
 
-pub unsafe extern "C" fn art3m1s_resources_create() -> *mut HostResources {
+pub(crate) unsafe extern "C" fn art3m1s_resources_create() -> *mut HostResources {
     Box::into_raw(Box::new(HostResources::new()))
 }
 
-pub unsafe extern "C" fn art3m1s_resources_destroy(resources: *mut HostResources) {
+pub(crate) unsafe extern "C" fn art3m1s_resources_destroy(resources: *mut HostResources) {
     if !resources.is_null() {
         drop(unsafe { Box::from_raw(resources) });
     }
 }
 
-pub unsafe extern "C" fn art3m1s_resources_clear(resources: *mut HostResources) {
+pub(crate) unsafe extern "C" fn art3m1s_resources_clear(resources: *mut HostResources) {
     if let Ok(resources) = unsafe { resources_ref(resources) } {
         resources.clear();
     }
 }
 
-pub unsafe extern "C" fn art3m1s_resources_mount_directory(
+pub(crate) unsafe extern "C" fn art3m1s_resources_mount_directory(
     resources: *mut HostResources,
     path: *const c_char,
 ) -> c_int {
@@ -729,7 +729,7 @@ pub unsafe extern "C" fn art3m1s_resources_mount_directory(
     }
 }
 
-pub unsafe extern "C" fn art3m1s_resources_mount_pfs(
+pub(crate) unsafe extern "C" fn art3m1s_resources_mount_pfs(
     resources: *mut HostResources,
     path: *const c_char,
     encoding: *const c_char,
@@ -755,7 +755,7 @@ pub unsafe extern "C" fn art3m1s_resources_mount_pfs(
     }
 }
 
-pub unsafe extern "C" fn art3m1s_resources_set_save_dir(
+pub(crate) unsafe extern "C" fn art3m1s_resources_set_save_dir(
     resources: *mut HostResources,
     path: *const c_char,
 ) -> c_int {
@@ -777,7 +777,7 @@ pub unsafe extern "C" fn art3m1s_resources_set_save_dir(
     }
 }
 
-pub unsafe extern "C" fn art3m1s_resources_set_override(
+pub(crate) unsafe extern "C" fn art3m1s_resources_set_override(
     resources: *mut HostResources,
     path: *const c_char,
     data: *const u8,
@@ -805,7 +805,7 @@ pub unsafe extern "C" fn art3m1s_resources_set_override(
     }
 }
 
-pub unsafe extern "C" fn art3m1s_resources_clear_overrides(resources: *mut HostResources) {
+pub(crate) unsafe extern "C" fn art3m1s_resources_clear_overrides(resources: *mut HostResources) {
     if let Ok(resources) = unsafe { resources_ref(resources) } {
         resources.clear_overrides();
     }

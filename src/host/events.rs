@@ -380,11 +380,11 @@ unsafe fn events_ref<'a>(events: *mut HostEvents) -> Option<&'a HostEvents> {
     }
 }
 
-pub unsafe extern "C" fn art3m1s_host_events_create() -> *mut HostEvents {
+pub(crate) unsafe extern "C" fn art3m1s_host_events_create() -> *mut HostEvents {
     Box::into_raw(Box::new(HostEvents::new()))
 }
 
-pub unsafe extern "C" fn art3m1s_host_events_destroy(events: *mut HostEvents) {
+pub(crate) unsafe extern "C" fn art3m1s_host_events_destroy(events: *mut HostEvents) {
     if let Some(events) = unsafe { events_ref(events) } {
         deactivate(events);
     }
@@ -393,19 +393,22 @@ pub unsafe extern "C" fn art3m1s_host_events_destroy(events: *mut HostEvents) {
     }
 }
 
-pub unsafe extern "C" fn art3m1s_host_events_enable_v1(events: *mut HostEvents, enabled: i32) {
+pub(crate) unsafe extern "C" fn art3m1s_host_events_enable_v1(
+    events: *mut HostEvents,
+    enabled: i32,
+) {
     if let Some(events) = unsafe { events_ref(events) } {
         events.set_enabled(enabled != 0);
     }
 }
 
-pub unsafe extern "C" fn art3m1s_host_events_next_v1(events: *mut HostEvents) -> usize {
+pub(crate) unsafe extern "C" fn art3m1s_host_events_next_v1(events: *mut HostEvents) -> usize {
     unsafe { events_ref(events) }
         .map(HostEvents::next_event_bytes)
         .unwrap_or(0)
 }
 
-pub unsafe extern "C" fn art3m1s_poll_events_v1(
+pub(crate) unsafe extern "C" fn art3m1s_poll_events_v1(
     events: *mut HostEvents,
     output: *mut u8,
     capacity: usize,
@@ -429,7 +432,7 @@ pub unsafe extern "C" fn art3m1s_poll_events_v1(
     written
 }
 
-pub unsafe extern "C" fn art3m1s_set_font_list_v1(
+pub(crate) unsafe extern "C" fn art3m1s_set_font_list_v1(
     events: *mut HostEvents,
     monospace: i32,
     vertical: i32,
@@ -451,13 +454,13 @@ pub unsafe extern "C" fn art3m1s_set_font_list_v1(
     1
 }
 
-pub unsafe extern "C" fn art3m1s_set_window_state_v1(events: *mut HostEvents, flags: i32) {
+pub(crate) unsafe extern "C" fn art3m1s_set_window_state_v1(events: *mut HostEvents, flags: i32) {
     if let Some(events) = unsafe { events_ref(events) } {
         events.set_window_state(flags);
     }
 }
 
-pub unsafe extern "C" fn art3m1s_set_text_replacements_v1(
+pub(crate) unsafe extern "C" fn art3m1s_set_text_replacements_v1(
     events: *mut HostEvents,
     data: *const u8,
     len: usize,
@@ -486,7 +489,7 @@ pub unsafe extern "C" fn art3m1s_set_text_replacements_v1(
     1
 }
 
-pub unsafe extern "C" fn art3m1s_set_text_translation_enabled_v1(
+pub(crate) unsafe extern "C" fn art3m1s_set_text_translation_enabled_v1(
     events: *mut HostEvents,
     enabled: i32,
 ) {
@@ -495,7 +498,7 @@ pub unsafe extern "C" fn art3m1s_set_text_translation_enabled_v1(
     }
 }
 
-pub unsafe extern "C" fn art3m1s_clear_host_state_v1(events: *mut HostEvents) {
+pub(crate) unsafe extern "C" fn art3m1s_clear_host_state_v1(events: *mut HostEvents) {
     if let Some(events) = unsafe { events_ref(events) } {
         events.clear_host_state();
     }

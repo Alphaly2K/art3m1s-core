@@ -146,7 +146,7 @@ fn panic_msg(payload: &Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-pub unsafe extern "C" fn art3m1s_set_debug(enabled: c_int) {
+pub(crate) unsafe extern "C" fn art3m1s_set_debug(enabled: c_int) {
     let enabled = enabled != 0;
     DEBUG.store(enabled, Ordering::Relaxed);
     if !enabled {
@@ -165,7 +165,7 @@ pub(crate) fn legacy_debug_enabled() -> bool {
     DEBUG.load(Ordering::Relaxed)
 }
 
-pub unsafe extern "C" fn art3m1s_set_damage_visualization(enabled: c_int) {
+pub(crate) unsafe extern "C" fn art3m1s_set_damage_visualization(enabled: c_int) {
     DAMAGE_VISUALIZATION.store(enabled != 0 && legacy_debug_enabled(), Ordering::Relaxed);
 }
 
@@ -361,7 +361,7 @@ pub(crate) fn font_override() -> Option<(u64, Arc<[u8]>)> {
 
 /// 安装运行时覆盖字体。`data`/`len` 为字体文件字节（TTF/OTF），core 内部复制。
 /// 返回 1 成功；0 参数无效或字体解析失败。
-pub unsafe extern "C" fn art3m1s_set_font_override(data: *const u8, len: c_int) -> c_int {
+pub(crate) unsafe extern "C" fn art3m1s_set_font_override(data: *const u8, len: c_int) -> c_int {
     if data.is_null() || len <= 0 {
         return 0;
     }
@@ -376,13 +376,13 @@ pub unsafe extern "C" fn art3m1s_set_font_override(data: *const u8, len: c_int) 
 }
 
 /// 清除运行时覆盖字体，恢复脚本指定字体。
-pub unsafe extern "C" fn art3m1s_clear_font_override() {
+pub(crate) unsafe extern "C" fn art3m1s_clear_font_override() {
     clear_font_override();
 }
 
 // ── ANGLE library search path ──────────────────────────────────
 
-pub unsafe extern "C" fn art3m1s_set_angle_path(path: *const c_char) {
+pub(crate) unsafe extern "C" fn art3m1s_set_angle_path(path: *const c_char) {
     if let Ok(s) = unsafe { std::ffi::CStr::from_ptr(path).to_str() } {
         let _ = crate::backend::set_angle_path_prefix(s);
     }
@@ -510,7 +510,11 @@ use crate::runtime::CoreRuntime;
 /// experimental Vulkan on Android/Windows/Linux, with GL as initialization
 /// fallback when it is built. Explicit native overrides are 2=Vulkan and
 /// 3=Metal. Values 1/4/5/6 retain GL/ANGLE debug and A/B paths.
-pub unsafe extern "C" fn art3m1s_runtime_create(w: u32, h: u32, backend: i32) -> *mut CoreRuntime {
+pub(crate) unsafe extern "C" fn art3m1s_runtime_create(
+    w: u32,
+    h: u32,
+    backend: i32,
+) -> *mut CoreRuntime {
     // catch_unwind 防止 panic 跨越 extern "C" 边界导致 abort，
     // 同时把 panic message 打印到日志方便定位。
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -533,7 +537,7 @@ pub unsafe extern "C" fn art3m1s_runtime_create(w: u32, h: u32, backend: i32) ->
     }
 }
 
-pub unsafe extern "C" fn art3m1s_runtime_set_resources(
+pub(crate) unsafe extern "C" fn art3m1s_runtime_set_resources(
     rt: *mut CoreRuntime,
     resources: *mut crate::host_files::HostResources,
 ) -> c_int {
@@ -555,7 +559,9 @@ pub unsafe extern "C" fn art3m1s_runtime_set_resources(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_backend_capabilities(rt: *const CoreRuntime) -> u64 {
+pub(crate) unsafe extern "C" fn art3m1s_runtime_backend_capabilities(
+    rt: *const CoreRuntime,
+) -> u64 {
     if rt.is_null() {
         return 0;
     }
@@ -567,7 +573,7 @@ pub unsafe extern "C" fn art3m1s_runtime_backend_capabilities(rt: *const CoreRun
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_load_project(
+pub(crate) unsafe extern "C" fn art3m1s_runtime_load_project(
     rt: *mut CoreRuntime,
     ini_content: *const c_char,
     platform: *const c_char,
@@ -603,7 +609,7 @@ pub unsafe extern "C" fn art3m1s_runtime_load_project(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_load_project_bytes(
+pub(crate) unsafe extern "C" fn art3m1s_runtime_load_project_bytes(
     rt: *mut CoreRuntime,
     ini_content: *const u8,
     ini_len: usize,
@@ -685,7 +691,7 @@ unsafe extern "C" fn art3m1s_probe_caption(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_feed_mouse(rt: *mut CoreRuntime, x: i32, y: i32) {
+pub(crate) unsafe extern "C" fn art3m1s_runtime_feed_mouse(rt: *mut CoreRuntime, x: i32, y: i32) {
     if rt.is_null() {
         return;
     }
@@ -698,7 +704,7 @@ pub unsafe extern "C" fn art3m1s_runtime_feed_mouse(rt: *mut CoreRuntime, x: i32
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_feed_click(rt: *mut CoreRuntime) {
+pub(crate) unsafe extern "C" fn art3m1s_runtime_feed_click(rt: *mut CoreRuntime) {
     if rt.is_null() {
         return;
     }
@@ -711,7 +717,7 @@ pub unsafe extern "C" fn art3m1s_runtime_feed_click(rt: *mut CoreRuntime) {
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_feed_mouse_button(
+pub(crate) unsafe extern "C" fn art3m1s_runtime_feed_mouse_button(
     rt: *mut CoreRuntime,
     button: u32,
     pressed: i32,
@@ -730,7 +736,7 @@ pub unsafe extern "C" fn art3m1s_runtime_feed_mouse_button(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_feed_touch(
+pub(crate) unsafe extern "C" fn art3m1s_runtime_feed_touch(
     rt: *mut CoreRuntime,
     id: u32,
     phase: u8,
@@ -749,7 +755,11 @@ pub unsafe extern "C" fn art3m1s_runtime_feed_touch(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_feed_key(rt: *mut CoreRuntime, vk: u32, pressed: i32) {
+pub(crate) unsafe extern "C" fn art3m1s_runtime_feed_key(
+    rt: *mut CoreRuntime,
+    vk: u32,
+    pressed: i32,
+) {
     if rt.is_null() {
         return;
     }
@@ -766,7 +776,7 @@ pub unsafe extern "C" fn art3m1s_runtime_feed_key(rt: *mut CoreRuntime, vk: u32,
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_submit_dialog(
+pub(crate) unsafe extern "C" fn art3m1s_runtime_submit_dialog(
     rt: *mut CoreRuntime,
     accepted: i32,
     text: *const c_char,
@@ -789,7 +799,7 @@ pub unsafe extern "C" fn art3m1s_runtime_submit_dialog(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_submit_text_translation(
+pub(crate) unsafe extern "C" fn art3m1s_runtime_submit_text_translation(
     rt: *mut CoreRuntime,
     serial: u64,
     text: *const c_char,
@@ -811,7 +821,7 @@ pub unsafe extern "C" fn art3m1s_runtime_submit_text_translation(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_destroy(rt: *mut CoreRuntime) {
+pub(crate) unsafe extern "C" fn art3m1s_runtime_destroy(rt: *mut CoreRuntime) {
     if !rt.is_null() {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             drop(unsafe { Box::from_raw(rt) });
@@ -824,7 +834,7 @@ pub unsafe extern "C" fn art3m1s_runtime_destroy(rt: *mut CoreRuntime) {
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_stage_width(rt: *const CoreRuntime) -> u32 {
+pub(crate) unsafe extern "C" fn art3m1s_runtime_stage_width(rt: *const CoreRuntime) -> u32 {
     if rt.is_null() {
         return 0;
     }
@@ -836,7 +846,7 @@ pub unsafe extern "C" fn art3m1s_runtime_stage_width(rt: *const CoreRuntime) -> 
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_stage_height(rt: *const CoreRuntime) -> u32 {
+pub(crate) unsafe extern "C" fn art3m1s_runtime_stage_height(rt: *const CoreRuntime) -> u32 {
     if rt.is_null() {
         return 0;
     }
@@ -851,7 +861,7 @@ pub unsafe extern "C" fn art3m1s_runtime_stage_height(rt: *const CoreRuntime) ->
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_configure_spatial_upscale(
+pub(crate) unsafe extern "C" fn art3m1s_runtime_configure_spatial_upscale(
     rt: *mut CoreRuntime,
     render_scale: f32,
     sharpness: f32,
@@ -884,7 +894,7 @@ pub unsafe extern "C" fn art3m1s_runtime_configure_spatial_upscale(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_set_render_quality_preset(
+pub(crate) unsafe extern "C" fn art3m1s_runtime_set_render_quality_preset(
     rt: *mut CoreRuntime,
     preset: c_int,
 ) -> c_int {
@@ -918,7 +928,7 @@ pub unsafe extern "C" fn art3m1s_runtime_set_render_quality_preset(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_pixel_buffer_size(rt: *const CoreRuntime) -> u32 {
+pub(crate) unsafe extern "C" fn art3m1s_runtime_pixel_buffer_size(rt: *const CoreRuntime) -> u32 {
     if rt.is_null() {
         return 0;
     }
@@ -930,7 +940,7 @@ pub unsafe extern "C" fn art3m1s_runtime_pixel_buffer_size(rt: *const CoreRuntim
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_advance_and_render(
+pub(crate) unsafe extern "C" fn art3m1s_runtime_advance_and_render(
     rt: *mut CoreRuntime,
     delta_ms: u32,
     out_pixels: *mut u8,
@@ -969,7 +979,7 @@ pub unsafe extern "C" fn art3m1s_runtime_advance_and_render(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_advance_without_render(
+pub(crate) unsafe extern "C" fn art3m1s_runtime_advance_without_render(
     rt: *mut CoreRuntime,
     delta_ms: u32,
 ) -> i32 {
@@ -1000,7 +1010,7 @@ pub unsafe extern "C" fn art3m1s_runtime_advance_without_render(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_set_external_surface(
+pub(crate) unsafe extern "C" fn art3m1s_runtime_set_external_surface(
     rt: *mut CoreRuntime,
     kind: i32,
     handle: *mut c_void,
@@ -1036,7 +1046,7 @@ pub unsafe extern "C" fn art3m1s_runtime_set_external_surface(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_clear_external_surface(rt: *mut CoreRuntime) {
+pub(crate) unsafe extern "C" fn art3m1s_runtime_clear_external_surface(rt: *mut CoreRuntime) {
     if rt.is_null() {
         return;
     }
@@ -1052,7 +1062,7 @@ pub unsafe extern "C" fn art3m1s_runtime_clear_external_surface(rt: *mut CoreRun
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_advance_and_present(
+pub(crate) unsafe extern "C" fn art3m1s_runtime_advance_and_present(
     rt: *mut CoreRuntime,
     delta_ms: u32,
 ) -> i32 {
@@ -1086,7 +1096,7 @@ pub unsafe extern "C" fn art3m1s_runtime_advance_and_present(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_set_profiler_enabled(
+pub(crate) unsafe extern "C" fn art3m1s_runtime_set_profiler_enabled(
     rt: *const CoreRuntime,
     enabled: c_int,
 ) {
@@ -1103,7 +1113,7 @@ pub unsafe extern "C" fn art3m1s_runtime_set_profiler_enabled(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_profiler_snapshot(
+pub(crate) unsafe extern "C" fn art3m1s_runtime_profiler_snapshot(
     rt: *const CoreRuntime,
     out: *mut u8,
     capacity: u32,
@@ -1130,7 +1140,7 @@ pub unsafe extern "C" fn art3m1s_runtime_profiler_snapshot(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_set_volume(
+pub(crate) unsafe extern "C" fn art3m1s_runtime_set_volume(
     rt: *mut CoreRuntime,
     volume_type: *const c_char,
     value: f32,
@@ -1159,7 +1169,7 @@ pub unsafe extern "C" fn art3m1s_runtime_set_volume(
         feature = "vulkan-backend"
     )
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_set_runtime_media_enabled_v1(
+pub(crate) unsafe extern "C" fn art3m1s_runtime_set_runtime_media_enabled_v1(
     rt: *mut CoreRuntime,
     enabled: c_int,
 ) {
@@ -1174,7 +1184,7 @@ pub unsafe extern "C" fn art3m1s_runtime_set_runtime_media_enabled_v1(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_notify_video_finished(
+pub(crate) unsafe extern "C" fn art3m1s_runtime_notify_video_finished(
     rt: *mut CoreRuntime,
     id: *const c_char,
 ) {
@@ -1203,7 +1213,7 @@ pub unsafe extern "C" fn art3m1s_runtime_notify_video_finished(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_upload_video_layer_frame(
+pub(crate) unsafe extern "C" fn art3m1s_runtime_upload_video_layer_frame(
     rt: *mut CoreRuntime,
     id: *const c_char,
     width: u32,
@@ -1252,7 +1262,7 @@ pub unsafe extern "C" fn art3m1s_runtime_upload_video_layer_frame(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_notify_sound_finished(
+pub(crate) unsafe extern "C" fn art3m1s_runtime_notify_sound_finished(
     rt: *mut CoreRuntime,
     id: *const c_char,
 ) {
@@ -1273,7 +1283,7 @@ pub unsafe extern "C" fn art3m1s_runtime_notify_sound_finished(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_is_exit_requested(rt: *const CoreRuntime) -> i32 {
+pub(crate) unsafe extern "C" fn art3m1s_runtime_is_exit_requested(rt: *const CoreRuntime) -> i32 {
     if rt.is_null() {
         return 0;
     }
@@ -1288,7 +1298,10 @@ pub unsafe extern "C" fn art3m1s_runtime_is_exit_requested(rt: *const CoreRuntim
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_notify_lifecycle(rt: *mut CoreRuntime, state: c_int) {
+pub(crate) unsafe extern "C" fn art3m1s_runtime_notify_lifecycle(
+    rt: *mut CoreRuntime,
+    state: c_int,
+) {
     if rt.is_null() {
         return;
     }
@@ -1311,7 +1324,7 @@ pub unsafe extern "C" fn art3m1s_runtime_notify_lifecycle(rt: *mut CoreRuntime, 
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_submit_http_result(
+pub(crate) unsafe extern "C" fn art3m1s_runtime_submit_http_result(
     rt: *mut CoreRuntime,
     status_code: c_int,
     body: *const u8,
@@ -1349,7 +1362,7 @@ pub unsafe extern "C" fn art3m1s_runtime_submit_http_result(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_set_string_variable(
+pub(crate) unsafe extern "C" fn art3m1s_runtime_set_string_variable(
     rt: *mut CoreRuntime,
     name: *const c_char,
     value: *const c_char,
@@ -1376,7 +1389,10 @@ pub unsafe extern "C" fn art3m1s_runtime_set_string_variable(
     feature = "metal-backend",
     feature = "vulkan-backend"
 ))]
-pub unsafe extern "C" fn art3m1s_runtime_set_reported_os(rt: *mut CoreRuntime, os: *const c_char) {
+pub(crate) unsafe extern "C" fn art3m1s_runtime_set_reported_os(
+    rt: *mut CoreRuntime,
+    os: *const c_char,
+) {
     if rt.is_null() {
         return;
     }
