@@ -303,9 +303,10 @@ and compares two GPU clears directly in the original pixel buffer. The layout
 handoff materializes deferred clears before the D3D11 completion query.
 
 For a clean Apple Silicon runtime and compiler build, install Xcode, Meson,
-Ninja, glslang, SDL3, pkg-config, GNU Make 4.3 or newer, Bison 3, Flex and
-Perl with JSON. Run `bash scripts/build-host-shaders-macos.sh OUTPUT_DIRECTORY`
-from this repository. This creates `dxvk/` and `hlsl/` under the new directory,
+Ninja, glslang, SDL3, pkg-config, GNU Make 4.3 or newer, Bison 3, Flex and Perl.
+Run `bash scripts/build-host-shaders-macos.sh OUTPUT_DIRECTORY` from this
+repository. The script supplies Perl's JSON module if needed and creates
+`dxvk/` and `hlsl/` under the new directory,
 ready to bundle together. The pinned MoltenVK requires macOS 15 or newer.
 Use an SDL3 build for the oldest macOS version you intend to support.
 

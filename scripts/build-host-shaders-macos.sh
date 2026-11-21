@@ -53,6 +53,12 @@ fetch_archive https://dl.winehq.org/vkd3d/source/vkd3d-2.1.tar.xz \
 tar -xf "$scratch/vkd3d-2.1.tar.xz" -C "$scratch"
 (
   cd "$scratch/vkd3d-2.1"
+  if ! "${PERL:-perl}" -MJSON -e 1 >/dev/null 2>&1; then
+    fetch_archive https://www.cpan.org/authors/id/I/IS/ISHIGAKI/JSON-4.10.tar.gz \
+      "$scratch/JSON-4.10.tar.gz" df8b5143d9a7de99c47b55f1a170bd1f69f711935c186a6dc0ab56dd05758e35
+    tar -xf "$scratch/JSON-4.10.tar.gz" -C "$scratch"
+    export PERL5LIB="$scratch/JSON-4.10/lib${PERL5LIB:+:$PERL5LIB}"
+  fi
   MAKE=gmake SONAME_LIBVULKAN=libMoltenVK.dylib lt_cv_sys_max_cmd_len=262144 \
     CPPFLAGS="-I$source/include/vulkan/include -I$source/include/spirv/include" \
     CFLAGS='-O2 -fno-lto -Wno-ignored-attributes -Wno-unknown-attributes' \
