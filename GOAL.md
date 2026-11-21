@@ -1447,6 +1447,9 @@ Dart Host 在第二块提交前取消原子写入，收到中止通知并清理�
 同一个文件对象重试成功。macOS 通道验证了跨会话拒绝与本会话取消。独立 Core 269 项测试、
 C ABI 冒烟、Dart 回归和 legacy 与 v2 联合构建检查通过。
 
+文件 IO schema 包含 stat、read、write_atomic、delete 的双向 metadata，以及写入中止和取消。
+用独立 Core 与 Dart Host 捕获的 72 条消息验证全部 10 种定义，并核对分块确认和空文件的字段约束。
+
 ## 后续阶段
 
 | 阶段 | 工作和可评审产物 | 通过条件 |

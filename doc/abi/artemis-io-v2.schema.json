@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Artemis v2 file IO metadata",
+  "description": "Select a definition by direction and kind. Replies reuse the original request's domain, kind, epoch and request ID. The message envelope carries the binary payload separately from this JSON metadata.",
+  "$defs": {
+    "statRequest": {
+      "description": "IO domain, kind 1. Empty binary payload.",
+      "allOf": [{ "$ref": "#/$defs/fileAddress" }],
+      "properties": { "max_read_bytes": { "$ref": "#/$defs/uint64" } }
+    },
+    "statReply": {
+      "description": "IO domain, kind 1. Empty binary payload.",
+      "oneOf": [{ "$ref": "#/$defs/statSuccess" }, { "$ref": "#/$defs/failure" }]
+    },
+    "readRequest": {
+      "description": "IO domain, kind 2. Empty binary payload. Offsets and lengths are in bytes.",
+      "allOf": [{ "$ref": "#/$defs/fileAddress" }],
+      "required": ["revision", "offset", "length"],
+      "properties": {
+        "revision": { "$ref": "#/$defs/uint64" },
+        "offset": { "$ref": "#/$defs/uint64" },
+        "length": { "$ref": "#/$defs/positiveUint64" },
+        "shader_language": { "enum": ["hlsl", "glsl"] }
+      }
+    },
+    "readReply": {
+      "description": "IO domain, kind 2. On success the binary payload contains the actual bytes read at the requested offset. On failure the payload is empty.",
+      "oneOf": [{ "$ref": "#/$defs/readSuccess" }, { "$ref": "#/$defs/failure" }]
+    },
+    "writeRequest": {
+      "description": "IO domain, kind 4. The binary payload contains either the entire file or the chunk at the given offset. Size denotes the final file size in bytes.",
+      "allOf": [{ "$ref": "#/$defs/saveAddress" }],
+      "properties": {
+        "transaction_id": { "$ref": "#/$defs/positiveUint64" },
+        "size": { "$ref": "#/$defs/positiveUint64" },
+        "offset": { "$ref": "#/$defs/uint64" }
+      },
+      "dependentRequired": {
+        "transaction_id": ["size", "offset"],
+        "size": ["transaction_id", "offset"],
+        "offset": ["transaction_id", "size"]
+      }
+    },
+    "writeReply": {
+      "description": "IO domain, kind 4. Empty binary payload. Replies to chunked requests must include the transaction ID and next offset. Staged acknowledges a non-final chunk. Ok confirms atomic replacement.",
+      "oneOf": [{ "$ref": "#/$defs/writeSuccess" }, { "$ref": "#/$defs/failure" }]
+    },
+    "deleteRequest": {
+      "description": "IO domain, kind 5. Empty binary payload.",
+      "$ref": "#/$defs/saveAddress"
+    },
+    "deleteReply": {
+      "description": "IO domain, kind 5. Empty binary payload. Ok confirms deletion.",
+      "oneOf": [{ "$ref": "#/$defs/success" }, { "$ref": "#/$defs/failure" }]
+    },
+    "writeAbort": {
+      "description": "Core to Host, IO domain, kind 6. Reliable notification with request ID zero and empty binary payload. Discard staged data for the transaction.",
+      "type": "object",
+      "required": ["transaction_id"],
+      "properties": { "transaction_id": { "$ref": "#/$defs/positiveUint64" } }
+    },
+    "cancelIo": {
+      "description": "Host to Core, Runtime domain, kind 18. The message envelope has request ID zero and an empty binary payload. The metadata identifies the delivered request in the current session epoch.",
+      "type": "object",
+      "required": ["request_id"],
+      "properties": { "request_id": { "$ref": "#/$defs/positiveUint64" } }
+    },
+    "statSuccess": {
+      "$ref": "#/$defs/success",
+      "required": ["found"],
+      "properties": { "found": { "type": "boolean" } },
+      "if": { "properties": { "found": { "const": true } } },
+      "then": {
+        "required": ["size", "revision"],
+        "properties": {
+          "size": { "$ref": "#/$defs/uint64" },
+          "revision": { "$ref": "#/$defs/uint64" },
+          "modified_utc_ms": {
+            "description": "UTC Unix time in milliseconds. Absent or null if unknown.",
+            "anyOf": [{ "$ref": "#/$defs/int64" }, { "type": "null" }]
+          }
+        }
+      }
+    },
+    "readSuccess": {
+      "$ref": "#/$defs/success",
+      "required": ["revision", "eof"],
+      "properties": {
+        "revision": { "$ref": "#/$defs/uint64" },
+        "eof": { "type": "boolean" }
+      }
+    },
+    "writeSuccess": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": { "enum": ["ok", "staged"] },
+        "transaction_id": { "$ref": "#/$defs/positiveUint64" },
+        "next_offset": { "$ref": "#/$defs/positiveUint64" }
+      },
+      "dependentRequired": {
+        "transaction_id": ["next_offset"],
+        "next_offset": ["transaction_id"]
+      },
+      "if": { "properties": { "status": { "const": "staged" } } },
+      "then": { "required": ["transaction_id", "next_offset"] }
+    },
+    "success": {
+      "type": "object",
+      "required": ["status"],
+      "properties": { "status": { "const": "ok" } }
+    },
+    "failure": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": { "enum": ["not_found", "denied", "io_error", "cancelled", "unsupported"] },
+        "message": { "type": "string" }
+      }
+    },
+    "fileAddress": {
+      "type": "object",
+      "required": ["namespace", "key"],
+      "properties": {
+        "namespace": { "enum": ["asset", "save"] },
+        "key": { "type": "string", "minLength": 1, "description": "Logical relative file key." }
+      }
+    },
+    "saveAddress": {
+      "$ref": "#/$defs/fileAddress",
+      "properties": { "namespace": { "const": "save" } }
+    },
+    "uint64": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$",
+      "description": "Canonical unsigned 64-bit decimal string. Its numeric value must fit in 64 bits."
+    },
+    "positiveUint64": { "$ref": "#/$defs/uint64", "not": { "const": "0" } },
+    "int64": {
+      "type": "string",
+      "pattern": "^(0|-?[1-9][0-9]{0,18})$",
+      "description": "Canonical signed 64-bit decimal string. Its numeric value must fit in 64 bits."
+    }
+  }
+}

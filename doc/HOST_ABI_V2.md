@@ -344,7 +344,6 @@ blob 为以制表符分隔的参数原始字节，无记录尾换行。每条最
 |---|---|---|
 | `io.stat` | namespace、key | found、size、revision、可选 UTC mtime；空文件与不存在有区别 |
 | `io.read` | namespace、key、revision、offset、length | 原始 blob、实际长度、EOF；跨 revision 拒绝或明确重试 |
-| `io.list` | namespace、prefix、cursor | 一页逻辑条目、revision、下一 cursor；目录枚举不暴露物理路径 |
 | `io.write_atomic` | save key、transaction ID、分块描述和 blob | Host 接受全部数据并原子提交后确认；受理不等于落盘 |
 | `io.delete` | save key | 明确 deleted/not_found/denied/io_error |
 | `io.write_abort` | 写入事务 ID | 可靠通知；Host 丢弃尚未提交的暂存内容 |
@@ -354,6 +353,17 @@ blob 为以制表符分隔的参数原始字节，无记录尾换行。每条最
 这些控制消息均使用 JSON object metadata，二进制数据只放 blob。IO domain=3，
 stat/read/write_atomic/delete 的 kind 分别为 1/2/4/5。结果使用原请求的 service kind；
 request ID、epoch 和 runtime 均由信封/提交描述符携带。
+
+[文件 IO schema](abi/artemis-io-v2.schema.json) 提供下列 `metadata_utf8` 定义。
+
+| 消息 | Core → Host | Host → Core |
+|---|---|---|
+| `ART_IO_STAT` | `#/$defs/statRequest` | `#/$defs/statReply` |
+| `ART_IO_READ` | `#/$defs/readRequest` | `#/$defs/readReply` |
+| `ART_IO_WRITE_ATOMIC` | `#/$defs/writeRequest` | `#/$defs/writeReply` |
+| `ART_IO_DELETE` | `#/$defs/deleteRequest` | `#/$defs/deleteReply` |
+| `ART_IO_WRITE_ABORT` | `#/$defs/writeAbort` | — |
+| `ART_RUNTIME_CANCEL_IO` | — | `#/$defs/cancelIo` |
 
 | 消息 | metadata | blob |
 |---|---|---|
