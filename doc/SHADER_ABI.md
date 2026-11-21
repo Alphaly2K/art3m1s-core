@@ -439,8 +439,9 @@ For the Flutter macOS v2 preview, set `ARTEMIS_V2_DXVK_RUNTIME_DIR` to the
 assembled runtime when building the Runner. Set `ARTEMIS_V2_HLSL_COMPILER_DIR`
 to the native compiler package to bundle automatic compilation. The bundled
 tool can prepare indexed `.hlsl` and `.fx` assets before the first frame
-within the startup budget. When the Core marks a runtime read as HLSL, the
-Host can prepare it before replying. This covers sources that were absent
+within the startup budget. The Flutter channel applies the remaining budget
+when registering the compiled programs. When the Core marks a runtime read
+as HLSL, the Host can prepare it before replying. This covers sources that were absent
 from the startup index, skipped by the budget, or named with another suffix.
 The application cache keys compiled effects by the compiler binaries and
 exact source bytes. Effects prepared at either stage use the same frame
