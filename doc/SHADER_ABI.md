@@ -432,8 +432,9 @@ its exact HLSL source to `art3m1s_metal_host_v1_prepare_ade2`. The first
 preparation initializes the device and reports any initialization failure.
 The caller can release both byte buffers after the call. A session can reuse
 the program for multiple layers and frames. An effect with no prepared
-program draws without the effect. Present and capture use the same programs
-and frame composition.
+program draws without the effect. A Host that prepares a program after
+presenting can redraw the latest frame by passing zero as `after_frame_id`.
+Present and capture use the same programs and frame composition.
 
 For the Flutter macOS v2 preview, set `ARTEMIS_V2_DXVK_RUNTIME_DIR` to the
 assembled runtime when building the Runner. Set `ARTEMIS_V2_HLSL_COMPILER_DIR`

@@ -349,7 +349,6 @@ static int shader_host_smoke(const ArtRuntimeApiV2 *api, const ArtFrameApiV2 *fr
     if (shader_host_mixed) {
         const char *angle = getenv("ARTEMIS_GL_SMOKE_ANGLE_DIR");
         assert(angle && art3m1s_metal_host_v1_create_mixed(frames, rt, directory, angle, &host) == ART_OK);
-        assert(art3m1s_metal_host_v1_prepare_glsl(host, text(shader_host_mixed_glsl)) == ART_OK);
     } else {
         assert(art3m1s_metal_host_v1_create_dxvk(frames, rt, directory, &host) == ART_OK);
     }
@@ -361,9 +360,9 @@ static int shader_host_smoke(const ArtRuntimeApiV2 *api, const ArtFrameApiV2 *fr
     assert(ade && fread(ade, 1, (size_t)length, file) == (size_t)length && fclose(file) == 0);
     ArtBytes source = shader_host_legacy_alpha ? text(shader_host_legacy_alpha_source) : text(shader_sequence_source);
     if (shader_host_legacy_alpha && external_shader_len) source = bytes(external_shader, external_shader_len);
-    assert(art3m1s_metal_host_v1_prepare_ade2(host, source,
-                                             (ArtBytes){ ade, (uint64_t)length }) == ART_OK);
-    free(ade);
+    ArtBytes compiled = bytes(ade, (size_t)length);
+    if (!shader_host_mixed)
+        assert(art3m1s_metal_host_v1_prepare_ade2(host, source, compiled) == ART_OK);
 
     void *surface = metal_create_pixel_buffer(4, 4);
     assert(surface && art3m1s_metal_host_v1_set_surface(host, metal_pixel_buffer_surface(surface)) == ART_OK);
@@ -384,6 +383,15 @@ static int shader_host_smoke(const ArtRuntimeApiV2 *api, const ArtFrameApiV2 *fr
         assert(presented > after);
         after = presented;
         uint8_t presentation[64], capture[64];
+        if (shader_host_mixed) {
+            // The first draw compiles GLSL and samples the unshaded HLSL layer.
+            const uint8_t fallback[] = {49, 68, 102, 255};
+            assert(metal_read_pixel_buffer(surface, presentation, sizeof(presentation)) == 0);
+            assert(!memcmp(presentation + 2 * 4, fallback, sizeof(fallback)));
+            assert(art3m1s_metal_host_v1_prepare_ade2(host, source, compiled) == ART_OK);
+            assert(art3m1s_metal_host_v1_present(host, 0, &presented) == ART_OK);
+            assert(presented == after);
+        }
         assert(metal_read_pixel_buffer(surface, presentation, sizeof(presentation)) == 0);
         assert(art3m1s_metal_host_v1_capture(host, after, 4, 4, capture, sizeof(capture)) == ART_OK);
         for (size_t pixel = 0; pixel < 16; ++pixel) {
@@ -404,6 +412,7 @@ static int shader_host_smoke(const ArtRuntimeApiV2 *api, const ArtFrameApiV2 *fr
                 abs(actual[2] - color[2]) > tolerance || actual[3] != color[3]) {
                 fprintf(stderr, "DXVK Host frame %u pixel %zu: RGBA %u,%u,%u,%u\n",
                         turn, pixel, actual[0], actual[1], actual[2], actual[3]);
+                free(ade);
                 return 1;
             }
         }
@@ -411,11 +420,12 @@ static int shader_host_smoke(const ArtRuntimeApiV2 *api, const ArtFrameApiV2 *fr
         ++turn;
     }
     assert(turn == frame_count);
+    free(ade);
     assert(art3m1s_metal_host_v1_destroy(host) == ART_OK);
     metal_free_pixel_buffer(surface);
     assert(api->destroy(rt) == ART_OK);
     puts(shader_host_legacy_alpha ? "Metal Host DXVK composited a legacy shader over transparent and translucent regions"
-         : shader_host_mixed ? "Metal Host composited DXVK and GLSL sprites and groups in order"
+         : shader_host_mixed ? "Metal Host drew GLSL on demand and replayed the same frame with late ADE2"
          : shader_host_sprites ? "Metal Host DXVK composited two sprite effects and an overlay in order"
                             : "Metal Host DXVK presentation and capture matched three Core frames");
     return 0;
