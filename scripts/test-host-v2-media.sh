@@ -35,7 +35,8 @@ cc -std=c11 -Wall -Wextra -Werror -Idoc/abi tools/host-smoke/media_host_v1.c \
   -Xlinker -rpath -Xlinker "$library_dir" -o "$scratch/probe"
 video_input='color=blue:s=32x32:r=24:d=1'
 "$ffmpeg_cli" -nostdin -v error -f lavfi -i "$video_input" -c:v mpeg4 "$scratch/excluded.mp4"
-"$ffmpeg_cli" -nostdin -v error -f lavfi -i "$video_input" -c:v msmpeg4v3 "$scratch/clip.avi"
+"$ffmpeg_cli" -nostdin -v error -f lavfi -i "$video_input" -f lavfi -i sine=frequency=440:duration=1 \
+  -c:v msmpeg4v3 -c:a pcm_s16le "$scratch/clip.avi"
 "$ffmpeg_cli" -nostdin -v error -f lavfi -i "$video_input" -f lavfi -i sine=frequency=440:duration=1 \
   -c:v wmv2 -c:a wmav2 "$scratch/clip.wmv"
 "$ffmpeg_cli" -nostdin -v error -f lavfi -i 'color=blue:s=32x32:r=24:d=6' \

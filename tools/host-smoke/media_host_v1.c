@@ -105,6 +105,10 @@ int main(int argc, char **argv) {
         fputs("WMV did not deliver timestamped stereo PCM and EOF.\n", stderr);
         return 1;
     }
+    if (!probe_audio(api, argv[7], 0)) {
+        fputs("AVI did not deliver timestamped stereo PCM and EOF.\n", stderr);
+        return 1;
+    }
     if (!probe_audio(api, argv[4], 1)) {
         fputs("Delayed WMV audio did not preserve its initial offset and midstream gap.\n", stderr);
         return 1;
