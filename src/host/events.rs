@@ -586,7 +586,12 @@ mod tests {
     fn enabled_handle_routes_process_events_without_sharing_queue() {
         let _guard = TEST_LOCK.lock().unwrap();
         let first = reset();
-        crate::ffi::log("I", "first");
+        let isolated = crate::host::HostSession::new();
+        {
+            let _scope = isolated.enter();
+            crate::host::HostSession::legacy().log("I", "first");
+        }
+        assert_eq!(isolated.events().next_event_bytes(), 0);
         assert_eq!(first.next_event_bytes(), EVENT_HEADER_SIZE + "first".len());
 
         let second = reset();

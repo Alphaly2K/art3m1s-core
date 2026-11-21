@@ -251,7 +251,7 @@ impl HostSession {
 
     pub(crate) fn log(&self, level: &str, message: &str) {
         if self.legacy {
-            crate::ffi::log(level, message);
+            crate::ffi::legacy_log(level, message);
         } else {
             self.events().push_log(level, message);
         }

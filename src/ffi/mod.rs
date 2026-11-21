@@ -183,8 +183,12 @@ fn log_suppressed_by_filter(level: &str, msg: &str) -> bool {
 pub fn log(level: &str, msg: &str) {
     if let Some(host) = crate::host::current_session() {
         host.log(level, msg);
-        return;
+    } else {
+        legacy_log(level, msg);
     }
+}
+
+pub(crate) fn legacy_log(level: &str, msg: &str) {
     if log_suppressed_by_filter(level, msg) {
         return;
     }
