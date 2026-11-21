@@ -138,7 +138,10 @@ IOSurface and sampling a Metal texture into a separate Metal target. On Linux,
 the same script uses `GlBackend::new_host_egl` to test
 both ES profiles against system EGL, with Mesa software rendering and the
 surfaceless platform as the script defaults. The EGL checks also verify that
-closing one renderer restores the other renderer's active context.
+one renderer can close while another remains active on the same thread or
+on a separate thread. With packaged macOS ANGLE dylibs, set
+`ARTEMIS_GL_SMOKE_TEST_INIT_FAILURE=1` to check that a GLES load failure
+preserves the renderer already active on that thread.
 These graphics checks run separately from the default Rust test suite.
 With a macOS ANGLE runtime, set `ARTEMIS_GL_SMOKE_TEST_CACHE=1` to verify
 cache creation, reuse across processes, recovery from corruption, and rebinding

@@ -220,8 +220,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rgba,
                 "closing the second EGL renderer must restore the first context"
             );
+            #[cfg(target_os = "macos")]
+            if let Some(directory) = std::env::var_os("ARTEMIS_GL_SMOKE_BROKEN_ANGLE_DIR") {
+                let Err(error) = GlBackend::new_host_angle(&PathBuf::from(directory), 4, 4) else {
+                    panic!("broken ANGLE unexpectedly loaded");
+                };
+                assert!(error.starts_with("load glGenTextures failed:"), "{error}");
+                assert_eq!(
+                    backend.readback_owned(FrameTarget::Main, extent)?,
+                    rgba,
+                    "a failed EGL renderer creation must preserve the current context"
+                );
+                println!("Artemis EGL context preserved after GLES load failure");
+            }
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        check_backdrop(new_backend(4, 4)?, gles).map_err(|error| error.to_string())
+                    })
+                    .join()
+                    .expect("second EGL renderer thread panicked")
+            })?;
+            assert_eq!(
+                backend.readback_owned(FrameTarget::Main, extent)?,
+                rgba,
+                "closing an EGL renderer on another thread must leave this context usable"
+            );
             backend.end_access();
-            println!("Artemis EGL context restore verified");
+            println!("Artemis EGL context restore and parallel renderer lifetime verified");
         }
     } else {
         renderer.backend_mut().end_access();

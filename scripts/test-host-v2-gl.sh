@@ -45,6 +45,18 @@ if [[ ${ARTEMIS_GL_SMOKE_TEST_CACHE:-} == 1 ]]; then
   printf '%s\n' 'ANGLE cache: cold creation, warm reuse, corruption recovery and runtime rebinding passed'
   exit
 fi
+if [[ ${ARTEMIS_GL_SMOKE_TEST_INIT_FAILURE:-} == 1 ]]; then
+  if [[ $(uname -s) != Darwin || -z $gles || ! -f $gles/libEGL.dylib || -n ${ARTEMIS_GL_SMOKE_SOURCE:-} ]]; then
+    printf '%s\n' 'The initialization failure check requires packaged macOS ANGLE dylibs and built-in shaders.' >&2
+    exit 2
+  fi
+  export ARTEMIS_GL_SMOKE_BROKEN_ANGLE_DIR="$scratch/broken-angle"
+  stub="$ARTEMIS_GL_SMOKE_BROKEN_ANGLE_DIR/libGLESv2.framework"
+  mkdir -p "$stub"
+  ln -s "$(cd "$gles" && pwd)/libEGL.dylib" "$ARTEMIS_GL_SMOKE_BROKEN_ANGLE_DIR/libEGL.dylib"
+  printf '%s\n' 'int artemis_gl_smoke_stub(void) { return 0; }' |
+    "${CC:-cc}" -x c -dynamiclib - -o "$stub/libGLESv2"
+fi
 if [[ -n "$gles" ]]; then
   if [[ -z ${ARTEMIS_GL_SMOKE_SOURCE:-} ]]; then
     "$scratch/arfp" --gles-frame | target/debug/artemis-gl-smoke

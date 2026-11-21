@@ -1222,42 +1222,7 @@ fn create_egl(
                 // the IOSurface config target on both macOS and iOS.
                 let iosurface_texture_target = EGL_TEXTURE_2D;
 
-                let pbuffer_attrs = [
-                    EGL_WIDTH,
-                    stage_w as EGLint,
-                    EGL_HEIGHT,
-                    stage_h as EGLint,
-                    EGL_NONE,
-                ];
-                let surface = egl_create_pbuffer_surface(display, config, pbuffer_attrs.as_ptr());
-                if surface.is_null() {
-                    return Err("eglCreatePbufferSurface failed".into());
-                }
-
-                let context_version =
-                    if shared || cfg!(any(target_os = "ios", target_os = "android")) {
-                        3
-                    } else {
-                        2
-                    };
-                let ctx_attrs = [
-                    0x3098, /* EGL_CONTEXT_CLIENT_VERSION */
-                    context_version,
-                    EGL_NONE,
-                ];
-                let ctx =
-                    egl_create_context(display, config, std::ptr::null_mut(), ctx_attrs.as_ptr());
-                if ctx.is_null() {
-                    egl_destroy_surface(display, surface);
-                    return Err("eglCreateContext failed".into());
-                }
-
-                if egl_make_current(display, surface, surface, ctx) == 0 {
-                    egl_destroy_context(display, ctx);
-                    egl_destroy_surface(display, surface);
-                    return Err("eglMakeCurrent failed".into());
-                }
-
+                // Resolve fallible symbol lookups before replacing the current context.
                 // Load GLESv2 for glow. Linux 必须用 RTLD_GLOBAL 让 mesa 的
                 // dispatch 层找到已预加载的 libGL 桌面符号。
                 let gles_candidates = if cfg!(target_os = "ios") {
@@ -1309,6 +1274,42 @@ fn create_egl(
                 // macOS/ANGLE 上 dlsym 已经够用，保留原路径。
                 let egl_get_proc_addr: Option<EglGetProcAddress> =
                     optional_symbol(&egl_lib, "eglGetProcAddress");
+
+                let pbuffer_attrs = [
+                    EGL_WIDTH,
+                    stage_w as EGLint,
+                    EGL_HEIGHT,
+                    stage_h as EGLint,
+                    EGL_NONE,
+                ];
+                let surface = egl_create_pbuffer_surface(display, config, pbuffer_attrs.as_ptr());
+                if surface.is_null() {
+                    return Err("eglCreatePbufferSurface failed".into());
+                }
+
+                let context_version =
+                    if shared || cfg!(any(target_os = "ios", target_os = "android")) {
+                        3
+                    } else {
+                        2
+                    };
+                let ctx_attrs = [
+                    0x3098, /* EGL_CONTEXT_CLIENT_VERSION */
+                    context_version,
+                    EGL_NONE,
+                ];
+                let ctx =
+                    egl_create_context(display, config, std::ptr::null_mut(), ctx_attrs.as_ptr());
+                if ctx.is_null() {
+                    egl_destroy_surface(display, surface);
+                    return Err("eglCreateContext failed".into());
+                }
+
+                if egl_make_current(display, surface, surface, ctx) == 0 {
+                    egl_destroy_context(display, ctx);
+                    egl_destroy_surface(display, surface);
+                    return Err("eglMakeCurrent failed".into());
+                }
 
                 let gl = glow::Context::from_loader_function(|s| {
                     let cs = CString::new(s).unwrap();
