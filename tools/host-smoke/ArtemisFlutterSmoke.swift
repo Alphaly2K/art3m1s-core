@@ -90,6 +90,8 @@ private final class Registry: NSObject, FlutterTextureRegistry {
                                       angleDirectory: angle, dxvkDirectory: dxvk)
         host.register(messenger: messenger)
         defer { host.close() }
+        try expect(messenger.call("hasProductionRuntime") as? Bool == false,
+                   "An incomplete runtime qualified for automatic selection")
 
         let ini = Data("[WINDOWS]\nWIDTH=4\nHEIGHT=4\nBOOT=boot.iet\n".utf8)
         let boot = Data("""
