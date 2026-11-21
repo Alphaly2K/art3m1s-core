@@ -1422,6 +1422,13 @@ Metal Host 构造时校验 Core 句柄和线程归属，校验完成后才初始
 跨线程构造返回成功，修复后对非所有者返回 `ART_E_THREAD`，无效句柄返回 `ART_E_HANDLE`。
 同一探针的像素、IOSurface、E-Mote、转场和截图回归及 Swift 会话验证通过。
 
+带新 Metal 构造检查的签名候选包通过解包复验。macOS Runner 使用同一版 Core 和 Metal
+通过 v1/v2 编号存档往返与项目切换。
+
+Swift Host 在创建会话前向 Core 查询支持的服务位，应用和 SDK 按共同掩码申请能力。探针先
+复现了 Core 拒绝额外能力位，修复后真实会话能够运行。对还没有能力信息表的历史 Core，
+浏览器能力按旧约定回退。两版 Core 的 Swift 回归与 Flutter 绑定同步检查通过。
+
 ## 后续阶段
 
 | 阶段 | 工作和可评审产物 | 通过条件 |

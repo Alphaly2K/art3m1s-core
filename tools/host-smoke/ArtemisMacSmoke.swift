@@ -102,7 +102,9 @@ private func verifySurface(_ surface: CVPixelBuffer) throws {
         let args = CommandLine.arguments
         try expect(args.count == 3, "expected Core and Metal dylib paths")
         let session = try ArtemisMacSession(corePath: args[1], metalPath: args[2], hostCaps: art_swift_io_cap(), screenshots: true)
-        let other = try ArtemisMacSession(corePath: args[1], metalPath: args[2], hostCaps: art_swift_io_cap())
+        let unsupportedService: UInt64 = 1 << 48
+        let other = try ArtemisMacSession(corePath: args[1], metalPath: args[2],
+                                          hostCaps: art_swift_io_cap() | unsupportedService)
         defer { try? other.close(); try? session.close() }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
