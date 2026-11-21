@@ -1530,7 +1530,7 @@ macOS ANGLE 的创建失败回归复现了缺少 GLES 符号时，原会话读�
 - P0 的 v1 清单与兼容头、v2 表、协议编号和 Schema 已发布到仓库。当前索引覆盖 36 个消息，C/C++ 头和真实导出检查通过。
 - P1 的会话与帧借用按系统线程隔离。Core C ABI 验证了独立线程推进、错误文本隔离、跨线程拒绝和帧 token 生命周期。
 - P2 的 Luau 文件、模块加载和持久化使用 Host IO。内存 Host 验证了等待恢复、短读和空文件、取消及写入失败。macOS Runner 已验证旧存档互读。
-- P3 的独立 Core 可在没有渲染器时启动。macOS 已验证 ARFP 的画面、双语言缓存、适配器重建和共享表面。ANGLE 的 C 导出回归覆盖两个 owner 线程、创建失败和原会话继续呈现。Linux 的新增双线程 EGL 回归随下一次 CI 运行。
+- P3 的独立 Core 可在没有渲染器时启动。macOS 已验证 ARFP 的画面、双语言缓存、适配器重建和共享表面。ANGLE 的 C 导出回归覆盖两个 owner 线程、创建失败和原会话继续呈现。Debian 12 ARM64 上，独立 C ABI 与 Mesa EGL 的 GLSL ES 1.00、3.00 回归通过，包括另一线程关闭渲染器后的像素读回。远端 CI 仍待运行。
 - P4 的独立 C、Rust、Dart Host 可运行项目，Swift 和 C# 绑定由 CI 校验。macOS Flutter 发布版已覆盖音视频等待和恢复、项目切换及窗口状态与大屏幕模式解耦。媒体 Host 在四个线程完成 40 次视频解码和 40 次音频解码。
 - P5 的独立 v2 产物仅导出 `art3m1s_get_api_v2`。本地重建的 v1 动态库通过符号清单和两个表布局检查。独立 Core 与 legacy 的 Luau 依赖检查通过，独立 Core 的依赖图没有原生 GPU 或 Host IO 适配器。
 
