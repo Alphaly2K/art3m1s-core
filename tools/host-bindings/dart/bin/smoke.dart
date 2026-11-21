@@ -253,6 +253,55 @@ void exerciseHost(
   );
 }
 
+void exerciseAssetReadBudget() {
+  final blob = Uint8List(4);
+  final budgets = <int?>[];
+  final service = ArtemisFileService.assetsOnly(
+    readAsset: (_, {int? maxBytes}) {
+      budgets.add(maxBytes);
+      return maxBytes != null && blob.length > maxBytes
+          ? null
+          : (bytes: blob, modified: null);
+    },
+  );
+  try {
+    service.handle(
+      ArtemisFileEvent(
+        ART_DOMAIN_RUNTIME,
+        ART_RUNTIME_SESSION_CHANGED,
+        1,
+        false,
+        const {},
+        Uint8List(0),
+      ),
+    );
+    ArtemisFileReply? stat(String? limit) => service.handle(
+      ArtemisFileEvent(ART_DOMAIN_IO, ART_IO_STAT, 1, true, {
+        'namespace': 'asset',
+        'key': 'effect.glsl',
+        if (limit != null) 'max_read_bytes': limit,
+      }, Uint8List(0)),
+    );
+    require(
+      stat('3')?.metadata['found'] == false,
+      'Read exceeded shader budget',
+    );
+    require(stat('4')?.metadata['size'] == '4', 'Read at the budget failed');
+    require(stat(null)?.metadata['size'] == '4', 'Unbounded stat failed');
+    require(
+      stat('18446744073709551615')?.metadata['size'] == '4' &&
+          stat('18446744073709551616')?.metadata['status'] == 'io_error',
+      'Asset stat must handle the full u64 limit',
+    );
+    require(
+      budgets.join(',') == '3,4,null,67108864',
+      'Wrong asset read budgets',
+    );
+  } finally {
+    service.close();
+  }
+}
+
 void exerciseMissingStagedWrite(Directory root) {
   final service = ArtemisFileService(saveRoot: root, readAsset: (_) => null);
   final saved = File('${root.path}/slot')..writeAsStringSync('previous');
@@ -480,6 +529,7 @@ void main(List<String> arguments) {
         (media ? ArtemisMediaCommand.capability : 0),
     rendererCapabilities: ART_RENDERER_CAP_SPRITE,
   );
+  exerciseAssetReadBudget();
   final session = create(media: true);
   try {
     final other = create(media: false);

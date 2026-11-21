@@ -34,9 +34,16 @@ const _statKind = 1,
     _abortKind = 6;
 
 /// Resolve a normalized asset key and its optional modification time in the
-/// Host's existing resource layers.
+/// Host's existing resource layers. A callback may also accept a named
+/// `int? maxBytes` parameter and return null if the asset exceeds that limit.
 typedef ArtemisReadAsset =
     ({Uint8List bytes, DateTime? modified})? Function(String key);
+
+typedef _BoundedAssetReader =
+    ({Uint8List bytes, DateTime? modified})? Function(
+      String key, {
+      int? maxBytes,
+    });
 
 /// File service for one Artemis session. Pass in its events in poll order,
 /// including session changes. The caller submits replies and retries them
@@ -52,6 +59,7 @@ final class ArtemisFileService {
 
   static const capabilities = 1 | 32;
   static const _maxFileSize = 64 * 1024 * 1024;
+  static final _maxWireSize = (BigInt.one << 64) - BigInt.one;
   static const _maxChunkSize = 1024 * 1024;
   static const _stagingPrefix = '.artemis-write-';
 
@@ -139,9 +147,28 @@ final class ArtemisFileService {
     Uint8List? bytes;
     DateTime? modified;
     if (namespace == 'asset') {
-      final asset = readAsset(key);
+      final budget = event.metadata['max_read_bytes'];
+      int? maxBytes;
+      if (budget != null) {
+        if (budget is! String ||
+            budget.length > 20 ||
+            !_unsignedDecimal.hasMatch(budget)) {
+          throw const _IoFailure('io_error');
+        }
+        final limit = BigInt.parse(budget);
+        if (limit > _maxWireSize) throw const _IoFailure('io_error');
+        maxBytes = limit > BigInt.from(_maxFileSize)
+            ? _maxFileSize
+            : limit.toInt();
+      }
+      final reader = readAsset;
+      final asset = reader is _BoundedAssetReader
+          ? reader(key, maxBytes: maxBytes)
+          : reader(key);
       if (asset != null) {
-        if (asset.bytes.length > _maxFileSize) throw const _IoFailure('denied');
+        if (asset.bytes.length > (maxBytes ?? _maxFileSize)) {
+          throw const _IoFailure('denied');
+        }
         bytes = Uint8List.fromList(asset.bytes);
         modified = asset.modified;
       }
