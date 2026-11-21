@@ -236,6 +236,9 @@ C 预览版 `ArtMessage.schema_version=1`、`flags=0`。一个批次可包含一
 | Media (5) | 16 | `playback_id`、`status`（`started`、`ended`、`failed`、`cancelled`） |
 | Media (5) | 17 | `playback_id`、`frame_id`、`width`、`height`；blob 为 RGBA8 |
 
+可按 domain、kind 和方向查找 `metadata_utf8` 的 schema。数值取自 C 头文件。各消息的
+blob 和处理规则见对应服务章节。[消息索引](abi/artemis-messages-v2.json)
+
 `ArtCreateInfo` 的 Host 能力位为 IO=1、UI=2、Media=4、HTTP=8、Translation=16、
 ChunkedWrites=32、ProjectSavePath=64、OpenBrowser=128。渲染能力位为 sprite=1、transition=2、
 screenshot=4、group=8、emote=16、HLSL=32、GLSL=64。Core 拒绝未知位。Host 对已交付的

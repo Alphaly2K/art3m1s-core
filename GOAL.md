@@ -1450,6 +1450,10 @@ C ABI 冒烟、Dart 回归和 legacy 与 v2 联合构建检查通过。
 文件 IO schema 包含 stat、read、write_atomic、delete 的双向 metadata，以及写入中止和取消。
 用独立 Core 与 Dart Host 捕获的 72 条消息验证全部 10 种定义，并核对分块确认和空文件的字段约束。
 
+输入、运行时、UI、截图和诊断的 metadata 已纳入 schema。消息索引将 C 头的 35 个 kind
+映射到 44 条按方向区分的定义。50 条真实 ABI 消息和字段边界用例通过校验。CI 检查 C 头、
+索引和 schema 引用的一致性。
+
 ## 后续阶段
 
 | 阶段 | 工作和可评审产物 | 通过条件 |

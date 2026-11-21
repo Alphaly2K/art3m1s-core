@@ -1,0 +1,215 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Artemis v2 input and services metadata",
+  "description": "Select a definition by domain, kind and direction. The message envelope carries the session epoch, request ID and separate binary payload.",
+  "$defs": {
+    "keyInput": {
+      "type": "object",
+      "required": ["code", "down"],
+      "properties": {
+        "code": { "type": "integer", "minimum": 1, "maximum": 255 },
+        "down": { "type": "boolean" }
+      }
+    },
+    "pointerInput": {
+      "type": "object",
+      "required": ["x", "y"],
+      "properties": {
+        "x": { "$ref": "#/$defs/stageCoordinate" },
+        "y": { "$ref": "#/$defs/stageCoordinate" }
+      }
+    },
+    "touchInput": {
+      "$ref": "#/$defs/pointerInput",
+      "required": ["id", "phase"],
+      "properties": {
+        "id": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "phase": { "enum": ["down", "move", "up"] }
+      }
+    },
+    "windowButtonInput": {
+      "type": "object",
+      "required": ["button"],
+      "properties": {
+        "button": { "enum": [0, 1, 2], "description": "Close, maximize or minimize, respectively." }
+      }
+    },
+    "windowStateInput": {
+      "type": "object",
+      "required": ["fullscreen", "minimized"],
+      "properties": {
+        "fullscreen": { "type": "boolean" },
+        "minimized": { "type": "boolean" }
+      }
+    },
+    "sessionChanged": {
+      "type": "object",
+      "properties": {
+        "save_path": { "type": "string", "description": "Logical project save path, present with ART_HOST_CAP_PROJECT_SAVE_PATH." }
+      }
+    },
+    "runtimeClosed": {
+      "type": "object",
+      "required": ["save_status"],
+      "properties": {
+        "save_status": { "enum": ["written", "failed"] },
+        "reason": { "type": "string" },
+        "files_written": { "$ref": "#/$defs/fileCount" }
+      },
+      "if": { "properties": { "save_status": { "const": "failed" } } },
+      "then": { "required": ["reason", "files_written"] }
+    },
+    "persistenceResult": {
+      "type": "object",
+      "required": ["operation", "status"],
+      "properties": {
+        "operation": { "enum": ["autosave", "save", "load"] },
+        "status": { "enum": ["written", "restored", "failed"] },
+        "reason": { "type": "string" },
+        "files_written": { "$ref": "#/$defs/fileCount" }
+      },
+      "if": { "properties": { "operation": { "const": "load" } } },
+      "then": { "properties": { "status": { "enum": ["restored", "failed"] } } },
+      "else": { "properties": { "status": { "enum": ["written", "failed"] } } },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "failed" } } },
+          "then": { "required": ["reason"] }
+        },
+        {
+          "if": { "properties": { "operation": { "enum": ["autosave", "save"] }, "status": { "const": "failed" } } },
+          "then": { "required": ["files_written"] }
+        }
+      ]
+    },
+    "caption": {
+      "type": "object",
+      "required": ["text"],
+      "properties": { "text": { "type": "string" } }
+    },
+    "dialogRequest": {
+      "type": "object",
+      "required": ["title", "message", "allow_cancel", "initial_text", "max_characters"],
+      "properties": {
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "allow_cancel": { "type": "boolean" },
+        "initial_text": { "type": ["string", "null"] },
+        "max_characters": { "anyOf": [{ "$ref": "#/$defs/uint64" }, { "type": "null" }] }
+      }
+    },
+    "dialogReply": {
+      "$ref": "#/$defs/serviceResult",
+      "properties": { "accepted": { "type": "boolean" }, "text": { "type": "string" } },
+      "if": { "properties": { "status": { "const": "ok" } } },
+      "then": { "required": ["accepted"] }
+    },
+    "windowAction": {
+      "type": "object",
+      "required": ["command"],
+      "properties": { "command": { "enum": ["fullscreen", "minimize"] } }
+    },
+    "avoid": {
+      "type": "object",
+      "required": ["visible", "mute"],
+      "properties": {
+        "visible": { "type": "boolean" },
+        "mute": { "type": "boolean" },
+        "asset": { "type": "string", "minLength": 1 },
+        "windowbutton": { "enum": [0, 1, 2] }
+      },
+      "if": { "properties": { "visible": { "const": true } } },
+      "then": { "required": ["asset", "windowbutton"], "properties": { "mute": { "const": true } } },
+      "else": { "properties": { "mute": { "const": false } } }
+    },
+    "httpRequest": {
+      "type": "object",
+      "required": ["method", "url", "headers", "data", "file_data", "max_response_bytes"],
+      "properties": {
+        "method": { "enum": ["get", "post"] },
+        "url": { "type": "string" },
+        "headers": { "$ref": "#/$defs/stringPairs" },
+        "data": { "$ref": "#/$defs/stringPairs" },
+        "file_data": { "$ref": "#/$defs/stringPairs", "description": "Form field name and logical asset key." },
+        "max_response_bytes": { "$ref": "#/$defs/uint64" }
+      }
+    },
+    "httpReply": {
+      "description": "Success carries the raw HTTP body as the binary payload. Errors carry an empty payload.",
+      "$ref": "#/$defs/networkResult",
+      "properties": { "status_code": { "type": "integer", "minimum": 100, "maximum": 599 } },
+      "if": { "properties": { "status": { "const": "ok" } } },
+      "then": { "required": ["status_code"] }
+    },
+    "httpCancel": {
+      "type": "object",
+      "required": ["request_id"],
+      "properties": { "request_id": { "$ref": "#/$defs/uint64" } }
+    },
+    "translationRequest": {
+      "type": "object",
+      "required": ["text", "ruby"],
+      "properties": { "text": { "type": "string", "minLength": 1 }, "ruby": { "type": ["string", "null"] } }
+    },
+    "translationReply": {
+      "$ref": "#/$defs/networkResult",
+      "properties": { "text": { "type": "string", "description": "At most 64 KiB when encoded as UTF-8." } },
+      "if": { "properties": { "status": { "const": "ok" } } },
+      "then": { "required": ["text"] }
+    },
+    "openBrowser": {
+      "type": "object",
+      "required": ["url"],
+      "properties": { "url": { "type": "string", "minLength": 1 } }
+    },
+    "captureRequest": {
+      "type": "object",
+      "required": ["render_frame_id"],
+      "properties": { "render_frame_id": { "$ref": "#/$defs/uint64" } }
+    },
+    "saveCaptureRequest": {
+      "type": "object",
+      "required": ["capture_id", "namespace", "key", "width", "height"],
+      "properties": {
+        "capture_id": { "$ref": "#/$defs/uint64" },
+        "namespace": { "const": "save" },
+        "key": { "type": "string", "minLength": 1 },
+        "width": { "$ref": "#/$defs/optionalCaptureDimension" },
+        "height": { "$ref": "#/$defs/optionalCaptureDimension" }
+      }
+    },
+    "captureReply": { "$ref": "#/$defs/serviceResult" },
+    "shaderUnavailable": {
+      "type": "object",
+      "required": ["language", "id", "key"],
+      "properties": {
+        "language": { "enum": ["hlsl", "glsl"] },
+        "id": { "type": "string" },
+        "key": { "type": "string", "minLength": 1 }
+      }
+    },
+    "noFields": { "type": "object", "description": "No defined metadata fields. Send an empty JSON object." },
+    "serviceResult": {
+      "type": "object",
+      "required": ["status"],
+      "properties": { "status": { "enum": ["ok", "cancelled", "denied", "unsupported", "io_error"] } }
+    },
+    "networkResult": {
+      "type": "object",
+      "required": ["status"],
+      "properties": { "status": { "enum": ["ok", "cancelled", "denied", "unsupported", "io_error", "timeout", "limit"] } }
+    },
+    "stringPairs": {
+      "type": "array",
+      "items": { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2 }
+    },
+    "optionalCaptureDimension": { "type": ["integer", "null"], "minimum": 1, "maximum": 4294967295 },
+    "stageCoordinate": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
+    "fileCount": { "type": "integer", "minimum": 0, "maximum": 255 },
+    "uint64": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$",
+      "description": "Canonical unsigned 64-bit decimal string. Its numeric value must fit in 64 bits."
+    }
+  }
+}

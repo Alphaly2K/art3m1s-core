@@ -1,0 +1,89 @@
+{
+  "abi_major": 2,
+  "submit_schema_version": 1,
+  "event_envelope_version": 2,
+  "domains": {
+    "ART_DOMAIN_RUNTIME": {
+      "events": {
+        "ART_RUNTIME_SESSION_CHANGED": "artemis-services-v2.schema.json#/$defs/sessionChanged",
+        "ART_RUNTIME_PROJECT_READY": "artemis-services-v2.schema.json#/$defs/noFields",
+        "ART_RUNTIME_EXIT_REQUESTED": "artemis-services-v2.schema.json#/$defs/noFields",
+        "ART_RUNTIME_CLOSED_EVENT": "artemis-services-v2.schema.json#/$defs/runtimeClosed",
+        "ART_RUNTIME_PERSISTENCE_RESULT": "artemis-services-v2.schema.json#/$defs/persistenceResult"
+      },
+      "submissions": {
+        "ART_RUNTIME_SHUTDOWN": "artemis-services-v2.schema.json#/$defs/noFields",
+        "ART_RUNTIME_SET_DEFAULT_FONT": "artemis-services-v2.schema.json#/$defs/noFields",
+        "ART_RUNTIME_CANCEL_IO": "artemis-io-v2.schema.json#/$defs/cancelIo"
+      }
+    },
+    "ART_DOMAIN_INPUT": {
+      "submissions": {
+        "ART_INPUT_KEY": "artemis-services-v2.schema.json#/$defs/keyInput",
+        "ART_INPUT_POINTER": "artemis-services-v2.schema.json#/$defs/pointerInput",
+        "ART_INPUT_TOUCH": "artemis-services-v2.schema.json#/$defs/touchInput",
+        "ART_INPUT_FOCUS_LOST": "artemis-services-v2.schema.json#/$defs/noFields",
+        "ART_INPUT_WINDOW_BUTTON": "artemis-services-v2.schema.json#/$defs/windowButtonInput",
+        "ART_INPUT_WINDOW_STATE": "artemis-services-v2.schema.json#/$defs/windowStateInput"
+      }
+    },
+    "ART_DOMAIN_IO": {
+      "events": {
+        "ART_IO_STAT": "artemis-io-v2.schema.json#/$defs/statRequest",
+        "ART_IO_READ": "artemis-io-v2.schema.json#/$defs/readRequest",
+        "ART_IO_WRITE_ATOMIC": "artemis-io-v2.schema.json#/$defs/writeRequest",
+        "ART_IO_DELETE": "artemis-io-v2.schema.json#/$defs/deleteRequest",
+        "ART_IO_WRITE_ABORT": "artemis-io-v2.schema.json#/$defs/writeAbort"
+      },
+      "submissions": {
+        "ART_IO_STAT": "artemis-io-v2.schema.json#/$defs/statReply",
+        "ART_IO_READ": "artemis-io-v2.schema.json#/$defs/readReply",
+        "ART_IO_WRITE_ATOMIC": "artemis-io-v2.schema.json#/$defs/writeReply",
+        "ART_IO_DELETE": "artemis-io-v2.schema.json#/$defs/deleteReply"
+      }
+    },
+    "ART_DOMAIN_UI": {
+      "events": {
+        "ART_UI_CAPTION": "artemis-services-v2.schema.json#/$defs/caption",
+        "ART_UI_DIALOG": "artemis-services-v2.schema.json#/$defs/dialogRequest",
+        "ART_UI_WINDOW_ACTION": "artemis-services-v2.schema.json#/$defs/windowAction",
+        "ART_UI_AVOID": "artemis-services-v2.schema.json#/$defs/avoid",
+        "ART_UI_HTTP_REQUEST": "artemis-services-v2.schema.json#/$defs/httpRequest",
+        "ART_UI_HTTP_CANCEL": "artemis-services-v2.schema.json#/$defs/httpCancel",
+        "ART_UI_TRANSLATE": "artemis-services-v2.schema.json#/$defs/translationRequest",
+        "ART_UI_OPEN_BROWSER": "artemis-services-v2.schema.json#/$defs/openBrowser"
+      },
+      "submissions": {
+        "ART_UI_DIALOG": "artemis-services-v2.schema.json#/$defs/dialogReply",
+        "ART_UI_HTTP_REQUEST": "artemis-services-v2.schema.json#/$defs/httpReply",
+        "ART_UI_TRANSLATE": "artemis-services-v2.schema.json#/$defs/translationReply"
+      }
+    },
+    "ART_DOMAIN_MEDIA": {
+      "events": {
+        "ART_MEDIA_AUDIO_COMMAND": "artemis-media-v2.schema.json#/$defs/audioCommand",
+        "ART_MEDIA_VIDEO_COMMAND": "artemis-media-v2.schema.json#/$defs/videoCommand"
+      },
+      "submissions": {
+        "ART_MEDIA_PLAYBACK_STATUS": "artemis-media-v2.schema.json#/$defs/playbackStatus",
+        "ART_MEDIA_VIDEO_FRAME": "artemis-media-v2.schema.json#/$defs/videoFrame"
+      }
+    },
+    "ART_DOMAIN_RENDER": {
+      "events": {
+        "ART_RENDER_CAPTURE": "artemis-services-v2.schema.json#/$defs/captureRequest",
+        "ART_RENDER_SAVE_CAPTURE": "artemis-services-v2.schema.json#/$defs/saveCaptureRequest"
+      },
+      "submissions": {
+        "ART_RENDER_CAPTURE": "artemis-services-v2.schema.json#/$defs/captureReply",
+        "ART_RENDER_SAVE_CAPTURE": "artemis-services-v2.schema.json#/$defs/captureReply"
+      }
+    },
+    "ART_DOMAIN_DIAGNOSTICS": {
+      "events": {
+        "ART_DIAGNOSTIC_SHADER_UNAVAILABLE": "artemis-services-v2.schema.json#/$defs/shaderUnavailable",
+        "ART_DIAGNOSTIC_SCRIPT_PRINT": "artemis-services-v2.schema.json#/$defs/noFields"
+      }
+    }
+  }
+}
