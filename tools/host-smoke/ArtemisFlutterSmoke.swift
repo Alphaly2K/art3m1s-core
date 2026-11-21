@@ -220,6 +220,14 @@ private final class Registry: NSObject, FlutterTextureRegistry {
                                           angleDirectory: angleDirectory, dxvkDirectory: dxvkDirectory)
             host.register(messenger: messenger)
             defer { host.close() }
+            let hasDxvkRuntime: Bool
+            if #available(macOS 15.0, *) {
+                hasDxvkRuntime = dxvkDirectory != nil
+            } else {
+                hasDxvkRuntime = false
+            }
+            try expect(messenger.call("hasDxvkRuntime") as? Bool == hasDxvkRuntime,
+                       "Unexpected DXVK runtime availability")
             var options: [String: Any] = [
                 "ini": ini, "platform": "windows", "hostCaps": art_swift_io_cap(), "renderer": "angle",
             ]
@@ -230,7 +238,7 @@ private final class Registry: NSObject, FlutterTextureRegistry {
                   let session = state["session"] as? String else {
                 throw Failure(detail: "Automatic selection did not fall back when ANGLE was unavailable")
             }
-            try expect(state["dxvk"] as? Bool == (dxvkDirectory != nil), "Unexpected shader renderer after fallback")
+            try expect(state["dxvk"] as? Bool == hasDxvkRuntime, "Unexpected shader renderer after fallback")
             try expect(messenger.call("surface", ["width": 4, "height": 4], session: session) as? Int == 0,
                        "Automatic selection did not provide a usable Metal surface")
             _ = try messenger.call("close", session: session)
