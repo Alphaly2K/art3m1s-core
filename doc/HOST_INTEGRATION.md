@@ -16,6 +16,9 @@ Rust 宿主依赖 `crates/artemis-core` 的 `art3m1s-artemis-core` 包，通过 
 Host 在回调内复制所需数据。正常保存并关闭时，调用 `request_shutdown()` 后继续处理事件，
 直到收到 `RUNTIME_CLOSED`。
 
+用 `cancel_io(epoch, request_id)` 取消当前会话已交付的文件请求。受理后以原帧号继续推进，
+并处理 `IO_WRITE_ABORT` 以释放对应的暂存数据。
+
 [内存 Rust Host 示例](../crates/artemis-core/tests/rust_host.rs) 演示资源回复、播放完成和帧读取。
 脚本运行在 Luau 上，服务消息与 [C 接口契约](HOST_ABI_V2.md) 共用。
 
@@ -27,6 +30,9 @@ Host 在回调内复制所需数据。正常保存并关闭时，调用 `request
 `ART_INTERFACE_CAPABILITIES` 列出 Core 接受的服务与渲染能力。Host 根据自身实现选择所需能力。
 实例调用由创建 runtime 的系统线程执行，工作线程把结果交回该线程。无画面会话使用
 `renderer_caps=0`，可推进脚本和服务。绘制会话查询 Frame 表，借用帧并在绘制完后释放令牌。
+生成 Host 消息类型时，可按 domain、kind 和方向查找 `metadata_utf8` 的 JSON Schema。
+对应关系见 [Artemis v2 消息索引](abi/artemis-messages-v2.json)。
+
 只绘制精灵的 Host 声明 `ART_RENDERER_CAP_SPRITE`，支持转场合成时同时声明
 `ART_RENDERER_CAP_TRANSITION`。
 支持存档缩略图的 Host 可声明 `ART_RENDERER_CAP_SCREENSHOT`，按捕获请求中的帧 ID 绘制并保留
