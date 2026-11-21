@@ -2,7 +2,7 @@
 #define ARTEMIS_DXVK_DEVICE_HPP
 
 #include <IOSurface/IOSurfaceRef.h>
-#include <d3d11_3.h>
+#include <d3d11_4.h>
 #include <vulkan/vulkan_core.h>
 #include "dxgi/dxgi_interfaces.h"
 #include "util/com/com_pointer.h"
@@ -35,7 +35,10 @@ private:
     dxvk::Com<ID3D11Device> device_;
     dxvk::Com<ID3D11DeviceContext> context_;
     dxvk::Com<IDXGIVkInteropDevice1> interop_;
-    dxvk::Com<ID3D11Query> completed_;
+    dxvk::Com<ID3D11DeviceContext4> signal_context_;
+    dxvk::Com<ID3D11Fence> completed_;
+    VkSemaphore completion_semaphore_ = VK_NULL_HANDLE;
+    uint64_t completion_value_ = 0;
     VkDevice vulkan_ = VK_NULL_HANDLE;
 };
 

@@ -2,12 +2,11 @@
 #include <CoreVideo/CVPixelBuffer.h>
 #include "artemis_dxvk_device.hpp"
 #include <vulkan/vulkan_metal.h>
+#include "d3d11/d3d11_fence.h"
 #include "dxvk/dxvk_adapter.h"
 
-#include <chrono>
 #include <cstring>
 #include <stdexcept>
-#include <thread>
 #include <vector>
 
 namespace artemis {
@@ -59,8 +58,18 @@ DxvkDevice::DxvkDevice() {
             "DXVK Vulkan device interface unavailable");
     interop_->GetVulkanHandles(nullptr, nullptr, &vulkan_);
     require(vulkan_ != VK_NULL_HANDLE, "DXVK Vulkan device unavailable");
-    const D3D11_QUERY_DESC query = {D3D11_QUERY_EVENT, 0};
-    require(SUCCEEDED(device_->CreateQuery(&query, &completed_)), "Cannot create D3D11 completion query");
+    Com<ID3D11Device5> fence_device;
+    require(SUCCEEDED(device_->QueryInterface(__uuidof(ID3D11Device5), reinterpret_cast<void **>(&fence_device))),
+            "DXVK device has no D3D11 fence support");
+    require(SUCCEEDED(context_->QueryInterface(__uuidof(ID3D11DeviceContext4), reinterpret_cast<void **>(&signal_context_))),
+            "DXVK context has no D3D11 fence support");
+    // DXVK uses a zero flag mask for local fences.
+    const auto flags = static_cast<D3D11_FENCE_FLAG>(0);
+    require(SUCCEEDED(fence_device->CreateFence(0, flags, __uuidof(ID3D11Fence),
+            reinterpret_cast<void **>(&completed_))), "Cannot create D3D11 completion fence");
+    // The bundled DXVK fence owns this semaphore until completed_ is released.
+    completion_semaphore_ = static_cast<dxvk::D3D11Fence *>(completed_.ptr())->GetFence()->handle();
+    require(completion_semaphore_ != VK_NULL_HANDLE, "DXVK fence has no Vulkan timeline semaphore");
 }
 
 void *DxvkDevice::metal_device() const {
@@ -75,15 +84,15 @@ void *DxvkDevice::metal_device() const {
 }
 
 void DxvkDevice::wait() {
-    context_->End(completed_.ptr());
-    context_->Flush();
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    HRESULT result;
-    while ((result = context_->GetData(completed_.ptr(), nullptr, 0, 0)) == S_FALSE &&
-           std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    require(result == S_OK, "D3D11 rendering did not complete");
+    const uint64_t value = ++completion_value_;
+    require(SUCCEEDED(signal_context_->Signal(completed_.ptr(), value)), "Cannot signal D3D11 completion fence");
+    VkSemaphoreWaitInfo wait = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
+    wait.semaphoreCount = 1;
+    wait.pSemaphores = &completion_semaphore_;
+    wait.pValues = &value;
+    constexpr uint64_t timeout_ns = UINT64_C(3000000000);
+    require(vkWaitSemaphores(vulkan_, &wait, timeout_ns) == VK_SUCCESS,
+            "D3D11 rendering did not complete");
 }
 
 void DxvkDevice::prepare_input(const DxvkSurface &surface) {
