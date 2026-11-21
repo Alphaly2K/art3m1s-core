@@ -39,6 +39,34 @@ if [[ -n $bundle ]]; then
     exit 1
   fi
   printf '%s\n' 'Bundled HLSL compiler emitted ADE2.'
+  "$mac/artemis-hlsl-compile" effect-pair > "$scratch/buffers.ade" <<'HLSL'
+cbuffer Shared : register(b1) { float green = 0.5; };
+cbuffer Shared : register(b0) { float alpha; };
+float4 main() : SV_Target { return float4(alpha, green, 0, 1); }
+HLSL
+  python3 - "$scratch/buffers.ade" <<'PYTHON'
+from pathlib import Path
+from struct import unpack_from
+from sys import argv
+
+artifact = Path(argv[1]).read_bytes()
+magic, ps_size, constants, textures, uniforms = unpack_from('<4s4I', artifact)
+assert (magic, textures, uniforms) == (b'ADE2', 0, 2)
+fields = {}
+for index in range(uniforms):
+    start = 20 + index * 264
+    offset, layout, name = unpack_from('<II256s', artifact, start)
+    assert layout == 1
+    fields[name.split(b'\0', 1)[0]] = offset
+vertex = 20 + uniforms * 264 + ps_size
+vs_size, = unpack_from('<I', artifact, vertex)
+defaults = vertex + 4 + vs_size
+first_buffer_size, = unpack_from('<I', artifact, defaults + constants)
+assert fields[b'alpha'] < first_buffer_size <= fields[b'green'] < constants
+assert unpack_from('<f', artifact, defaults + fields[b'alpha']) == (1.0,)
+assert unpack_from('<f', artifact, defaults + fields[b'green']) == (0.5,)
+print('Bundled HLSL compiler preserved both same-named constant buffers.')
+PYTHON
   if [[ $mode == --bundle-compile ]]; then
     exit 0
   fi

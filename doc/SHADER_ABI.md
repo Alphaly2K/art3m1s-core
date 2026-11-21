@@ -422,7 +422,10 @@ Flex, Perl with JSON, and Vulkan and SPIR-V headers. Use
 --without-ncurses` for the compiler build. Set `SONAME_LIBVULKAN` if
 configure cannot resolve the Vulkan library; the compile and reflect operations
 do not create a graphics device. The release archive includes the generated IDL
-headers. If sandboxed configure cannot read the maximum command length, set
+headers. Apply `tools/host-bindings/d3d11/vkd3d-rdef-buffer-names.patch` before
+building vkd3d so the compiler can distinguish constant buffers that share a
+name. Include the patch with the upstream archive in `source/` when distributing
+that build. If sandboxed configure cannot read the maximum command length, set
 `lt_cv_sys_max_cmd_len=262144`.
 
 Run `bash scripts/build-host-hlsl-native.sh VKD3D_PREFIX VKD3D_SOURCE_TAR_XZ

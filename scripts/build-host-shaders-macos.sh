@@ -67,6 +67,8 @@ ARTEMIS_DXVK_NATIVE_SOURCE="$source" ARTEMIS_DXVK_NATIVE_BUILD="$scratch/native"
 fetch_archive https://dl.winehq.org/vkd3d/source/vkd3d-2.1.tar.xz \
   "$scratch/vkd3d-2.1.tar.xz" 7510146aff2adfb4ae07ab890701a607e5ff7c66e57100cfc9f630ec92eeda6a
 tar -xf "$scratch/vkd3d-2.1.tar.xz" -C "$scratch"
+vkd3d_patch="$bindings/vkd3d-rdef-buffer-names.patch"
+patch -d "$scratch/vkd3d-2.1" -p1 < "$vkd3d_patch"
 (
   cd "$scratch/vkd3d-2.1"
   if ! "${PERL:-perl}" -MJSON -e 1 >/dev/null 2>&1; then
@@ -85,6 +87,7 @@ tar -xf "$scratch/vkd3d-2.1.tar.xz" -C "$scratch"
 )
 bash "$root/scripts/build-host-hlsl-native.sh" "$scratch/prefix" \
   "$scratch/vkd3d-2.1.tar.xz" "$scratch/hlsl-package"
+cp "$vkd3d_patch" "$scratch/hlsl-package/source/"
 
 for binary in "$scratch/dxvk-package/"*.dylib "$scratch/hlsl-package/"*.dylib \
   "$scratch/hlsl-package/artemis-hlsl-compile"; do

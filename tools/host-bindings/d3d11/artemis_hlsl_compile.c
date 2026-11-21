@@ -127,8 +127,7 @@ static HRESULT quad_vertex(ID3D11ShaderReflection *pixel, UINT count, ID3DBlob *
 }
 
 static HRESULT reflect_uniforms(ID3D11ShaderReflection *reflection, const char *name,
-                                ArtDxbcHeader *header, ArtDxbcUniform *uniforms, unsigned char *defaults,
-                                int legacy) {
+                                ArtDxbcHeader *header, ArtDxbcUniform *uniforms, unsigned char *defaults) {
     ID3D11ShaderReflectionConstantBuffer *buffer = reflection->lpVtbl->GetConstantBufferByName(reflection, name);
     D3D11_SHADER_BUFFER_DESC desc;
     const uint32_t base = header->constant_bytes;
@@ -164,7 +163,7 @@ static HRESULT reflect_uniforms(ID3D11ShaderReflection *reflection, const char *
         }
         if (defaults && field.DefaultValue) {
             memcpy(defaults + uniform->offset, field.DefaultValue, span);
-        } else if (legacy && !shape.Elements && ((!strcmp(field.Name, "alpha") && shape.Columns == 1) ||
+        } else if (defaults && !shape.Elements && ((!strcmp(field.Name, "alpha") && shape.Columns == 1) ||
                    (!strcmp(field.Name, "colorMultiply") && shape.Columns == 3))) {
             const float identity[] = {1.0f, 1.0f, 1.0f};
             memcpy(defaults + uniform->offset, identity, span);
@@ -209,10 +208,15 @@ static HRESULT write_effect(const void *data, uint32_t bytes, int paired, int le
             goto done;
         }
     }
+    if (buffers[0] && buffers[1] && !strcmp(buffers[0], buffers[1])) {
+        fputs("Shader reflection gave two constant buffer registers the same name\n", stderr);
+        status = E_NOTIMPL;
+        goto done;
+    }
     for (UINT slot = 0; slot < ART_DXBC_CONSTANT_SLOTS; ++slot) {
         if (buffers[slot]) {
             status = reflect_uniforms(reflection, buffers[slot], &header, uniforms,
-                                      paired ? defaults : NULL, legacy);
+                                      paired ? defaults : NULL);
             if (FAILED(status)) goto done;
         }
         if (slot == 0) first_buffer_bytes = header.constant_bytes;

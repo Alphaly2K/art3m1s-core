@@ -1,0 +1,46 @@
+--- a/libs/vkd3d-shader/hlsl_codegen.c
++++ b/libs/vkd3d-shader/hlsl_codegen.c
+@@ -15208,6 +15208,25 @@
+     return VKD3D_OK;
+ }
+
++static size_t rdef_put_buffer_name(struct hlsl_ctx *ctx, struct vkd3d_bytecode_buffer *buffer,
++        const struct hlsl_buffer *cbuffer)
++{
++    const struct hlsl_buffer *other;
++
++    /* The resource entry and the buffer descriptor must name the same register. */
++    LIST_FOR_EACH_ENTRY(other, &ctx->buffers, struct hlsl_buffer, entry)
++    {
++        if (other != cbuffer && other->reg.allocated && !strcmp(other->name, cbuffer->name))
++        {
++            char name[48];
++
++            snprintf(name, sizeof(name), "$cbuffer_%u_%u", cbuffer->reg.space, cbuffer->reg.index);
++            return put_string(buffer, name);
++        }
++    }
++    return put_string(buffer, cbuffer->name);
++}
++
+ static void sm4_generate_rdef(struct hlsl_ctx *ctx, struct vkd3d_shader_code *out)
+ {
+     uint32_t binding_desc_size = (hlsl_version_ge(ctx, 5, 1) ? 10 : 8) * sizeof(uint32_t);
+@@ -15333,7 +15352,8 @@
+     {
+         const struct extern_resource *resource = &extern_resources[i];
+
+-        string_offset = put_string(buffer, resource->name);
++        string_offset = resource->buffer ? rdef_put_buffer_name(ctx, buffer, resource->buffer)
++                : put_string(buffer, resource->name);
+         set_u32(buffer, resources_offset + i * binding_desc_size, string_offset);
+     }
+
+@@ -15386,6 +15406,6 @@
+         if (!cbuffer->reg.allocated)
+             continue;
+
+-        string_offset = put_string(buffer, cbuffer->name);
++        string_offset = rdef_put_buffer_name(ctx, buffer, cbuffer);
+         set_u32(buffer, buffers_offset + i++ * 6 * sizeof(uint32_t), string_offset);
+     }
