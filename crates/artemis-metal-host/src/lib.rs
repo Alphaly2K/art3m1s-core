@@ -2,6 +2,9 @@ use art3m1s_render::artemis::{FramePacket, SpriteRenderer};
 use art3m1s_render::backend::{
     FrameTarget, GpuBackend, RenderRegion, gl::GlBackend, metal::MetalBackend,
 };
+use art3m1s_render::post_process::{
+    PostProcessPass, PostProcessPipeline, UpscaleConfig, UpscaleMode,
+};
 use art3m1s_render::{Extent2D, NativeSurface, NativeSurfaceKind};
 use std::ffi::{CStr, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -411,16 +414,21 @@ unsafe extern "C" fn art3m1s_metal_host_v1_create_mixed(
                 let path = Path::new(CStr::from_ptr(value).to_str().map_err(|_| ARGUMENT)?);
                 path.is_absolute().then_some(path).ok_or(ARGUMENT)
             };
-            let dxvk = directory(dxvk_directory)?;
+            let dxvk = (!dxvk_directory.is_null())
+                .then(|| directory(dxvk_directory))
+                .transpose()?;
             let angle = directory(angle_directory)?;
             let mut backend = MetalBackend::new(1, 1).map_err(|_| STATE)?;
-            backend
-                .enable_dxvk(dxvk)
-                .and_then(|()| backend.enable_angle_effects(angle))
-                .map_err(|error| {
-                    eprintln!("Artemis mixed renderer initialization failed: {error}");
-                    UNSUPPORTED
-                })?;
+            let mut setup = || -> Result<(), String> {
+                if let Some(dxvk) = dxvk {
+                    backend.enable_dxvk(dxvk)?;
+                }
+                backend.enable_angle_effects(angle)
+            };
+            setup().map_err(|error| {
+                eprintln!("Artemis mixed renderer initialization failed: {error}");
+                UNSUPPORTED
+            })?;
             Ok(Some((
                 Extent2D::new(1, 1),
                 Renderer::Metal(SpriteRenderer::new(backend)),
@@ -572,6 +580,77 @@ unsafe extern "C" fn art3m1s_metal_host_v1_set_surface(
     surface: *mut c_void,
 ) -> i32 {
     unsafe { with_host(host, |host| host.set_surface(surface)) }
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn art3m1s_metal_host_v1_supports_spatial_upscaling(
+    host: *mut ArtMetalHost,
+    out_supported: *mut u8,
+) -> i32 {
+    if out_supported.is_null() {
+        return ARGUMENT;
+    }
+    unsafe { out_supported.write(0) };
+    unsafe {
+        with_host(host, |host| {
+            if host.renderer.is_none() {
+                host.renderer(Extent2D::new(1, 1))?;
+            }
+            if let Some((_, Renderer::Metal(renderer))) = &mut host.renderer {
+                let supported = renderer
+                    .backend_mut()
+                    .backend_info()
+                    .capabilities
+                    .spatial_upscaling;
+                out_supported.write(u8::from(supported));
+            }
+            Ok(())
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn art3m1s_metal_host_v1_set_spatial_upscale(
+    host: *mut ArtMetalHost,
+    render_scale: f32,
+) -> i32 {
+    unsafe {
+        with_host(host, |host| {
+            if render_scale != 0.0 && !(0.1..=1.0).contains(&render_scale) {
+                return Err(ARGUMENT);
+            }
+            if host.renderer.is_none() {
+                if render_scale == 0.0 {
+                    return Ok(());
+                }
+                host.renderer(Extent2D::new(1, 1))?;
+            }
+            let Some((_, Renderer::Metal(renderer))) = &mut host.renderer else {
+                return if render_scale == 0.0 {
+                    Ok(())
+                } else {
+                    Err(UNSUPPORTED)
+                };
+            };
+            let backend = renderer.backend_mut();
+            let pipeline = if render_scale == 0.0 {
+                PostProcessPipeline::default()
+            } else {
+                if !backend.backend_info().capabilities.spatial_upscaling {
+                    return Err(UNSUPPORTED);
+                }
+                PostProcessPipeline {
+                    render_scale,
+                    passes: vec![PostProcessPass::Upscale(UpscaleConfig {
+                        mode: UpscaleMode::Spatial,
+                        ..UpscaleConfig::default()
+                    })],
+                    ..PostProcessPipeline::default()
+                }
+            };
+            backend.configure_post_process(pipeline).map_err(|_| STATE)
+        })
+    }
 }
 
 #[unsafe(no_mangle)]

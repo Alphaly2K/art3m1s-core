@@ -8,6 +8,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../doc/abi/art3m1s_core_v2.draft.h");
     println!("cargo:rerun-if-changed=../../doc/abi/art3m1s_metal_host_v1.h");
     println!("cargo:rustc-link-lib=framework=IOSurface");
+    println!("cargo:rustc-cdylib-link-arg=-Wl,-weak_framework,MetalFX");
     println!(
         "cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/libart3m1s_artemis_metal_host.dylib"
     );
