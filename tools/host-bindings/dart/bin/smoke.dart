@@ -297,6 +297,10 @@ void exerciseAssetReadBudget() {
       budgets.join(',') == '3,4,null,67108864',
       'Wrong asset read budgets',
     );
+    require(
+      service.replaceSave(1, 'capture.png', blob) == 'denied',
+      'An asset-only Host must reject capture writes',
+    );
   } finally {
     service.close();
   }
