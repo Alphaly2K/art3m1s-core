@@ -78,8 +78,10 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
     let adapter = args.next().ok_or("expected the Metal Host dylib path")?;
     let session = Session::open(&CString::new(library.as_bytes())?)?;
     let shared = SharedSurface::new(Extent2D::new(4, 4))?;
+    let rebuilt_surface = SharedSurface::new(Extent2D::new(4, 4))?;
     let replacement = SharedSurface::new(Extent2D::new(8, 8))?;
-    let mut native = NativeHost::open(&CString::new(adapter.as_bytes())?, &session)?;
+    let adapter = CString::new(adapter.as_bytes())?;
+    let mut native = NativeHost::open(&adapter, &session)?;
     assert_eq!(native.present(0), Err(-6));
     native.verify_runtime_binding();
     assert_eq!(native.wrong_thread_status(), -3);
@@ -283,6 +285,15 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
         (1, false) => [125, 125, 130, 255],
         _ => BLUE,
     });
+    let leased = session.frame(0)?;
+    drop(native);
+    let mut native = NativeHost::open(&adapter, &session)?;
+    native.set_surface(Some(&rebuilt_surface))?;
+    assert_eq!(native.present(0), Ok(Some(middle)));
+    assert_eq!(rebuilt_surface.pixels()?, middle_pixels);
+    assert!(leased.decode()?.transition().unwrap().rule.is_some());
+    drop(leased);
+
     native.set_surface(None)?;
     assert_eq!(native.present(0), Err(-6));
     native.set_surface(Some(&replacement))?;
@@ -320,7 +331,7 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
     renderer.clear_cached_shaders();
     renderer.backend_mut().end_access();
     println!(
-        "Artemis v2 Metal pixels passed (E-Mote, groups, transitions, HLSL, thumbnails and IOSurface)"
+        "Artemis v2 Metal pixels passed (E-Mote, groups, transitions, HLSL, thumbnails, IOSurface and rebuild)"
     );
     Ok(())
 }
