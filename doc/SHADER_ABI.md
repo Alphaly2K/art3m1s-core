@@ -44,18 +44,23 @@ Legacy aliases remain available: `alpha`, `colorMultiply`, `samplerFore`,
 
 ## Registration and reload
 
-The legacy native runtime exposes shader registration through:
+In v2, the Host advertises its shader languages through `ART_RENDERER_CAP_HLSL`
+and `ART_RENDERER_CAP_GLSL`. The Core reads an effect through Host I/O when the
+script loads it or restores it from a save. A shader read can carry
+`shader_language` so the Host can prepare a program ahead of drawing. A frame
+carries the effect's language, source bytes and bindings. Use the source and
+compatibility of the compiler or renderer when choosing a cache entry. A new
+source for the same script identifier can appear while a transition still uses
+the previous source.
 
-- `art3m1s_runtime_register_hlsl_shader`
-- `art3m1s_runtime_replace_hlsl_shader` (also exposed as `..._reload_hlsl_shader`)
-- `art3m1s_runtime_unregister_hlsl_shader`
+Startup prewarming is optional. A Host can prepare a bounded set of indexed
+candidates, then look up or compile the other effects when they are first
+needed. Both paths prepare programs for the same frame renderer.
 
-Registration returns a stable logical `ShaderId` as a positive `int64`, or
-`-1` on invalid arguments or a compile error. Compilation errors are logged
-with shader name, stage, compiler message, and source location when supplied by
-the compiler. A replacement preserves the logical ID and invalidates every
-native pipeline cache entry for that shader. Vulkan module and pipeline objects
-are retired until their submission serial completes.
+In the legacy runtime, the game script loads HLSL effects and the built-in
+renderer compiles them. Rust integrations can also use the shader methods on
+`CoreRuntime`. The v1 C function table has no shader registration slots. New
+C Hosts use the v2 frame and I/O contracts in [Host ABI v2](HOST_ABI_V2.md).
 
 ## Supported subset
 
