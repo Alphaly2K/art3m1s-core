@@ -6,17 +6,24 @@ use art3m1s_render::post_process::{
     PostProcessPass, PostProcessPipeline, UpscaleConfig, UpscaleMode,
 };
 use art3m1s_render::{Extent2D, NativeSurface, NativeSurfaceKind};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::ptr;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{LazyLock, Mutex};
 use std::thread::{self, ThreadId};
 
 const OK: i32 = 0;
 const ARGUMENT: i32 = -1;
+const HANDLE: i32 = -2;
 const THREAD: i32 = -3;
 const BUFFER: i32 = -5;
 const STATE: i32 = -6;
+const LIMIT: i32 = -8;
 const STALE: i32 = -7;
 const PANIC: i32 = -9;
 const UNSUPPORTED: i32 = -4;
@@ -135,8 +142,20 @@ impl Drop for Lease {
     }
 }
 
+#[repr(C)]
 struct ArtMetalHost {
-    owner: ThreadId,
+    _opaque: [u8; 0],
+}
+
+// Opaque IDs are never dereferenced or reused. Only the creating thread holds the GPU state.
+static NEXT_HOST: AtomicUsize = AtomicUsize::new(1);
+static OWNERS: LazyLock<Mutex<HashMap<usize, ThreadId>>> = LazyLock::new(Default::default);
+
+thread_local! {
+    static HOSTS: RefCell<HashMap<usize, Rc<RefCell<Host>>>> = RefCell::new(HashMap::new());
+}
+
+struct Host {
     frames: Frames,
     target: Option<NativeSurface>,
     renderer: Option<(Extent2D, Renderer)>,
@@ -176,7 +195,16 @@ impl Renderer {
     }
 }
 
-impl ArtMetalHost {
+impl Host {
+    fn register(self) -> Result<*mut ArtMetalHost, i32> {
+        let id = NEXT_HOST
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .map_err(|_| LIMIT)?;
+        HOSTS.with(|hosts| hosts.borrow_mut().insert(id, Rc::new(RefCell::new(self))));
+        OWNERS.lock().unwrap().insert(id, thread::current().id());
+        Ok(ptr::without_provenance_mut(id))
+    }
+
     fn set_surface(&mut self, surface: *mut c_void) -> Result<(), i32> {
         if surface.is_null() {
             return self.set_target(None);
@@ -308,22 +336,29 @@ fn boundary(f: impl FnOnce() -> Result<(), i32>) -> i32 {
         .unwrap_or(OK)
 }
 
-unsafe fn with_host(
-    host: *mut ArtMetalHost,
-    f: impl FnOnce(&mut ArtMetalHost) -> Result<(), i32>,
-) -> i32 {
+fn owned_id(host: *mut ArtMetalHost) -> Result<usize, i32> {
+    let id = host.addr();
+    if id == 0 {
+        return Err(ARGUMENT);
+    }
+    match OWNERS.lock().unwrap().get(&id) {
+        Some(owner) if *owner == thread::current().id() => Ok(id),
+        Some(_) => Err(THREAD),
+        None => Err(HANDLE),
+    }
+}
+
+fn with_host(host: *mut ArtMetalHost, f: impl FnOnce(&mut Host) -> Result<(), i32>) -> i32 {
     boundary(|| {
-        if host.is_null() {
-            return Err(ARGUMENT);
-        }
-        if unsafe { (*host).owner } != thread::current().id() {
-            return Err(THREAD);
-        }
-        let host = unsafe { &mut *host };
+        let id = owned_id(host)?;
+        let host = HOSTS
+            .with(|hosts| hosts.borrow().get(&id).cloned())
+            .ok_or(HANDLE)?;
+        let mut host = host.try_borrow_mut().map_err(|_| STATE)?;
         if host.failed {
             return Err(STATE);
         }
-        catch_unwind(AssertUnwindSafe(|| f(host))).unwrap_or_else(|_| {
+        catch_unwind(AssertUnwindSafe(|| f(&mut host))).unwrap_or_else(|_| {
             host.failed = true;
             Err(PANIC)
         })
@@ -548,14 +583,13 @@ unsafe fn create_host(
             return Err(ARGUMENT);
         }
         status(unsafe { metal_host_check_frames(table) })?;
-        let host = ArtMetalHost {
-            owner: thread::current().id(),
+        let host = Host {
             frames: Frames { table, runtime },
             target: None,
             renderer: renderer()?,
             failed: false,
         };
-        unsafe { out.write(Box::into_raw(Box::new(host))) };
+        unsafe { out.write(host.register()?) };
         Ok(())
     })
 }
@@ -563,13 +597,17 @@ unsafe fn create_host(
 #[unsafe(no_mangle)]
 unsafe extern "C" fn art3m1s_metal_host_v1_destroy(host: *mut ArtMetalHost) -> i32 {
     boundary(|| {
-        if host.is_null() {
-            return Err(ARGUMENT);
-        }
-        if unsafe { (*host).owner } != thread::current().id() {
-            return Err(THREAD);
-        }
-        drop(unsafe { Box::from_raw(host) });
+        let id = owned_id(host)?;
+        let host = HOSTS.with(|hosts| {
+            let mut hosts = hosts.borrow_mut();
+            let host = hosts.get(&id).ok_or(HANDLE)?;
+            if Rc::strong_count(host) != 1 {
+                return Err(STATE);
+            }
+            Ok(hosts.remove(&id).unwrap())
+        })?;
+        OWNERS.lock().unwrap().remove(&id);
+        drop(host);
         Ok(())
     })
 }
@@ -579,7 +617,7 @@ unsafe extern "C" fn art3m1s_metal_host_v1_set_surface(
     host: *mut ArtMetalHost,
     surface: *mut c_void,
 ) -> i32 {
-    unsafe { with_host(host, |host| host.set_surface(surface)) }
+    with_host(host, |host| host.set_surface(surface))
 }
 
 #[unsafe(no_mangle)]
@@ -614,43 +652,41 @@ unsafe extern "C" fn art3m1s_metal_host_v1_set_spatial_upscale(
     host: *mut ArtMetalHost,
     render_scale: f32,
 ) -> i32 {
-    unsafe {
-        with_host(host, |host| {
-            if render_scale != 0.0 && !(0.1..=1.0).contains(&render_scale) {
-                return Err(ARGUMENT);
+    with_host(host, |host| {
+        if render_scale != 0.0 && !(0.1..=1.0).contains(&render_scale) {
+            return Err(ARGUMENT);
+        }
+        if host.renderer.is_none() {
+            if render_scale == 0.0 {
+                return Ok(());
             }
-            if host.renderer.is_none() {
-                if render_scale == 0.0 {
-                    return Ok(());
-                }
-                host.renderer(Extent2D::new(1, 1))?;
-            }
-            let Some((_, Renderer::Metal(renderer))) = &mut host.renderer else {
-                return if render_scale == 0.0 {
-                    Ok(())
-                } else {
-                    Err(UNSUPPORTED)
-                };
-            };
-            let backend = renderer.backend_mut();
-            let pipeline = if render_scale == 0.0 {
-                PostProcessPipeline::default()
+            host.renderer(Extent2D::new(1, 1))?;
+        }
+        let Some((_, Renderer::Metal(renderer))) = &mut host.renderer else {
+            return if render_scale == 0.0 {
+                Ok(())
             } else {
-                if !backend.backend_info().capabilities.spatial_upscaling {
-                    return Err(UNSUPPORTED);
-                }
-                PostProcessPipeline {
-                    render_scale,
-                    passes: vec![PostProcessPass::Upscale(UpscaleConfig {
-                        mode: UpscaleMode::Spatial,
-                        ..UpscaleConfig::default()
-                    })],
-                    ..PostProcessPipeline::default()
-                }
+                Err(UNSUPPORTED)
             };
-            backend.configure_post_process(pipeline).map_err(|_| STATE)
-        })
-    }
+        };
+        let backend = renderer.backend_mut();
+        let pipeline = if render_scale == 0.0 {
+            PostProcessPipeline::default()
+        } else {
+            if !backend.backend_info().capabilities.spatial_upscaling {
+                return Err(UNSUPPORTED);
+            }
+            PostProcessPipeline {
+                render_scale,
+                passes: vec![PostProcessPass::Upscale(UpscaleConfig {
+                    mode: UpscaleMode::Spatial,
+                    ..UpscaleConfig::default()
+                })],
+                ..PostProcessPipeline::default()
+            }
+        };
+        backend.configure_post_process(pipeline).map_err(|_| STATE)
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -710,5 +746,54 @@ unsafe extern "C" fn art3m1s_metal_host_v1_capture(
             let rgba = std::slice::from_raw_parts_mut(output, size);
             host.capture(frame, extent, rgba)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Barrier;
+
+    #[test]
+    fn rejects_reentry_foreign_calls_and_destroyed_handles() {
+        let handle = Host {
+            frames: Frames {
+                table: ptr::null(),
+                runtime: 0,
+            },
+            target: None,
+            renderer: None,
+            failed: false,
+        }
+        .register()
+        .unwrap();
+        let detach = |handle| unsafe { art3m1s_metal_host_v1_set_surface(handle, ptr::null_mut()) };
+        let destroy = |handle| unsafe { art3m1s_metal_host_v1_destroy(handle) };
+        assert_eq!(
+            with_host(handle, |_| {
+                assert_eq!(detach(handle), STATE);
+                assert_eq!(destroy(handle), STATE);
+                Ok(())
+            }),
+            OK
+        );
+
+        let ready = Barrier::new(2);
+        thread::scope(|scope| {
+            let id = handle.addr();
+            let ready = &ready;
+            scope.spawn(move || {
+                let handle = ptr::without_provenance_mut(id);
+                let first = (detach(handle), destroy(handle));
+                ready.wait();
+                assert_eq!(first, (THREAD, THREAD));
+                assert!(matches!(detach(handle), THREAD | HANDLE));
+                assert!(matches!(destroy(handle), THREAD | HANDLE));
+            });
+            ready.wait();
+            assert_eq!(destroy(handle), OK);
+        });
+        assert_eq!(detach(handle), HANDLE);
+        assert_eq!(destroy(handle), HANDLE);
     }
 }

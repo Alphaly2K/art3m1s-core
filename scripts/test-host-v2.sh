@@ -17,6 +17,6 @@ printf '#include "art3m1s_core_v2.draft.h"\n' |
   "${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror -pedantic -Idoc/abi -x c++ -fsyntax-only -
 scratch="$(mktemp -d)"
 trap 'rm -f "$scratch/artemis-v2" && rmdir "$scratch"' EXIT
-"${CC:-cc}" -std=c11 -Wall -Wextra -Werror -pedantic -Idoc/abi tools/host-smoke/artemis_v2.c \
+"${CC:-cc}" -std=c11 -Wall -Wextra -Werror -pedantic -pthread -DARTEMIS_THREAD_SMOKE -Idoc/abi tools/host-smoke/artemis_v2.c \
   -L"$lib_dir" -lart3m1s_core -Wl,-rpath,"$lib_dir" -o "$scratch/artemis-v2"
 "$scratch/artemis-v2"

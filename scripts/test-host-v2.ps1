@@ -35,7 +35,7 @@ try {
     $import = Join-Path $libDir 'art3m1s_core.dll.lib'
     $probe = Join-Path $scratch 'artemis-v2.exe'
     $object = Join-Path $scratch 'artemis-v2.obj'
-    & cl.exe /nologo /std:c11 /W4 /WX /D_CRT_SECURE_NO_WARNINGS /Idoc/abi "/Fo$object" "/Fe$probe" tools/host-smoke/artemis_v2.c $import
+    & cl.exe /nologo /std:c11 /W4 /WX /D_CRT_SECURE_NO_WARNINGS /DARTEMIS_THREAD_SMOKE /Idoc/abi "/Fo$object" "/Fe$probe" tools/host-smoke/artemis_v2.c $import
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     & $probe
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

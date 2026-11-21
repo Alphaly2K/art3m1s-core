@@ -6,6 +6,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(ARTEMIS_THREAD_SMOKE) && defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#elif defined(ARTEMIS_THREAD_SMOKE)
+#include <pthread.h>
+#endif
+
 #ifdef ARTEMIS_DXVK_HOST_SMOKE
 #include "art3m1s_metal_host_v1.h"
 void *metal_create_pixel_buffer(uint32_t width, uint32_t height);
@@ -497,6 +504,85 @@ static void check_api_header(const ArtApiHeader *header, uint32_t id, size_t min
     assert(header->abi_major == ART_ABI_V2_MAJOR);
 }
 
+#ifdef ARTEMIS_THREAD_SMOKE
+struct ThreadProbe {
+    const ArtRootApiV2 *root;
+    const ArtRuntimeApiV2 *api;
+    const ArtFrameApiV2 *frames;
+    const ArtCreateInfo *info;
+    const ArtProjectInfo *project;
+    ArtRuntimeHandle owner;
+    ArtFrameToken owner_token;
+};
+
+#ifdef _WIN32
+static DWORD WINAPI probe_thread(void *opaque) {
+#else
+static void *probe_thread(void *opaque) {
+#endif
+    const struct ThreadProbe *probe = opaque;
+    const ArtRootApiV2 *root = NULL;
+    assert(art3m1s_get_api_v2(ART_ABI_V2_MAJOR, sizeof(ArtRootApiV2), &root) == ART_OK);
+    assert(root == probe->root);
+    const void *table = NULL;
+    assert(root->query_interface(ART_INTERFACE_RUNTIME, ART_ABI_V2_MAJOR, sizeof(ArtRuntimeApiV2), &table) == ART_OK);
+    const ArtRuntimeApiV2 *api = table;
+    const ArtFrameApiV2 *frames = probe->frames;
+    assert(api == probe->api);
+    uint64_t required = 1;
+    assert(root->copy_last_error(NULL, 0, &required) == ART_OK && required == 0);
+
+    ArtRuntimeHandle owner = probe->owner;
+    ArtRuntimeState state = { .struct_size = sizeof(state) };
+    ArtStepInfo step = { .struct_size = sizeof(step), .host_frame_id = 2 };
+    ArtStepResult result = { .struct_size = sizeof(result) };
+    ArtPollResult poll = { .struct_size = sizeof(poll) };
+    ArtFrameView view = { .struct_size = sizeof(view) };
+    ArtBytes pixels = {0};
+    assert(api->get_state(owner, &state) == ART_E_THREAD);
+    assert(api->open_project(owner, probe->project) == ART_E_THREAD);
+    assert(api->step(owner, &step, &result) == ART_E_THREAD);
+    assert(api->submit(owner, NULL, 0) == ART_E_THREAD);
+    assert(api->poll_events(owner, NULL, 0, &poll) == ART_E_THREAD);
+    assert(api->destroy(owner) == ART_E_THREAD);
+    assert(frames->acquire_latest(owner, 0, &view) == ART_E_THREAD);
+    assert(frames->release(owner, probe->owner_token) == ART_E_THREAD);
+    assert(frames->texture_rgba(owner, probe->owner_token, 0, &pixels) == ART_E_THREAD);
+    assert(root->copy_last_error(NULL, 0, &required) == ART_E_BUFFER && required > 0);
+
+    ArtRuntimeHandle other = 0;
+    assert(api->create(probe->info, &other) == ART_OK && other != owner);
+    assert(api->open_project(other, probe->project) == ART_OK);
+    assert(pump(api, other, 1) == (1 | 4 | 8 | 16 | SCRIPT_PRINTED | BROWSER_OPEN));
+    assert(frames->acquire_latest(other, 0, &view) == ART_OK);
+    assert(view.token != probe->owner_token);
+    assert(frames->release(other, probe->owner_token) == ART_E_HANDLE);
+    assert(frames->texture_rgba(other, view.token, 0, &pixels) == ART_OK);
+    assert(pixels.size == 4 && pixels.data[0] == 0x11);
+    assert(frames->release(other, view.token) == ART_OK);
+    assert(api->destroy(other) == ART_OK);
+    return 0;
+}
+
+static void check_threads(struct ThreadProbe *probe) {
+    uint8_t before[120], after[120];
+    uint64_t before_size, after_size;
+    assert(probe->root->copy_last_error(before, sizeof(before), &before_size) == ART_OK);
+    assert(before_size > 0);
+#ifdef _WIN32
+    HANDLE worker = CreateThread(NULL, 0, probe_thread, probe, 0, NULL);
+    assert(worker && WaitForSingleObject(worker, INFINITE) == WAIT_OBJECT_0);
+    assert(CloseHandle(worker));
+#else
+    pthread_t worker;
+    assert(pthread_create(&worker, NULL, probe_thread, probe) == 0);
+    assert(pthread_join(worker, NULL) == 0);
+#endif
+    assert(probe->root->copy_last_error(after, sizeof(after), &after_size) == ART_OK);
+    assert(after_size == before_size && !memcmp(before, after, (size_t)before_size));
+}
+#endif
+
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--shader-frame")) shader_frame = HLSL;
     else if (argc == 2 && !strcmp(argv[1], "--shader-sequence")) {
@@ -641,6 +727,10 @@ int main(int argc, char **argv) {
     const uint8_t expected[] = {0x11, 0x22, 0x33, 0xff};
     assert(pixels.size == sizeof(expected) && !memcmp(pixels.data, expected, sizeof(expected)));
     assert(api->destroy(rt) == ART_E_STATE);
+#ifdef ARTEMIS_THREAD_SMOKE
+    struct ThreadProbe probe = { root, api, frames, &info, &project, rt, view.token };
+    check_threads(&probe);
+#endif
 
     ArtMessage keys[] = {
         message(ART_DOMAIN_INPUT, ART_INPUT_KEY, epoch, 0, "{\"code\":13,\"down\":true}"),

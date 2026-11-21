@@ -136,7 +136,9 @@ typedef ArtemisState = ({
 });
 
 /// A caller-driven session. All calls, including [close], require the OS
-/// thread that created it. The library must remain loaded until close returns.
+/// thread that created it. If the Dart host cannot guarantee OS thread
+/// affinity, dispatch the calls to one native thread through a Host adapter.
+/// Keep the Core library loaded until close returns.
 final class ArtemisSession {
   ArtemisSession._(this._root, this._runtime, this._frames, this._handle);
 
