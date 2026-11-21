@@ -174,6 +174,7 @@ pub(super) fn create_with_caps(
         let mut session =
             ScriptIoSession::new(handle.0, Default::default(), limits, max_file_bytes)?;
         session.set_random_seed(random_seed)?;
+        session.dialogs_enabled = host_caps & HOST_CAP_UI != 0;
         session.media_enabled = host_caps & HOST_CAP_MEDIA != 0;
         session.http_enabled = host_caps & HOST_CAP_HTTP != 0;
         session.open_browser_enabled = host_caps & HOST_CAP_OPEN_BROWSER != 0;

@@ -317,6 +317,7 @@ pub struct ScriptIoSession {
     boot_restore: Option<BootRestore>,
     project_loading: bool,
     dialog_request: Option<RequestIdentity>,
+    pub(super) dialogs_enabled: bool,
     http: http::Http,
     pub(super) media_enabled: bool,
     pub(super) http_enabled: bool,
@@ -388,6 +389,7 @@ impl ScriptIoSession {
             boot_restore: None,
             project_loading: false,
             dialog_request: None,
+            dialogs_enabled: true,
             http: http::Http::default(),
             media_enabled: true,
             http_enabled: true,
@@ -449,7 +451,8 @@ impl ScriptIoSession {
             latest_render_frame_id: self.frames.latest_id(),
             stage_size: (transport.epoch != 0).then_some([config.stage_width, config.stage_height]),
             waiting_for_io: self.operation.is_some() || self.background_autosave,
-            waiting_for_ui: matches!(self.scenario_event, Some(Event::ShowDialog { .. }))
+            waiting_for_ui: (self.dialogs_enabled
+                && matches!(self.scenario_event, Some(Event::ShowDialog { .. })))
                 || self.http.waits_for_host(),
             waiting_for_render: self.screenshot.pending_request().is_some(),
             waiting_for_scenario: self.scenario_event.is_some(),

@@ -57,27 +57,33 @@ impl ScriptIoSession {
                 textfield,
                 textfield_size,
             }) => {
-                if self.dialog_request.is_none() {
-                    let initial_text = textfield.as_deref().map(|name| {
-                        self.interpreter
-                            .get_variable(name)
-                            .map(|value| value.as_string())
-                            .unwrap_or_default()
-                    });
-                    let body = MessageBody::new(
-                        json!({"title": title, "message": message, "allow_cancel": varname.is_some(),
-                            "initial_text": initial_text,
-                            "max_characters": textfield_size.map(|size| size.to_string())})
-                        .to_string(),
-                        vec![],
-                    )?;
-                    self.dialog_request = Some(self.transport.request(UI_DIALOG, body)?);
-                    return Ok(Some(ScriptIoProgress::Waiting));
-                }
-                let Some(reply) = self.transport.pop_reply() else {
-                    return Ok(Some(ScriptIoProgress::Waiting));
+                let (accepted, text) = if self.dialogs_enabled {
+                    if self.dialog_request.is_none() {
+                        let initial_text = textfield.as_deref().map(|name| {
+                            self.interpreter
+                                .get_variable(name)
+                                .map(|value| value.as_string())
+                                .unwrap_or_default()
+                        });
+                        let body = MessageBody::new(
+                            json!({"title": title, "message": message, "allow_cancel": varname.is_some(),
+                                "initial_text": initial_text,
+                                "max_characters": textfield_size.map(|size| size.to_string())})
+                            .to_string(),
+                            vec![],
+                        )?;
+                        self.dialog_request = Some(self.transport.request(UI_DIALOG, body)?);
+                        return Ok(Some(ScriptIoProgress::Waiting));
+                    }
+                    let Some(reply) = self.transport.pop_reply() else {
+                        return Ok(Some(ScriptIoProgress::Waiting));
+                    };
+                    let decoded = decode_dialog_reply(&reply)?;
+                    self.dialog_request = None;
+                    decoded
+                } else {
+                    (false, None)
                 };
-                let (accepted, text) = decode_dialog_reply(&reply)?;
                 if let Some(name) = varname {
                     self.interpreter
                         .set_variable(name, asb_interpreter::Value::Int(i64::from(accepted)));
@@ -92,7 +98,6 @@ impl ScriptIoSession {
                     self.interpreter
                         .set_variable(name, asb_interpreter::Value::String(text));
                 }
-                self.dialog_request = None;
             }
             _ => return Ok(Some(ScriptIoProgress::Event)),
         }

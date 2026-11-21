@@ -294,6 +294,8 @@ UI domain=4 的通知与请求不携带 blob。HTTP 完成回复可携带正文�
 | 7 `ui.translate` | 后台请求，`text` 为原文，`ruby` 为当前注音字符串或 `null` | `{"status":"ok","text":"译文"}`；也可回复失败状态，始终无 blob |
 | 8 `ui.open_browser` | 可靠通知，`{"url":"…"}` | 无回复 |
 
+未声明 `ART_HOST_CAP_UI` 时，对话框按取消完成。脚本的确认变量置为 0，文本字段保留原值。
+
 Host 按同一条 `ui.avoid` 记录更新遮罩和静音；解除静音时沿用原音量。`windowbutton=0` 忽略
 窗口按钮，`1` 使用平台默认动作，`2` 把按钮提交给 Core。Core 先交付退出回避通知，再派发
 `setonwindowbutton`。会话重载或关闭后，Host 清除遮罩和会话静音状态。

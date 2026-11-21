@@ -12,7 +12,20 @@ fn rust_host_drives_the_queued_session_and_reads_a_frame() {
         reported_os: None,
     };
     const MODULE: &[u8] = b"return 73";
-    const BOOT: &[u8] = b"*top\n[lua]\nassert(require('constants') == 73)\n[/lua]\n[lyc id=1 width=2 height=1 color=ff112233]\n[caption data=ready]\n[seplay id=fx file=tone.ogg]\n[wait se=fx]\n[caption data=ended]\n[stop]\n";
+    const BOOT: &[u8] = br#"*top
+[lua]
+assert(require('constants') == 73)
+[/lua]
+[lyc id=1 width=2 height=1 color=ff112233]
+[caption data=ready]
+[seplay id=fx file=tone.ogg]
+[wait se=fx]
+[var name=t.player data=original]
+[var name=t.accepted data=1]
+[dialog title=Name varname=t.accepted textfield=t.player]
+[caption data="$t.accepted + ':' + t.player"]
+[stop]
+"#;
     let runtime = Runtime::new(RuntimeOptions {
         host_capabilities: capabilities::HOST_CAP_IO | capabilities::HOST_CAP_MEDIA,
         renderer_capabilities: capabilities::CAP_SPRITES,
@@ -66,7 +79,7 @@ fn rust_host_drives_the_queued_session_and_reads_a_frame() {
                 }
                 UI_CAPTION => {
                     ready |= data["text"] == "ready";
-                    ended |= data["text"] == "ended";
+                    ended |= data["text"] == "0:original";
                     None
                 }
                 _ => None,
