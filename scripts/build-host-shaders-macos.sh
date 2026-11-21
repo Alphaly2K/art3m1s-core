@@ -13,6 +13,7 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 output="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 scratch=$(mktemp -d)
 trap 'rm -rf -- "$scratch"' EXIT
+export MACOSX_DEPLOYMENT_TARGET=15.0
 
 fetch_archive() {
   local url=$1 path=$2 hash=$3
@@ -39,6 +40,20 @@ fetch_archive "https://github.com/metalsharp/DXVK-MacOS/releases/download/$tag/$
   "$scratch/moltenvk.tar.zst" f2db7e9d19a4759c82b27b240ca54c90d1abdd69fb36c175e06ffb7b1226e90d
 tar -xf "$scratch/moltenvk.tar.zst" -C "$scratch"
 
+sdl_version=3.4.16
+sdl_name="SDL3-$sdl_version"
+fetch_archive "https://github.com/libsdl-org/SDL/releases/download/release-$sdl_version/$sdl_name.tar.gz" \
+  "$scratch/$sdl_name.tar.gz" 7322236cd12090c3eb40b9728be4d49c76f66ad17d04369584d4ecad5cf77c68
+tar -xf "$scratch/$sdl_name.tar.gz" -C "$scratch"
+sdl_prefix="$scratch/sdl-prefix"
+cmake -S "$scratch/$sdl_name" -B "$scratch/sdl-build" -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$sdl_prefix" \
+  -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET" \
+  -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST_LIBRARY=OFF -DSDL_TESTS=OFF
+cmake --build "$scratch/sdl-build"
+cmake --install "$scratch/sdl-build"
+export PKG_CONFIG_PATH="$sdl_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+
 meson setup "$scratch/native" "$source" --buildtype release --wrap-mode nodownload \
   --force-fallback-for libdisplay-info \
   -Denable_d3d8=false -Denable_d3d9=false -Denable_d3d10=false \
@@ -46,6 +61,7 @@ meson setup "$scratch/native" "$source" --buildtype release --wrap-mode nodownlo
 ninja -C "$scratch/native" src/d3d11/libdxvk_d3d11.0.dylib src/dxgi/libdxvk_dxgi.0.dylib
 ARTEMIS_DXVK_NATIVE_SOURCE="$source" ARTEMIS_DXVK_NATIVE_BUILD="$scratch/native" \
   ARTEMIS_MOLTENVK_DYLIB="$scratch/$archive/libMoltenVK.dylib" \
+  ARTEMIS_SDL3_LICENSE="$scratch/$sdl_name/LICENSE.txt" \
   bash "$root/scripts/build-host-dxvk-native.sh" "$scratch/dxvk-package"
 
 fetch_archive https://dl.winehq.org/vkd3d/source/vkd3d-2.1.tar.xz \
@@ -69,6 +85,27 @@ tar -xf "$scratch/vkd3d-2.1.tar.xz" -C "$scratch"
 )
 bash "$root/scripts/build-host-hlsl-native.sh" "$scratch/prefix" \
   "$scratch/vkd3d-2.1.tar.xz" "$scratch/hlsl-package"
+
+for binary in "$scratch/dxvk-package/"*.dylib "$scratch/hlsl-package/"*.dylib \
+  "$scratch/hlsl-package/artemis-hlsl-compile"; do
+  minimum=$(xcrun vtool -arch arm64 -show-build "$binary" | awk '
+    $1 == "cmd" { command = $2 }
+    $1 == "minos" && command == "LC_BUILD_VERSION" { print $2 }
+    $1 == "version" && command == "LC_VERSION_MIN_MACOSX" { print $2 }
+  ')
+  if ! awk -v version="$minimum" -v target="$MACOSX_DEPLOYMENT_TARGET" 'BEGIN {
+    if (version !~ /^[0-9]+\.[0-9]+(\.[0-9]+)?$/) exit 1
+    split(version, minimum, ".")
+    split(target, maximum, ".")
+    for (i = 1; i <= 3; i++) {
+      if (minimum[i] + 0 != maximum[i] + 0) exit (minimum[i] + 0 > maximum[i] + 0)
+    }
+  }'; then
+    printf '%s requires macOS %s, package target is %s\n' \
+      "$(basename "$binary")" "${minimum:-unknown}" "$MACOSX_DEPLOYMENT_TARGET" >&2
+    exit 1
+  fi
+done
 
 mkdir "$output"
 mv "$scratch/dxvk-package" "$output/dxvk"
