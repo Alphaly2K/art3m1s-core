@@ -99,7 +99,10 @@ static const char shader_host_mixed_boot[] = "*top\n[lyshader id=paint file=pain
     "[lyc id=4.child width=2 height=2 color=ffffffff]\n"
     "[lyprop id=4.child left=2 top=2]\n[lyprop id=4 shader=back]\n"
     "[lyc id=5 width=1 height=1 color=ffabcdef]\n"
-    "[flip]\n[caption data=ready]\n[stop]\n";
+    "[flip]\n[takess]\n[save file=mixed-slot]\n[caption data=ready]\n[stop]\n";
+static uint8_t mixed_slot[32 * 1024];
+static size_t mixed_slot_len;
+static const char shader_mixed_restore[] = "*top\n[load file=mixed-slot]\n[caption data=ready]\n[stop]\n";
 static const char shader_host_mixed_glsl[] =
     "varying mediump vec2 resultCoord0, resultCoord1;\n"
     "uniform sampler2D textureBack, textureFore;\n"
@@ -190,6 +193,12 @@ static void service_io(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt,
     ArtBytes payload = asset ? text(asset) : bytes(NULL, 0);
     if (external_shader_len && strstr(metadata, shader_frame == HLSL ? "\"key\":\"paint.hlsl\"" : "\"key\":\"paint.frag\""))
         payload = bytes(external_shader, external_shader_len);
+#ifdef ARTEMIS_DXVK_HOST_SMOKE
+    if (shader_host_mixed && strstr(metadata, "\"key\":\"restore.iet\""))
+        payload = text(shader_mixed_restore);
+    if (shader_host_mixed && mixed_slot_len && strstr(metadata, "\"key\":\"mixed-slot\""))
+        payload = bytes(mixed_slot, mixed_slot_len);
+#endif
     if (strstr(metadata, "\"key\":\"mask.png\"")) payload = bytes(mask_png, sizeof(mask_png));
     if (strstr(metadata, "\"key\":\"user.png\"")) payload = bytes(user_png, sizeof(user_png));
     if (kind == ART_IO_STAT) {
@@ -222,7 +231,11 @@ static unsigned pump(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt, uint64_t f
     unsigned observed = 0;
     for (unsigned turn = 0; turn < 64; ++turn) {
         assert(api->step(rt, &step, &result) == ART_OK);
+#ifdef ARTEMIS_DXVK_HOST_SMOKE
+        uint8_t events[sizeof(mixed_slot) + 4096];
+#else
         uint8_t events[4096];
+#endif
         ArtPollResult poll = { .struct_size = sizeof(poll) };
         ArtStatus status = api->poll_events(rt, events, sizeof(events), &poll);
         assert(status == ART_OK || status == ART_NO_DATA);
@@ -244,6 +257,13 @@ static unsigned pump(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt, uint64_t f
                 size_t blob_size = (size_t)little(record + 60, 4);
                 assert(blob_size != 0 && blob_size == size - 64 - meta_size);
                 assert(strstr(metadata, "\"namespace\":\"save\""));
+#ifdef ARTEMIS_DXVK_HOST_SMOKE
+                if (shader_host_mixed && strstr(metadata, "\"key\":\"mixed-slot\"")) {
+                    assert(blob_size <= sizeof(mixed_slot));
+                    memcpy(mixed_slot, record + 64 + meta_size, blob_size);
+                    mixed_slot_len = blob_size;
+                } else
+#endif
                 if (strstr(metadata, "\"key\":\"saveg.dat\"")) observed |= SAVED_GLOBALS;
                 else {
                     assert(strstr(metadata, "\"key\":\"system.dat\""));
@@ -346,8 +366,8 @@ static void check_video_wait(const ArtRuntimeApiV2 *api, const ArtProjectInfo *p
 static int shader_host_smoke(const ArtRuntimeApiV2 *api, const ArtFrameApiV2 *frames,
                              ArtRuntimeHandle rt, const char *directory, const char *artifact) {
     ArtMetalHost *host = NULL;
+    const char *angle = shader_host_mixed ? getenv("ARTEMIS_GL_SMOKE_ANGLE_DIR") : NULL;
     if (shader_host_mixed) {
-        const char *angle = getenv("ARTEMIS_GL_SMOKE_ANGLE_DIR");
         assert(angle && art3m1s_metal_host_v1_create_mixed(frames, rt, directory, angle, &host) == ART_OK);
     } else {
         assert(art3m1s_metal_host_v1_create_dxvk(frames, rt, directory, &host) == ART_OK);
@@ -376,8 +396,9 @@ static int shader_host_smoke(const ArtRuntimeApiV2 *api, const ArtFrameApiV2 *fr
     const unsigned frame_count = shader_host_sprites || shader_host_legacy_alpha || shader_host_mixed ? 1 : 3;
     unsigned turn = 0;
     uint64_t after = 0;
+    uint8_t original[64] = {0};
     for (uint64_t id = 1; id <= 16 && turn < frame_count; ++id) {
-        if (pump(api, rt, id) != 1) continue;
+        if (!(pump(api, rt, id) & 1)) continue;
         uint64_t presented = 0;
         assert(art3m1s_metal_host_v1_present(host, after, &presented) == ART_OK);
         assert(presented > after);
@@ -417,9 +438,34 @@ static int shader_host_smoke(const ArtRuntimeApiV2 *api, const ArtFrameApiV2 *fr
             }
         }
         assert(!memcmp(capture, presentation, sizeof(capture)));
+        if (shader_host_mixed) memcpy(original, presentation, sizeof(original));
         ++turn;
     }
     assert(turn == frame_count);
+    if (shader_host_mixed) {
+        assert(mixed_slot_len);
+        assert(art3m1s_metal_host_v1_destroy(host) == ART_OK);
+        ArtProjectInfo project = {
+            .struct_size = sizeof(project),
+            .ini_bytes = text("[WINDOWS]\nWIDTH=4\nHEIGHT=4\nBOOT=restore.iet\n"),
+            .platform_utf8 = text("windows"),
+        };
+        assert(api->open_project(rt, &project) == ART_OK);
+        assert(art3m1s_metal_host_v1_create_mixed(frames, rt, directory, angle, &host) == ART_OK);
+        assert(art3m1s_metal_host_v1_set_surface(host, metal_pixel_buffer_surface(surface)) == ART_OK);
+        unsigned restored = 0;
+        for (uint64_t id = 1; id <= 16 && !restored; ++id) restored = pump(api, rt, id) & 1;
+        assert(restored);
+        assert(art3m1s_metal_host_v1_prepare_ade2(host, source, compiled) == ART_OK);
+        uint64_t restored_id = 0;
+        assert(art3m1s_metal_host_v1_present(host, 0, &restored_id) == ART_OK);
+        uint8_t result[64];
+        assert(metal_read_pixel_buffer(surface, result, sizeof(result)) == 0);
+        assert(!memcmp(result, original, sizeof(result)));
+        assert(art3m1s_metal_host_v1_capture(host, restored_id, 4, 4, result, sizeof(result)) == ART_OK);
+        assert(!memcmp(result, original, sizeof(result)));
+        puts("Fresh session restored mixed shader presentation and capture");
+    }
     free(ade);
     assert(art3m1s_metal_host_v1_destroy(host) == ART_OK);
     metal_free_pixel_buffer(surface);
