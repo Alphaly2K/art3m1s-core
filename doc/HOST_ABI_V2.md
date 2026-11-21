@@ -85,9 +85,9 @@ C 接口共有 12 个函数指针，分布在三张表。Host 可在 `create` �
 公开 API 的一部分。禁止用任意字符串 `invoke(method, json)` 把不受约束的私有 RPC 塞进
 `submit`；每个 domain/kind 都必须有版本、字段、失败分支和一致性测试。
 
-标题探测使用 headless/probe runtime 和相同 IO 协议，在第一条 caption 或预算耗尽时结束，
-不创建 renderer。完整游戏的最低 Host 组合是 runtime + IO + renderer + media 完成协议；
-不支持 UI/网络等可选服务时按已定义失败分支恢复。
+`renderer_caps=0` 启动无画面会话。脚本、逻辑状态和 Host 事件照常推进，帧查询返回
+`ART_NO_DATA`。标题探测用同一 IO 协议，在第一条 caption 或预算耗尽时结束。完整游戏
+通常使用 runtime、IO、renderer 和媒体完成协议。可选 UI 和网络服务按各自的能力位协商。
 
 ### ABI 演进与类型
 

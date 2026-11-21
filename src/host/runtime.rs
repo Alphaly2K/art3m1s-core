@@ -181,6 +181,7 @@ pub(super) fn create_with_caps(
         session.translation_enabled = host_caps & HOST_CAP_TRANSLATION != 0;
         session.chunked_writes = host_caps & HOST_CAP_CHUNKED_WRITES != 0;
         session.project_save_path = host_caps & HOST_CAP_PROJECT_SAVE_PATH != 0;
+        session.frames_enabled = renderer_caps != 0;
         session.transitions_enabled = renderer_caps & CAP_TRANSITIONS != 0;
         session.screenshots_enabled = renderer_caps & CAP_SCREENSHOTS != 0;
         session.groups_enabled = renderer_caps & CAP_GROUPS != 0;

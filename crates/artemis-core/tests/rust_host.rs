@@ -6,6 +6,15 @@ use serde_json::{Value, json};
 
 #[test]
 fn rust_host_drives_the_queued_session_and_reads_a_frame() {
+    drive_queued_session(capabilities::CAP_SPRITES);
+}
+
+#[test]
+fn headless_host_drives_the_queued_session_without_frames() {
+    drive_queued_session(0);
+}
+
+fn drive_queued_session(renderer_capabilities: u64) {
     const PROJECT: ProjectInfo<'_> = ProjectInfo {
         ini: b"[WINDOWS]\nWIDTH=32\nHEIGHT=24\nBOOT=boot.iet\n",
         platform: "WINDOWS",
@@ -28,7 +37,7 @@ assert(require('constants') == 73)
 "#;
     let runtime = Runtime::new(RuntimeOptions {
         host_capabilities: capabilities::HOST_CAP_IO | capabilities::HOST_CAP_MEDIA,
-        renderer_capabilities: capabilities::CAP_SPRITES,
+        renderer_capabilities,
         ..Default::default()
     })
     .unwrap();
@@ -120,6 +129,12 @@ assert(require('constants') == 73)
         }
     }
     assert!(ended && rejected_foreign_reply);
+
+    if renderer_capabilities == 0 {
+        assert!(runtime.state().unwrap().latest_render_frame_id.is_none());
+        assert!(runtime.with_latest_frame(0, |_| ()).unwrap().is_none());
+        return;
+    }
 
     let latest = runtime
         .with_latest_frame(0, |frame| {

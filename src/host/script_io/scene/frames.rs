@@ -16,7 +16,8 @@ impl ScriptIoSession {
         &mut self,
         progress: ScriptIoProgress,
     ) -> Result<(), ProtocolError> {
-        if self.project_loading
+        if !self.frames_enabled
+            || self.project_loading
             || self.shutdown.is_closing_or_closed()
             || self.screenshot.pending_request().is_some()
             || self.operation.is_some()
