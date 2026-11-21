@@ -568,7 +568,11 @@ impl Audio {
         let replaces = self.active.get(&channel).map(|track| track.id);
         let (record, playback) = match spec.build(scene, &channel, id, replaces) {
             Err(ProtocolError::Argument(_)) => {
-                crate::core_warn!("audio playback skipped: invalid asset key");
+                diagnostic::script_log(
+                    transport,
+                    "warn",
+                    "audio playback skipped: invalid asset key",
+                );
                 return Ok(());
             }
             result => result?,

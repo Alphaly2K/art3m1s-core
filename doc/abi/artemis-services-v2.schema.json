@@ -188,6 +188,12 @@
         "key": { "type": "string", "minLength": 1 }
       }
     },
+    "scriptLog": {
+      "description": "The binary payload is one UTF-8 log message, up to 4096 bytes.",
+      "type": "object",
+      "required": ["level"],
+      "properties": { "level": { "enum": ["debug", "warn"] } }
+    },
     "noFields": { "type": "object", "description": "No defined metadata fields. Send an empty JSON object." },
     "serviceResult": {
       "type": "object",

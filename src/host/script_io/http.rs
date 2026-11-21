@@ -159,7 +159,11 @@ impl ScriptIoSession {
                     return Ok(None);
                 }
                 Err(_) => {
-                    crate::core_warn!("invalid HTTP response save key");
+                    diagnostic::script_log(
+                        &mut self.transport,
+                        "warn",
+                        "invalid HTTP response save key",
+                    );
                 }
             }
         } else if let Some(name) = varname_data {
@@ -180,7 +184,11 @@ impl ScriptIoSession {
         match response {
             IoResponse::Written => self.invalidate_save_texture(&key),
             IoResponse::Failed { kind, .. } => {
-                crate::core_warn!("HTTP response write failed: {}", kind.as_str());
+                diagnostic::script_log(
+                    &mut self.transport,
+                    "warn",
+                    format!("HTTP response write failed: {}", kind.as_str()),
+                );
             }
             _ => return Err(ProtocolError::State),
         }

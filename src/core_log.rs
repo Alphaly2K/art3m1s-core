@@ -19,7 +19,4 @@ macro_rules! core_info {
 macro_rules! core_warn {
     ($($arg:tt)*) => { $crate::__core_log("W", format!($($arg)*)); };
 }
-macro_rules! core_debug {
-    ($($arg:tt)*) => { $crate::__core_log("D", format!($($arg)*)); };
-}
-pub(crate) use {core_debug, core_info, core_warn};
+pub(crate) use {core_info, core_warn};

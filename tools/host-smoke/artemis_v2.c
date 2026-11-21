@@ -37,7 +37,8 @@ static const char boot[] = "*top\n[lua]\n"
                            "[var system=fullscreen name=t.fs]\n[var system=minimize name=t.min]\n"
                            "[if estimate=\"$t.fs == 1 && t.min == 1\"]\n[caption data=advanced]\n[/if]\n"
                            "[stop]\n";
-static const char video_boot[] = "*top\n[video file=probe.wmv]\n[caption data=advanced]\n[stop]\n";
+static const char video_boot[] = "*top\n[video file=../invalid.wmv]\n[video file=probe.wmv]\n"
+                                 "[caption data=advanced]\n[stop]\n";
 static const char *boot_source = boot;
 static char video_playback[21];
 #define SHADER_SCENE \
@@ -231,7 +232,7 @@ static void service_io(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt,
 }
 
 enum { SAVED_GLOBALS = 32, SAVED_SYSTEM = 64, CLOSED = 128, SCRIPT_PRINTED = 256,
-       VIDEO_PLAYED = 512, BROWSER_OPEN = 1024 };
+       VIDEO_PLAYED = 512, BROWSER_OPEN = 1024, SCRIPT_LOGGED = 2048, SCRIPT_WARNED = 4096 };
 
 static unsigned pump(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt, uint64_t frame_id) {
     ArtStepInfo step = { .struct_size = sizeof(step), .host_frame_id = frame_id,
@@ -336,6 +337,16 @@ static unsigned pump(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt, uint64_t f
                 assert(memcmp(record + event_header_bytes + meta_size, line, sizeof(line) - 1) == 0);
                 assert(!(observed & SCRIPT_PRINTED));
                 observed |= SCRIPT_PRINTED;
+            } else if (domain == ART_DOMAIN_DIAGNOSTICS && kind == ART_DIAGNOSTIC_SCRIPT_LOG) {
+                assert(!request && !(flags & ART_EVENT_FLAG_CRITICAL));
+                const int debug = !strcmp(metadata, "{\"level\":\"debug\"}");
+                const char *line = debug ? "boot" : "video playback skipped: invalid asset key";
+                const unsigned flag = debug ? SCRIPT_LOGGED : SCRIPT_WARNED;
+                assert(debug || !strcmp(metadata, "{\"level\":\"warn\"}"));
+                assert(size - event_header_bytes - meta_size == strlen(line));
+                assert(!memcmp(record + event_header_bytes + meta_size, line, strlen(line)));
+                assert(!(observed & flag));
+                observed |= flag;
             }
             offset += size;
         }
@@ -353,7 +364,7 @@ static void check_video_wait(const ArtRuntimeApiV2 *api, const ArtProjectInfo *p
     assert(api->create(&create, &runtime) == ART_OK);
     boot_source = video_boot;
     assert(api->open_project(runtime, project) == ART_OK);
-    assert(pump(api, runtime, 1) == VIDEO_PLAYED);
+    assert(pump(api, runtime, 1) == (VIDEO_PLAYED | SCRIPT_WARNED));
     assert(strtoull(video_playback, NULL, 10) > INT64_MAX);
 
     ArtRuntimeState state = { .struct_size = sizeof(state) };
@@ -558,7 +569,7 @@ static void *probe_thread(void *opaque) {
     ArtRuntimeHandle other = 0;
     assert(api->create(probe->info, &other) == ART_OK && other != owner);
     assert(api->open_project(other, probe->project) == ART_OK);
-    assert(pump(api, other, 1) == (1 | 4 | 8 | 16 | SCRIPT_PRINTED | BROWSER_OPEN));
+    assert(pump(api, other, 1) == (1 | 4 | 8 | 16 | SCRIPT_PRINTED | BROWSER_OPEN | SCRIPT_LOGGED));
     assert(frames->acquire_latest(other, 0, &view) == ART_OK);
     assert(view.token != probe->owner_token);
     probe->worker_token = view.token;
@@ -723,7 +734,7 @@ int main(int argc, char **argv) {
     ArtPollResult short_poll = { .struct_size = sizeof(short_poll) };
     assert(api->poll_events(rt, NULL, 0, &short_poll) == ART_E_BUFFER);
     assert(short_poll.required_next_bytes > 0 && short_poll.record_count == 0);
-    assert(pump(api, rt, 1) == (1 | 4 | 8 | 16 | SCRIPT_PRINTED | BROWSER_OPEN));
+    assert(pump(api, rt, 1) == (1 | 4 | 8 | 16 | SCRIPT_PRINTED | BROWSER_OPEN | SCRIPT_LOGGED));
 
     struct { ArtRuntimeState prefix; uint64_t tail; } state = {
         .prefix.struct_size = sizeof(state), .tail = UINT64_C(0x123456789abcdef0)
@@ -778,7 +789,7 @@ int main(int argc, char **argv) {
     assert(first.record_count == 1 && first.written_bytes == 64 + sizeof(save_path) - 1);
     assert(little(opened + 8, 4) == ART_RUNTIME_SESSION_CHANGED);
     assert(!memcmp(opened + 64, save_path, sizeof(save_path) - 1));
-    assert(pump(api, rt, 1) == (1 | 4 | 8 | SCRIPT_PRINTED));
+    assert(pump(api, rt, 1) == (1 | 4 | 8 | SCRIPT_PRINTED | SCRIPT_LOGGED));
     ArtMessage shutdown = message(ART_DOMAIN_RUNTIME, ART_RUNTIME_SHUTDOWN, little(opened + 24, 8), 0, "{}");
     assert(api->submit(rt, &shutdown, 1) == ART_OK);
     assert(api->get_state(rt, &state.prefix) == ART_OK && state.prefix.state == ART_RUNTIME_CLOSING);

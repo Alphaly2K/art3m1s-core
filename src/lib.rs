@@ -35,7 +35,7 @@ pub use host::{events as host_events, files as host_files, media as host_media};
 #[cfg(not(feature = "legacy"))]
 mod core_log;
 #[cfg(not(feature = "legacy"))]
-pub(crate) use core_log::{core_debug, core_info, core_warn, emit as __core_log};
+pub(crate) use core_log::{core_info, core_warn, emit as __core_log};
 #[cfg(feature = "legacy")]
 mod legacy_project;
 #[cfg(feature = "legacy")]

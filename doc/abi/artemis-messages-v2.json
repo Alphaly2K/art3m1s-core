@@ -82,7 +82,8 @@
     "ART_DOMAIN_DIAGNOSTICS": {
       "events": {
         "ART_DIAGNOSTIC_SHADER_UNAVAILABLE": "artemis-services-v2.schema.json#/$defs/shaderUnavailable",
-        "ART_DIAGNOSTIC_SCRIPT_PRINT": "artemis-services-v2.schema.json#/$defs/noFields"
+        "ART_DIAGNOSTIC_SCRIPT_PRINT": "artemis-services-v2.schema.json#/$defs/noFields",
+        "ART_DIAGNOSTIC_SCRIPT_LOG": "artemis-services-v2.schema.json#/$defs/scriptLog"
       }
     }
   }

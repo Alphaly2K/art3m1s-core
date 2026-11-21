@@ -1070,7 +1070,11 @@ impl ScriptIoSession {
                 match caller {
                     save_files::SaveFileCaller::Scenario => {
                         if let IoResponse::Failed { kind, .. } = result {
-                            crate::core_warn!("save file operation failed: {}", kind.as_str());
+                            diagnostic::script_log(
+                                &mut self.transport,
+                                "warn",
+                                format!("save file operation failed: {}", kind.as_str()),
+                            );
                         }
                         self.resume_scenario()?;
                     }

@@ -141,7 +141,7 @@ impl ScriptIoSession {
                     ) =>
                 {
                     if let Some(Event::DebugPrint { data, .. }) = &self.scenario_event {
-                        crate::core_debug!("[debugprint] {}", data);
+                        diagnostic::script_log(&mut self.transport, "debug", data);
                     }
                     self.resume_scenario().map(|()| None)
                 }

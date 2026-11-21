@@ -2,8 +2,24 @@ use super::*;
 use std::sync::{Arc, Mutex};
 
 const SCRIPT_PRINT: u32 = 2;
+const SCRIPT_LOG: u32 = 3;
 const MAX_LINE_BYTES: usize = 4096;
 const PRINT_RECORD_OVERHEAD: usize = HEADER_BYTES + 8 + "{}".len();
+
+pub(super) fn script_log(transport: &mut SessionTransport, level: &str, message: impl AsRef<str>) {
+    let message = message.as_ref().as_bytes();
+    if message.len() > MAX_LINE_BYTES {
+        transport.count_dropped_diagnostics(1);
+        return;
+    }
+    let metadata = json!({"level": level}).to_string();
+    if MessageBody::new(metadata, message.to_vec())
+        .and_then(|body| transport.diagnostic(SCRIPT_LOG, body))
+        .is_err()
+    {
+        transport.count_dropped_diagnostics(1);
+    }
+}
 
 // Lua runs inside a step. Buffer its output until the step releases the VM.
 #[derive(Default)]

@@ -318,6 +318,8 @@ Host 按同一条 `ui.avoid` 记录更新遮罩和静音；解除静音时沿用
 累计丢弃次数；其容量不占用控制预算。重载清除两个队列与旧结果，保留生命周期丢弃计数。
 `ART_DIAGNOSTIC_SCRIPT_PRINT` 是一条 Luau `print` 通知，无回复。metadata 为 `{}`，
 blob 为以制表符分隔的参数原始字节，无记录尾换行。每条最多 4096 字节；超限时丢弃整条。
+`ART_DIAGNOSTIC_SCRIPT_LOG` 交付脚本诊断，metadata 的 `level` 为 `debug` 或 `warn`。
+blob 是至多 4096 字节的 UTF-8 日志正文。两种记录均可丢弃，各自带当前会话的 epoch。
 已受理结果另有默认 4096 条/16 MiB 预算，等待请求默认上限为 4096。metadata 和 blob
 各默认限 1 MiB。字节预算按信封、长度头、metadata 和 blob 的编码总长计算。
 单条或整批超过空队列总预算返回 LIMIT；仅因现有积压而放不下时返回 WOULD_BLOCK。
