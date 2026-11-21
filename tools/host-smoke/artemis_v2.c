@@ -509,10 +509,12 @@ struct ThreadProbe {
     const ArtRootApiV2 *root;
     const ArtRuntimeApiV2 *api;
     const ArtFrameApiV2 *frames;
+    const ArtCapabilitiesV2 *caps;
     const ArtCreateInfo *info;
     const ArtProjectInfo *project;
     ArtRuntimeHandle owner;
     ArtFrameToken owner_token;
+    ArtFrameToken worker_token;
 };
 
 #ifdef _WIN32
@@ -520,7 +522,7 @@ static DWORD WINAPI probe_thread(void *opaque) {
 #else
 static void *probe_thread(void *opaque) {
 #endif
-    const struct ThreadProbe *probe = opaque;
+    struct ThreadProbe *probe = opaque;
     const ArtRootApiV2 *root = NULL;
     assert(art3m1s_get_api_v2(ART_ABI_V2_MAJOR, sizeof(ArtRootApiV2), &root) == ART_OK);
     assert(root == probe->root);
@@ -529,6 +531,9 @@ static void *probe_thread(void *opaque) {
     const ArtRuntimeApiV2 *api = table;
     const ArtFrameApiV2 *frames = probe->frames;
     assert(api == probe->api);
+    assert(root->query_interface(ART_INTERFACE_CAPABILITIES, ART_ABI_V2_MAJOR,
+                                 sizeof(ArtCapabilitiesV2), &table) == ART_OK);
+    assert(table == probe->caps);
     uint64_t required = 1;
     assert(root->copy_last_error(NULL, 0, &required) == ART_OK && required == 0);
 
@@ -556,6 +561,7 @@ static void *probe_thread(void *opaque) {
     assert(pump(api, other, 1) == (1 | 4 | 8 | 16 | SCRIPT_PRINTED | BROWSER_OPEN));
     assert(frames->acquire_latest(other, 0, &view) == ART_OK);
     assert(view.token != probe->owner_token);
+    probe->worker_token = view.token;
     assert(frames->release(other, probe->owner_token) == ART_E_HANDLE);
     assert(frames->texture_rgba(other, view.token, 0, &pixels) == ART_OK);
     assert(pixels.size == 4 && pixels.data[0] == 0x11);
@@ -564,21 +570,32 @@ static void *probe_thread(void *opaque) {
     return 0;
 }
 
-static void check_threads(struct ThreadProbe *probe) {
+static void check_threads(struct ThreadProbe probe) {
+    struct ThreadProbe probes[] = { probe, probe };
     uint8_t before[120], after[120];
     uint64_t before_size, after_size;
-    assert(probe->root->copy_last_error(before, sizeof(before), &before_size) == ART_OK);
+    assert(probe.root->copy_last_error(before, sizeof(before), &before_size) == ART_OK);
     assert(before_size > 0);
 #ifdef _WIN32
-    HANDLE worker = CreateThread(NULL, 0, probe_thread, probe, 0, NULL);
-    assert(worker && WaitForSingleObject(worker, INFINITE) == WAIT_OBJECT_0);
-    assert(CloseHandle(worker));
+    HANDLE workers[2];
+    for (size_t i = 0; i < 2; ++i) {
+        workers[i] = CreateThread(NULL, 0, probe_thread, &probes[i], 0, NULL);
+        assert(workers[i]);
+    }
+    for (size_t i = 0; i < 2; ++i) {
+        assert(WaitForSingleObject(workers[i], INFINITE) == WAIT_OBJECT_0);
+        assert(CloseHandle(workers[i]));
+    }
 #else
-    pthread_t worker;
-    assert(pthread_create(&worker, NULL, probe_thread, probe) == 0);
-    assert(pthread_join(worker, NULL) == 0);
+    pthread_t workers[2];
+    for (size_t i = 0; i < 2; ++i)
+        assert(pthread_create(&workers[i], NULL, probe_thread, &probes[i]) == 0);
+    for (size_t i = 0; i < 2; ++i)
+        assert(pthread_join(workers[i], NULL) == 0);
 #endif
-    assert(probe->root->copy_last_error(after, sizeof(after), &after_size) == ART_OK);
+    assert(probes[0].worker_token && probes[1].worker_token);
+    assert(probes[0].worker_token != probes[1].worker_token);
+    assert(probe.root->copy_last_error(after, sizeof(after), &after_size) == ART_OK);
     assert(after_size == before_size && !memcmp(before, after, (size_t)before_size));
 }
 #endif
@@ -728,8 +745,8 @@ int main(int argc, char **argv) {
     assert(pixels.size == sizeof(expected) && !memcmp(pixels.data, expected, sizeof(expected)));
     assert(api->destroy(rt) == ART_E_STATE);
 #ifdef ARTEMIS_THREAD_SMOKE
-    struct ThreadProbe probe = { root, api, frames, &info, &project, rt, view.token };
-    check_threads(&probe);
+    struct ThreadProbe probe = { root, api, frames, caps, &info, &project, rt, view.token, 0 };
+    check_threads(probe);
 #endif
 
     ArtMessage keys[] = {
