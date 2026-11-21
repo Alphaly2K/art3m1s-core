@@ -110,12 +110,13 @@ opacity or multiply it wants to apply before blending.
 
 The Flutter Runner can prewarm indexed `.glsl`, `.frag`, `.fsh` and `.fs`
 files in the macOS ANGLE Host before its first frame, within source and time
-budgets. During play, the Host loads a program when a frame first uses the
-effect. Both paths use the same loader. It reuses programs in the current
-context and stores ANGLE program binaries in the application's cache
-directory. Binaries match the effective vertex and fragment sources and the
-GL driver identity. If the cache is unavailable or a binary is rejected,
-the renderer compiles from source.
+budgets. A session can start with no prewarmed programs. During play, the Host
+loads a program when a frame first uses the effect. Both paths share a loader
+and a bounded cache in the current context. A program first loaded at runtime
+can replace an older entry when the cache is full. The Host also stores ANGLE
+program binaries in the application's cache directory. Binaries match the
+effective vertex and fragment sources and the GL driver identity. If the cache
+is unavailable or a binary is rejected, the renderer compiles from source.
 
 The Flutter project's `tool/integration_tests/artemis_v2_angle_smoke.dart`
 checks presentation, transitions and screenshots. With DXVK omitted from the

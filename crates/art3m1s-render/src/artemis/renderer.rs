@@ -347,7 +347,8 @@ impl<B: GpuBackend> SpriteRenderer<B> {
         self.shaders.retain(|_, name| name.is_some());
     }
 
-    /// Release compiled programs owned by this adapter.
+    /// Unregister the adapter's shader bindings.
+    /// The backend may keep compiled programs for reuse.
     pub fn clear_cached_shaders(&mut self) {
         for name in self.shaders.drain().filter_map(|(_, name)| name) {
             self.backend.unregister_shader(&name);

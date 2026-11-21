@@ -34,7 +34,8 @@ Host 在回调内复制所需数据。正常保存并关闭时，调用 `request
 协议提供 PSB 字节。
 Host 按编译后端声明 `ART_RENDERER_CAP_HLSL` 和/或 `ART_RENDERER_CAP_GLSL`，根据帧包的
 语言、源码版本和绑定编译绘制。使用 `SpriteRenderer` 时，可用 `clear_cached_shaders()`
-释放已注册的程序。GL/GLES 后端的片元输入和绑定见 [Runtime Shader ABI](SHADER_ABI.md)。
+解除当前的帧着色器绑定。后端可保留编译产物供下次使用。GL/GLES 后端的片元输入和绑定见
+[Runtime Shader ABI](SHADER_ABI.md)。
 Linux 和 Android 的 Rust Host 可用 `GlBackend::new_host_egl` 创建系统 GLES 3 上下文；
 macOS 和 iOS 可用 `GlBackend::new_host_angle` 并提供 ANGLE/Metal 库的目录。
 
