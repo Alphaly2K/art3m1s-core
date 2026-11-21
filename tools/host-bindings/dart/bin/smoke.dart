@@ -111,7 +111,7 @@ void exerciseHost(
               audioEvent = event;
             case (ART_DOMAIN_MEDIA, ART_MEDIA_VIDEO_COMMAND):
               videoEvent = event;
-            case (ART_DOMAIN_DIAGNOSTICS, 1):
+            case (ART_DOMAIN_DIAGNOSTICS, ART_DIAGNOSTIC_SHADER_UNAVAILABLE):
               require(
                 !event.requiresReply &&
                     event.epoch == epoch &&

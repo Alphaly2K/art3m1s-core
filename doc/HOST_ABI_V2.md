@@ -302,7 +302,7 @@ Host 按同一条 `ui.avoid` 记录更新遮罩和静音；解除静音时沿用
 控制记录按 FIFO 优先交付，排空后才交付诊断；跨队列不承诺 sequence 递增。
 诊断满载或超过单条预算时丢弃新记录，
 累计丢弃次数；其容量不占用控制预算。重载清除两个队列与旧结果，保留生命周期丢弃计数。
-诊断域 kind 2（`diagnostics.script_print`）是一条 Luau `print` 通知，无回复。metadata 为 `{}`，
+`ART_DIAGNOSTIC_SCRIPT_PRINT` 是一条 Luau `print` 通知，无回复。metadata 为 `{}`，
 blob 为以制表符分隔的参数原始字节，无记录尾换行。每条最多 4096 字节；超限时丢弃整条。
 已受理结果另有默认 4096 条/16 MiB 预算，等待请求默认上限为 4096。metadata 和 blob
 各默认限 1 MiB。字节预算按信封、长度头、metadata 和 blob 的编码总长计算。
@@ -540,7 +540,7 @@ C Host 分别声明 `ART_RENDERER_CAP_HLSL`、`ART_RENDERER_CAP_GLSL`，可同�
 的大小超出上限时，Core 跳过后续读取。源码缺失或编译失败时直接绘制精灵，组内已有的其他效果
 继续执行。编译和绑定约定见 [Runtime Shader ABI](SHADER_ABI.md)。
 
-`[lyshader]` 请求未协商的语言时，Core 继续推进，不读取该源码，并发送诊断 domain=7、kind=1。
+`[lyshader]` 请求未协商的语言时，Core 继续推进，跳过源码读取并发送 `ART_DIAGNOSTIC_SHADER_UNAVAILABLE`。
 metadata 包含 `language`（`hlsl` 或 `glsl`）、脚本中的 `id` 和解析后的逻辑资源 `key`；无需回复。
 
 编号存档可记录 shader ID 到逻辑源码键的映射。使用截图时记录捕获时的映射。读档提交前，

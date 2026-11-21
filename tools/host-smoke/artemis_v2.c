@@ -310,7 +310,7 @@ static unsigned pump(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt, uint64_t f
             } else if (domain == ART_DOMAIN_RUNTIME && kind == ART_RUNTIME_CLOSED_EVENT) {
                 assert(!strcmp(metadata, "{\"save_status\":\"written\"}"));
                 observed |= CLOSED;
-            } else if (domain == ART_DOMAIN_DIAGNOSTICS && kind == 2) {
+            } else if (domain == ART_DOMAIN_DIAGNOSTICS && kind == ART_DIAGNOSTIC_SCRIPT_PRINT) {
                 static const char line[] = "boot\tready\t\xff";
                 assert(request == 0 && !strcmp(metadata, "{}"));
                 assert(size - 64 - meta_size == sizeof(line) - 1);

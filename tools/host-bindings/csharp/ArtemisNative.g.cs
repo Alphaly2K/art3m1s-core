@@ -146,6 +146,8 @@ namespace Artemis.Host
     {
         public const uint ART_ABI_V2_MAJOR = 2u;
         public const ulong ART_API_MAGIC = 0x415254334D324150ul;
+        public const uint ART_DIAGNOSTIC_SCRIPT_PRINT = 2u;
+        public const uint ART_DIAGNOSTIC_SHADER_UNAVAILABLE = 1u;
         public const ushort ART_DOMAIN_DIAGNOSTICS = 7;
         public const ushort ART_DOMAIN_INPUT = 2;
         public const ushort ART_DOMAIN_IO = 3;
