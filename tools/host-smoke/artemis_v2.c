@@ -475,6 +475,22 @@ static int shader_host_smoke(const ArtRuntimeApiV2 *api, const ArtFrameApiV2 *fr
     if (shader_host_mixed) {
         assert(mixed_slot_len);
         assert(art3m1s_metal_host_v1_destroy(host) == ART_OK);
+        metal_free_pixel_buffer(surface);
+        surface = metal_create_pixel_buffer(4, 4);
+        assert(surface);
+        assert(art3m1s_metal_host_v1_create_mixed(frames, rt, directory, angle, &host) == ART_OK);
+        assert(art3m1s_metal_host_v1_set_surface(host, metal_pixel_buffer_surface(surface)) == ART_OK);
+        assert(art3m1s_metal_host_v1_prepare_ade2(host, source, compiled) == ART_OK);
+        uint64_t rebuilt_id = 0;
+        uint8_t result[64];
+        assert(art3m1s_metal_host_v1_present(host, 0, &rebuilt_id) == ART_OK && rebuilt_id == after);
+        assert(metal_read_pixel_buffer(surface, result, sizeof(result)) == 0);
+        assert(!memcmp(result, original, sizeof(result)));
+        assert(art3m1s_metal_host_v1_capture(host, rebuilt_id, 4, 4, result, sizeof(result)) == ART_OK);
+        assert(!memcmp(result, original, sizeof(result)));
+        puts("Rebuilt renderer replayed the same mixed shader frame");
+
+        assert(art3m1s_metal_host_v1_destroy(host) == ART_OK);
         ArtProjectInfo project = {
             .struct_size = sizeof(project),
             .ini_bytes = text("[WINDOWS]\nWIDTH=4\nHEIGHT=4\nBOOT=restore.iet\n"),
@@ -489,7 +505,6 @@ static int shader_host_smoke(const ArtRuntimeApiV2 *api, const ArtFrameApiV2 *fr
         assert(art3m1s_metal_host_v1_prepare_ade2(host, source, compiled) == ART_OK);
         uint64_t restored_id = 0;
         assert(art3m1s_metal_host_v1_present(host, 0, &restored_id) == ART_OK);
-        uint8_t result[64];
         assert(metal_read_pixel_buffer(surface, result, sizeof(result)) == 0);
         assert(!memcmp(result, original, sizeof(result)));
         assert(art3m1s_metal_host_v1_capture(host, restored_id, 4, 4, result, sizeof(result)) == ART_OK);
