@@ -259,7 +259,7 @@ impl SourceInput {
                 ffmpeg::ffi::av_dict_set(
                     &mut options,
                     c"format_whitelist".as_ptr(),
-                    c"asf,ogg".as_ptr(),
+                    c"asf,avi,ogg".as_ptr(),
                     0,
                 )
             };

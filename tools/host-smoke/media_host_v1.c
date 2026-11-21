@@ -71,7 +71,7 @@ static int probe_audio(const ArtMediaHostApiV1 *api, const char *path, int delay
 }
 
 int main(int argc, char **argv) {
-    if (argc != 7) return 1;
+    if (argc != 8) return 1;
     void *library = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
     if (!library) {
         fprintf(stderr, "%s\n", dlerror());
@@ -95,6 +95,10 @@ int main(int argc, char **argv) {
     }
     if (!probe(api, argv[6], 2, 1000000)) {
         fputs("Theora did not preserve its implicit frame hold through EOF.\n", stderr);
+        return 1;
+    }
+    if (!probe(api, argv[7], 24, 0)) {
+        fputs("AVI did not deliver its 24 decoded frames and EOF.\n", stderr);
         return 1;
     }
     if (!probe_audio(api, argv[3], 0)) {

@@ -740,8 +740,8 @@ Runner 可提供 `angleDirectory`，Dart 在 `ArtemisFlutterSession.open(angle: 
 ANGLE/Metal。可选的 `dxvkDirectory` 允许会话使用 Host 提供的 ADE2 程序，`mixedShaders`
 允许同一帧使用 HLSL 与 GLSL。应用在创建会话时协商可用的后端和着色器能力，预热列表可以为空。
 
-可选提供 `mediaPath` 加载独立的 [媒体 Host](abi/art3m1s_media_host_v1.h)，用于 ASF/WMV 和
-Ogg 视频。该库用现有 FFmpeg 动态库构建，提供时间戳、RGBA 帧和 48 kHz 双声道 PCM；调用者
+可选提供 `mediaPath` 加载独立的 [媒体 Host](abi/art3m1s_media_host_v1.h)，用于 ASF/WMV、
+AVI 和 Ogg 视频。该库用现有 FFmpeg 动态库构建，提供时间戳、RGBA 帧和 48 kHz 双声道 PCM；调用者
 串行使用每个解码句柄，并在下一次拉取或关闭前消费借用数据。Flutter Runner 可使用
 [ArtemisLegacyMedia](../tools/host-bindings/swift/ArtemisLegacyMedia.swift) 调度播放；解码库无需链接 Core。
 音视频时间戳以同一个容器起点为零，保留音轨相对于视频的启动偏移；PCM 块之间的空档表示静音。
