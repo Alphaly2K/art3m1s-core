@@ -3,9 +3,21 @@ set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-cargo tree --locked --all-features --manifest-path crates/artemis-core/Cargo.toml \
+manifest=crates/artemis-core/Cargo.toml
+features=(--all-features)
+legacy=0
+if [[ $# == 1 && $1 == --legacy-luau ]]; then
+  manifest=Cargo.toml
+  features=(--features gl-backend,metal-backend,vulkan-backend)
+  legacy=1
+elif [[ $# != 0 ]]; then
+  printf 'Usage: %s [--legacy-luau]\n' "$0" >&2
+  exit 2
+fi
+
+cargo tree --locked "${features[@]}" --manifest-path "$manifest" \
   --target all --edges normal,build --prefix none --format '{p}|{f}' |
-  awk -F '|' '
+  awk -F '|' -v legacy="$legacy" '
     function reject(message) {
       print message > "/dev/stderr"
       failed = 1
@@ -18,6 +30,12 @@ cargo tree --locked --all-features --manifest-path crates/artemis-core/Cargo.tom
       if (seen[package SUBSEP features]++) next
       features = "," features ","
       if (package == "luau0-src") luau_source = 1
+
+      if (package == "mlua" || package == "mlua-sys") {
+        if (features !~ /,luau,/ || features ~ /,(lua5[1-5]|luajit|luajit52|module),/)
+          reject("Artemis must use Luau in " package)
+      }
+      if (legacy) next
 
       if (package ~ /^(art3m1s-(core|media|native-render|rfvp|krkr|siglus)|art3m1s-artemis-(metal-host|media-host)|pfs-upk-rust|pf8|ash|glow|wgpu|shaderc|spirv-cross2|cpal|sdl3|winit|ffmpeg-next|ffmpeg-sys-next)$/) {
         reject("Host dependency in standalone Core: " package)
@@ -34,13 +52,9 @@ cargo tree --locked --all-features --manifest-path crates/artemis-core/Cargo.tom
         reject("Standalone Core must route file checks through the Host")
       if (package == "asb-interpreter" && features ~ /,system-clock,/)
         reject("Standalone Core must use Host time and seed")
-      if (package == "mlua" || package == "mlua-sys") {
-        if (features !~ /,luau,/ || features ~ /,(lua5[1-5]|luajit|luajit52|module),/)
-          reject("Standalone Core must use Luau in " package)
-      }
     }
     END {
-      if (!luau_source) reject("Luau source is missing from standalone Core")
+      if (!luau_source) reject("Luau source is missing from the Artemis build")
       exit failed
     }
   '

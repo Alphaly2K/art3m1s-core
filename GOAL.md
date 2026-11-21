@@ -1372,6 +1372,8 @@ Core `449fbd9` 的 Artemis v2 CI `44924619880` 在 Linux、Windows 和 macOS 均
 Metal 竞态回归、真机呈现和 Swift 冒烟通过。Flutter `37317fe` 的绑定一致性检查、macOS
 通道双会话、ANGLE 像素与媒体冒烟通过。上一轮发布 `44920856068` 的 macOS 归档已通过校验并上传。
 
+## macOS 生产验证与 Host 边界收口
+
 Flutter `f73ddab` 按千分值换算 v2 音频的轨道增益与声像，覆盖新播放、脚本调整和读档恢复。
 定向回归先复现 `gain=1` 按满音量播放。修复后 14 项媒体和帧循环测试及静态分析通过。macOS
 真机验证两个原生 A/B 播放器收到 0.001 的音量与 −0.001 的声像，并通过循环、交叉淡变、暂停
@@ -1409,6 +1411,12 @@ Flutter `f73ddab` 的发布运行 `44926115651` 全部通过。下载产物的 S
 解包后通过签名、ABI、媒体、混合着色器和运行时补载验证。Flutter `e190bcc` 将线程归属和帧
 token 的 C 回归加入最终 ZIP 的检查，已在本地签名发布包上通过。Host 接入指南同步了无画面
 配置和 macOS 生产选路。
+
+Flutter `aecc571` 的远端归档 `44928462899` 已上传。下载摘要与 Actions 一致，解包后通过
+最终 ZIP 的线程检查、媒体解码和混合着色器复验。
+
+CI 对独立 Core 和 legacy Artemis 检查 Luau 依赖。legacy 检查覆盖 GL、Metal 和 Vulkan
+的 feature 并集。本地验证两种正常依赖图通过，注入 `lua53` 的依赖图均被拒绝。
 
 ## 后续阶段
 

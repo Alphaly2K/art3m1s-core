@@ -26,6 +26,8 @@ jobs:
       run: git clone --depth 1 "$SIGLUS_REPOSITORY" "${GITHUB_WORKSPACE}/../siglus_rs"
     - name: Build
       run: cargo build --verbose
+    - name: Check Luau in legacy Artemis
+      run: bash scripts/check-host-v2-deps.sh --legacy-luau
     - name: Check legacy Artemis exports
       run: bash scripts/check-artemis-exports.sh legacy target/debug/libart3m1s_core.so
     - name: Run tests
