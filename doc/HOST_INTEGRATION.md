@@ -23,10 +23,12 @@ Host 在回调内复制所需数据。正常保存并关闭时，调用 `request
 
 使用 `cargo build --locked --manifest-path crates/artemis-core/Cargo.toml` 编译纯 Core 动态库。
 独立构建无需检出其他引擎。加载 C 动态库后
-通过 [C 头文件](abi/art3m1s_core_v2.draft.h) 中的 `art3m1s_get_api_v2` 查询 Runtime 和 Frame 表。
-创建 runtime 的线程负责所有调用；工作线程把结果交回该线程。Host 循环推进逻辑、处理请求并
-借用帧，绘制完释放令牌。只绘制精灵的 Host 可提交 `ART_RENDERER_CAP_SPRITE`；支持旧场景
-捕获及转场合成的 Host 同时提交 `ART_RENDERER_CAP_TRANSITION`。
+通过 [C 头文件](abi/art3m1s_core_v2.draft.h) 中的 `art3m1s_get_api_v2` 获取根表。可选的
+`ART_INTERFACE_CAPABILITIES` 列出 Core 接受的服务与渲染能力。Host 根据自身实现选择所需能力。
+实例调用由创建 runtime 的系统线程执行，工作线程把结果交回该线程。无画面会话使用
+`renderer_caps=0`，可推进脚本和服务。绘制会话查询 Frame 表，借用帧并在绘制完后释放令牌。
+只绘制精灵的 Host 声明 `ART_RENDERER_CAP_SPRITE`，支持转场合成时同时声明
+`ART_RENDERER_CAP_TRANSITION`。
 支持存档缩略图的 Host 可声明 `ART_RENDERER_CAP_SCREENSHOT`，按捕获请求中的帧 ID 绘制并保留
 图像，再按保存请求写入 save 命名空间。
 支持子场景离屏合成的 Host 声明 `ART_RENDERER_CAP_GROUP`，按帧包的组范围、效果与遮罩合成。
@@ -147,7 +149,7 @@ Host 只依赖引擎总抽象，不应直接依赖某个 adapter 的内部类型
 
 | 引擎 | 查询入口 | 当前状态 |
 |---|---|---|
-| Artemis / Art3m1s | `art3m1s_get_api_v1` / `art3m1s_get_api_v2` | v1 为生产路径；v2 为独立预览 |
+| Artemis / Art3m1s | `art3m1s_get_api_v1` / `art3m1s_get_api_v2` | 含完整运行库的 macOS 15 及以上包在 Metal 和 ANGLE/Metal 模式自动选择独立 v2。其他情况使用 v1 |
 | RFVP | `art3m1s_rfvp_get_api_v1` | 独立 adapter；默认 feature `rfvp-engine` |
 | KRKR / Kirikiri | `art3m1s_krkr_get_api_v1` | 早期 adapter；仅在使用 `krkr-engine` 且 native shim 可用时存在 |
 | Siglus | `art3m1s_siglus_get_api_v1` | 早期 adapter；`--features siglus-engine`，macOS Host 已接入；Kira 只混音，Host 通过独立 PCM ABI 输出声音；视频/对话框仍待迁移 |
