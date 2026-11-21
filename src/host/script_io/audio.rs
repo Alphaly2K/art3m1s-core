@@ -86,7 +86,7 @@ pub(super) struct Audio {
 
 struct Playback {
     id: u64,
-    snapshot: AudioChannelSnapshot,
+    snapshot: Option<AudioChannelSnapshot>,
     start_ns: Option<u64>,
     start_received: bool,
     terminal_received: bool,
@@ -103,10 +103,13 @@ impl Audio {
     pub(super) fn snapshot(&self) -> AudioSnapshot {
         let mut snapshot = AudioSnapshot::default();
         for (channel, track) in &self.active {
+            let Some(saved) = &track.snapshot else {
+                continue;
+            };
             match channel {
-                Channel::Bgm => snapshot.bgm = Some(track.snapshot.clone()),
-                Channel::Se(_) => snapshot.se.push(track.snapshot.clone()),
-                Channel::Voice(_) => snapshot.voice.push(track.snapshot.clone()),
+                Channel::Bgm => snapshot.bgm = Some(saved.clone()),
+                Channel::Se(_) => snapshot.se.push(saved.clone()),
+                Channel::Voice(_) => snapshot.voice.push(saved.clone()),
             }
         }
         snapshot
@@ -474,6 +477,10 @@ impl ScriptIoSession {
                 }
                 if *duration == 0 {
                     self.audio.active.clear();
+                } else {
+                    for track in self.audio.active.values_mut() {
+                        track.snapshot = None;
+                    }
                 }
             }
             Event::SoundFinishHandler {
@@ -605,11 +612,13 @@ impl Audio {
             Control::Stop(_) => {}
             Control::Gain(value, _) | Control::Pan(value, _) => {
                 for (channel, track) in &mut self.active {
-                    if matches(channel) {
+                    if matches(channel)
+                        && let Some(snapshot) = &mut track.snapshot
+                    {
                         if let Control::Gain(..) = command {
-                            track.snapshot.gain = value;
+                            snapshot.gain = value;
                         } else {
-                            track.snapshot.pan = value;
+                            snapshot.pan = value;
                         }
                     }
                 }
@@ -646,14 +655,14 @@ impl Play<'_> {
             record,
             Playback {
                 id,
-                snapshot: AudioChannelSnapshot {
+                snapshot: Some(AudioChannelSnapshot {
                     id: script_id.unwrap_or("bgm").to_owned(),
                     file: self.file.to_owned(),
                     loop_play: self.loop_play,
                     gain: self.gain.unwrap_or(1000),
                     pan: self.pan.unwrap_or(0),
                     skippable: self.skippable,
-                },
+                }),
                 start_ns: None,
                 start_received: false,
                 terminal_received: false,

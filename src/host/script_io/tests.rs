@@ -5455,6 +5455,39 @@ __engine:setEventHandler{onSave='on_save', onLoad='on_load'}
 }
 
 #[test]
+fn save_during_all_sound_fade_out_restores_only_later_playbacks() {
+    use crate::host::media::PlaybackStatus;
+
+    let (mut session, epoch, mut host) = playback_project(
+        br#"*top
+[splay file=theme.ogg loop=1]
+[seplay id=amb file=wind.ogg loop=1]
+[allsoundstop time=3000]
+[save file=quiet]
+[splay file=next.ogg loop=1]
+[save file=next]
+[stop]
+"#,
+    );
+    drive_display_snapshot(&mut session, &mut host, playback_frame(1, 0));
+
+    let saved_audio = |key: &str| {
+        let bytes = &host.files[&("save".into(), key.into())].1;
+        serde_json::from_slice::<crate::save::SaveData>(bytes)
+            .unwrap()
+            .audio
+            .unwrap()
+    };
+    assert_eq!(saved_audio("quiet"), crate::save::AudioSnapshot::default());
+    let next = saved_audio("next");
+    assert_eq!(next.bgm.unwrap().file, "next.ogg");
+    assert!(next.se.is_empty());
+    session
+        .submit_playback_status(epoch, 2, PlaybackStatus::Cancelled)
+        .unwrap();
+}
+
+#[test]
 fn numbered_save_restores_scene_text_and_audio_in_a_fresh_runtime() {
     use crate::host::{
         media::PlaybackStatus,
