@@ -415,7 +415,8 @@ private final class Registry: NSObject, FlutterTextureRegistry {
             }
             throw Failure(detail: "ANGLE scene never presented")
         }
-        let first = try render(["renderer": "metal", "mixedShaders": true, "hlslOnDemand": true])
+        let first = try render(["renderer": "metal", "mixedShaders": true, "hlslOnDemand": true,
+                                "glslSources": [FlutterStandardTypedData(bytes: shader)], "glslPrewarmMilliseconds": 0])
         let second = try render(["renderer": "angle"])
         _ = try messenger.call("close", session: second.session)
         guard let buffer = registry.textures[first.texture]?.copyPixelBuffer()?.takeRetainedValue() else {
