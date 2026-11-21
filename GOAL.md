@@ -8,10 +8,13 @@
 
 ## 当前阶段
 
-继续核对剩余快照字段、实机画面对照和生产 Host 接入。
-v2 预览已提供独立构建、C 内存 Host 和 Dart 封装；Linux、Windows 原生 CI 和生产 Host 切换待完成。
-生产 Flutter 的 macOS Artemis v2 可选预览已接入脚本截图、HTTP 和媒体。继续补齐脚本窗口操作等
-宿主服务，并用实际游戏验证存档兼容、帧时序和前后台切换，再决定默认切换条件。
+独立 v2 Core 已在 Linux、macOS 和 Windows 通过 C ABI 与独立 Host CI。macOS Flutter
+预览已验证真实音视频、会话切换、系统窗口状态及 v1 与 v2 存档互读。原版 GLSL 场景通过
+转场、原生呈现和跨会话读档像素对照。
+
+Host 按资源索引和预算预热 HLSL 与 GLSL，预算可以设为零。脚本运行中发现的其他效果由
+Host 查缓存或编译，准备完成后使用同一 ARFP 绘制路径。HLSL 通过 DXVK 与 MoltenVK
+执行，GLSL 由 ANGLE 执行。新包通过 Flutter 冷缓存启动、运行时补编译、重启复用和截图验证。
 
 当前 HLSL 转换仅覆盖已验证样本，保留为试验路径。生产候选使用兼容的 HLSL 编译器生成原引擎
 目标的 Direct3D 字节码，再由 DXVK 执行；Apple 平台优先验证 DXVK + MoltenVK。该组合已有
