@@ -100,6 +100,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime_cache = std::env::var_os("ARTEMIS_GL_SMOKE_CACHE_RUNTIME").is_some();
     if let Some(path) = &cache_directory {
         let backend = renderer.backend_mut();
+        if runtime_cache {
+            // Fill the in-memory prewarm cache before the first runtime draw.
+            for index in 0..256 {
+                let mut source = effect.shader.source.to_vec();
+                source.extend_from_slice(format!("\n// prewarm {index}\n").as_bytes());
+                backend.prepare_glsl(&source)?;
+            }
+        }
         assert!(backend.set_glsl_cache(path), "program binaries unavailable");
         if !runtime_cache {
             backend.prepare_glsl(&effect.shader.source)?;

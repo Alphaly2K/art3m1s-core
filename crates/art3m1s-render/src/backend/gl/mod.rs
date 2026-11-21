@@ -99,8 +99,9 @@ pub struct GlRenderer {
     program: glow::Program,
     program_bindings: ProgramBindings,
     custom_programs: HashMap<String, Rc<CustomProgram>>,
-    glsl_programs: HashMap<Box<[u8]>, Rc<CustomProgram>>,
+    glsl_programs: HashMap<Box<[u8]>, CachedGlslProgram>,
     glsl_source_bytes: usize,
+    glsl_cache_clock: u64,
     binary_cache: Option<binary_cache::Cache>,
     profile: ShaderProfile,
     white_texture: glow::Texture,
@@ -232,6 +233,7 @@ impl GlRenderer {
                 custom_programs,
                 glsl_programs: HashMap::new(),
                 glsl_source_bytes: 0,
+                glsl_cache_clock: 0,
                 binary_cache: None,
                 profile,
                 white_texture,
@@ -340,8 +342,10 @@ impl GlRenderer {
     }
 
     fn load_glsl(&mut self, source: &[u8]) -> Result<Rc<CustomProgram>, String> {
-        if let Some(program) = self.glsl_programs.get(source) {
-            return Ok(Rc::clone(program));
+        self.glsl_cache_clock += 1;
+        if let Some(cached) = self.glsl_programs.get_mut(source) {
+            cached.last_used = self.glsl_cache_clock;
+            return Ok(Rc::clone(&cached.program));
         }
         let program = unsafe {
             shader::build_glsl_effect_program(
@@ -352,10 +356,26 @@ impl GlRenderer {
             )?
         };
         let program = Rc::new(CustomProgram::new(&self.gl, program, true));
-        if self.can_cache_glsl(source) {
-            self.glsl_programs
-                .insert(source.into(), Rc::clone(&program));
+        if source.len() <= MAX_GLSL_SOURCE_BYTES {
+            // Active bindings own their programs even after a cache entry is evicted.
+            while !self.can_cache_glsl(source) {
+                let oldest = self
+                    .glsl_programs
+                    .iter()
+                    .min_by_key(|(_, cached)| cached.last_used)
+                    .map(|(key, _)| key.clone())
+                    .unwrap();
+                self.glsl_source_bytes -= oldest.len();
+                self.glsl_programs.remove(&oldest);
+            }
             self.glsl_source_bytes += source.len();
+            self.glsl_programs.insert(
+                source.into(),
+                CachedGlslProgram {
+                    program: Rc::clone(&program),
+                    last_used: self.glsl_cache_clock,
+                },
+            );
         }
         Ok(program)
     }
@@ -1381,6 +1401,11 @@ struct GroupTarget {
     texture: glow::Texture,
     width: i32,
     height: i32,
+}
+
+struct CachedGlslProgram {
+    program: Rc<CustomProgram>,
+    last_used: u64,
 }
 
 struct CustomProgram {
