@@ -420,6 +420,8 @@ const int ART_HOST_CAP_CHUNKED_WRITES = 32;
 
 const int ART_HOST_CAP_PROJECT_SAVE_PATH = 64;
 
+const int ART_HOST_CAP_OPEN_BROWSER = 128;
+
 const int ART_RENDERER_CAP_SPRITE = 1;
 
 const int ART_RENDERER_CAP_TRANSITION = 2;
@@ -495,6 +497,8 @@ const int ART_UI_HTTP_REQUEST = 5;
 const int ART_UI_HTTP_CANCEL = 6;
 
 const int ART_UI_TRANSLATE = 7;
+
+const int ART_UI_OPEN_BROWSER = 8;
 
 const int ART_IO_STAT = 1;
 

@@ -184,6 +184,7 @@ namespace Artemis.Host
         public const ulong ART_HOST_CAP_HTTP = 8ul;
         public const ulong ART_HOST_CAP_IO = 1ul;
         public const ulong ART_HOST_CAP_MEDIA = 4ul;
+        public const ulong ART_HOST_CAP_OPEN_BROWSER = 128ul;
         public const ulong ART_HOST_CAP_PROJECT_SAVE_PATH = 64ul;
         public const ulong ART_HOST_CAP_TRANSLATION = 16ul;
         public const ulong ART_HOST_CAP_UI = 2ul;
@@ -236,6 +237,7 @@ namespace Artemis.Host
         public const uint ART_UI_DIALOG = 2u;
         public const uint ART_UI_HTTP_CANCEL = 6u;
         public const uint ART_UI_HTTP_REQUEST = 5u;
+        public const uint ART_UI_OPEN_BROWSER = 8u;
         public const uint ART_UI_TRANSLATE = 7u;
         public const uint ART_UI_WINDOW_ACTION = 3u;
         public const uint ART_WAIT_IO = 1u;

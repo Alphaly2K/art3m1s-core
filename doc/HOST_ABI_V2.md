@@ -287,6 +287,7 @@ UI domain=4 的通知与请求不携带 blob。HTTP 完成回复可携带正文�
 | 5 `ui.http_request` | 请求，`method`（`get`、`post`）、`url`、有序二元组数组 `headers`、`data`、`file_data`，以及十进制字符串 `max_response_bytes` | `{"status":"ok","status_code":200}`，blob 为正文；也可回复失败状态 |
 | 6 `ui.http_cancel` | 可靠通知，被取消请求的 `request_id`（十进制字符串） | 无回复 |
 | 7 `ui.translate` | 后台请求，`text` 为原文，`ruby` 为当前注音字符串或 `null` | `{"status":"ok","text":"译文"}`；也可回复失败状态，始终无 blob |
+| 8 `ui.open_browser` | 可靠通知，`{"url":"…"}` | 无回复 |
 
 Host 按同一条 `ui.avoid` 记录更新遮罩和静音；解除静音时沿用原音量。`windowbutton=0` 忽略
 窗口按钮，`1` 使用平台默认动作，`2` 把按钮提交给 Core。Core 先交付退出回避通知，再派发
@@ -672,7 +673,9 @@ Host 声明 `ART_HOST_CAP_TRANSLATION` 后可收到后台翻译请求。Core 立
 
 当前 v2 未提供 `callnative` 服务。遇到该标签时清空指定的字符串结果并继续执行；Lua 的
 `e:tag` 在返回前写入结果，`e:enqueueTag` 在队列执行时写入。浏览器、剪贴板等行为由 Host
-决定支持情况，未实现时必须有明确的反馈规则。
+决定支持情况。Host 声明 `ART_HOST_CAP_OPEN_BROWSER` 后，`[openbrowser]` 发送 `ui.open_browser`。
+Host 根据平台的 URL 策略处理通知，脚本在通知入队后继续运行。未声明能力、URL 为空或超出消息
+元数据预算时，Core 跳过通知。
 
 窗口状态、字体列表/字体 blob、文本替换、reported OS、音量等作为 runtime 配置消息。
 INI 分节选择与 reported OS 保持独立。默认值和缺失/null/空串的区别必须写进 schema。

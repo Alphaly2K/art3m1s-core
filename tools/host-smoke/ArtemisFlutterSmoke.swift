@@ -110,6 +110,11 @@ private final class Registry: NSObject, FlutterTextureRegistry {
               let secondSession = secondState["session"] as? String,
               firstSession != secondSession else { throw Failure(detail: "Could not open independent sessions") }
         messenger.session = firstSession
+        guard let epoch = firstState["epoch"] as? String else { throw Failure(detail: "Missing session epoch") }
+        try expect(messenger.call("openBrowser", ["epoch": epoch, "url": "file:///example"]) as? Bool == false,
+                   "A non-web URL was accepted")
+        let staleBrowser = try messenger.call("openBrowser", ["epoch": "0", "url": "https://example.invalid"]) as? FlutterError
+        try expect(staleBrowser?.code == "stale_reply", "A stale browser request was accepted")
         try expect(messenger.call("surface", ["width": 4, "height": 4]) as? Int == 0, "Texture ID zero lost")
         try expect(messenger.call("present") == nil, "Presented without a frame")
 

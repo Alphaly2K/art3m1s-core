@@ -136,13 +136,15 @@ pub const HOST_CAP_HTTP: u64 = 8;
 pub const HOST_CAP_TRANSLATION: u64 = 16;
 pub const HOST_CAP_CHUNKED_WRITES: u64 = 32;
 pub const HOST_CAP_PROJECT_SAVE_PATH: u64 = 64;
+pub const HOST_CAP_OPEN_BROWSER: u64 = 128;
 pub(super) const HOST_CAPS: u64 = HOST_CAP_IO
     | HOST_CAP_UI
     | HOST_CAP_MEDIA
     | HOST_CAP_HTTP
     | HOST_CAP_TRANSLATION
     | HOST_CAP_CHUNKED_WRITES
-    | HOST_CAP_PROJECT_SAVE_PATH;
+    | HOST_CAP_PROJECT_SAVE_PATH
+    | HOST_CAP_OPEN_BROWSER;
 
 /// Create a runtime owned by the calling thread. Destroy it before that thread exits.
 #[cfg(test)]
@@ -174,6 +176,7 @@ pub(super) fn create_with_caps(
         session.set_random_seed(random_seed)?;
         session.media_enabled = host_caps & HOST_CAP_MEDIA != 0;
         session.http_enabled = host_caps & HOST_CAP_HTTP != 0;
+        session.open_browser_enabled = host_caps & HOST_CAP_OPEN_BROWSER != 0;
         session.translation_enabled = host_caps & HOST_CAP_TRANSLATION != 0;
         session.chunked_writes = host_caps & HOST_CAP_CHUNKED_WRITES != 0;
         session.project_save_path = host_caps & HOST_CAP_PROJECT_SAVE_PATH != 0;

@@ -25,6 +25,7 @@ static const char boot[] = "*top\n[lua]\n"
                            "[lyc id=1 width=2 height=1 color=ff112233]\n"
                            "[takess]\n[savess file=thumb]\n"
                            "[httpget url=https://example.invalid/status varname_code=t.http]\n"
+                           "[openbrowser url=https://example.invalid/manual]\n"
                            "[caption data=ready]\n[@]\n"
                            "[var system=fullscreen name=t.fs]\n[var system=minimize name=t.min]\n"
                            "[if estimate=\"$t.fs == 1 && t.min == 1\"]\n[caption data=advanced]\n[/if]\n"
@@ -222,7 +223,8 @@ static void service_io(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt,
     }
 }
 
-enum { SAVED_GLOBALS = 32, SAVED_SYSTEM = 64, CLOSED = 128, SCRIPT_PRINTED = 256, VIDEO_PLAYED = 512 };
+enum { SAVED_GLOBALS = 32, SAVED_SYSTEM = 64, CLOSED = 128, SCRIPT_PRINTED = 256,
+       VIDEO_PLAYED = 512, BROWSER_OPEN = 1024 };
 
 static unsigned pump(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt, uint64_t frame_id) {
     ArtStepInfo step = { .struct_size = sizeof(step), .host_frame_id = frame_id,
@@ -300,6 +302,11 @@ static unsigned pump(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt, uint64_t f
             } else if (domain == ART_DOMAIN_UI && kind == ART_UI_CAPTION) {
                 if (strstr(metadata, "\"ready\"")) observed |= 1;
                 if (strstr(metadata, "\"advanced\"")) observed |= 2;
+            } else if (domain == ART_DOMAIN_UI && kind == ART_UI_OPEN_BROWSER) {
+                assert(!request && (flags & ART_EVENT_FLAG_CRITICAL));
+                assert(!strcmp(metadata, "{\"url\":\"https://example.invalid/manual\"}"));
+                assert(!(observed & BROWSER_OPEN));
+                observed |= BROWSER_OPEN;
             } else if (domain == ART_DOMAIN_MEDIA && kind == ART_MEDIA_VIDEO_COMMAND) {
                 static const char field[] = "\"playback_id\":\"";
                 const char *id = strstr(metadata, field);
@@ -556,7 +563,8 @@ int main(int argc, char **argv) {
     assert(frames);
     check_api_header(&frames->header, ART_INTERFACE_FRAME, sizeof(*frames));
 
-    ArtCreateInfo info = { .struct_size = sizeof(info), .host_service_caps = ART_HOST_CAP_IO | ART_HOST_CAP_HTTP,
+    ArtCreateInfo info = { .struct_size = sizeof(info),
+                           .host_service_caps = ART_HOST_CAP_IO | ART_HOST_CAP_HTTP | ART_HOST_CAP_OPEN_BROWSER,
                            .renderer_caps = ART_RENDERER_CAP_SPRITE | ART_RENDERER_CAP_SCREENSHOT };
     if (shader_frame == HLSL) info.renderer_caps |= ART_RENDERER_CAP_HLSL;
     else if (shader_frame) info.renderer_caps |= ART_RENDERER_CAP_GLSL;
@@ -601,7 +609,7 @@ int main(int argc, char **argv) {
     ArtPollResult short_poll = { .struct_size = sizeof(short_poll) };
     assert(api->poll_events(rt, NULL, 0, &short_poll) == ART_E_BUFFER);
     assert(short_poll.required_next_bytes > 0 && short_poll.record_count == 0);
-    assert(pump(api, rt, 1) == (1 | 4 | 8 | 16 | SCRIPT_PRINTED));
+    assert(pump(api, rt, 1) == (1 | 4 | 8 | 16 | SCRIPT_PRINTED | BROWSER_OPEN));
 
     struct { ArtRuntimeState prefix; uint64_t tail; } state = {
         .prefix.struct_size = sizeof(state), .tail = UINT64_C(0x123456789abcdef0)

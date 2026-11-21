@@ -17,6 +17,11 @@ pub const UI_AVOID: MessageKind = MessageKind {
     kind: 4,
 };
 
+pub const UI_OPEN_BROWSER: MessageKind = MessageKind {
+    domain: Domain::Ui,
+    kind: 8,
+};
+
 impl ScriptIoSession {
     // None means this event was consumed and the interpreter can continue.
     pub(super) fn dispatch_ui_event(&mut self) -> Result<Option<ScriptIoProgress>, ProtocolError> {
@@ -30,6 +35,14 @@ impl ScriptIoSession {
             {
                 let body = MessageBody::new(json!({"command": command}).to_string(), vec![])?;
                 self.transport.notify(UI_WINDOW_ACTION, body)?;
+            }
+            Some(Event::OpenBrowser { url }) => {
+                if self.open_browser_enabled && !url.is_empty() {
+                    let body = MessageBody::new(json!({"url": url}).to_string(), vec![])?;
+                    if body.metadata().len() <= self.limits().metadata_bytes {
+                        self.transport.notify(UI_OPEN_BROWSER, body)?;
+                    }
+                }
             }
             Some(Event::CallNative { result, .. }) => {
                 if let Some(name) = result {
