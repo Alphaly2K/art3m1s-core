@@ -5,8 +5,9 @@ license = "MPL-2.0"
 edition = "2024"
 
 [features]
-default = ["console-diagnostics", "system-clock"]
+default = ["console-diagnostics", "filesystem-fallback", "system-clock"]
 console-diagnostics = []
+filesystem-fallback = []
 system-clock = ["dep:libc"]
 
 [dependencies]

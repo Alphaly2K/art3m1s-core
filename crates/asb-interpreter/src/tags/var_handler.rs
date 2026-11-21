@@ -400,10 +400,16 @@ pub fn execute_var_system(
             } else if let Some(exists) =
                 with_host_hooks(variables, |h| (h.file_exists)(&file, save))
             {
-                // 宿主钩子可查包文件/magic path/存档目录，优先于本地文件系统
                 exists
             } else {
-                std::path::Path::new(&file).exists()
+                #[cfg(feature = "filesystem-fallback")]
+                {
+                    std::path::Path::new(&file).exists()
+                }
+                #[cfg(not(feature = "filesystem-fallback"))]
+                {
+                    false
+                }
             };
             variables.set(name, Value::Bool(exists));
         }
