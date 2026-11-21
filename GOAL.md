@@ -1290,6 +1290,12 @@ KRKR 构建步骤失败。
 现场确认桌面锁屏且应用窗口未获得焦点。Shell 和输出设置的六项定向测试通过，真窗口复跑需要
 可聚焦的桌面。
 
+Core `7477df1` 和 Flutter `94fda1e` 同步了事件信封版本、长度与标志常量，保留现有编码。
+C、Dart 和 Swift Host 冒烟及双仓库绑定比对通过。独立 v2 CI `44886313349` 的 Windows、macOS、
+Linux 三组通过 ABI、Core 和 C#/Dart Host 验证。最新 Flutter 主分支的本地发布包已通过构建、
+签名和解包检查。远端发布预览 `44882053851` 的 Flutter 测试及 Android 包已通过，Apple 作业
+仍在构建 macOS。
+
 ## 后续阶段
 
 | 阶段 | 工作和可评审产物 | 通过条件 |
