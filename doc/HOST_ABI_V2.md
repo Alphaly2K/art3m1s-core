@@ -214,8 +214,9 @@ Core 根据舞台坐标捕获可拖动图层，并在 `dragarea` 内更新位置
 
 `submit` 原子受理一个批次并复制其 metadata/blob；返回后 Host 可释放输入。语义校验、
 容量和身份检查失败时整批不受理。受理不直接运行 Lua；只在 `step` 的确定性边界执行。
-输入、状态和结果在批内按顺序处理。初始建议上限为每批 4096 条、单条 blob 1 MiB，
-大文件必须分块，最终限制作为可查询能力冻结。
+输入、状态和结果在批内按顺序处理。批次最多 4096 条，普通结果的 metadata 和 blob 各限
+1 MiB。默认字体和图层视频帧使用单条控制消息，blob 最多 64 MiB，还须满足各自的资源预算。
+较大的文件通过分块 IO 交付。
 
 C 预览版 `ArtMessage.schema_version=1`、`flags=0`。一个批次可包含一组 IO/UI/Render 回复、一组输入，
 或单条控制消息。回复沿用原请求的 domain、kind、epoch 和 request_id。输入和控制的
@@ -234,10 +235,10 @@ C 预览版 `ArtMessage.schema_version=1`、`flags=0`。一个批次可包含一
 | Media (5) | 16 | `playback_id`、`status`（`started`、`ended`、`failed`、`cancelled`） |
 | Media (5) | 17 | `playback_id`、`frame_id`、`width`、`height`；blob 为 RGBA8 |
 
-`ArtCreateInfo` 的 Host 能力位分别为 IO=1、UI=2、Media=4、HTTP=8、Translation=16、
-ChunkedWrites=32。Renderer 位分别为 sprite=1、transition=2、screenshot=4、group=8、
-emote=16、HLSL=32、GLSL=64。
-预览版检查未知位；Host 仍须处理收到的服务请求，缺少可选服务时返回相应失败。
+`ArtCreateInfo` 的 Host 能力位为 IO=1、UI=2、Media=4、HTTP=8、Translation=16、
+ChunkedWrites=32、ProjectSavePath=64、OpenBrowser=128。渲染能力位为 sprite=1、transition=2、
+screenshot=4、group=8、emote=16、HLSL=32、GLSL=64。Core 拒绝未知位。Host 对已交付的
+请求提交对应结果。服务不可用时使用该请求定义的失败结果。
 
 窗口快照采用最近一次提交值，在下一逻辑帧或新开始的后台自动存档中生效。重试同一帧或同一次
 后台存档保持原快照。未提交快照时两项均为 false。
