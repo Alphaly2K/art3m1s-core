@@ -239,28 +239,33 @@ static unsigned pump(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt, uint64_t f
         ArtPollResult poll = { .struct_size = sizeof(poll) };
         ArtStatus status = api->poll_events(rt, events, sizeof(events), &poll);
         assert(status == ART_OK || status == ART_NO_DATA);
+        const size_t event_header_bytes = ART_EVENT_ENVELOPE_BYTES + ART_EVENT_BODY_HEADER_BYTES;
         size_t offset = 0;
         for (uint32_t index = 0; index < poll.record_count; ++index) {
-            assert(poll.written_bytes - offset >= 64);
+            assert(poll.written_bytes - offset >= event_header_bytes);
             const uint8_t *record = events + offset;
             size_t size = (size_t)little(record, 4);
-            assert(size >= 64 && size <= poll.written_bytes - offset);
+            assert(size >= event_header_bytes && size <= poll.written_bytes - offset);
+            assert(little(record + 4, 2) == ART_EVENT_ENVELOPE_VERSION);
             uint16_t domain = (uint16_t)little(record + 6, 2);
             uint32_t kind = (uint32_t)little(record + 8, 4);
             uint64_t epoch = little(record + 24, 8);
             uint64_t request = little(record + 40, 8);
-            size_t meta_size = (size_t)little(record + 56, 4);
+            uint64_t flags = little(record + 12, 4);
+            assert((flags & ART_EVENT_FLAG_JSON_BLOB) != 0);
+            assert(((flags & ART_EVENT_FLAG_REQUIRES_REPLY) != 0) == (request != 0));
+            size_t meta_size = (size_t)little(record + ART_EVENT_ENVELOPE_BYTES, 4);
             char metadata[512] = {0};
-            assert(meta_size < sizeof(metadata) && meta_size <= size - 64);
-            memcpy(metadata, record + 64, meta_size);
+            assert(meta_size < sizeof(metadata) && meta_size <= size - event_header_bytes);
+            memcpy(metadata, record + event_header_bytes, meta_size);
             if (domain == ART_DOMAIN_IO && kind == ART_IO_WRITE_ATOMIC) {
-                size_t blob_size = (size_t)little(record + 60, 4);
-                assert(blob_size != 0 && blob_size == size - 64 - meta_size);
+                size_t blob_size = (size_t)little(record + ART_EVENT_ENVELOPE_BYTES + 4, 4);
+                assert(blob_size != 0 && blob_size == size - event_header_bytes - meta_size);
                 assert(strstr(metadata, "\"namespace\":\"save\""));
 #ifdef ARTEMIS_DXVK_HOST_SMOKE
                 if (shader_host_mixed && strstr(metadata, "\"key\":\"mixed-slot\"")) {
                     assert(blob_size <= sizeof(mixed_slot));
-                    memcpy(mixed_slot, record + 64 + meta_size, blob_size);
+                    memcpy(mixed_slot, record + event_header_bytes + meta_size, blob_size);
                     mixed_slot_len = blob_size;
                 } else
 #endif
@@ -313,8 +318,8 @@ static unsigned pump(const ArtRuntimeApiV2 *api, ArtRuntimeHandle rt, uint64_t f
             } else if (domain == ART_DOMAIN_DIAGNOSTICS && kind == ART_DIAGNOSTIC_SCRIPT_PRINT) {
                 static const char line[] = "boot\tready\t\xff";
                 assert(request == 0 && !strcmp(metadata, "{}"));
-                assert(size - 64 - meta_size == sizeof(line) - 1);
-                assert(memcmp(record + 64 + meta_size, line, sizeof(line) - 1) == 0);
+                assert(size - event_header_bytes - meta_size == sizeof(line) - 1);
+                assert(memcmp(record + event_header_bytes + meta_size, line, sizeof(line) - 1) == 0);
                 assert(!(observed & SCRIPT_PRINTED));
                 observed |= SCRIPT_PRINTED;
             }

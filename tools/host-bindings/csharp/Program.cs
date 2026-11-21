@@ -9,6 +9,8 @@ using static Artemis.Host.ArtemisNative;
 
 internal static unsafe class Program
 {
+    private const int EventEnvelopeBytes = (int)ART_EVENT_ENVELOPE_BYTES;
+    private const int EventHeaderBytes = EventEnvelopeBytes + (int)ART_EVENT_BODY_HEADER_BYTES;
     private static readonly byte[] Boot = Encoding.UTF8.GetBytes(
         "*top\n[lyc id=1 width=4 height=4 color=ff112233]\n[flip]\n[stop]\n");
 
@@ -88,7 +90,9 @@ internal static unsafe class Program
             while (!records.IsEmpty)
             {
                 int size = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(records));
-                if (size < 64) throw new InvalidOperationException("Invalid event record size.");
+                if (size < EventHeaderBytes || size > records.Length ||
+                    BinaryPrimitives.ReadUInt16LittleEndian(records[4..]) != ART_EVENT_ENVELOPE_VERSION)
+                    throw new InvalidOperationException("Invalid event record envelope.");
                 ReplyToIo(runtime, handle, records[..size]);
                 records = records[size..];
             }
@@ -109,8 +113,8 @@ internal static unsafe class Program
     {
         if (BinaryPrimitives.ReadUInt16LittleEndian(record[6..]) != ART_DOMAIN_IO) return;
         uint kind = BinaryPrimitives.ReadUInt32LittleEndian(record[8..]);
-        int metadataSize = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(record[56..]));
-        using var metadata = JsonDocument.Parse(record.Slice(64, metadataSize).ToArray());
+        int metadataSize = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(record[EventEnvelopeBytes..]));
+        using var metadata = JsonDocument.Parse(record.Slice(EventHeaderBytes, metadataSize).ToArray());
         bool hasAsset = metadata.RootElement.GetProperty("key").GetString() == "boot.iet";
         byte[] payload = Array.Empty<byte>();
         string response;

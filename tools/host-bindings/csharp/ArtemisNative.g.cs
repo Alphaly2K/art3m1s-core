@@ -155,6 +155,12 @@ namespace Artemis.Host
         public const ushort ART_DOMAIN_RENDER = 6;
         public const ushort ART_DOMAIN_RUNTIME = 1;
         public const ushort ART_DOMAIN_UI = 4;
+        public const uint ART_EVENT_BODY_HEADER_BYTES = 8u;
+        public const uint ART_EVENT_ENVELOPE_BYTES = 56u;
+        public const ushort ART_EVENT_ENVELOPE_VERSION = 2;
+        public const uint ART_EVENT_FLAG_CRITICAL = 2u;
+        public const uint ART_EVENT_FLAG_JSON_BLOB = 256u;
+        public const uint ART_EVENT_FLAG_REQUIRES_REPLY = 1u;
         public const int ART_E_ARGUMENT = -1;
         public const int ART_E_BUFFER = -5;
         public const int ART_E_HANDLE = -2;

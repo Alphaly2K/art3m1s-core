@@ -242,10 +242,10 @@ emote=16、HLSL=32、GLSL=64。
 | 偏移 | 类型 | 字段 |
 |---|---|---|
 | 0 | u32 | record_bytes，含头和 body |
-| 4 | u16 | envelope_version，初值 2 |
+| 4 | u16 | envelope_version，`ART_EVENT_ENVELOPE_VERSION` |
 | 6 | u16 | domain |
 | 8 | u32 | kind，domain 内稳定编号 |
-| 12 | u32 | flags：0x1 requires_reply，0x2 critical，0x100 JSON/blob body |
+| 12 | u32 | flags：`ART_EVENT_FLAG_REQUIRES_REPLY`、`ART_EVENT_FLAG_CRITICAL`、`ART_EVENT_FLAG_JSON_BLOB` |
 | 16 | u64 | runtime_handle |
 | 24 | u64 | session_epoch |
 | 32 | u64 | sequence，runtime 生命周期单调递增 |
@@ -253,9 +253,10 @@ emote=16、HLSL=32、GLSL=64。
 | 48 | u32 | body_bytes |
 | 52 | u32 | reserved=0 |
 
-头长 56，`record_bytes = 56 + body_bytes`。控制记录 body 是小端
-`metadata_bytes:u32, blob_bytes:u32, UTF-8 JSON metadata, raw blob`，两段长度相加加 8
-必须等于 body_bytes；metadata 必须为 JSON object，无 NUL/隐含 padding。诊断使用相同 body。
+`record_bytes` 为 `ART_EVENT_ENVELOPE_BYTES` 加 `body_bytes`。body 的小端长度前缀
+包含 `metadata_bytes:u32` 和 `blob_bytes:u32`，共 `ART_EVENT_BODY_HEADER_BYTES` 字节，随后
+依次是 UTF-8 JSON 和原始 blob。两段长度与前缀长度的和必须等于 `body_bytes`。metadata
+必须为 JSON object，无 NUL 或填充。控制和诊断记录使用同一 body 格式。
 Runtime domain=1、kind=1 为 `session_changed`，request_id=0，metadata=`{}`，blob 为空。
 Host 声明 `ART_HOST_CAP_PROJECT_SAVE_PATH` 时，由 `open_project` 创建的会话在该事件中提供
 `{"save_path":"…"}`。该值是 Core 解析的逻辑相对子目录，使用 `/` 分隔并保留大小写；Host 可用

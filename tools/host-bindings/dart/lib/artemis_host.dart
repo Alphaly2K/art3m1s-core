@@ -473,19 +473,20 @@ List<ArtemisEvent> _decodeEvents(
   final data = ByteData.sublistView(bytes);
   final events = <ArtemisEvent>[];
   var offset = 0;
+  const envelopeBytes = ART_EVENT_ENVELOPE_BYTES;
+  const headerBytes = envelopeBytes + ART_EVENT_BODY_HEADER_BYTES;
   while (offset < bytes.length) {
-    const headerBytes = 64;
     const le = Endian.little;
     if (bytes.length - offset < headerBytes)
       throw const FormatException('Truncated Artemis event');
     final size = data.getUint32(offset, le);
-    final metadataSize = data.getUint32(offset + 56, le);
-    final blobSize = data.getUint32(offset + 60, le);
+    final metadataSize = data.getUint32(offset + envelopeBytes, le);
+    final blobSize = data.getUint32(offset + envelopeBytes + 4, le);
     if (size != headerBytes + metadataSize + blobSize ||
         size > bytes.length - offset ||
-        data.getUint16(offset + 4, le) != 2 ||
+        data.getUint16(offset + 4, le) != ART_EVENT_ENVELOPE_VERSION ||
         data.getUint64(offset + 16, le) != handle ||
-        data.getUint32(offset + 48, le) != size - 56) {
+        data.getUint32(offset + 48, le) != size - envelopeBytes) {
       throw const FormatException('Invalid Artemis event envelope');
     }
     final metadataStart = offset + headerBytes;

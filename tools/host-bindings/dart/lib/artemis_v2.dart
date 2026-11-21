@@ -394,6 +394,18 @@ const int ART_ABI_V2_MAJOR = 2;
 
 const int ART_SUBMIT_SCHEMA_VERSION = 1;
 
+const int ART_EVENT_ENVELOPE_VERSION = 2;
+
+const int ART_EVENT_ENVELOPE_BYTES = 56;
+
+const int ART_EVENT_BODY_HEADER_BYTES = 8;
+
+const int ART_EVENT_FLAG_REQUIRES_REPLY = 1;
+
+const int ART_EVENT_FLAG_CRITICAL = 2;
+
+const int ART_EVENT_FLAG_JSON_BLOB = 256;
+
 const int ART_HOST_CAP_IO = 1;
 
 const int ART_HOST_CAP_UI = 2;
