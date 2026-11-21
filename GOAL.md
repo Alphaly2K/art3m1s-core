@@ -1418,6 +1418,10 @@ Flutter `aecc571` 的远端归档 `44928462899` 已上传。下载摘要与 Acti
 CI 对独立 Core 和 legacy Artemis 检查 Luau 依赖。legacy 检查覆盖 GL、Metal 和 Vulkan
 的 feature 并集。本地验证两种正常依赖图通过，注入 `lua53` 的依赖图均被拒绝。
 
+Metal Host 构造时校验 Core 句柄和线程归属，校验完成后才初始化 GPU。真机探针先复现了
+跨线程构造返回成功，修复后对非所有者返回 `ART_E_THREAD`，无效句柄返回 `ART_E_HANDLE`。
+同一探针的像素、IOSurface、E-Mote、转场和截图回归及 Swift 会话验证通过。
+
 ## 后续阶段
 
 | 阶段 | 工作和可评审产物 | 通过条件 |

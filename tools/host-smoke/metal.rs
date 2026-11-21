@@ -81,6 +81,7 @@ void ps(float2 uv : TEXCOORD0, out float4 result : COLOR0) {
     let replacement = SharedSurface::new(Extent2D::new(8, 8))?;
     let mut native = NativeHost::open(&CString::new(adapter.as_bytes())?, &session)?;
     assert_eq!(native.present(0), Err(-6));
+    native.verify_runtime_binding();
     assert_eq!(native.wrong_thread_status(), -3);
     native.set_surface(Some(&shared))?;
     assert_eq!(native.present(0), Ok(None));

@@ -9,6 +9,7 @@ static void *library;
 static const ArtRuntimeApiV2 *runtime;
 static const ArtFrameApiV2 *frame;
 static void *native_library;
+static __typeof__(art3m1s_metal_host_v1_create) *native_create;
 static __typeof__(art3m1s_metal_host_v1_destroy) *native_destroy;
 static __typeof__(art3m1s_metal_host_v1_set_surface) *native_surface;
 static __typeof__(art3m1s_metal_host_v1_present) *native_present;
@@ -125,17 +126,23 @@ ArtStatus metal_native_open(const char *path, ArtRuntimeHandle rt, ArtMetalHost 
         fprintf(stderr, "%s\n", dlerror());
         return ART_E_UNSUPPORTED;
     }
-    __typeof__(art3m1s_metal_host_v1_create) *create =
-        dlsym(native_library, "art3m1s_metal_host_v1_create");
+    native_create = dlsym(native_library, "art3m1s_metal_host_v1_create");
     native_destroy = dlsym(native_library, "art3m1s_metal_host_v1_destroy");
     native_surface = dlsym(native_library, "art3m1s_metal_host_v1_set_surface");
     native_present = dlsym(native_library, "art3m1s_metal_host_v1_present");
     native_capture = dlsym(native_library, "art3m1s_metal_host_v1_capture");
     ArtStatus status = ART_E_UNSUPPORTED;
-    if (create && native_destroy && native_surface && native_present && native_capture) {
-        status = create(frame, rt, out);
+    if (native_create && native_destroy && native_surface && native_present && native_capture) {
+        status = native_create(frame, rt, out);
     }
     if (status != ART_OK) dlclose(native_library);
+    return status;
+}
+
+ArtStatus metal_native_check_binding(ArtRuntimeHandle rt) {
+    ArtMetalHost *host = NULL;
+    ArtStatus status = native_create(frame, rt, &host);
+    if (host) native_destroy(host);
     return status;
 }
 

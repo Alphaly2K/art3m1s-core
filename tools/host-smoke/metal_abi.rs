@@ -52,6 +52,7 @@ unsafe extern "C" {
     fn metal_pixels(rt: u64, token: u64, index: u32, pixels: *mut Bytes) -> i32;
     fn metal_release(rt: u64, token: u64) -> i32;
     fn metal_native_open(path: *const c_char, rt: u64, out: *mut *mut c_void) -> i32;
+    fn metal_native_check_binding(rt: u64) -> i32;
     fn metal_native_close(host: *mut c_void);
     fn metal_native_surface(host: *mut c_void, surface: *mut c_void) -> i32;
     fn metal_native_present(host: *mut c_void, after: u64, out: *mut u64) -> i32;
@@ -266,6 +267,15 @@ impl<'a> NativeHost<'a> {
             )
         };
         if status == 0 { Ok(()) } else { Err(status) }
+    }
+
+    pub fn verify_runtime_binding(&self) {
+        let runtime = self._session.id();
+        let foreign = std::thread::spawn(move || unsafe { metal_native_check_binding(runtime) })
+            .join()
+            .unwrap();
+        assert_eq!(foreign, -3);
+        assert_eq!(unsafe { metal_native_check_binding(u64::MAX) }, -2);
     }
 
     pub fn wrong_thread_status(&self) -> i32 {

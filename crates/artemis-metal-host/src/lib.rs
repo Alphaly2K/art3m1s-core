@@ -18,6 +18,7 @@ use std::sync::{LazyLock, Mutex};
 use std::thread::{self, ThreadId};
 
 const OK: i32 = 0;
+const NO_DATA: i32 = 1;
 const ARGUMENT: i32 = -1;
 const HANDLE: i32 = -2;
 const THREAD: i32 = -3;
@@ -583,8 +584,15 @@ unsafe fn create_host(
             return Err(ARGUMENT);
         }
         status(unsafe { metal_host_check_frames(table) })?;
+        let frames = Frames { table, runtime };
+        // No frame can be newer than this. The query checks the runtime without borrowing one.
+        match frames.acquire(u64::MAX) {
+            Err(NO_DATA) => {}
+            Err(error) => return Err(error),
+            Ok(_) => return Err(STATE),
+        }
         let host = Host {
-            frames: Frames { table, runtime },
+            frames,
             target: None,
             renderer: renderer()?,
             failed: false,
