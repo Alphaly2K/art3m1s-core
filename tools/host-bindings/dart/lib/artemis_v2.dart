@@ -526,6 +526,8 @@ const int ART_RUNTIME_SHUTDOWN = 16;
 
 const int ART_RUNTIME_SET_DEFAULT_FONT = 17;
 
+const int ART_RUNTIME_CANCEL_IO = 18;
+
 const int ART_INPUT_KEY = 1;
 
 const int ART_INPUT_POINTER = 2;

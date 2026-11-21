@@ -252,6 +252,11 @@ impl Runtime {
         Ok(runtime::submit_shutdown(self.handle, epoch)?)
     }
 
+    /// Cancel a pending file IO request from this runtime and epoch.
+    pub fn cancel_io(&self, epoch: u64, request_id: u64) -> Result<(), Error> {
+        Ok(runtime::cancel_io(self.handle, epoch, request_id)?)
+    }
+
     /// Read a newer frame without copying its commands or textures. The frame
     /// stays valid across any steps or reloads performed inside `draw`.
     pub fn with_latest_frame<T>(

@@ -225,6 +225,7 @@ namespace Artemis.Host
         public const ulong ART_RENDERER_CAP_TRANSITION = 2ul;
         public const uint ART_RENDER_CAPTURE = 1u;
         public const uint ART_RENDER_SAVE_CAPTURE = 2u;
+        public const uint ART_RUNTIME_CANCEL_IO = 18u;
         public const uint ART_RUNTIME_CLOSED = 4u;
         public const uint ART_RUNTIME_CLOSED_EVENT = 4u;
         public const uint ART_RUNTIME_CLOSING = 3u;

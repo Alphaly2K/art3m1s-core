@@ -125,6 +125,7 @@ private final class Registry: NSObject, FlutterTextureRegistry {
         var checkedIdentity = false
         var checkedPlayback = false
         var sawBrowser = false
+        let usesLegacyCore = ProcessInfo.processInfo.environment["ARTEMIS_SMOKE_LEGACY_CAPABILITIES"] == "1"
         for _ in 0..<24 where !ready {
             try expect(messenger.call("step", tick) is [String: Any], "Could not step")
             guard let events = try messenger.call("poll") as? [[String: Any]] else { throw Failure(detail: "Could not poll") }
@@ -170,6 +171,24 @@ private final class Registry: NSObject, FlutterTextureRegistry {
                                "Fixture needs coinciding request IDs")
                     let error = try messenger.call("submit", ["batch": [reply]], session: secondSession) as? FlutterError
                     try expect(error?.code == "stale_reply", "Accepted reply from another session")
+                    if !usesLegacyCore, let request = event["request"] as? String {
+                        var cancel: [String: Any] = [
+                            "domain": Int(ArtSwiftRuntimeDomain), "kind": Int(ArtSwiftCancelIo),
+                            "epoch": epoch, "request": "0", "owner": firstSession,
+                            "metadata": FlutterStandardTypedData(bytes: try JSONSerialization.data(withJSONObject: [
+                                "request_id": request,
+                            ])),
+                        ]
+                        let wrong = try messenger.call("submit", ["batch": [cancel]], session: secondSession) as? FlutterError
+                        try expect(wrong?.code == "stale_reply", "Accepted cancellation from another session")
+                        cancel["owner"] = secondSession
+                        try expect(messenger.call("submit", ["batch": [cancel]], session: secondSession) as? Bool == true,
+                                   "Could not cancel the delivered IO request")
+                        var late = reply
+                        late["owner"] = secondSession
+                        let cancelled = try messenger.call("submit", ["batch": [late]], session: secondSession) as? FlutterError
+                        try expect(cancelled?.code == "stale_reply", "Accepted a reply after cancellation")
+                    }
                     checkedIdentity = true
                 }
                 try expect(messenger.call("submit", ["batch": [reply]]) as? Bool == true, "Reply not accepted")
@@ -178,8 +197,7 @@ private final class Registry: NSObject, FlutterTextureRegistry {
             }
         }
         try expect(ready && checkedIdentity && checkedPlayback, "Project did not complete the channel checks")
-        let expectsBrowser = ProcessInfo.processInfo.environment["ARTEMIS_SMOKE_LEGACY_CAPABILITIES"] != "1"
-        try expect(sawBrowser == expectsBrowser, "Browser availability did not match the Core capability table")
+        try expect(sawBrowser != usesLegacyCore, "Browser availability did not match the Core capability table")
         try exerciseBackgroundAutosave(messenger, tick: tick)
         try expect(messenger.call("present") is String, "Frame not presented")
         try expect(messenger.call("present") == nil && registry.notifications == [0], "Notified twice for the same frame")

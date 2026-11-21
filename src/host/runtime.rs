@@ -262,6 +262,16 @@ pub fn submit_shutdown(handle: RuntimeHandle, epoch: u64) -> Result<(), RuntimeE
     with_session(handle, |session| Ok(session.submit_shutdown(epoch)?))
 }
 
+/// Cancel a pending file IO request. Resume the operation on the next step.
+#[cfg(any(not(feature = "legacy"), feature = "host-abi-v2"))]
+pub(super) fn cancel_io(
+    handle: RuntimeHandle,
+    epoch: u64,
+    request_id: u64,
+) -> Result<(), RuntimeError> {
+    with_session(handle, |session| Ok(session.cancel_io(epoch, request_id)?))
+}
+
 /// Queue an ordered batch of input for the next newly accepted Host frame.
 pub fn submit_input(
     handle: RuntimeHandle,

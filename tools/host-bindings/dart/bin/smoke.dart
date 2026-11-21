@@ -383,7 +383,12 @@ function extend(e)
   assert(denied == nil and string.find(reason, 'denied'))
   local f = assert(io.open('save/sub/slot', 'a'))
   f:write(string.rep('Az', $repeats))
-  assert(f:close())
+  local ok, reason = pcall(f.close, f)
+  if not ok then
+    assert(string.find(reason, 'cancelled'))
+    assert(e:file('save/sub/slot') == '$prefix')
+    assert(f:close())
+  end
   assert(e:file('save/sub/slot') == '$prefix' .. string.rep('Az', $repeats))
   local empty = assert(io.open('save/sub/empty', 'w'))
   assert(empty:close() and e:isFileExists('save/sub/empty'))
@@ -410,6 +415,8 @@ end
     utcOffsetMinutes: 0,
   );
   ArtemisEvent? abandoned;
+  String? cancelledTransaction;
+  var aborted = false;
   void pump({required bool abandonAfterStaging}) {
     for (var turn = 0; turn < 64; turn++) {
       step();
@@ -419,7 +426,44 @@ end
         events = session.pollEvents()
       ) {
         for (final event in events) {
+          if (!abandonAfterStaging &&
+              cancelledTransaction == null &&
+              event.domain == ART_DOMAIN_IO &&
+              event.kind == ART_IO_WRITE_ATOMIC &&
+              event.metadata['transaction_id'] is String &&
+              event.metadata['offset'] != '0') {
+            final id = event.metadata['transaction_id'] as String;
+            require(session.cancelIo(event), 'Cancellation would block');
+            require(
+              session.state.waitFlags & ART_WAIT_IO != 0,
+              'Cancellation lost the suspended IO frame',
+            );
+            try {
+              session.submit([
+                event.reply({
+                  'status': 'ok',
+                  'transaction_id': id,
+                  'next_offset': event.metadata['size'],
+                }),
+              ]);
+              throw StateError('Core accepted a reply to a cancelled request');
+            } on ArtemisError catch (error) {
+              if (error.status != ART_E_STALE) rethrow;
+            }
+            cancelledTransaction = id;
+            continue;
+          }
           final reply = io.handle(event);
+          if (event.domain == ART_DOMAIN_IO &&
+              event.kind == ART_IO_WRITE_ABORT) {
+            require(
+              event.metadata['transaction_id'] == cancelledTransaction &&
+                  !pendingExists() &&
+                  saved.readAsStringSync() == prefix,
+              'Abort did not discard only the cancelled transaction',
+            );
+            aborted = true;
+          }
           if (reply != null) {
             if (abandonAfterStaging && reply.metadata['status'] == 'staged') {
               require(
@@ -434,6 +478,12 @@ end
                 'A partial write changed the live file',
               );
               if (abandonAfterStaging) {
+                try {
+                  session.cancelIo(event);
+                  throw StateError('Core cancelled an acknowledged request');
+                } on ArtemisError catch (error) {
+                  if (error.status != ART_E_STALE) rethrow;
+                }
                 abandoned = event;
                 return;
               }
@@ -481,6 +531,7 @@ end
     }
     open(session);
     pump(abandonAfterStaging: false);
+    require(aborted, 'No write abort was delivered');
     require(
       saved.lengthSync() == total && !pendingExists(),
       'Chunked write did not complete',

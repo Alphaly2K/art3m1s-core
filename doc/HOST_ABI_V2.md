@@ -232,6 +232,7 @@ C 预览版 `ArtMessage.schema_version=1`、`flags=0`。一个批次可包含一
 | Input (2) | 6 | 窗口快照 `fullscreen`、`minimized`（布尔） |
 | Runtime (1) | 16 | `{}`，请求正常关闭 |
 | Runtime (1) | 17 | `{}`，blob 为默认字体 |
+| Runtime (1) | 18 | `request_id`，要取消的文件 IO 请求 ID，使用十进制字符串 |
 | Media (5) | 16 | `playback_id`、`status`（`started`、`ended`、`failed`、`cancelled`） |
 | Media (5) | 17 | `playback_id`、`frame_id`、`width`、`height`；blob 为 RGBA8 |
 
@@ -399,6 +400,13 @@ Core 只在最后一块得到合法确认后恢复脚本。失败回复沿用上
 `io.write_abort` 是 IO kind=6 的可靠通知，metadata 为 `{"transaction_id":"…"}`，无 blob 和回复。
 Host 收到通知后停止并清理该事务尚未提交的内容。迟到的分块确认返回 `STALE`，已完成的原子
 替换不可撤销。Host 还应在会话替换或销毁时清理旧事务。
+
+Host 可用 `ART_RUNTIME_CANCEL_IO` 取消同一 runtime 与 epoch 下已交付的文件 IO 请求。
+Core 受理后在下一次 `step` 交付取消结果，有暂存分块时先排入 `io.write_abort`。
+如果控制队列满，调用返回 `WOULD_BLOCK`，Host 排空后可重试。请求未交付时返回 `STATE`，
+请求已确认或不再有效时返回 `STALE`。Host 管理自身的外部任务，应在取消成功后停止处理目标请求。
+要取消写入，Host 须先保证后台任务尚未执行最终替换。旧版 Core 对这条可选控制消息返回
+`UNSUPPORTED`。
 
 `[file]` 和 Luau `e:file{command=…}` 的 `copy`、`move` 和 `delete` 使用 save 命名空间。
 复制和移动通过 `stat/read`

@@ -228,6 +228,26 @@ final class ArtemisSession {
     ),
   ]);
 
+  /// Cancels a pending file IO request. If this returns false, poll events
+  /// and retry. A successful cancellation is applied by the next step.
+  bool cancelIo(ArtemisEvent event) {
+    if (!event.belongsTo(this) ||
+        event.domain != ART_DOMAIN_IO ||
+        !event.requiresReply) {
+      throw ArgumentError('Expected an IO request from this session');
+    }
+    return submit([
+      ArtemisMessage(
+        domain: ART_DOMAIN_RUNTIME,
+        kind: ART_RUNTIME_CANCEL_IO,
+        epoch: event.epoch,
+        metadata: {
+          'request_id': BigInt.from(event.requestId).toUnsigned(64).toString(),
+        },
+      ),
+    ]);
+  }
+
   void openProject(
     List<int> ini, {
     required String platform,

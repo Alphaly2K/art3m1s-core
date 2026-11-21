@@ -17,6 +17,8 @@ mod video;
 mod wait;
 mod write_chunks;
 
+#[cfg(any(test, not(feature = "legacy"), feature = "host-abi-v2"))]
+pub use self::write_chunks::IO_WRITE_ABORT;
 #[cfg(any(test, not(feature = "legacy")))]
 pub use self::{
     audio::MEDIA_AUDIO_COMMAND,
@@ -27,7 +29,6 @@ pub use self::{
     translation::UI_TRANSLATE,
     ui::{UI_AVOID, UI_CAPTION, UI_DIALOG, UI_OPEN_BROWSER, UI_WINDOW_ACTION},
     video::MEDIA_VIDEO_COMMAND,
-    write_chunks::IO_WRITE_ABORT,
 };
 use lifecycle::Shutdown;
 
@@ -452,7 +453,7 @@ impl ScriptIoSession {
             host_frame_id: self.frame.map(|frame| frame.id),
             latest_render_frame_id: self.frames.latest_id(),
             stage_size: (transport.epoch != 0).then_some([config.stage_width, config.stage_height]),
-            waiting_for_io: self.operation.is_some() || self.background_autosave,
+            waiting_for_io: self.operation.is_some() || self.cancelled || self.background_autosave,
             waiting_for_ui: (self.dialogs_enabled
                 && matches!(self.scenario_event, Some(Event::ShowDialog { .. })))
                 || self.http.waits_for_host(),
@@ -854,8 +855,21 @@ impl ScriptIoSession {
         self.transport.submit_replies(replies)
     }
 
-    #[cfg(test)]
-    pub fn cancel_pending(&mut self) -> Result<(), ProtocolError> {
+    #[cfg(any(not(feature = "legacy"), feature = "host-abi-v2"))]
+    pub(super) fn cancel_io(&mut self, epoch: u64, request_id: u64) -> Result<(), ProtocolError> {
+        if self.faulted {
+            return Err(ProtocolError::State);
+        }
+        let identity = self
+            .identity
+            .filter(|identity| identity.epoch == epoch && identity.request_id == request_id)
+            .ok_or(ProtocolError::Stale)?;
+        self.transport.check_delivered(identity)?;
+        self.cancel_pending()
+    }
+
+    #[cfg(any(test, not(feature = "legacy"), feature = "host-abi-v2"))]
+    fn cancel_pending(&mut self) -> Result<(), ProtocolError> {
         if self.operation.is_none() {
             return Err(ProtocolError::State);
         }

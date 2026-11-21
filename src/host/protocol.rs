@@ -632,10 +632,7 @@ impl SessionTransport {
         let mut seen = HashSet::new();
         let mut bytes = 0usize;
         for reply in replies {
-            let pending = self.find_pending(reply.identity)?;
-            if !pending.delivered {
-                return Err(ProtocolError::State);
-            }
+            self.check_delivered(reply.identity)?;
             if !seen.insert(reply.identity.request_id) {
                 return Err(ProtocolError::Stale);
             }
@@ -688,6 +685,13 @@ impl SessionTransport {
                 true
             }
         });
+        Ok(())
+    }
+
+    pub(super) fn check_delivered(&self, identity: RequestIdentity) -> Result<(), ProtocolError> {
+        if !self.find_pending(identity)?.delivered {
+            return Err(ProtocolError::State);
+        }
         Ok(())
     }
 
