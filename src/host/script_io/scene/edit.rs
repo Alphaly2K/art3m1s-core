@@ -108,6 +108,16 @@ impl LayerEdits {
         name.starts_with(EDIT_PREFIX)
     }
 
+    pub(super) fn overlay_assets(&self) -> impl Iterator<Item = &str> {
+        self.layers
+            .values()
+            .flat_map(|edited| edited.steps.iter().flatten())
+            .filter_map(|step| match step {
+                EditStep::Blend { asset, .. } => Some(asset.as_str()),
+                _ => None,
+            })
+    }
+
     pub(super) fn capture(
         &self,
         assets: &HashMap<String, Option<Arc<FrameTexture>>>,

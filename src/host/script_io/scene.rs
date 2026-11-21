@@ -9,6 +9,7 @@ use crate::video_layer::{
 };
 use asb_interpreter::event::{LayerEvent, WaitReason};
 use asb_interpreter::lua_engine::EngineCallbacks;
+use std::collections::HashSet;
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 
@@ -247,7 +248,7 @@ impl SceneProjection {
         self.dirty = true;
     }
 
-    fn missing_assets<'a>(&'a self, event: &'a Event) -> impl Iterator<Item = &'a str> {
+    fn event_assets<'a>(&'a self, event: &'a Event) -> impl Iterator<Item = &'a str> {
         let files = match event {
             Event::Layer(LayerEvent::Create { file, .. } | LayerEvent::Create2 { file, .. }) => {
                 [Some(file.as_str()), None, None]
@@ -297,11 +298,37 @@ impl SceneProjection {
             Event::LayerEdit { mode, file, .. } if mode == "blend" => [file.as_deref(), None, None],
             _ => [None, None, None],
         };
-        files.into_iter().flatten().filter(|file| {
-            !file.is_empty()
-                && !is_video_layer_texture_name(file)
-                && !self.textures.contains_key(*file)
-        })
+        files
+            .into_iter()
+            .flatten()
+            .filter(|file| !file.is_empty() && !is_video_layer_texture_name(file))
+    }
+
+    fn missing_assets<'a>(&'a self, event: &'a Event) -> impl Iterator<Item = &'a str> {
+        self.event_assets(event)
+            .filter(|file| !self.textures.contains_key(*file))
+    }
+
+    fn make_texture_room<'a>(
+        &mut self,
+        rgba_len: usize,
+        protected: impl IntoIterator<Item = &'a str>,
+    ) -> bool {
+        if self.textures.len() >= MAX_TEXTURES || rgba_len > MAX_TEXTURE_BYTES - self.texture_bytes
+        {
+            let keep: HashSet<_> = scene_assets(self.compositor.scene(), self.shader_caps)
+                .chain(self.edited.overlay_assets())
+                .collect();
+            let protected: HashSet<_> = protected.into_iter().collect();
+            self.textures.retain(|key, texture| {
+                if keep.contains(key.as_str()) || protected.contains(key.as_str()) {
+                    return true;
+                }
+                self.texture_bytes -= texture.as_ref().map_or(0, |texture| texture.rgba.len());
+                false
+            });
+        }
+        self.textures.len() < MAX_TEXTURES && rgba_len <= MAX_TEXTURE_BYTES - self.texture_bytes
     }
 
     fn layer_info(&self, layer: &crate::compositor::Layer) -> HashMap<String, String> {
@@ -347,6 +374,7 @@ struct PendingAsset {
     event: Event,
     read: TextureRead,
     remaining: VecDeque<String>,
+    protected: Vec<String>,
 }
 
 pub(super) enum AssetProgress {
@@ -358,6 +386,7 @@ pub(super) enum AssetProgress {
 pub(super) struct TextureRead {
     file: String,
     exact_path: Option<String>,
+    over_budget: bool,
 }
 
 impl TextureRead {
@@ -370,6 +399,7 @@ impl TextureRead {
             Self {
                 file,
                 exact_path: Some(path),
+                over_budget: false,
             },
             request,
         )
@@ -547,62 +577,26 @@ impl SceneIo {
         scene.dirty = true;
     }
 
-    pub(super) fn missing_snapshot_textures(
+    pub(super) fn snapshot_textures(
         &self,
         snapshot: &crate::compositor::Scene,
         edits: &EditSnapshot,
-    ) -> Result<VecDeque<String>, ProtocolError> {
+    ) -> Result<(HashSet<String>, VecDeque<String>), ProtocolError> {
         let scene = self.scene.lock().unwrap();
-        let required = LayerEdits::required_assets(snapshot, edits)?;
-        let missing_edits = required
-            .into_iter()
-            .filter(|file| scene.textures.get(*file).and_then(Option::as_ref).is_none());
-        Ok(snapshot
-            .all_layers()
-            .flat_map(|layer| {
-                let props = &layer.props;
-                let custom_shader = scene.shader_caps != 0
-                    && props.shader.as_deref().is_some_and(|id| !id.is_empty());
-                let binding = |name: &str| {
-                    let reference = props.custom.get(name)?;
-                    Some(
-                        snapshot
-                            .get(reference)
-                            .and_then(|layer| layer.file.as_deref())
-                            .unwrap_or(reference),
-                    )
-                };
-                let user = props
-                    .shader_textures
-                    .iter()
-                    .find(|name| name.eq_ignore_ascii_case("textureUser"));
-                [
-                    layer.file.as_deref(),
-                    layer.mask.as_deref(),
-                    props
-                        .custom
-                        .get("intermediate_render_mask")
-                        .map(String::as_str),
-                    custom_shader.then(|| binding("mask")).flatten(),
-                    custom_shader
-                        .then(|| user.and_then(|name| binding(name)))
-                        .flatten(),
-                ]
+        let edited = LayerEdits::required_assets(snapshot, edits)?;
+        let required: std::collections::BTreeSet<_> = scene_assets(snapshot, scene.shader_caps)
+            .chain(edited.iter().copied())
+            .collect();
+        let missing = required
+            .iter()
+            .filter(|&&file| match scene.textures.get(file) {
+                None => true,
+                Some(None) => edited.contains(&file),
+                Some(Some(_)) => false,
             })
-            .flatten()
-            .chain(snapshot.anime_states.values().flat_map(|state| {
-                state
-                    .frames
-                    .iter()
-                    .flat_map(|frame| [Some(frame.file.as_str()), frame.mask.as_deref()])
-                    .flatten()
-            }))
-            .filter(|file| !file.is_empty() && !scene.textures.contains_key(*file))
-            .chain(missing_edits)
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .map(str::to_owned)
-            .collect())
+            .map(|&file| file.to_owned())
+            .collect();
+        Ok((required.into_iter().map(str::to_owned).collect(), missing))
     }
 
     pub(super) fn capture_layer_edits(&self) -> Result<EditSnapshot, ProtocolError> {
@@ -643,6 +637,7 @@ impl SceneIo {
                 event: event.clone(),
                 read,
                 remaining: VecDeque::new(),
+                protected: Vec::new(),
             });
             return Some(request);
         }
@@ -660,6 +655,7 @@ impl SceneIo {
             event: event.clone(),
             read,
             remaining,
+            protected: scene.event_assets(event).map(str::to_owned).collect(),
         });
         Some(request)
     }
@@ -673,7 +669,11 @@ impl SceneIo {
                 ..
             }
         );
-        if let Some(request) = self.complete_texture(&mut pending.read, response) {
+        if let Some(request) = self.complete_texture(
+            &mut pending.read,
+            response,
+            pending.protected.iter().map(String::as_str),
+        ) {
             self.pending = Some(pending);
             return AssetProgress::More(request);
         }
@@ -695,19 +695,22 @@ impl SceneIo {
         TextureRead::start(file, &scene.magic_paths)
     }
 
-    pub(super) fn complete_texture(
+    pub(super) fn complete_texture<'a>(
         &self,
         read: &mut TextureRead,
         response: IoResponse,
+        protected: impl IntoIterator<Item = &'a str>,
     ) -> Option<IoRequest> {
         let mut scene = self.scene.lock().unwrap();
-        let image = match &response {
-            IoResponse::Read(bytes) if scene.textures.len() < MAX_TEXTURES => {
-                decode_texture(bytes, MAX_TEXTURE_BYTES - scene.texture_bytes)
-            }
+        let image = match response {
+            IoResponse::Read(ref bytes) => decode_texture(bytes),
             _ => None,
         };
-        if image.is_none()
+        let has_image = image.is_some();
+        let rgba_len = image.as_ref().map_or(0, |image| image.as_raw().len());
+        let fits = scene.make_texture_room(rgba_len, protected);
+        read.over_budget |= has_image && !fits;
+        if (!has_image || !fits)
             && !matches!(
                 response,
                 IoResponse::Failed {
@@ -719,7 +722,7 @@ impl SceneIo {
         {
             return Some(IoRequest::Read { path });
         }
-        if scene.textures.len() < MAX_TEXTURES {
+        if fits && (has_image || !read.over_budget) {
             let texture = image.and_then(|image| {
                 let (width, height) = image.dimensions();
                 let rgba = image.into_raw().into_boxed_slice();
@@ -736,17 +739,91 @@ impl SceneIo {
                     rgba,
                 }))
             });
-            scene
+            let existing = scene
                 .textures
                 .insert(std::mem::take(&mut read.file), texture);
+            if let Some(Some(texture)) = existing {
+                scene.texture_bytes -= texture.rgba.len();
+            }
         }
         None
     }
 }
 
+fn scene_assets(scene: &crate::compositor::Scene, shader_caps: u64) -> impl Iterator<Item = &str> {
+    scene
+        .all_layers()
+        .flat_map(move |layer| {
+            let props = &layer.props;
+            let custom_shader =
+                shader_caps != 0 && props.shader.as_deref().is_some_and(|id| !id.is_empty());
+            let binding = |name: &str| {
+                let reference = props.custom.get(name)?;
+                Some(
+                    scene
+                        .get(reference)
+                        .and_then(|layer| layer.file.as_deref())
+                        .unwrap_or(reference),
+                )
+            };
+            let user = props
+                .shader_textures
+                .iter()
+                .find(|name| name.eq_ignore_ascii_case("textureUser"));
+            [
+                layer.file.as_deref(),
+                layer.mask.as_deref(),
+                props
+                    .custom
+                    .get("intermediate_render_mask")
+                    .map(String::as_str),
+                custom_shader.then(|| binding("mask")).flatten(),
+                custom_shader
+                    .then(|| user.and_then(|name| binding(name)))
+                    .flatten(),
+            ]
+        })
+        .flatten()
+        .chain(scene.anime_states.values().flat_map(|state| {
+            state
+                .frames
+                .iter()
+                .flat_map(|frame| [Some(frame.file.as_str()), frame.mask.as_deref()])
+                .flatten()
+        }))
+        .filter(|file| !file.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn texture_pressure_reclaims_only_unbound_assets() {
+        let mut scene = SceneProjection::default();
+        scene.compositor.set_layer_file("1", Some("visible".into()));
+        scene.compositor.set_layer_mask("1", Some("mask"));
+        for key in ["visible", "mask", "restored", "obsolete"] {
+            scene.textures.insert(
+                key.into(),
+                Some(Arc::new(FrameTexture {
+                    revision: scene.textures.len() as u64 + 1,
+                    width: 1,
+                    height: 1,
+                    rgba: vec![0; 4].into(),
+                })),
+            );
+            scene.texture_bytes += 4;
+        }
+        let leased = scene.textures["obsolete"].clone().unwrap();
+
+        assert!(scene.make_texture_room(MAX_TEXTURE_BYTES - 12, ["restored"]));
+        assert!(!scene.textures.contains_key("obsolete"));
+        assert_eq!(scene.texture_bytes, 12);
+        assert_eq!(leased.rgba(), [0; 4]);
+        assert!(!scene.make_texture_room(MAX_TEXTURE_BYTES - 8, ["restored"]));
+        assert_eq!(scene.textures.len(), 3);
+    }
 
     #[test]
     fn video_budget_only_retries_when_promotion_can_free_space() {
@@ -778,7 +855,7 @@ mod tests {
     }
 }
 
-fn decode_texture(bytes: &[u8], available: usize) -> Option<image::RgbaImage> {
+fn decode_texture(bytes: &[u8]) -> Option<image::RgbaImage> {
     let mut reader = image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::Png);
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(8192);
@@ -787,7 +864,7 @@ fn decode_texture(bytes: &[u8], available: usize) -> Option<image::RgbaImage> {
     reader.limits(limits);
     let image = reader.decode().ok()?;
     let rgba_len = u64::from(image.width()) * u64::from(image.height()) * 4;
-    (rgba_len <= MAX_IMAGE_BYTES && rgba_len <= available as u64).then(|| image.into_rgba8())
+    (rgba_len <= MAX_IMAGE_BYTES).then(|| image.into_rgba8())
 }
 
 impl EngineCallbacks for SceneCallbacks {

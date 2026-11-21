@@ -41,7 +41,7 @@ use asb_interpreter::{
     CallbackResult, Event, ExecutionResult, HostTime, Interpreter, InterpreterConfig, Script,
 };
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
 
 pub const IO_STAT: MessageKind = MessageKind {
@@ -195,6 +195,7 @@ enum NumberedLoadWork {
         load: Box<PreparedLoad>,
         remaining: VecDeque<String>,
         pending: scene::TextureRead,
+        protected: HashSet<String>,
     },
     ReadingSavedShader {
         load: Box<PreparedLoad>,
@@ -1628,6 +1629,7 @@ impl ScriptIoSession {
                 load,
                 mut remaining,
                 mut pending,
+                protected,
             } => {
                 let response = response.ok_or(ProtocolError::State)?;
                 if let IoResponse::Failed {
@@ -1638,16 +1640,21 @@ impl ScriptIoSession {
                     return Ok(self.fail_numbered_load(IoFailure::Cancelled, message));
                 }
                 let scene = self.scene.as_ref().ok_or(ProtocolError::State)?;
-                if let Some(request) = scene.complete_texture(&mut pending, response) {
+                if let Some(request) = scene.complete_texture(
+                    &mut pending,
+                    response,
+                    protected.iter().map(String::as_str),
+                ) {
                     self.numbered_load = Some(NumberedLoadWork::ReadingScene {
                         load,
                         remaining,
                         pending,
+                        protected,
                     });
                     return Ok(ScenarioStep::Request(request));
                 }
                 if let Some(file) = remaining.pop_front() {
-                    return self.read_saved_scene_texture(load, remaining, file);
+                    return self.read_saved_scene_texture(load, remaining, file, protected);
                 }
                 self.restore_numbered_load(load)
             }
@@ -1841,8 +1848,8 @@ impl ScriptIoSession {
                 return Ok(self.fail_numbered_load(IoFailure::IoError, "invalid saved scene tree"));
             }
             snapshot.strip_video_bindings();
-            let mut remaining =
-                match scene.missing_snapshot_textures(snapshot, &load.file.layer_edits) {
+            let (protected, mut remaining) =
+                match scene.snapshot_textures(snapshot, &load.file.layer_edits) {
                     Ok(files) => files,
                     Err(error) => {
                         let kind = if error == ProtocolError::Limit {
@@ -1860,7 +1867,7 @@ impl ScriptIoSession {
                 return Ok(self.fail_numbered_load(IoFailure::Denied, "invalid saved texture path"));
             }
             if let Some(file) = remaining.pop_front() {
-                return self.read_saved_scene_texture(load, remaining, file);
+                return self.read_saved_scene_texture(load, remaining, file, protected);
             }
         }
         self.restore_numbered_load(load)
@@ -1871,6 +1878,7 @@ impl ScriptIoSession {
         load: Box<PreparedLoad>,
         remaining: VecDeque<String>,
         file: String,
+        protected: HashSet<String>,
     ) -> Result<ScenarioStep, ScriptIoError> {
         let scene = self.scene.as_ref().ok_or(ProtocolError::State)?;
         let (pending, request) = scene.start_texture_read(file);
@@ -1878,6 +1886,7 @@ impl ScriptIoSession {
             load,
             remaining,
             pending,
+            protected,
         });
         Ok(ScenarioStep::Request(request))
     }
