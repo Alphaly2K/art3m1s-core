@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check that every public message kind resolves to a metadata schema."""
+"""Check the public message IDs and their metadata schema references."""
 
 import json
 from pathlib import Path
@@ -32,6 +32,14 @@ for field, macro in (
 
 domains = {symbol for symbol in values if symbol.startswith('ART_DOMAIN_')}
 require(set(index['domains']) == domains, 'Message index and C header domains differ')
+kind_macros = header[header.index('#define ART_RUNTIME_SESSION_CHANGED'):header.index('/* Draft ARFP')]
+public_kinds = set(re.findall(r'^#define (ART_\w+) ', kind_macros, re.M))
+codes = index['codes']
+require(codes.keys() == domains | public_kinds, 'Message codes and C header symbols differ')
+for symbol, code in codes.items():
+    require(type(code) is int and code == values.get(symbol), f'{symbol} differs from the published message code')
+require(len({codes[domain] for domain in domains}) == len(domains), 'Duplicate message domain code')
+
 dispatch = set()
 indexed_kinds = set()
 definitions = {file.name: load(file)['$defs'] for file in abi.glob('artemis-*-v2.schema.json')}
@@ -54,18 +62,18 @@ for file, schema in definitions.items():
 for domain, directions in index['domains'].items():
     name = domain.removeprefix('ART_DOMAIN_')
     prefix = 'ART_DIAGNOSTIC_' if name == 'DIAGNOSTICS' else f'ART_{name}_'
+    domain_kinds = {}
     for direction, entries in directions.items():
         require(direction in ('events', 'submissions'), f'Unknown message direction: {direction}')
         for symbol, reference in entries.items():
-            require(symbol in values and symbol.startswith(prefix), f'{symbol} does not belong to {domain}')
-            key = (values[domain], direction, values[symbol])
-            require(key not in dispatch, f'Duplicate kind in {domain} {direction}: {symbol}')
+            require(symbol in public_kinds and symbol.startswith(prefix), f'{symbol} does not belong to {domain}')
+            kind = codes[symbol]
+            other = domain_kinds.setdefault(kind, symbol)
+            require(other == symbol, f'{domain} has duplicate kind {kind}: {other}, {symbol}')
             file, _, definition = reference.partition('#/$defs/')
             require(definition in definitions.get(file, {}), f'{symbol} points to missing {reference}')
-            dispatch.add(key)
+            dispatch.add((codes[domain], direction, kind))
             indexed_kinds.add(symbol)
 
-kind_macros = header[header.index('#define ART_RUNTIME_SESSION_CHANGED'):header.index('/* Draft ARFP')]
-public_kinds = set(re.findall(r'^#define (ART_\w+) ', kind_macros, re.M))
 require(indexed_kinds == public_kinds, f'Message index and C header kinds differ: {sorted(indexed_kinds ^ public_kinds)}')
 print(f'Artemis message index covers {len(indexed_kinds)} kinds in {len(dispatch)} direction-specific entries')

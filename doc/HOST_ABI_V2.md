@@ -1,4 +1,4 @@
-# Artemis Host ABI v2：接口契约（草案）
+# Artemis Host ABI v2 接口契约
 
 状态：v2 C 预览使用 `cargo build --locked --manifest-path crates/artemis-core/Cargo.toml`。
 独立预览发布 C 动态库；仓库根目录的构建继续用于 v1 和现有 Rust 调用者。导出审计见
@@ -15,17 +15,14 @@
 与 CPU 侧计算，Host 执行物理 IO、GPU 绘制、音视频解码/输出和最终呈现。Host 拥有
 renderer，core 不保留原生 GPU 合成与 present 的生产路径；现有 renderer 以 Host SDK 复用。
 
-其余建议决策：
+其他接口约定如下。
 
 1. 新增独立 v2，冻结 v1 布局、返回值和 feature 语义；禁止原地把 v1 指针参数改成整数。
 2. 一个动态查询符号、小型 runtime 表、独立 frame 表，能力与消息 schema 分开版本化。
 3. 继续使用 Host 调 core、core 排队、Host 拉取；不恢复 native→Dart 或其他语言反向回调。
 4. 所有游戏状态、输出和请求按 runtime 隔离；会话重载增加 epoch。
 5. 统一 status、代际句柄、明确所有权；不公开 Rust 容器、trait、DrawList 内存布局或平台指针。
-6. 先完成 IO continuation 与帧契约验证，再冻结 v2 的消息编号、capability 位和绑定。
-
-发布的 ABI 必须定义完整的消息 kind、能力位、渲染 opcode 和资源格式，并提供对应的
-Host 一致性验证。预览版只承诺本页列出的已实现部分，协议编号尚待冻结。
+6. 已发布的消息编号、能力位和渲染 opcode 在各自的协议版本内保持稳定。接入方按能力和版本协商使用新增功能。
 
 ## 2. 职责边界
 
@@ -236,8 +233,9 @@ C 预览版 `ArtMessage.schema_version=1`、`flags=0`。一个批次可包含一
 | Media (5) | 16 | `playback_id`、`status`（`started`、`ended`、`failed`、`cancelled`） |
 | Media (5) | 17 | `playback_id`、`frame_id`、`width`、`height`；blob 为 RGBA8 |
 
-可按 domain、kind 和方向查找 `metadata_utf8` 的 schema。数值取自 C 头文件。各消息的
-blob 和处理规则见对应服务章节。[消息索引](abi/artemis-messages-v2.json)
+可按 domain、kind 和方向查找 `metadata_utf8` 的 schema。消息索引的 `codes` 将符号映射到
+协议数值，`domains` 按方向提供 Schema 引用。CI 对照 C 头文件校验编号，并核对 Schema
+引用。各消息的 blob 和处理规则见对应服务章节。[消息索引](abi/artemis-messages-v2.json)
 
 `ArtCreateInfo` 的 Host 能力位为 IO=1、UI=2、Media=4、HTTP=8、Translation=16、
 ChunkedWrites=32、ProjectSavePath=64、OpenBrowser=128。渲染能力位为 sprite=1、transition=2、
