@@ -615,6 +615,16 @@ RGBA8 字形图集，将字形四边形按消息层顺序放进帧包；图集�
 
 ## 8. 媒体、UI、配置与诊断
 
+Host 按消息方向和 kind，从[媒体消息 schema](abi/artemis-media-v2.schema.json)选择对应的
+`metadata_utf8` 定义。
+
+| 方向 | kind | schema 定义 |
+|---|---|---|
+| Core → Host | `ART_MEDIA_AUDIO_COMMAND` (1) | `#/$defs/audioCommand` |
+| Core → Host | `ART_MEDIA_VIDEO_COMMAND` (2) | `#/$defs/videoCommand` |
+| Host → Core | `ART_MEDIA_PLAYBACK_STATUS` (16) | `#/$defs/playbackStatus` |
+| Host → Core | `ART_MEDIA_VIDEO_FRAME` (17) | `#/$defs/videoFrame` |
+
 媒体命令保留 BGM、SE 和语音的增益、声像、淡变、交叉淡入、A/B 循环段及跳过设置。
 `play`、`restore` 和轨道调整中的增益与声像使用整数千分值。`gain=1000` 对应原始音量，
 负值按静音处理。`pan` 限制在 −1000 到 1000，分别对应最左和最右，0 为居中。未指定的
@@ -658,8 +668,8 @@ Media kind=2 交付视频命令。`op=play` 带有十进制字符串 `playback_i
 
 图层视频使用 `submit_video_frame` 提交连续的 `frame_id`、尺寸和紧密排列的自上而下 RGBA8
 像素。Core 复制像素；同一播放只接受递增的帧 ID，下一受理逻辑帧只使用最新的一份。过期帧
-和终态后的帧返回 `Stale`。单张帧最多 64 MiB，当前和待用数据合计最多 128 MiB；已借出的
-帧有自己的有效期。如果推进逻辑帧能释放足够空间，提交返回 `WOULD_BLOCK`，Host 可在推进后
+和终态后的帧返回 `Stale`。宽高各为 1–8192，单张帧最多 64 MiB，当前和待用数据合计最多 128 MiB。
+已借出的帧有自己的有效期。如果推进逻辑帧能释放足够空间，提交返回 `WOULD_BLOCK`，Host 可在推进后
 按原帧 ID 和像素重试；否则超预算返回 `LIMIT`。自然结束会解除目标图层上仍指向该视频的绑定；
 Host 可以先等最后一帧提交成功并进入下一逻辑帧，再回报 `Ended`。旧借用不因新画面或播放
 完成而改变。

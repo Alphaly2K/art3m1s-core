@@ -231,6 +231,14 @@ void exerciseHost(
       BigInt.parse(video.id) <= (BigInt.one << 63)) {
     throw StateError('Unexpected layer video command or truncated playback ID');
   }
+  for (final (width, height) in [(8193, 1), (1, 8193)]) {
+    try {
+      video.videoFrame(1, width, height, Uint8List(width * height * 4));
+    } on ArgumentError {
+      continue;
+    }
+    throw StateError('Dart accepted a layer video dimension above 8192');
+  }
   final pixels = Uint8List.fromList([8, 16, 32, 255]);
   final frame = videoEvent!.videoFrame(1, 1, 1, pixels);
   send(frame);

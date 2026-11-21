@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Artemis v2 media metadata",
+  "description": "Select the definition using the direction and kind from the domain 5 message envelope. These schemas describe the JSON metadata. The envelope carries the session epoch and the separate binary payload.",
+  "$defs": {
+    "audioCommand": {
+      "description": "Core to Host, kind 1, empty binary payload.",
+      "oneOf": [
+        { "$ref": "#/$defs/audioPlay" },
+        { "$ref": "#/$defs/audioUpdate" },
+        { "$ref": "#/$defs/audioVolume" },
+        { "$ref": "#/$defs/audioStopAll" },
+        { "$ref": "#/$defs/audioRestore" }
+      ]
+    },
+    "videoCommand": {
+      "description": "Core to Host, kind 2, empty binary payload.",
+      "oneOf": [
+        { "$ref": "#/$defs/videoPlay" },
+        { "$ref": "#/$defs/videoStopAll" }
+      ]
+    },
+    "playbackStatus": {
+      "description": "Host to Core, kind 16, request ID zero and empty binary payload.",
+      "type": "object",
+      "required": ["playback_id", "status"],
+      "properties": {
+        "playback_id": { "$ref": "#/$defs/playbackId" },
+        "status": { "enum": ["started", "ended", "failed", "cancelled"] }
+      }
+    },
+    "videoFrame": {
+      "description": "Host to Core, kind 17, request ID zero. The binary payload is top-down, tightly packed, straight RGBA8 with width times height times four bytes, up to 64 MiB. The frame ID increases within a playback.",
+      "type": "object",
+      "required": ["playback_id", "frame_id", "width", "height"],
+      "properties": {
+        "playback_id": { "$ref": "#/$defs/playbackId" },
+        "frame_id": { "$ref": "#/$defs/uint64" },
+        "width": { "type": "integer", "minimum": 1, "maximum": 8192 },
+        "height": { "type": "integer", "minimum": 1, "maximum": 8192 }
+      }
+    },
+    "audioPlay": {
+      "type": "object",
+      "required": [
+        "op", "playback_id", "replaces", "channel", "id", "key", "loop",
+        "loop_key", "gain", "pan", "fade_ms", "buffer_ms", "skippable", "crossfade"
+      ],
+      "properties": {
+        "op": { "const": "play" },
+        "playback_id": { "$ref": "#/$defs/playbackId" },
+        "replaces": { "$ref": "#/$defs/replacedPlayback" },
+        "channel": { "enum": ["bgm", "se", "voice"] },
+        "id": { "type": ["string", "null"], "description": "Script channel ID. Null for BGM." },
+        "key": { "$ref": "#/$defs/assetKey" },
+        "loop": { "type": "boolean" },
+        "loop_key": {
+          "description": "Optional asset for the repeating segment of an A/B loop.",
+          "anyOf": [{ "$ref": "#/$defs/assetKey" }, { "type": "null" }]
+        },
+        "gain": { "$ref": "#/$defs/optionalInt32", "description": "Gain in thousandths. Null uses 1000." },
+        "pan": { "$ref": "#/$defs/optionalInt32", "description": "Pan in thousandths. Null uses 0." },
+        "fade_ms": { "$ref": "#/$defs/uint64" },
+        "buffer_ms": { "$ref": "#/$defs/optionalInt32" },
+        "skippable": { "type": "boolean" },
+        "crossfade": { "type": "boolean" }
+      }
+    },
+    "audioUpdate": {
+      "type": "object",
+      "required": ["op", "playback_ids", "time_ms", "value"],
+      "properties": {
+        "op": { "enum": ["stop", "gain", "pan"] },
+        "playback_ids": { "type": "array", "items": { "$ref": "#/$defs/playbackId" } },
+        "time_ms": { "$ref": "#/$defs/uint64" },
+        "value": { "$ref": "#/$defs/optionalInt32", "description": "Null for stop. Otherwise gain or pan in thousandths." }
+      },
+      "if": { "properties": { "op": { "const": "stop" } } },
+      "then": { "properties": { "value": { "type": "null" } } },
+      "else": { "properties": { "value": { "type": "integer" } } }
+    },
+    "audioVolume": {
+      "type": "object",
+      "required": ["op", "channel", "level"],
+      "properties": {
+        "op": { "const": "volume" },
+        "channel": { "enum": ["master", "bgm", "se", "voice", "video"] },
+        "level": { "type": "integer", "minimum": 0, "maximum": 1000 }
+      }
+    },
+    "audioStopAll": {
+      "type": "object",
+      "required": ["op", "fade_ms"],
+      "properties": {
+        "op": { "const": "stop_all" },
+        "fade_ms": { "$ref": "#/$defs/uint64" }
+      }
+    },
+    "audioRestore": {
+      "type": "object",
+      "required": ["op", "plays", "stop_video"],
+      "properties": {
+        "op": { "const": "restore" },
+        "plays": { "type": "array", "items": { "$ref": "#/$defs/audioPlay" } },
+        "stop_video": { "type": "boolean" }
+      }
+    },
+    "videoPlay": {
+      "type": "object",
+      "required": ["op", "playback_id", "replaces", "layer", "key", "loop", "skip", "delay_margin_ms"],
+      "properties": {
+        "op": { "const": "play" },
+        "playback_id": { "$ref": "#/$defs/playbackId" },
+        "replaces": { "$ref": "#/$defs/replacedPlayback" },
+        "layer": { "type": ["string", "null"], "description": "Target layer ID. Null for fullscreen playback." },
+        "key": { "$ref": "#/$defs/assetKey" },
+        "loop": { "type": "boolean" },
+        "skip": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647,
+          "description": "0 disables skipping. 1 allows clicking to skip. 2 allows skipping through the menu only. Other values have no skip action."
+        },
+        "delay_margin_ms": { "$ref": "#/$defs/optionalInt32", "minimum": 0 }
+      }
+    },
+    "videoStopAll": {
+      "type": "object",
+      "required": ["op"],
+      "properties": { "op": { "const": "stop_all" } }
+    },
+    "assetKey": { "type": "string", "minLength": 1, "description": "Logical key in the project asset namespace." },
+    "uint64": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$",
+      "description": "Canonical unsigned 64-bit decimal string. Its numeric value must fit in 64 bits."
+    },
+    "playbackId": {
+      "$ref": "#/$defs/uint64",
+      "not": { "const": "0" },
+      "description": "Opaque playback ID assigned by Core. Preserve all digits across the Host boundary."
+    },
+    "replacedPlayback": { "anyOf": [{ "$ref": "#/$defs/playbackId" }, { "type": "null" }] },
+    "optionalInt32": { "type": ["integer", "null"], "minimum": -2147483648, "maximum": 2147483647 }
+  }
+}
