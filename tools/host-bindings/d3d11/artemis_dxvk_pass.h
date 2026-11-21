@@ -29,6 +29,7 @@ typedef struct ArtDxvkUniform {
 
 /* Use one context per owner thread. Destroy its programs and targets before the context. */
 ART_DXVK_API ArtDxvkContext *art_dxvk_context_create(void);
+/* Returns NULL after a failed GPU handoff. Recreate the context to use effects again. */
 ART_DXVK_API void *art_dxvk_context_metal_device(const ArtDxvkContext *context);
 ART_DXVK_API void art_dxvk_context_destroy(ArtDxvkContext *context);
 

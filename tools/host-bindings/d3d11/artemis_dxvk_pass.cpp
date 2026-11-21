@@ -16,6 +16,7 @@ struct ArtDxvkContext {
     Com<ID3D11RasterizerState> rasterizer;
     Com<ID3D11SamplerState> point_sampler, linear_sampler;
     void *metal_device = host.metal_device();
+    std::unique_ptr<ArtDxvkTargets> failed_import;
 
     ArtDxvkContext() {
         auto *device = host.device();
@@ -37,7 +38,7 @@ struct ArtDxvkContext {
         context->RSSetState(rasterizer.ptr());
     }
 
-    ~ArtDxvkContext() { host.context()->ClearState(); }
+    ~ArtDxvkContext();
 };
 
 struct ArtDxvkProgram {
@@ -98,10 +99,11 @@ struct ArtDxvkTargets {
                 "Cannot create DXVK foreground view");
         require(SUCCEEDED(owner->CreateRenderTargetView(output->texture(), nullptr, &target)),
                 "Cannot create DXVK output view");
-        host.prepare_input(*foreground);
         viewport = {0, 0, float(width), float(height), 0, 1};
     }
 };
+
+ArtDxvkContext::~ArtDxvkContext() { host.context()->ClearState(); }
 
 static Com<ID3D11ShaderResourceView> upload(ID3D11Device *device, ArtDxvkImage image) {
     require(image.rgba && image.width && image.height && image.width <= D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION &&
@@ -128,11 +130,14 @@ ArtDxvkContext *art_dxvk_context_create(void) try {
     return nullptr;
 }
 
-void *art_dxvk_context_metal_device(const ArtDxvkContext *context) { return context->metal_device; }
+void *art_dxvk_context_metal_device(const ArtDxvkContext *context) {
+    return context->host.available() ? context->metal_device : nullptr;
+}
 void art_dxvk_context_destroy(ArtDxvkContext *context) { delete context; }
 
 ArtDxvkProgram *art_dxvk_program_create(ArtDxvkContext *context, const uint8_t *ade, size_t size) try {
     require(context && ade && size, "DXVK requires compiled shader bytes");
+    require(context->host.available(), "DXVK device unavailable");
     return new ArtDxvkProgram(context->host.device(), {reinterpret_cast<const char *>(ade), size});
 } catch (const std::exception &error) {
     std::fprintf(stderr, "%s\n", error.what());
@@ -144,8 +149,16 @@ int art_dxvk_program_straight_alpha(const ArtDxvkProgram *program) { return prog
 void art_dxvk_program_destroy(ArtDxvkProgram *program) { delete program; }
 
 ArtDxvkTargets *art_dxvk_targets_create(ArtDxvkContext *context, IOSurfaceRef foreground, IOSurfaceRef output) try {
-    require(context != nullptr, "DXVK requires a context");
-    return new ArtDxvkTargets(context->host, foreground, output);
+    require(context && context->host.available(), "DXVK target device unavailable");
+    auto targets = std::make_unique<ArtDxvkTargets>(context->host, foreground, output);
+    try {
+        context->host.prepare_input(*targets->foreground);
+    } catch (...) {
+        // Hold the imported images until teardown if their layout transition failed to complete.
+        context->failed_import = std::move(targets);
+        throw;
+    }
+    return targets.release();
 } catch (const std::exception &error) {
     std::fprintf(stderr, "%s\n", error.what());
     return nullptr;
@@ -156,6 +169,7 @@ void art_dxvk_targets_destroy(ArtDxvkTargets *targets) { delete targets; }
 int art_dxvk_draw(ArtDxvkContext *context, ArtDxvkProgram *program, const ArtDxvkTargets *targets,
                   ArtDxvkImage mask, ArtDxvkImage user, const ArtDxvkUniform *uniforms, size_t count) try {
     require(context && program && targets && (uniforms || !count), "Invalid DXVK draw arguments");
+    require(context->host.available(), "DXVK device unavailable");
     auto *device = context->host.device();
     require(program->owner == device && targets->owner == device, "DXVK draw uses objects from different devices");
     program->effect.reset_uniforms(program->data);

@@ -136,12 +136,16 @@ impl Effects {
     }
 
     fn context(&self) -> Result<Handle, String> {
-        self.context
+        let context = self
+            .context
             .get()
             .ok_or("DXVK effect context has not been prepared")?
             .as_ref()
-            .map(|context| context.raw)
-            .map_err(Clone::clone)
+            .map_err(Clone::clone)?;
+        if unsafe { (self.metal_device)(context.raw) }.is_null() {
+            return Err("DXVK effect context is unavailable".into());
+        }
+        Ok(context.raw)
     }
 
     pub fn cache(&mut self, device: &Device, source: &[u8], artifact: &[u8]) -> Result<(), String> {
@@ -178,6 +182,8 @@ impl Effects {
                     },
                 ),
             );
+        } else {
+            self.context()?;
         }
         Ok(())
     }
@@ -192,7 +198,7 @@ impl Effects {
     }
 
     pub fn contains(&self, name: &str) -> bool {
-        self.active.id(name).is_some()
+        self.active.id(name).is_some() && self.context().is_ok()
     }
 
     pub fn straight_alpha(&self, name: &str) -> bool {
@@ -207,11 +213,11 @@ impl Effects {
         device: &Device,
         extent: Extent2D,
     ) -> Result<&PrivateRenderTarget, String> {
+        let context = self.context()?;
         if self.targets[slot]
             .as_ref()
             .is_none_or(|targets| targets.foreground.extent != extent)
         {
-            let context = self.context()?;
             let (fore_surface, foreground) = shared_texture(device, extent)?;
             let (out_surface, output) = shared_texture(device, extent)?;
             let raw = unsafe { (self.create_targets)(context, &fore_surface, &out_surface) }

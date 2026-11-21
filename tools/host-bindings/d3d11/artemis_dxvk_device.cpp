@@ -5,8 +5,10 @@
 #include "d3d11/d3d11_fence.h"
 #include "dxvk/dxvk_adapter.h"
 
+#include <chrono>
 #include <cstring>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 namespace artemis {
@@ -84,6 +86,8 @@ void *DxvkDevice::metal_device() const {
 }
 
 void DxvkDevice::wait() {
+    failed_ = true;
+    needs_drain_ = true;
     const uint64_t value = ++completion_value_;
     require(SUCCEEDED(signal_context_->Signal(completed_.ptr(), value)), "Cannot signal D3D11 completion fence");
     VkSemaphoreWaitInfo wait = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
@@ -91,27 +95,45 @@ void DxvkDevice::wait() {
     wait.pSemaphores = &completion_semaphore_;
     wait.pValues = &value;
     constexpr uint64_t timeout_ns = UINT64_C(3000000000);
-    require(vkWaitSemaphores(vulkan_, &wait, timeout_ns) == VK_SUCCESS,
-            "D3D11 rendering did not complete");
+    const VkResult result = vkWaitSemaphores(vulkan_, &wait, timeout_ns);
+    needs_drain_ = result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST;
+    require(result == VK_SUCCESS, "D3D11 rendering did not complete");
+    failed_ = false;
+}
+
+void DxvkDevice::finish_before_release() noexcept {
+    if (!needs_drain_) return;
+
+    // Imported images are owned by the bridge and may still be referenced by DXVK.
+    interop_->FlushRenderingCommands();
+    while (needs_drain_) {
+        interop_->LockSubmissionQueue();
+        const VkResult result = vkDeviceWaitIdle(vulkan_);
+        interop_->ReleaseSubmissionQueue();
+        needs_drain_ = result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST;
+        if (needs_drain_) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
 }
 
 void DxvkDevice::prepare_input(const DxvkSurface &surface) {
-    require(surface.device_ == vulkan_, "DXVK surface belongs to another device");
+    require(available() && &surface.owner_ == this, "DXVK surface device unavailable or mismatched");
     interop_->TransitionSurfaceLayout(surface.surface_.ptr(), &colorRange, VK_IMAGE_LAYOUT_UNDEFINED, surface.layout_);
     wait();
 }
 
 void DxvkDevice::finish_output(const DxvkSurface &surface) {
-    require(surface.device_ == vulkan_, "DXVK surface belongs to another device");
+    require(available() && &surface.owner_ == this, "DXVK surface device unavailable or mismatched");
     // Materialize deferred writes before handing the image to Metal.
     interop_->TransitionSurfaceLayout(surface.surface_.ptr(), &colorRange, surface.layout_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     interop_->TransitionSurfaceLayout(surface.surface_.ptr(), &colorRange, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, surface.layout_);
     wait();
 }
 
-DxvkSurface::DxvkSurface(const DxvkDevice &device) : interop_(device.interop_), device_(device.vulkan_) {}
+DxvkSurface::DxvkSurface(DxvkDevice &device)
+    : owner_(device), interop_(device.interop_), device_(device.vulkan_) {}
 
 DxvkSurface::~DxvkSurface() {
+    owner_.finish_before_release();
     surface_ = nullptr;
     texture_ = nullptr;
     if (image_) vkDestroyImage(device_, image_, nullptr);
@@ -119,7 +141,8 @@ DxvkSurface::~DxvkSurface() {
     if (iosurface_) CFRelease(iosurface_);
 }
 
-std::unique_ptr<DxvkSurface> DxvkSurface::import(const DxvkDevice &device, IOSurfaceRef surface, UINT bind) {
+std::unique_ptr<DxvkSurface> DxvkSurface::import(DxvkDevice &device, IOSurfaceRef surface, UINT bind) {
+    require(device.available(), "DXVK device unavailable");
     constexpr UINT supported = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
     require(surface && bind && !(bind & ~supported), "Invalid DXVK IOSurface import arguments");
     const size_t width = IOSurfaceGetWidth(surface), height = IOSurfaceGetHeight(surface);
