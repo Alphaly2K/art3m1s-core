@@ -342,6 +342,11 @@ impl<B: GpuBackend> SpriteRenderer<B> {
         }
     }
 
+    /// Retry failed shader bindings on the next draw after preparing a program.
+    pub fn retry_failed_shader_bindings(&mut self) {
+        self.shaders.retain(|_, name| name.is_some());
+    }
+
     /// Release compiled programs owned by this adapter.
     pub fn clear_cached_shaders(&mut self) {
         for name in self.shaders.drain().filter_map(|(_, name)| name) {

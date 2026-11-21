@@ -463,7 +463,7 @@ unsafe extern "C" fn art3m1s_metal_host_v1_prepare_ade2(
                     eprintln!("Artemis ADE2 preparation failed: {error}");
                     ARGUMENT
                 })?;
-            renderer.clear_cached_shaders();
+            renderer.retry_failed_shader_bindings();
             Ok(())
         })
     }
