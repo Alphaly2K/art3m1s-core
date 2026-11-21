@@ -1216,11 +1216,13 @@ Core `c067f1d` 与 Flutter `c6dd7af` 将 GLSL 源码读取和原生编译计入�
 Core 原生矩阵已通过（`44858795357`）。重建后的 macOS Flutter 原生通道通过，混合 GPU
 探针从零预热开始并验证运行时 ADE2 补注册、同帧重绘和新会话读档。Core `331c48e` 为
 干净 macOS 环境补齐 HLSL 编译器构建所需的 Perl JSON 模块。发布包 CI `44860700099` 已
-构建 DXVK、MoltenVK 和 HLSL 编译器，应用打包及验收仍在运行。
+通过。带 DXVK、MoltenVK、ANGLE 和 HLSL 编译器的 macOS v2 压缩包已上传，包内应用
+签名、独立 Core 导出、媒体解码和 ADE2 编译检查均通过。
 
 Flutter `8a3bb04`、`d625775`、`a677d97` 和 `8b791db` 补齐 Linux CI 的系统构建依赖。
-前一轮已越过 gperf 与 libxcrypt，SDL3 配置失败时的日志将包含实际配置错误。最新桌面
-复验待确认。该调整仅作用于 CI 构建环境。
+运行 `44862799021` 通过依赖安装，随后在构建 KRKR 的共享库时因 FFmpeg 静态对象缺少
+位置无关代码而链接失败。该问题属于 KRKR 构建范围。Flutter 常规 Linux 测试和 macOS、
+iOS、Android 构建已通过（`44861236107`）。
 
 ## 后续阶段
 
