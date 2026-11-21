@@ -99,11 +99,13 @@ private final class Registry: NSObject, FlutterTextureRegistry {
         [autosave allow=1]
         [lyc id=1 width=4 height=4 color=ffff0000]
         [seplay id=fx file=tone.ogg]
+        [openbrowser url=https://example.invalid/manual]
         [caption data=ready]
         [wt0]
         """.utf8)
         let open: [String: Any] = ["ini": FlutterStandardTypedData(bytes: ini), "platform": "windows",
-                                   "hostCaps": art_swift_io_cap() | UInt64(ArtSwiftMediaCapability)]
+                                   "hostCaps": art_swift_io_cap() | UInt64(ArtSwiftMediaCapability) |
+                                               UInt64(ArtSwiftOpenBrowserCapability)]
         guard let firstState = try messenger.call("open", open) as? [String: Any],
               let secondState = try messenger.call("open", open) as? [String: Any],
               let firstSession = firstState["session"] as? String,
@@ -122,6 +124,7 @@ private final class Registry: NSObject, FlutterTextureRegistry {
         var ready = false
         var checkedIdentity = false
         var checkedPlayback = false
+        var sawBrowser = false
         for _ in 0..<24 where !ready {
             try expect(messenger.call("step", tick) is [String: Any], "Could not step")
             guard let events = try messenger.call("poll") as? [[String: Any]] else { throw Failure(detail: "Could not poll") }
@@ -129,6 +132,7 @@ private final class Registry: NSObject, FlutterTextureRegistry {
                 let bytes = (event["metadata"] as? FlutterStandardTypedData)?.data ?? Data()
                 let args = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] ?? [:]
                 if args["text"] as? String == "ready" { ready = true }
+                if args["url"] as? String == "https://example.invalid/manual" { sawBrowser = true }
                 if event["domain"] as? Int == Int(ArtSwiftMedia),
                    event["kind"] as? Int == Int(ArtSwiftAudioCommand),
                    let playback = args["playback_id"] as? String {
@@ -174,6 +178,8 @@ private final class Registry: NSObject, FlutterTextureRegistry {
             }
         }
         try expect(ready && checkedIdentity && checkedPlayback, "Project did not complete the channel checks")
+        let expectsBrowser = ProcessInfo.processInfo.environment["ARTEMIS_SMOKE_LEGACY_CAPABILITIES"] != "1"
+        try expect(sawBrowser == expectsBrowser, "Browser availability did not match the Core capability table")
         try exerciseBackgroundAutosave(messenger, tick: tick)
         try expect(messenger.call("present") is String, "Frame not presented")
         try expect(messenger.call("present") == nil && registry.notifications == [0], "Notified twice for the same frame")

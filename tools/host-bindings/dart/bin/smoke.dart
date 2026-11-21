@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:artemis_host_v2/artemis_file_io.dart';
 import 'package:artemis_host_v2/artemis_file_service.dart';
 import 'package:artemis_host_v2/artemis_host.dart';
+import 'package:ffi/ffi.dart';
 
 void require(bool condition, String message) {
   if (!condition) throw StateError(message);
@@ -525,6 +526,40 @@ void main(List<String> arguments) {
   if (arguments.length != 1)
     throw ArgumentError('Pass the path to the standalone Artemis library');
   final library = DynamicLibrary.open(arguments.single);
+  using((arena) {
+    final root = arena<Pointer<ArtRootApiV2>>();
+    require(
+      ArtemisV2(library).art3m1s_get_api_v2(
+            ART_ABI_V2_MAJOR,
+            sizeOf<ArtRootApiV2>(),
+            root,
+          ) ==
+          ART_OK,
+      'Missing root table',
+    );
+    final table = arena<Pointer<Void>>();
+    final query = root.value.ref.query_interface
+        .asFunction<int Function(int, int, int, Pointer<Pointer<Void>>)>();
+    require(
+      query(
+            ART_INTERFACE_CAPABILITIES,
+            ART_ABI_V2_MAJOR,
+            sizeOf<ArtCapabilitiesV2>(),
+            table,
+          ) ==
+          ART_OK,
+      'Missing capabilities table',
+    );
+    final caps = table.value.cast<ArtCapabilitiesV2>().ref;
+    require(
+      caps.host_service_caps & ART_HOST_CAP_IO != 0,
+      'Host IO not advertised',
+    );
+    require(
+      caps.renderer_caps & ART_RENDERER_CAP_SPRITE != 0,
+      'Sprite rendering not advertised',
+    );
+  });
   ArtemisSession create({required bool media}) => ArtemisSession.create(
     library,
     hostCapabilities:

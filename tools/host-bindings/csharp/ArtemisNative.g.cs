@@ -135,6 +135,14 @@ namespace Artemis.Host
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    public unsafe struct ArtCapabilitiesV2
+    {
+        public ArtApiHeader header;
+        public ulong host_service_caps;
+        public ulong renderer_caps;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     public unsafe struct ArtRootApiV2
     {
         public ArtApiHeader header;
@@ -194,6 +202,7 @@ namespace Artemis.Host
         public const uint ART_INPUT_TOUCH = 3u;
         public const uint ART_INPUT_WINDOW_BUTTON = 5u;
         public const uint ART_INPUT_WINDOW_STATE = 6u;
+        public const uint ART_INTERFACE_CAPABILITIES = 3u;
         public const uint ART_INTERFACE_FRAME = 2u;
         public const uint ART_INTERFACE_RUNTIME = 1u;
         public const uint ART_IO_DELETE = 5u;

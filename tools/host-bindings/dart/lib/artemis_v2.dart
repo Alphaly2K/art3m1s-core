@@ -333,6 +333,16 @@ final class ArtFrameApiV2 extends ffi.Struct {
   texture_rgba;
 }
 
+final class ArtCapabilitiesV2 extends ffi.Struct {
+  external ArtApiHeader header;
+
+  @ffi.Uint64()
+  external int host_service_caps;
+
+  @ffi.Uint64()
+  external int renderer_caps;
+}
+
 final class ArtRootApiV2 extends ffi.Struct {
   external ArtApiHeader header;
 
@@ -389,6 +399,8 @@ const int ART_API_MAGIC = 4706917139870794064;
 const int ART_INTERFACE_RUNTIME = 1;
 
 const int ART_INTERFACE_FRAME = 2;
+
+const int ART_INTERFACE_CAPABILITIES = 3;
 
 const int ART_ABI_V2_MAJOR = 2;
 

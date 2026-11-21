@@ -212,6 +212,13 @@ struct FrameApi {
 }
 
 #[repr(C)]
+struct Capabilities {
+    header: ApiHeader,
+    host_service_caps: u64,
+    renderer_caps: u64,
+}
+
+#[repr(C)]
 struct CreateInfo {
     struct_size: u32,
     flags: u32,
@@ -307,6 +314,11 @@ static FRAME: FrameApi = FrameApi {
     release,
     texture_rgba,
 };
+static CAPABILITIES: Capabilities = Capabilities {
+    header: header::<Capabilities>(3),
+    host_service_caps: runtime::HOST_CAPS,
+    renderer_caps: runtime::RENDERER_CAPS,
+};
 
 /// Query the root table. The returned static table is valid for the library lifetime.
 ///
@@ -349,6 +361,7 @@ unsafe extern "C" fn query_interface(
         let (head, table) = match id {
             1 => (&RUNTIME.header, ptr::from_ref(&RUNTIME).cast()),
             2 => (&FRAME.header, ptr::from_ref(&FRAME).cast()),
+            3 => (&CAPABILITIES.header, ptr::from_ref(&CAPABILITIES).cast()),
             _ => return Err(Failure::new(UNSUPPORTED, "unknown interface ID")),
         };
         check_api(head, major, minimum_size)?;

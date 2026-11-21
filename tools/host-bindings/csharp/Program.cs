@@ -31,6 +31,12 @@ internal static unsafe class Program
         var runtime = (ArtRuntimeApiV2*)table;
         Check(root->query_interface(ART_INTERFACE_FRAME, ART_ABI_V2_MAJOR, (uint)sizeof(ArtFrameApiV2), &table));
         var frames = (ArtFrameApiV2*)table;
+        Check(root->query_interface(ART_INTERFACE_CAPABILITIES, ART_ABI_V2_MAJOR, (uint)sizeof(ArtCapabilitiesV2), &table));
+        var capabilities = (ArtCapabilitiesV2*)table;
+        if (capabilities == null || capabilities->header.interface_id != ART_INTERFACE_CAPABILITIES ||
+            (capabilities->host_service_caps & ART_HOST_CAP_IO) == 0 ||
+            (capabilities->renderer_caps & ART_RENDERER_CAP_SPRITE) == 0)
+            throw new InvalidOperationException("Unexpected capabilities table.");
         var create = new ArtCreateInfo
         {
             struct_size = (uint)sizeof(ArtCreateInfo),

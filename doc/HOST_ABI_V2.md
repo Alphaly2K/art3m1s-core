@@ -75,8 +75,13 @@ flowchart LR
 | Runtime | `poll_events` | 批量读取完整可靠事件和可丢诊断记录 |
 | Runtime | `get_state` | 获取会话、舞台尺寸、等待、退出、积压和丢弃计数 |
 | Frame（按能力查询） | `acquire_latest` / `release` / `texture_rgba` | 获取不可变渲染快照和像素，并释放借用 |
+| Capabilities（可选） | `host_service_caps`、`renderer_caps` | 查询此 Core 的 `create` 接受的能力位 |
 
-预览版合计 12 个函数指针，分布在三张表。消息 schema 仍是
+C 接口共有 12 个函数指针，分布在三张表。Host 可在 `create` 前查询
+`ART_INTERFACE_CAPABILITIES`。返回的只读 `ArtCapabilitiesV2` 与其余接口表具有相同生命周期，
+位掩码由 Core 提供。Host 对可选能力取交集，并自行确认设备、文件和服务可用。较早的 v2 库对
+这张表返回 `ART_E_UNSUPPORTED`，Host 可沿用该版本已支持的能力。`create` 仍会拒绝未知位。
+消息 schema 仍是
 公开 API 的一部分。禁止用任意字符串 `invoke(method, json)` 把不受约束的私有 RPC 塞进
 `submit`；每个 domain/kind 都必须有版本、字段、失败分支和一致性测试。
 

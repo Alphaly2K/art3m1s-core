@@ -562,9 +562,20 @@ int main(int argc, char **argv) {
     const ArtFrameApiV2 *frames = table;
     assert(frames);
     check_api_header(&frames->header, ART_INTERFACE_FRAME, sizeof(*frames));
+    assert(root->query_interface(ART_INTERFACE_CAPABILITIES, ART_ABI_V2_MAJOR,
+                                 sizeof(ArtCapabilitiesV2) + 1, &table) == ART_E_UNSUPPORTED);
+    assert(!table);
+    assert(root->query_interface(ART_INTERFACE_CAPABILITIES, ART_ABI_V2_MAJOR,
+                                 sizeof(ArtApiHeader), &table) == ART_OK);
+    const ArtCapabilitiesV2 *caps = table;
+    assert(caps);
+    check_api_header(&caps->header, ART_INTERFACE_CAPABILITIES, sizeof(*caps));
+    const uint64_t required_host = ART_HOST_CAP_IO | ART_HOST_CAP_HTTP | ART_HOST_CAP_OPEN_BROWSER;
+    assert((caps->host_service_caps & required_host) == required_host);
+    assert(caps->renderer_caps & ART_RENDERER_CAP_GLSL);
 
     ArtCreateInfo info = { .struct_size = sizeof(info),
-                           .host_service_caps = ART_HOST_CAP_IO | ART_HOST_CAP_HTTP | ART_HOST_CAP_OPEN_BROWSER,
+                           .host_service_caps = required_host,
                            .renderer_caps = ART_RENDERER_CAP_SPRITE | ART_RENDERER_CAP_SCREENSHOT };
     if (shader_frame == HLSL) info.renderer_caps |= ART_RENDERER_CAP_HLSL;
     else if (shader_frame) info.renderer_caps |= ART_RENDERER_CAP_GLSL;
