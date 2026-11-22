@@ -838,6 +838,7 @@ Dart 直连与 Flutter 通道共用 `artemis_media.dart`。Host 开启 `ArtemisM
 后，按轮询顺序读取 `event.mediaCommand`，通过现有资产服务和设备实现播放。调用
 `event.playbackStatus(playbackId, status)` 或 `event.videoFrame(frameId, width, height, rgba)`
 构造回报；每条回报应单独提交。播放 ID 保留为十进制字符串，回报绑定原事件的会话和 epoch。
+Dart 的 `fadeMs` 和 `timeMs` 上限为 `2^63 - 1` 毫秒。完整的无符号时长保存在事件 metadata 中。
 FFI 的 `ART_E_STALE` 与 Flutter 通道的 `stale_reply` 表示该回报已过期，应丢弃。重载、关闭
 或收到停止命令时由 Host 停止对应的播放器。Flutter 端和会话绑定需同时引入媒体类型文件。
 

@@ -24,7 +24,8 @@ void exerciseHost(
     '[setonwindowbutton button=1 label=window call=1]\n'
     '[exec command=fullscreen]\n[caption data=${'x' * 5000}]\n'
     'original text\n[wt0]\n[caption data=advanced]\n'
-    '[seplay id=fx file=ping.ogg gain=450]\n[wait se=fx]\n'
+    '[seplay id=fx file=ping.ogg gain=450 time=18446744073709551615]\n'
+    '[wait se=fx]\n'
     '[lyc id=1.80]\n[video id=1.80 file=overlay.ogv]\n'
     '[wait video=1.80]\n[caption data=media_done]\n[stop]\n'
     '*window\n[caption data=window]\n[return]\n',
@@ -210,7 +211,9 @@ void exerciseHost(
       audio.channel != ArtemisAudioChannel.se ||
       audio.scriptId != 'fx' ||
       audio.key != 'ping.ogg' ||
-      audio.gain != 450) {
+      audio.gain != 450 ||
+      audio.fadeMs != 0x7fffffffffffffff ||
+      audioEvent?.metadata['fade_ms'] != '18446744073709551615') {
     throw StateError('Unexpected audio play command');
   }
   final complete = audioEvent!.playbackStatus(
