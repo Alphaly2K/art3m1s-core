@@ -1559,6 +1559,10 @@ Flutter `5ba4a68` 在 Runner 移除旧会话并报告关闭错误后继续项目
 正常发布入口生成的签名 ZIP 通过解包、导出、C ABI 线程、媒体解码、HLSL 编译、按需 GLSL 和混合帧重放检查。
 归档 SHA-256 为 `a0c26e65a11de0cc41c81054062aaeac5eac0bb4bf7a2f9560daa524637c3094`。
 
+Host 接入指南已注明 macOS Flutter 的 v2 自动选择条件，并标出 v1 的调用流程。当前本机通过独立
+C ABI、导出、Swift 编译、C# 绑定生成及 36 个消息的 schema 索引检查。远端验收包括 Core 的跨平台
+检查和 Flutter 的发布工作流。Flutter 工作流从 Core 的 `master` 检出绑定，因此先推送 Core 主分支。
+
 ### 本地验收状态
 
 - P0 的 v1 清单与兼容头、v2 表、协议编号和 Schema 已发布到仓库。当前索引覆盖 36 个消息，C/C++ 头和真实导出检查通过。
@@ -1631,9 +1635,9 @@ v1 adapter 可以复用逐步拆出的内部逻辑，但继续暴露原语义。
 - 项目初始化读取 tag.ini 时使用该 runtime 的资源；surface 绑定缓存改为 runtime 所有，
   销毁一个实例不会清空另一个实例的 surface 引用。
 
-后续仍待完成：v2 C 查询入口与可发布 schema、剩余场景/事件入口的 IO 调度、纯核心依赖拆分
-以及独立 FramePacket/Host renderer SDK。
-Rust 注入入口与已完成的会话隔离属于前置改造；P1–P5 的其余项目仍待完成。
+2026-11-17 的基础改造建立了 Rust 注入入口和会话隔离。当时的后续工作包括 v2 C 查询入口、
+可发布 schema、场景与事件入口的 IO 调度、独立 Core 以及 FramePacket/Host renderer SDK。
+各项的当前验收情况见上方的本地验收状态。
 
 本批验证：`cargo check --locked --offline --all-features`、根 crate 与解释器的 fmt 检查、
 完整 `scripts/test-all.sh`（655 passed、9 ignored，含原有未跟踪测试）以及 release 构建通过。

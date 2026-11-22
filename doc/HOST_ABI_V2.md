@@ -1,9 +1,10 @@
 # Artemis Host ABI v2 接口契约
 
-状态：v2 C 预览使用 `cargo build --locked --manifest-path crates/artemis-core/Cargo.toml`。
-独立预览发布 C 动态库；仓库根目录的构建继续用于 v1 和现有 Rust 调用者。导出审计见
-[EXPORT_AUDIT.md](EXPORT_AUDIT.md)，预览头文件见
-[abi/art3m1s_core_v2.draft.h](abi/art3m1s_core_v2.draft.h)。
+独立 Artemis v2 Core 使用 `cargo build --locked --manifest-path crates/artemis-core/Cargo.toml`
+构建 C 动态库。Art3m1s 的 macOS Flutter Host 在 macOS 15 及以上版本检测到完整的 v2 组件时，
+会为支持的渲染选项自动选用 v2。仓库根目录的构建提供 v1 和现有 Rust 接口。
+参见 [C 头文件](abi/art3m1s_core_v2.draft.h)、[Host 接入指南](HOST_INTEGRATION.md#artemis-v2-c)
+和[导出审计](EXPORT_AUDIT.md)。
 
 ## 1. 范围与设计决策
 
@@ -744,7 +745,7 @@ Rust 消费者，再放入明确 legacy 层或在一次标明破坏性版本中�
 SDK 产物应包含唯一 schema、可编译 C 头、生成的 Dart/Swift/C# 绑定，以及一个不依赖
 Flutter 的最小 Host 样例。平台 IO/render/media 适配器可以复用，但不链接进纯核心。
 不用在每种语言里手写第二份函数顺序、长度类型和 magic。
-生成绑定和内存 Host 的用法见 [Host 接入指南](HOST_INTEGRATION.md#artemis-v2-c-预览)。
+生成绑定和内存 Host 的用法见 [Host 接入指南](HOST_INTEGRATION.md#artemis-v2-c)。
 
 独立 C Host 可用 `bash scripts/test-host-v2.sh` 或 `scripts/test-host-v2.ps1` 构建并验证。
 macOS 上可用 `bash scripts/test-host-v2-metal.sh` 运行独立 Metal Host，验证从 C ABI 借用

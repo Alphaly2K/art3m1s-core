@@ -66,7 +66,7 @@ cargo build --release
 根目录构建默认启用 Artemis v1 和 GL。原生 Metal、实验 Vulkan、FFmpeg 及其他引擎
 通过相应 feature 启用。Artemis v2 的独立构建由 Host 提供 IO 和画面输出，可运行
 `cargo build --release --manifest-path crates/artemis-core/Cargo.toml`，接入方式见
-[Host 接入指南](doc/HOST_INTEGRATION.md#artemis-v2-c-预览)。
+[Host 接入指南](doc/HOST_INTEGRATION.md#artemis-v2-c)。
 需要商业游戏资源的兼容性测试默认不执行，见 [tests/README.md](tests/README.md)。
 
 KRKR 的当前构建层次如下：
@@ -96,8 +96,8 @@ cargo build --manifest-path crates/art3m1s-krkr/Cargo.toml \
 
 ## 宿主接入
 
-Artemis v2 预览提供独立的纯 Core 动态库，宿主负责资源和存档 IO、GPU 绘制和呈现。
-构建与调用方式见 [Host v2 接入指南](doc/HOST_INTEGRATION.md#artemis-v2-c-预览)。
+Artemis v2 提供独立的纯 Core 动态库，宿主负责资源和存档 IO、音视频设备、GPU 绘制和呈现。
+构建与调用方式见 [Host v2 接入指南](doc/HOST_INTEGRATION.md#artemis-v2-c)。
 
 线程、生命周期、帧循环、资源边界和 KRKR 接入约定见
 [doc/HOST_INTEGRATION.md](doc/HOST_INTEGRATION.md)；三个入口的完整 C ABI 声明与协议见

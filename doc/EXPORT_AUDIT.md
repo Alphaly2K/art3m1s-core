@@ -1,13 +1,13 @@
 # Artemis 导出审计与重构范围
 
 审计日期：2026-11-17。源码基线：`a809729bcc179ee56a7bae6aaab71b23fd4ea8e6`。
-接口契约和预览构建见 [HOST_ABI_V2.md](HOST_ABI_V2.md)。
+接口契约和独立构建见 [HOST_ABI_V2.md](HOST_ABI_V2.md)。
 本文为实施前的审计快照，行号、哈希和“双 Lua 后端”等事实对应上述基线；后续实施状态
 以 GOAL.md 和当前源码为准，不覆盖这份原始清单。
 
 当前已验证的 macOS 动态导出：默认构建仍为 `art3m1s_get_api_v1` 和 9 个 `pfs_*`；纯 Core
-v2 预览只导出 `art3m1s_get_api_v2`。独立构建和跨平台检查命令见
-[Host 接入指南](HOST_INTEGRATION.md#artemis-v2-c-预览)。
+v2 构建只导出 `art3m1s_get_api_v2`。独立构建和跨平台检查命令见
+[Host 接入指南](HOST_INTEGRATION.md#artemis-v2-c)。
 
 ## 1. 结论与范围
 

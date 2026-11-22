@@ -1,11 +1,8 @@
 # Host 接入指南
 
-本文面向 Flutter、原生应用及其他嵌入式 Host，以 [`src/ffi/api.rs`](../src/ffi/api.rs)
-的 Artemis 版本化 C ABI、[`src/ffi/rfvp_api.rs`](../src/ffi/rfvp_api.rs) 的 RFVP ABI、
-[`src/ffi/krkr_api.rs`](../src/ffi/krkr_api.rs) 的 KRKR ABI 和
-[`src/ffi/siglus_api.rs`](../src/ffi/siglus_api.rs) 的 Siglus ABI 为准。它不是 Artemis 脚本
-API 文档，也不要求 Host 使用 Dart 或 libmpv。完整签名、返回值和命令字段见
-[FFI_REFERENCE.md](FFI_REFERENCE.md)。
+新 Artemis Host 可按下面的 v2 示例接入，完整接口见 [Artemis Host ABI v2 契约](HOST_ABI_V2.md)。
+后文的 `runtime_*` 流程适用于 Artemis v1 和聚合构建。Artemis v1、RFVP、KRKR 和 Siglus 的
+签名、返回值与命令字段见 [FFI_REFERENCE.md](FFI_REFERENCE.md)。
 
 ### Artemis v2 Rust 预览
 
@@ -22,7 +19,9 @@ Host 在回调内复制所需数据。正常保存并关闭时，调用 `request
 [内存 Rust Host 示例](../crates/artemis-core/tests/rust_host.rs) 演示资源回复、播放完成和帧读取。
 脚本运行在 Luau 上，服务消息与 [C 接口契约](HOST_ABI_V2.md) 共用。
 
-### Artemis v2 C 预览
+<a id="artemis-v2-c-预览"></a>
+
+### Artemis v2 C
 
 使用 `cargo build --locked --manifest-path crates/artemis-core/Cargo.toml` 编译纯 Core 动态库。
 独立构建无需检出其他引擎。加载 C 动态库后
@@ -47,7 +46,7 @@ Host 按编译后端声明 `ART_RENDERER_CAP_HLSL` 和/或 `ART_RENDERER_CAP_GLS
 Linux 和 Android 的 Rust Host 可用 `GlBackend::new_host_egl` 创建系统 GLES 3 上下文；
 macOS 和 iOS 可用 `GlBackend::new_host_angle` 并提供 ANGLE/Metal 库的目录。
 
-[内存 Host 示例](../tools/host-smoke/artemis_v2.c) 不依赖窗口或游戏素材。以下命令构建预览库、
+[内存 Host 示例](../tools/host-smoke/artemis_v2.c) 不依赖窗口或游戏素材。以下命令构建独立 Core、
 检查导出并运行示例。macOS 或 Linux 使用：
 
 ```sh
@@ -94,6 +93,8 @@ macOS 应用也可以用 `cargo build --locked --manifest-path crates/artemis-me
 应用提供的 IOSurface。Core 和渲染库分别打包；调用顺序见 [v2 契约](HOST_ABI_V2.md#9-rust-公开面与-sdk)。
 Swift 应用可使用同一契约中的 `ArtemisMacSession` 管理主线程上的 v2 会话与绘制，应用自行处理
 资源、媒体及纹理注册。使用 `bash scripts/test-host-v2-swift.sh` 运行合成项目的异步 IO 与呈现检查。
+
+### Artemis v1 Rust
 
 legacy Rust Host 通过 `host::ResourceProvider` 提供逻辑资源，通过
 `CoreRuntime::with_host_backend` 提供 renderer，入口不自行选择平台 GPU：
