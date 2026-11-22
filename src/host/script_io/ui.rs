@@ -36,6 +36,8 @@ impl ScriptIoSession {
                 let body = MessageBody::new(json!({"command": command}).to_string(), vec![])?;
                 self.transport.notify(UI_WINDOW_ACTION, body)?;
             }
+            // The v2 Host interface has no cursor service. Cursor hints cannot suspend the script.
+            Some(Event::MouseConfig { .. }) => {}
             Some(Event::OpenBrowser { url }) => {
                 if self.open_browser_enabled && !url.is_empty() {
                     let body = MessageBody::new(json!({"url": url}).to_string(), vec![])?;
