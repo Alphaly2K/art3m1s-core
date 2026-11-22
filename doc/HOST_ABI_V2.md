@@ -678,7 +678,8 @@ Host 按消息方向和 kind，从[媒体消息 schema](abi/artemis-media-v2.sch
 `submit_playback_status(handle, epoch, playback_id, status)` 在下一次受理
 新帧时应用；每次播放可报一次 `Started`、一次终态。`Ended` 触发注册的完成处理器；失败和取消
 也解除对应等待。`[wait se=… time=N]` 从 Core 应用 `Started` 的帧计时。停止、替换或重载后，旧
-播放状态回报返回 `Stale`；带淡出的停止在 Host 回报终态后结束。重载时 Host 应停止旧 epoch。
+播放状态回报返回 `Stale`。带淡出的停止在 Host 回报终态后结束。同一播放再次收到停止命令时，
+Host 以新时长从当前音量继续淡出。时长为零时立即停止。重载时 Host 应停止旧 epoch。
 编号读档成功时，Core 在 `onLoad` 前将音频恢复命令排入可靠队列。存档保存曲目、循环、增益和
 声像。执行 `[allsoundstop]` 后，存档只记录此后开始的播放，淡出中的旧播放仍可回报终态。
 设备播放位置不写入存档。读取没有音频快照的旧存档按静音恢复。
