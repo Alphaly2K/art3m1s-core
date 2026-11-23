@@ -5,6 +5,7 @@ use crate::{EmoteError, PsbDocument, PsbResourceData, PsbValue, ResourceRef, Res
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TextureFormat {
     Dxt5,
+    Bgra8,
     Other(String),
 }
 
@@ -47,12 +48,13 @@ impl EmoteAtlas {
             .and_then(PsbValue::as_object)
             .ok_or_else(|| EmoteError::InvalidFormat("motion PSB has no source table".into()))?;
 
+        let spec = document.root.get("spec").and_then(PsbValue::as_str);
         let mut atlas = Self::default();
         for (texture_id, source_value) in source {
             let texture_value = source_value.get("texture").ok_or_else(|| {
                 EmoteError::InvalidFormat(format!("{texture_id} has no texture descriptor"))
             })?;
-            let texture = parse_texture(texture_id, texture_value)?;
+            let texture = parse_texture(texture_id, texture_value, spec)?;
             validate_texture_resource(document, &texture)?;
 
             if let Some(icons) = source_value.get("icon").and_then(PsbValue::as_object) {
@@ -105,28 +107,35 @@ impl EmoteAtlas {
             .texture(id)
             .ok_or_else(|| EmoteError::InvalidFormat(format!("unknown texture {id}")))?;
         let bytes = document.resource(texture.resource)?;
-        match texture.format {
-            TextureFormat::Dxt5 => decode_dxt5(bytes, texture.width, texture.height),
-            TextureFormat::Other(ref format) => {
-                Err(EmoteError::Unsupported(format!("texture format {format}")))
-            }
-        }
+        decode_texture(texture, bytes)
     }
 
     pub fn decode_texture_data_rgba8(&self, id: &str, bytes: &[u8]) -> Result<Vec<u8>> {
         let texture = self
             .texture(id)
             .ok_or_else(|| EmoteError::InvalidFormat(format!("unknown texture {id}")))?;
-        match texture.format {
-            TextureFormat::Dxt5 => decode_dxt5(bytes, texture.width, texture.height),
-            TextureFormat::Other(ref format) => {
-                Err(EmoteError::Unsupported(format!("texture format {format}")))
+        decode_texture(texture, bytes)
+    }
+}
+
+fn decode_texture(texture: &EmoteTexture, bytes: &[u8]) -> Result<Vec<u8>> {
+    match &texture.format {
+        TextureFormat::Dxt5 => decode_dxt5(bytes, texture.width, texture.height),
+        TextureFormat::Bgra8 => {
+            validate_rgba8(texture, bytes)?;
+            let mut rgba = bytes.to_vec();
+            for pixel in rgba.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
             }
+            Ok(rgba)
+        }
+        TextureFormat::Other(format) => {
+            Err(EmoteError::Unsupported(format!("texture format {format}")))
         }
     }
 }
 
-fn parse_texture(id: &str, value: &PsbValue) -> Result<EmoteTexture> {
+fn parse_texture(id: &str, value: &PsbValue, spec: Option<&str>) -> Result<EmoteTexture> {
     let format = required_string(value, "type")?;
     Ok(EmoteTexture {
         id: id.to_owned(),
@@ -136,6 +145,9 @@ fn parse_texture(id: &str, value: &PsbValue) -> Result<EmoteTexture> {
         truncated_height: required_u32(value, "truncated_height")?,
         format: if format.eq_ignore_ascii_case("DXT5") {
             TextureFormat::Dxt5
+        } else if spec == Some("win") && format.eq_ignore_ascii_case("RGBA8") {
+            // Windows PSB stores RGBA8 texels in little-endian BGRA byte order.
+            TextureFormat::Bgra8
         } else {
             TextureFormat::Other(format)
         },
@@ -170,6 +182,9 @@ fn parse_icon(texture_id: &str, id: &str, value: &PsbValue) -> Result<AtlasIcon>
 
 fn validate_texture_resource(document: &PsbDocument, texture: &EmoteTexture) -> Result<()> {
     let bytes = document.resource(texture.resource)?;
+    if texture.format == TextureFormat::Bgra8 {
+        return validate_rgba8(texture, bytes);
+    }
     if texture.format == TextureFormat::Dxt5 {
         let blocks_x = texture.width.div_ceil(4) as usize;
         let blocks_y = texture.height.div_ceil(4) as usize;
@@ -184,6 +199,22 @@ fn validate_texture_resource(document: &PsbDocument, texture: &EmoteTexture) -> 
                 bytes.len()
             )));
         }
+    }
+    Ok(())
+}
+
+fn validate_rgba8(texture: &EmoteTexture, bytes: &[u8]) -> Result<()> {
+    let expected = (texture.width as usize)
+        .checked_mul(texture.height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .filter(|&len| len > 0)
+        .ok_or_else(|| EmoteError::InvalidFormat("invalid RGBA8 texture dimensions".into()))?;
+    if bytes.len() != expected {
+        return Err(EmoteError::InvalidFormat(format!(
+            "{} RGBA8 resource has {} bytes, expected {expected}",
+            texture.id,
+            bytes.len()
+        )));
     }
     Ok(())
 }
@@ -335,6 +366,37 @@ fn rgb565(value: u16) -> [u8; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_rgba8_atlas_converts_bgra_and_rejects_short_resources() {
+        let reference = ResourceRef {
+            index: 0,
+            extra: false,
+        };
+        let descriptor = PsbValue::Object(BTreeMap::from([
+            ("width".into(), PsbValue::Integer(2)),
+            ("height".into(), PsbValue::Integer(1)),
+            ("truncated_width".into(), PsbValue::Integer(2)),
+            ("truncated_height".into(), PsbValue::Integer(1)),
+            ("type".into(), PsbValue::String("RGBA8".into())),
+            ("pixel".into(), PsbValue::Resource(reference)),
+        ]));
+        let mut atlas = EmoteAtlas::default();
+        atlas.textures.insert(
+            "sprite".into(),
+            parse_texture("sprite", &descriptor, Some("win")).unwrap(),
+        );
+        let bgra = [30, 20, 200, 255, 240, 10, 5, 128];
+        assert_eq!(
+            atlas.decode_texture_data_rgba8("sprite", &bgra).unwrap(),
+            [200, 20, 30, 255, 5, 10, 240, 128]
+        );
+        assert!(
+            atlas
+                .decode_texture_data_rgba8("sprite", &bgra[..7])
+                .is_err()
+        );
+    }
 
     #[test]
     fn decodes_single_opaque_red_dxt5_block() {
