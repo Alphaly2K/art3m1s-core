@@ -982,9 +982,13 @@ impl Model {
                 .inertia
                 .lock()
                 .map_err(|_| "Cannot read inertia settings")?;
-            self.dirty |= self
-                .inertia
-                .sample(task_tick, self.position, &inertia, &state.variables);
+            self.dirty |= self.inertia.sample(
+                task_tick,
+                self.position,
+                &inertia,
+                &state.variables,
+                self.effects_mode != 0,
+            );
             self.inertia.apply(&mut state.variables);
             Some(state)
         };

@@ -77,19 +77,19 @@ impl Material {
     }
 
     fn at_level(base: Self, min: Self, max: Self, value: i32) -> Self {
-        let level = value.clamp(0, 200) as f32 / 100.;
-        let (from, to, amount) = if level < 1. {
-            (min, base, level)
+        let level = (value as f32 * 0.01).clamp(0., 2.);
+        let (endpoint, amount) = if level < 1. {
+            (min, 1. - level)
         } else {
-            (base, max, level - 1.)
+            (max, level - 1.)
         };
-        let mix = |a, b| a + (b - a) * amount;
+        let mix = |base, end| (end - base) * amount + base;
         Self {
-            mass: mix(from.mass, to.mass),
-            stiffness: mix(from.stiffness, to.stiffness),
-            drag: mix(from.drag, to.drag),
-            step: mix(from.step, to.step),
-            travel: mix(from.travel, to.travel),
+            mass: mix(base.mass, endpoint.mass),
+            stiffness: mix(base.stiffness, endpoint.stiffness),
+            drag: mix(base.drag, endpoint.drag),
+            step: mix(base.step, endpoint.step),
+            travel: mix(base.travel, endpoint.travel),
             ..base
         }
     }
@@ -106,16 +106,17 @@ struct Spring {
     mode: u32,
     displacement: f32,
     speed: f32,
+    normalized: f32,
 }
 
 impl Spring {
     fn reset(&mut self) {
         self.displacement = 0.;
         self.speed = 0.;
+        self.normalized = 0.;
     }
 
-    fn advance(&mut self, ticks: u32, drive: f32, material: Material) -> f32 {
-        self.displacement -= drive;
+    fn advance(&mut self, ticks: u32, material: Material) -> f32 {
         for _ in 0..ticks {
             self.displacement = self.displacement.clamp(-material.travel, material.travel);
             let force = -material.stiffness * self.displacement - material.drag * self.speed;
@@ -124,9 +125,11 @@ impl Spring {
         }
         if !self.displacement.is_finite() || !self.speed.is_finite() {
             self.reset();
+        } else if ticks != 0 {
+            self.normalized = self.displacement / material.travel;
         }
-        let sign = if material.inverted { -1. } else { 1. };
-        self.displacement / material.travel * material.amplitude * sign
+        let offset = self.normalized * material.amplitude;
+        if material.inverted { -offset } else { offset }
     }
 }
 
@@ -134,7 +137,7 @@ struct Link {
     source: String,
     target: String,
     gain: f32,
-    divisor: f32,
+    inverse_divisor: f32,
     last: Option<f32>,
 }
 
@@ -209,7 +212,7 @@ impl Inertia {
                                 source: label.to_owned(),
                                 target: target.to_owned(),
                                 gain,
-                                divisor,
+                                inverse_divisor: divisor.recip(),
                                 last: None,
                             });
                         }
@@ -232,6 +235,7 @@ impl Inertia {
                     mode: 0,
                     displacement: 0.,
                     speed: 0.,
+                    normalized: 0.,
                 },
             );
         }
@@ -259,29 +263,20 @@ impl Inertia {
         position: [f32; 2],
         settings: &Settings,
         pose: &Assignments,
+        effects_mode: bool,
     ) -> bool {
         let position = position.map(|value| if value.is_finite() { value } else { 0. });
-        let (ticks, delta) = self.last.map_or((0, [0.; 2]), |(last, previous)| {
+        // The original solver uses zero as its uninitialized clock value.
+        let tick = tick.max(1);
+        let previous = self.last.replace((tick, position));
+        let (ticks, delta) = previous.map_or((0, [0.; 2]), |(last, previous)| {
             (
                 tick.wrapping_sub(last),
                 std::array::from_fn(|axis| position[axis] - previous[axis]),
             )
         });
-        // A discontinuous clock is a new baseline. Do not replay a task's entire history.
-        let reset = self.last.is_none() || settings.enabled == 0 || ticks > 120;
-        let mut drive = Assignments::new();
-        if reset || ticks != 0 {
-            self.last = Some((tick, position));
-            for link in &mut self.links {
-                let value = pose.get(&link.source).copied().unwrap_or(0.);
-                let last = link.last.replace(value).unwrap_or(value);
-                if !reset && value != last {
-                    *drive.entry(link.target.clone()).or_default() +=
-                        (value - last) / link.divisor * link.gain;
-                }
-            }
-        }
-        let mut offsets = Assignments::new();
+        let active = effects_mode && settings.enabled != 0;
+        let reset = previous.is_none() || !active || ticks >= (1 << 31);
         for (label, spring) in &mut self.springs {
             let level = spring
                 .level_group
@@ -289,7 +284,7 @@ impl Inertia {
                 .and_then(|group| settings.levels.get(group))
                 .copied()
                 .unwrap_or(100);
-            let enabled = settings.enabled != 0
+            let enabled = active
                 && spring.mode == 0
                 && spring
                     .enable_group
@@ -304,18 +299,34 @@ impl Inertia {
             if !enabled || reset {
                 continue;
             }
-            let material = Material::at_level(spring.base, spring.min, spring.max, level);
-            let mut input = 0.;
-            if ticks != 0 {
-                if self.horizontal.contains(label) {
-                    input += delta[0];
-                }
-                if self.vertical.contains(label) {
-                    input += delta[1];
-                }
-                input += drive.get(label).copied().unwrap_or(0.) * material.travel;
+            if self.horizontal.contains(label) {
+                spring.displacement -= delta[0];
             }
-            let offset = spring.advance(ticks, input, material);
+            if self.vertical.contains(label) {
+                spring.displacement -= delta[1];
+            }
+        }
+        // Drives change displacement once per sample. Integrating on the same
+        // tick would make repeated frame requests advance the visible pose.
+        for link in &mut self.links {
+            let value = pose.get(&link.source).copied().unwrap_or(0.);
+            let last = link.last.replace(value).unwrap_or(value);
+            if !reset
+                && value != last
+                && let Some(spring) = self.springs.get_mut(&link.target)
+                && spring.enabled
+            {
+                spring.displacement -=
+                    (value - last) * link.inverse_divisor * spring.base.travel * link.gain;
+            }
+        }
+        let mut offsets = Assignments::new();
+        for (label, spring) in &mut self.springs {
+            if reset || !spring.enabled {
+                continue;
+            }
+            let material = Material::at_level(spring.base, spring.min, spring.max, spring.level);
+            let offset = spring.advance(ticks, material);
             if offset.is_finite() && offset != 0. {
                 offsets.insert(label.clone(), offset);
             }
@@ -366,19 +377,42 @@ hair
         let settings = Settings::default();
         let first_pose = Assignments::from([("face".into(), 8.), ("hair".into(), 3.)]);
         let next_pose = Assignments::from([("face".into(), 9.), ("hair".into(), 3.)]);
-        assert!(!inertia.sample(u32::MAX, [40., 10.], &settings, &first_pose));
-        assert!(!inertia.sample(u32::MAX, [44., 16.], &settings, &next_pose));
-        assert!(inertia.sample(0, [44., 16.], &settings, &next_pose));
+        assert!(!inertia.sample(19, [40., 10.], &settings, &first_pose, true));
+        assert!(!inertia.sample(19, [44., 16.], &settings, &next_pose, true));
+        assert!(inertia.sample(20, [44., 16.], &settings, &next_pose, true));
         let mut applied = next_pose.clone();
         inertia.apply(&mut applied);
         assert_eq!(applied["hair"], -4.);
         assert_eq!(applied["coat"], 3.);
-        assert!(!inertia.sample(0, [44., 16.], &settings, &next_pose));
-        assert!(inertia.sample(1, [44., 16.], &settings, &next_pose));
+        assert!(!inertia.sample(20, [44., 16.], &settings, &next_pose, true));
+        assert!(inertia.sample(21, [44., 16.], &settings, &next_pose, true));
         let mut applied = next_pose.clone();
         inertia.apply(&mut applied);
         assert_eq!(applied["hair"], 4.75);
         assert!(!applied.contains_key("coat"));
+    }
+
+    #[test]
+    fn difference_drive_uses_base_travel_across_material_levels_and_tick_jumps() {
+        let mut inertia = Inertia::parse(
+            "#material\npart 4.5 2.8 .47 .21 120 0 23 21\n#inertia_dif\nsource part .65 3\n",
+            "#material_min\npart 2.7 1.8 .23 .14 80 1 50 -.8\n#inertia_lv\n%head\npart\n",
+        );
+        let mut settings = Settings::default();
+        settings.set(LEVEL, "head".into(), 50);
+        // Outputs sampled from the original solver with this synthetic material.
+        for (tick, source, expected) in [
+            (19, 7., 0.),
+            (20, 9., -11.725_991),
+            (22, 11., -21.214_767),
+            (22, 7., -21.214_767),
+            (23, 7., 3.738_684_4),
+        ] {
+            let mut pose = Assignments::from([("source".into(), source)]);
+            inertia.sample(tick, [0.; 2], &settings, &pose, true);
+            inertia.apply(&mut pose);
+            assert_eq!(pose.get("part").copied().unwrap_or(0.), expected);
+        }
     }
 
     #[test]
@@ -387,20 +421,23 @@ hair
         let mut settings = Settings::default();
         let pose = Assignments::new();
         settings.set(LEVEL, "head".into(), 50);
-        inertia.sample(1, [0., 0.], &settings, &pose);
-        inertia.sample(2, [12., 0.], &settings, &pose);
+        inertia.sample(1, [0., 0.], &settings, &pose, true);
+        inertia.sample(2, [12., 0.], &settings, &pose, true);
         assert!((inertia.offsets["hair"] + 4.).abs() < 0.00001);
         inertia.set_group(Some("head"), 1);
-        assert!(inertia.sample(2, [12., 0.], &settings, &pose));
+        assert!(inertia.sample(2, [12., 0.], &settings, &pose, true));
         assert!(inertia.offsets.is_empty());
         settings.set(ENABLE, "head".into(), 0);
         inertia.set_group(None, 0);
-        assert!(!inertia.sample(3, [24., 0.], &settings, &pose));
+        assert!(!inertia.sample(3, [24., 0.], &settings, &pose, true));
         settings.set(ENABLE, "head".into(), 1);
-        assert!(!inertia.sample(3, [24., 0.], &settings, &pose));
-        assert!(inertia.sample(4, [36., 0.], &settings, &pose));
+        assert!(!inertia.sample(3, [24., 0.], &settings, &pose, true));
+        assert!(inertia.sample(4, [36., 0.], &settings, &pose, true));
+        assert!(inertia.sample(4, [36., 0.], &settings, &pose, false));
+        assert!(inertia.offsets.is_empty());
+        assert!(inertia.sample(5, [48., 0.], &settings, &pose, true));
         settings.set(GLOBAL, String::new(), 0);
-        assert!(inertia.sample(4, [36., 0.], &settings, &pose));
+        assert!(inertia.sample(5, [48., 0.], &settings, &pose, true));
         assert!(inertia.offsets.is_empty());
     }
 }
