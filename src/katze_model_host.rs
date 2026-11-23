@@ -12,7 +12,8 @@ use std::{
     collections::BTreeMap,
     ffi::{CStr, c_char, c_void},
     mem::size_of,
-    ptr, slice,
+    slice,
+    sync::atomic::{AtomicI32, Ordering},
 };
 
 const OK: i32 = 0;
@@ -20,6 +21,7 @@ const ABSENT: i32 = 1;
 const ERROR: i32 = -5;
 const MAX_PSZ: usize = 128 * 1024 * 1024;
 const MAX_FRAME_SIDE: i32 = 4096;
+const FADE_SETTING: u32 = 6;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -75,6 +77,9 @@ type Select = unsafe extern "C" fn(u64, u64, Bytes, u32) -> i32;
 type SetName = unsafe extern "C" fn(u64, u64, Bytes) -> i32;
 type GetBytes = unsafe extern "C" fn(u64, u64, *mut Bytes) -> i32;
 type Action = unsafe extern "C" fn(u64, u64) -> i32;
+type SetMode = unsafe extern "C" fn(u64, u64, u32) -> i32;
+type GetSetting = unsafe extern "C" fn(u64, u32, Bytes, *mut i32) -> i32;
+type SetSetting = unsafe extern "C" fn(u64, u32, Bytes, i32) -> i32;
 type Unused = Option<unsafe extern "C" fn()>;
 
 // Field order and signatures follow KatzeModelHost in the development ABI 0 header.
@@ -88,13 +93,13 @@ struct Host {
     set_body_options: SetName,
     set_effects_mode: Unused,
     set_tone: Unused,
-    effects_active: Unused,
+    effects_active: SetMode,
     frame: Frame,
     close: unsafe extern "C" fn(u64, u64),
     default_body_options: Unused,
-    get_setting: Unused,
-    set_setting: Unused,
-    reset_settings: Unused,
+    get_setting: GetSetting,
+    set_setting: SetSetting,
+    reset_settings: unsafe extern "C" fn(u64) -> i32,
     reset_view: Unused,
     clear_actions: Action,
     advance_action: Unused,
@@ -104,14 +109,14 @@ struct Host {
     set_differences: Select,
     current_differences: GetBytes,
     set_difference_scale: Unused,
-    clear_effects: Unused,
+    clear_effects: Action,
     update_lip_sync: Unused,
     start_lip_track: Unused,
     set_feature_mode: Unused,
     set_waiting_motion: SetName,
     set_inertia_group: Unused,
     refresh_effects: Unused,
-    start_fade: Unused,
+    start_fade: SetMode,
     set_color_filter: Unused,
 }
 
@@ -125,13 +130,13 @@ const fn host(context: u64) -> Host {
         set_body_options,
         set_effects_mode: None,
         set_tone: None,
-        effects_active: None,
+        effects_active,
         frame,
         close,
         default_body_options: None,
-        get_setting: None,
-        set_setting: None,
-        reset_settings: None,
+        get_setting,
+        set_setting,
+        reset_settings,
         reset_view: None,
         clear_actions,
         advance_action: None,
@@ -141,53 +146,79 @@ const fn host(context: u64) -> Host {
         set_differences: set_options,
         current_differences,
         set_difference_scale: None,
-        clear_effects: None,
+        clear_effects,
         update_lip_sync: None,
         start_lip_track: None,
         set_feature_mode: None,
         set_waiting_motion,
         set_inertia_group: None,
         refresh_effects: None,
-        start_fade: None,
+        start_fade,
         set_color_filter: None,
     }
 }
 
-/// Returns a model callback table with the corresponding script encoding.
+#[repr(C)]
+struct SessionHost {
+    callbacks: Host,
+    encoding: &'static Encoding,
+    fade: AtomicI32,
+}
+
+/// Creates a model callback table owned by the caller.
 ///
 /// # Safety
 /// `label` must point to a NUL-terminated string or be null for CP932.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_katze_model_host_v0(label: *const c_char) -> *const c_void {
-    static JAPANESE: Host = host(0);
-    static SIMPLIFIED_CHINESE: Host = host(1);
-    static UTF8: Host = host(2);
-    static TRADITIONAL_CHINESE: Host = host(3);
     let label = if label.is_null() {
         &[][..]
     } else {
         unsafe { CStr::from_ptr(label) }.to_bytes()
     };
-    let encoding = Encoding::for_label(label).unwrap_or(SHIFT_JIS);
-    let table = if [encoding_rs::GBK, encoding_rs::GB18030].contains(&encoding) {
-        &SIMPLIFIED_CHINESE
-    } else if encoding == encoding_rs::UTF_8 {
-        &UTF8
-    } else if encoding == encoding_rs::BIG5 {
-        &TRADITIONAL_CHINESE
-    } else {
-        &JAPANESE
-    };
-    ptr::from_ref(table).cast()
+    let session = Box::into_raw(Box::new(SessionHost {
+        callbacks: host(0),
+        encoding: Encoding::for_label(label).unwrap_or(SHIFT_JIS),
+        fade: AtomicI32::new(0),
+    }));
+    unsafe { (*session).callbacks.context = session as u64 };
+    session.cast()
 }
 
-fn encoding(context: u64) -> &'static Encoding {
-    match context {
-        1 => encoding_rs::GB18030,
-        2 => encoding_rs::UTF_8,
-        3 => encoding_rs::BIG5,
-        _ => SHIFT_JIS,
+/// # Safety
+/// `callbacks` is the owned table. Release it after the runtime session is destroyed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_katze_model_host_destroy_v0(callbacks: *const c_void) {
+    if !callbacks.is_null() {
+        drop(unsafe { Box::from_raw(callbacks.cast::<SessionHost>().cast_mut()) });
     }
+}
+
+unsafe fn session(context: u64) -> &'static SessionHost {
+    unsafe { &*(context as *const SessionHost) }
+}
+
+unsafe extern "C" fn get_setting(context: u64, setting: u32, _: Bytes, out: *mut i32) -> i32 {
+    if setting != FADE_SETTING {
+        return ABSENT;
+    }
+    unsafe { out.write(session(context).fade.load(Ordering::Relaxed)) };
+    OK
+}
+
+unsafe extern "C" fn set_setting(context: u64, setting: u32, _: Bytes, value: i32) -> i32 {
+    if setting != FADE_SETTING {
+        return ABSENT;
+    }
+    unsafe { session(context) }
+        .fade
+        .store(value, Ordering::Relaxed);
+    OK
+}
+
+unsafe extern "C" fn reset_settings(context: u64) -> i32 {
+    unsafe { session(context) }.fade.store(0, Ordering::Relaxed);
+    OK
 }
 
 fn guarded(call: impl FnOnce() -> Result<i32, String>) -> i32 {
@@ -209,7 +240,7 @@ unsafe extern "C" fn open(context: u64, input: *const Input, token: *mut u64) ->
             EmoteModel::from_document(PsbDocument::from_bytes(bytes).map_err(|e| e.to_string())?)
                 .map_err(|e| e.to_string())?;
         let mut model = Model::load(model)?;
-        let encoding = encoding(context);
+        let encoding = unsafe { session(context) }.encoding;
         let decode = |bytes: Bytes| encoding.decode(unsafe { bytes.view() }).0;
         model.expression = Differences::parse(&decode(input.expression_table));
         model.body = Differences::parse(&decode(input.body_table));
@@ -231,7 +262,10 @@ unsafe extern "C" fn close(_: u64, token: u64) {
 unsafe extern "C" fn set_options(context: u64, token: u64, options: Bytes, _: u32) -> i32 {
     guarded(|| {
         let model = unsafe { &mut *(token as *mut Model) };
-        model.select(unsafe { options.view() }, encoding(context));
+        model.select(
+            unsafe { options.view() },
+            unsafe { session(context) }.encoding,
+        );
         Ok(OK)
     })
 }
@@ -239,7 +273,10 @@ unsafe extern "C" fn set_options(context: u64, token: u64, options: Bytes, _: u3
 unsafe extern "C" fn set_body_options(context: u64, token: u64, options: Bytes) -> i32 {
     guarded(|| {
         let model = unsafe { &mut *(token as *mut Model) };
-        let keys = encoding(context).decode(unsafe { options.view() }).0;
+        let keys = unsafe { session(context) }
+            .encoding
+            .decode(unsafe { options.view() })
+            .0;
         model.body_values = model.body.select(&keys);
         model.apply();
         Ok(OK)
@@ -260,7 +297,10 @@ unsafe extern "C" fn current_differences(_: u64, token: u64, out: *mut Bytes) ->
 unsafe extern "C" fn start_action(context: u64, token: u64, name: Bytes) -> i32 {
     guarded(|| {
         let model = unsafe { &mut *(token as *mut Model) };
-        let label = encoding(context).decode(unsafe { name.view() }).0;
+        let label = unsafe { session(context) }
+            .encoding
+            .decode(unsafe { name.view() })
+            .0;
         if model.play(&label) {
             Ok(OK)
         } else {
@@ -290,18 +330,38 @@ unsafe extern "C" fn set_waiting_motion(context: u64, token: u64, name: Bytes) -
     }
 }
 
-unsafe extern "C" fn frame(_: u64, token: u64, time: u32, out: *mut Output) -> i32 {
+unsafe extern "C" fn start_fade(_: u64, token: u64, duration: u32) -> i32 {
+    unsafe { &mut *(token as *mut Model) }.pending_fade = Some(duration);
+    OK
+}
+
+unsafe extern "C" fn clear_effects(_: u64, token: u64) -> i32 {
+    unsafe { &mut *(token as *mut Model) }.fade = None;
+    OK
+}
+
+unsafe extern "C" fn effects_active(_: u64, token: u64, _: u32) -> i32 {
+    if unsafe { &*(token as *const Model) }.fade.is_some() {
+        OK
+    } else {
+        ABSENT
+    }
+}
+
+unsafe extern "C" fn frame(context: u64, token: u64, time: u32, out: *mut Output) -> i32 {
     guarded(|| {
         let model = unsafe { &mut *(token as *mut Model) };
-        model.render(time)?;
-        if model.pixels.is_empty() {
+        let enabled = unsafe { session(context) }.fade.load(Ordering::Relaxed) != 0;
+        model.advance_frame(time, enabled)?;
+        let pixels = model.output();
+        if pixels.bgra.is_empty() {
             return Ok(ABSENT);
         }
         unsafe {
             out.write(Output {
-                size: model.size,
-                origin: model.origin,
-                bgra: Bytes::of(&model.pixels),
+                size: pixels.size,
+                origin: pixels.origin,
+                bgra: Bytes::of(&pixels.bgra),
             });
         }
         Ok(OK)
@@ -408,6 +468,79 @@ impl Differences {
     }
 }
 
+#[derive(Clone, Default)]
+struct Raster {
+    origin: [i32; 2],
+    size: [u32; 2],
+    bgra: Vec<u8>,
+}
+
+impl Raster {
+    fn pixel(&self, x: i64, y: i64) -> [u8; 4] {
+        let x = x - i64::from(self.origin[0]);
+        let y = y - i64::from(self.origin[1]);
+        if x < 0
+            || y < 0
+            || x >= i64::from(self.size[0])
+            || y >= i64::from(self.size[1])
+            || self.bgra.is_empty()
+        {
+            return [0; 4];
+        }
+        let index = 4 * (y as usize * self.size[0] as usize + x as usize);
+        self.bgra[index..index + 4].try_into().unwrap()
+    }
+
+    fn blend(&mut self, from: &Self, to: &Self, weight: u32) -> bool {
+        let bounds = |raster: &Self, axis: usize| {
+            let min = i64::from(raster.origin[axis]);
+            (min, min + i64::from(raster.size[axis]))
+        };
+        for axis in 0..2 {
+            let (from_min, from_max) = bounds(from, axis);
+            let (to_min, to_max) = bounds(to, axis);
+            let (min, max) = if from.bgra.is_empty() {
+                (to_min, to_max)
+            } else if to.bgra.is_empty() {
+                (from_min, from_max)
+            } else {
+                (from_min.min(to_min), from_max.max(to_max))
+            };
+            let side = max - min;
+            if !(1..=i64::from(MAX_FRAME_SIDE)).contains(&side) {
+                return false;
+            }
+            self.origin[axis] = min as i32;
+            self.size[axis] = side as u32;
+        }
+        let [width, height] = self.size.map(|n| n as usize);
+        self.bgra.resize(4 * width * height, 0);
+        for (i, dst) in self.bgra.chunks_exact_mut(4).enumerate() {
+            let x = i64::from(self.origin[0]) + (i % width) as i64;
+            let y = i64::from(self.origin[1]) + (i / width) as i64;
+            let (mut a, mut b) = (from.pixel(x, y), to.pixel(x, y));
+            if a[3] == 0 {
+                a[..3].copy_from_slice(&b[..3]);
+            }
+            if b[3] == 0 {
+                b[..3].copy_from_slice(&a[..3]);
+            }
+            for channel in 0..4 {
+                dst[channel] = ((u32::from(a[channel]) * (256 - weight)
+                    + u32::from(b[channel]) * weight)
+                    >> 8) as u8;
+            }
+        }
+        true
+    }
+}
+
+struct Fade {
+    from: Raster,
+    started: u32,
+    duration: u32,
+}
+
 struct Model {
     playback: EmotePlayback,
     gpu: Box<dyn GpuBackend>,
@@ -419,9 +552,10 @@ struct Model {
     applied: Assignments,
     keys: Vec<u8>,
     action: Option<String>,
-    origin: [i32; 2],
-    size: [u32; 2],
-    pixels: Vec<u8>,
+    raster: Raster,
+    blended: Raster,
+    fade: Option<Fade>,
+    pending_fade: Option<u32>,
     last_tick: Option<u32>,
     dirty: bool,
 }
@@ -458,9 +592,10 @@ impl Model {
             applied: Assignments::new(),
             keys: Vec::new(),
             action: None,
-            origin: [0; 2],
-            size: [0; 2],
-            pixels: Vec::new(),
+            raster: Raster::default(),
+            blended: Raster::default(),
+            fade: None,
+            pending_fade: None,
             last_tick: None,
             dirty: true,
         })
@@ -518,6 +653,45 @@ impl Model {
         self.dirty = true;
     }
 
+    fn output(&self) -> &Raster {
+        if self.fade.is_some() {
+            &self.blended
+        } else {
+            &self.raster
+        }
+    }
+
+    fn advance_frame(&mut self, time: u32, fade_enabled: bool) -> Result<(), String> {
+        if !fade_enabled {
+            self.fade = None;
+        }
+        if let Some(duration) = self.pending_fade.take() {
+            self.fade = if duration != 0 && fade_enabled && self.last_tick.is_some() {
+                Some(Fade {
+                    from: self.output().clone(),
+                    started: time,
+                    duration,
+                })
+            } else {
+                None
+            };
+        }
+        self.render(time)?;
+        if let Some(fade) = &self.fade {
+            let elapsed = time.wrapping_sub(fade.started);
+            if elapsed >= fade.duration
+                || !self.blended.blend(
+                    &fade.from,
+                    &self.raster,
+                    (elapsed as f32 / fade.duration as f32 * 256.0) as u32,
+                )
+            {
+                self.fade = None;
+            }
+        }
+        Ok(())
+    }
+
     fn render(&mut self, time: u32) -> Result<(), String> {
         if let Some(last) = self.last_tick.replace(time) {
             if last != time {
@@ -561,7 +735,7 @@ impl Model {
             list.push(command);
         }
         if list.is_empty() {
-            self.pixels.clear();
+            self.raster.bgra.clear();
             self.dirty = false;
             return Ok(());
         }
@@ -583,21 +757,22 @@ impl Model {
             cmd.transform = translation * cmd.transform;
         }
         list.materialize_stencil_groups(ALPHA_MASK_SHADER);
-        if self.size != size {
+        if self.raster.size != size {
             self.gpu.resize(extent)?;
         }
         self.gpu.begin_frame(FrameTarget::Main)?;
         self.gpu.render_with_clear_color(&list, [0.; 4]);
         self.gpu.end_frame();
-        self.pixels
+        self.raster
+            .bgra
             .resize(extent.rgba8_len().ok_or("Invalid frame size")?, 0);
         let written = self
             .gpu
-            .readback(FrameTarget::Main, extent, &mut self.pixels)?;
-        if written != self.pixels.len() {
+            .readback(FrameTarget::Main, extent, &mut self.raster.bgra)?;
+        if written != self.raster.bgra.len() {
             return Err("Incomplete model readback".into());
         }
-        for pixel in self.pixels.chunks_exact_mut(4) {
+        for pixel in self.raster.bgra.chunks_exact_mut(4) {
             pixel.swap(0, 2);
             let alpha = u32::from(pixel[3]);
             if alpha > 0 && alpha < 255 {
@@ -606,8 +781,8 @@ impl Model {
                 }
             }
         }
-        self.size = size;
-        self.origin = origin;
+        self.raster.size = size;
+        self.raster.origin = origin;
         self.dirty = false;
         Ok(())
     }
