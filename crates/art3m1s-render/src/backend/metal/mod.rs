@@ -3998,7 +3998,7 @@ fn effect_uniforms(command: &DrawCommand) -> EffectUniforms {
         ],
         negative_padding: [
             uniform("negative", 0, command.color.negative as u8 as f32),
-            0.0,
+            uniform("invertMask", 0, 0.0),
             0.0,
             0.0,
         ],
@@ -4337,6 +4337,18 @@ mod tests {
                 .chunks_exact(4)
                 .all(|pixel| pixel == [255, 0, 0, 255])
         );
+        frame.shader_groups[0]
+            .effect
+            .uniforms
+            .insert("invertMask".into(), vec![1.0]);
+        backend.begin_frame(FrameTarget::Main).unwrap();
+        backend.render_with_clear_color(&frame, [0.0; 4]);
+        backend.end_frame();
+        let inverted = backend
+            .readback_owned(FrameTarget::Main, Extent2D::new(4, 4))
+            .unwrap();
+        assert!(inverted.iter().all(|&channel| channel == 0));
+
         assert!(backend.pipelines.keys().any(|key| {
             key.shader == ShaderKind::AlphaMask && key.stencil == StencilMode::MaskComposite
         }));

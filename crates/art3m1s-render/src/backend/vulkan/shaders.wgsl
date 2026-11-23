@@ -124,8 +124,9 @@ fn sprite_fragment(in: RasterData) -> @location(0) vec4<f32> {
 @fragment
 fn alpha_mask_fragment(in: RasterData) -> @location(0) vec4<f32> {
     var color = textureSample(source_texture, linear_sampler, in.uv);
+    let coverage = textureSample(mask_texture, linear_sampler, in.uv).a;
     let mask_alpha = uniforms.effect.alpha_progress_vague_opaque.x *
-        textureSample(mask_texture, linear_sampler, in.uv).a;
+        mix(coverage, 1.0 - coverage, uniforms.effect.negative_padding.y);
     color = vec4<f32>(
         color.rgb * uniforms.effect.color_multiply_grayscale.xyz * mask_alpha,
         color.a * mask_alpha,

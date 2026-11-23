@@ -229,6 +229,7 @@ pub struct StencilMetadata {
     pub namespace: u64,
     pub source_label: String,
     pub mask_labels: Vec<String>,
+    pub inverted: bool,
 }
 
 /// Per-sprite fixed-function state used by the native E-Mote renderer.
@@ -399,7 +400,10 @@ impl DrawList {
                 end: index + 1,
                 effect: ShaderEffect {
                     name: effect_name.to_owned(),
-                    uniforms: BTreeMap::new(),
+                    uniforms: BTreeMap::from([(
+                        "invertMask".into(),
+                        vec![f32::from(u8::from(stencil.inverted))],
+                    )]),
                     mask_texture: None,
                     user_texture: None,
                 },

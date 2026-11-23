@@ -120,8 +120,9 @@ fragment float4 alpha_mask_fragment(
     sampler linear_sampler [[sampler(0)]],
     constant EffectUniforms &uniforms [[buffer(1)]]) {
     float4 color = source.sample(linear_sampler, in.uv);
+    float coverage = mask.sample(linear_sampler, in.uv).a;
     float mask_alpha = uniforms.alpha_progress_vague_opaque.x *
-        mask.sample(linear_sampler, in.uv).a;
+        mix(coverage, 1.0 - coverage, uniforms.negative_padding.y);
     color.rgb *= uniforms.color_multiply_grayscale.xyz * mask_alpha;
     color.a *= mask_alpha;
     return color;

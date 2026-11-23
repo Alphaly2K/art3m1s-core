@@ -3798,7 +3798,12 @@ fn effect_uniforms(c: &DrawCommand) -> EffectUniforms {
             u("colorMultiply", 2, c.color.multiply[2]),
             u("grayscale", 0, c.color.grayscale as u8 as f32),
         ],
-        negative_padding: [u("negative", 0, c.color.negative as u8 as f32), 0., 0., 0.],
+        negative_padding: [
+            u("negative", 0, c.color.negative as u8 as f32),
+            u("invertMask", 0, 0.),
+            0.,
+            0.,
+        ],
     }
 }
 fn solid_command(e: Extent2D, m: [f32; 3], opacity: f32, b: Option<[f32; 4]>) -> DrawCommand {

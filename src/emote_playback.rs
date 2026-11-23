@@ -213,6 +213,7 @@ impl EmotePlayback {
                 namespace: self.generation,
                 source_label: item.layer_label,
                 mask_labels: item.stencil_mask_layers,
+                inverted: item.stencil_mask_inverted,
             }),
             native_emote: Some(native_material),
         })

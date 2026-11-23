@@ -348,6 +348,7 @@ pub struct EmoteDrawItem {
     pub draw_order: Vec<i64>,
     pub mesh: Option<EmoteMesh>,
     pub stencil_mask_layers: Vec<String>,
+    pub stencil_mask_inverted: bool,
 }
 
 /// Per-instance local frame history. Only layers containing a HOLD key need
@@ -369,6 +370,12 @@ impl EmoteEvaluationHistory {
         self.model = identity;
         self.generation += 1;
     }
+}
+
+#[derive(Clone, Copy, Default)]
+struct StencilMask<'a> {
+    layers: &'a [String],
+    inverted: bool,
 }
 
 pub struct EmoteMotionEvaluator<'a> {
@@ -442,7 +449,7 @@ impl<'a> EmoteMotionEvaluator<'a> {
             &resolved_state,
             TransformContext::default(),
             0,
-            &[],
+            StencilMask::default(),
             &[],
             &mut stack,
             &mut deformers,
@@ -470,7 +477,7 @@ impl<'a> EmoteMotionEvaluator<'a> {
         state: &EmoteRenderState,
         parent_context: TransformContext,
         depth: usize,
-        stencil_mask_layers: &[String],
+        stencil: StencilMask<'_>,
         order_prefix: &[i64],
         stack: &mut BTreeSet<(String, String)>,
         deformers: &mut Vec<MeshDeformer>,
@@ -524,7 +531,7 @@ impl<'a> EmoteMotionEvaluator<'a> {
                 state,
                 parent_context.clone(),
                 depth,
-                stencil_mask_layers,
+                stencil,
                 order_prefix,
                 &mut structural_index,
                 stack,
@@ -548,7 +555,7 @@ impl<'a> EmoteMotionEvaluator<'a> {
         state: &EmoteRenderState,
         parent_context: TransformContext,
         depth: usize,
-        parent_stencil_mask_layers: &[String],
+        parent_stencil: StencilMask<'_>,
         order_prefix: &[i64],
         structural_index: &mut usize,
         stack: &mut BTreeSet<(String, String)>,
@@ -620,12 +627,14 @@ impl<'a> EmoteMotionEvaluator<'a> {
         };
         let mut child_context = layer_context.clone();
         prepare_child_inherit_source(&mut child_context, layer, own_sync);
-        let stencil_mask_layers =
-            if (layer.stencil_type & 0x4) != 0 && !layer.stencil_mask_layers.is_empty() {
-                layer.stencil_mask_layers.as_slice()
-            } else {
-                parent_stencil_mask_layers
-            };
+        let stencil = if (layer.stencil_type & 0x4) != 0 && !layer.stencil_mask_layers.is_empty() {
+            StencilMask {
+                layers: layer.stencil_mask_layers.as_slice(),
+                inverted: layer.stencil_type == 6,
+            }
+        } else {
+            parent_stencil
+        };
 
         // Shape-sync layers (meshTransform + native sync bit) propagate their
         // mesh payload to descendants. The payload lives on icon frames as
@@ -658,7 +667,7 @@ impl<'a> EmoteMotionEvaluator<'a> {
                 layer_context,
                 layer.motion_independent_layer_inherit,
                 depth,
-                stencil_mask_layers,
+                stencil,
                 &draw_order,
                 stack,
                 deformers,
@@ -684,7 +693,7 @@ impl<'a> EmoteMotionEvaluator<'a> {
                 state,
                 child_context.clone(),
                 depth,
-                stencil_mask_layers,
+                stencil,
                 order_prefix,
                 structural_index,
                 stack,
@@ -718,7 +727,7 @@ impl<'a> EmoteMotionEvaluator<'a> {
         context: TransformContext,
         motion_independent_layer_inherit: bool,
         depth: usize,
-        stencil_mask_layers: &[String],
+        stencil: StencilMask<'_>,
         draw_order: &[i64],
         stack: &mut BTreeSet<(String, String)>,
         deformers: &mut Vec<MeshDeformer>,
@@ -760,7 +769,7 @@ impl<'a> EmoteMotionEvaluator<'a> {
                 icon,
                 content,
                 context,
-                stencil_mask_layers,
+                stencil,
                 draw_order,
             );
             apply_deformers(&mut item, deformers);
@@ -811,7 +820,7 @@ impl<'a> EmoteMotionEvaluator<'a> {
             state,
             nested_context,
             depth + 1,
-            stencil_mask_layers,
+            stencil,
             draw_order,
             stack,
             deformers,
@@ -1804,7 +1813,7 @@ fn draw_item(
     icon: &AtlasIcon,
     content: &EmoteFrameContent,
     context: TransformContext,
-    stencil_mask_layers: &[String],
+    stencil: StencilMask<'_>,
     draw_order: &[i64],
 ) -> EmoteDrawItem {
     EmoteDrawItem {
@@ -1834,7 +1843,8 @@ fn draw_item(
         z_order: icon.z_order,
         draw_order: draw_order.to_vec(),
         mesh: content.mesh.clone(),
-        stencil_mask_layers: stencil_mask_layers.to_vec(),
+        stencil_mask_layers: stencil.layers.to_vec(),
+        stencil_mask_inverted: stencil.inverted,
     }
 }
 
@@ -2327,6 +2337,7 @@ mod tests {
                 control_coordinates: None,
             }),
             stencil_mask_layers: Vec::new(),
+            stencil_mask_inverted: false,
         };
         apply_deformers(&mut item, &[]);
         let preserved = item.mesh.unwrap().blend_points.unwrap();

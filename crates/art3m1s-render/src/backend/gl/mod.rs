@@ -885,6 +885,7 @@ impl GlRenderer {
                 }
 
                 gl.uniform_1_f32(bindings.alpha.as_ref(), cmd.opacity);
+                gl.uniform_1_f32(bindings.invert_mask.as_ref(), 0.0);
                 gl.uniform_3_f32(
                     bindings.color_multiply.as_ref(),
                     c.multiply[0],
@@ -1542,6 +1543,7 @@ struct ProgramBindings {
     texture_mask: Option<glow::UniformLocation>,
     texture_user: Option<glow::UniformLocation>,
     alpha: Option<glow::UniformLocation>,
+    invert_mask: Option<glow::UniformLocation>,
     color_multiply: Option<glow::UniformLocation>,
 }
 
@@ -1574,6 +1576,7 @@ impl ProgramBindings {
             texture_mask: get("u_texture_mask"),
             texture_user: get("u_texture_user"),
             alpha: get("alpha"),
+            invert_mask: get("invertMask"),
             color_multiply: get("colorMultiply"),
         }
     }

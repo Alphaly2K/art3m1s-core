@@ -182,11 +182,13 @@ out vec4 frag_color;
 uniform sampler2D u_texture_fore;
 uniform sampler2D u_texture_mask;
 uniform float alpha;
+uniform float invertMask;
 uniform vec3 colorMultiply;
 
 void main() {
     vec4 c = texture(u_texture_fore, v_uv);
-    float mask_alpha = alpha * texture(u_texture_mask, v_uv).a;
+    float coverage = texture(u_texture_mask, v_uv).a;
+    float mask_alpha = alpha * mix(coverage, 1.0 - coverage, invertMask);
     // Group targets store premultiplied RGB. A mask must scale RGB and alpha
     // together so the result stays premultiplied for the final group blend.
     c.rgb *= colorMultiply * mask_alpha;
