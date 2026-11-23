@@ -22,6 +22,14 @@ pub mod audio;
 #[cfg(feature = "legacy")]
 pub mod backend;
 mod emote_playback;
+#[cfg(all(
+    feature = "katze-model-host",
+    any(
+        all(feature = "metal-backend", any(target_os = "macos", target_os = "ios")),
+        all(feature = "vulkan-backend", any(target_os = "linux", target_os = "windows", target_os = "android")),
+    )
+))]
+mod katze_model_host;
 #[cfg(feature = "legacy")]
 pub mod ffi;
 #[cfg(any(

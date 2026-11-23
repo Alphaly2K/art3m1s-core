@@ -94,6 +94,11 @@ impl EmotePlayback {
         self.player.take_commands().for_each(drop);
     }
 
+    #[cfg(feature = "katze-model-host")]
+    pub(crate) fn clear_variable(&mut self, label: &str) {
+        self.player.clear_variable(label);
+    }
+
     pub(crate) fn advance(&mut self, frames: f32) -> bool {
         let mut changed = self.player.advance_model(&self.model, frames);
         for blink in &mut self.eye_blinks {

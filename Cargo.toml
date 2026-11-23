@@ -30,6 +30,7 @@ art3m1s-krkr = { path = "crates/art3m1s-krkr", optional = true }
 art3m1s-siglus = { path = "crates/art3m1s-siglus", optional = true }
 cpal = { version = "0.15.3", optional = true }
 encoding_rs = "0.8"
+flate2 = { version = "1", optional = true }
 glam = "0.30"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -47,6 +48,7 @@ ctt-astcenc = { version = "0.5", optional = true }
 [features]
 default = ["gl-backend"]
 host-abi-v2 = []
+katze-model-host = ["dep:flate2"]
 legacy = [
     "dep:art3m1s-native-render",
     "dep:pfs-upk-rust",

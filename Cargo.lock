@@ -208,6 +208,7 @@ dependencies = [
  "cpal",
  "ctt-astcenc",
  "encoding_rs",
+ "flate2",
  "glam 0.30.10",
  "glow 0.16.0",
  "image 0.25.10",

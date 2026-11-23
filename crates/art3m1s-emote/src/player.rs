@@ -97,6 +97,10 @@ impl EmotePlayer {
         &self.variables
     }
 
+    pub fn clear_variable(&mut self, label: &str) {
+        self.variables.remove(label);
+    }
+
     pub fn timelines(&self) -> &BTreeMap<String, TimelineState> {
         &self.timelines
     }
