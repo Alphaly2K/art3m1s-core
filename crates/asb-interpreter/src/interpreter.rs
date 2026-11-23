@@ -3063,20 +3063,8 @@ impl Interpreter {
         };
         let line = self.current_line;
         let stack = self.call_stack.clone();
-        if self
-            .queued_wait_checkpoints
-            .last()
-            .is_some_and(|checkpoint| {
-                checkpoint.script == script
-                    && checkpoint.line == line
-                    && same_call_stack(&checkpoint.stack, &stack)
-            })
-        {
-            let index = self.queued_wait_checkpoints.len() - 1;
-            self.queued_wait_checkpoints[index].event = event.clone();
-            self.active_queued_wait = Some(index);
-            return;
-        }
+        // A callback can issue its own wait without moving the script PC.
+        // Keep its deferred tags and timing separate from the interrupted wait.
         let (deferred, immediate_count) = {
             let mut ctx = self.engine_ctx.lock().unwrap();
             let deferred = std::mem::take(&mut ctx.tag_queue);
@@ -3388,7 +3376,12 @@ impl Interpreter {
         if !self.last_wait_from_queue {
             self.current_line = self.current_line.saturating_add(1);
         }
-        self.record_queued_wait_checkpoint(event);
+        // Reuse the checkpoint only when parking the wait it already represents.
+        if !(self.last_wait_from_queue && self.last_queue_pause_is_wait)
+            || self.active_queued_wait.is_none()
+        {
+            self.record_queued_wait_checkpoint(event);
+        }
         let checkpoint = &mut self.queued_wait_checkpoints[self.active_queued_wait.unwrap()];
         checkpoint.allow_queue = true;
         checkpoint.host_interrupt = Some(HostWaitTiming {
@@ -3782,6 +3775,82 @@ mod tests {
         assert_eq!(it.get_variable("opened"), Some(Value::Int(1)));
         assert!(it.get_variable("after_wait").is_none());
         assert!(it.call_stack().is_empty());
+        assert_eq!(it.current_host_wait_start(), Some((4, 10)));
+    }
+
+    #[test]
+    fn hosted_callback_wait_keeps_the_wait_at_the_same_script_position() {
+        let mut it = Interpreter::try_new_hosted(InterpreterConfig::default()).unwrap();
+        it.load_script("story", "*main\n[stop]\n[var name=left_menu data=1]\n")
+            .unwrap();
+        it.set_callback(|event| match event {
+            Event::Wait { .. } | Event::Flip => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        it.start("story", "main").unwrap();
+        let ExecutionResult::Wait(menu) = it.step().unwrap() else {
+            panic!("expected the menu wait");
+        };
+        it.park_wait_for_host_dispatch(&menu, Some((4, 10)), true)
+            .unwrap();
+        it.lua()
+            .load(
+                r#"
+                __engine:tag{'flip'}
+                __engine:enqueueTag{'wait', time=20}
+                __engine:enqueueTag{'var', name='preview_finished', data=1}
+                "#,
+            )
+            .exec()
+            .unwrap();
+        assert!(matches!(
+            it.step().unwrap(),
+            ExecutionResult::Wait(Event::Flip)
+        ));
+        it.advance_line();
+        let ExecutionResult::Wait(
+            preview @ Event::Wait {
+                reason:
+                    WaitReason::Timed {
+                        milliseconds: 20, ..
+                    },
+            },
+        ) = it.step().unwrap()
+        else {
+            panic!("expected the preview wait");
+        };
+        assert_eq!(it.current_host_wait_start(), None);
+        it.park_wait_for_host_dispatch(&preview, Some((5, 20)), true)
+            .unwrap();
+        it.append_queued_tags(vec![(
+            "var".into(),
+            HashMap::from([
+                ("name".into(), "updated_option".into()),
+                ("data".into(), "1".into()),
+            ]),
+        )]);
+        assert!(matches!(
+            it.step().unwrap(),
+            ExecutionResult::Wait(Event::Wait {
+                reason: WaitReason::Timed {
+                    milliseconds: 20,
+                    ..
+                }
+            })
+        ));
+        assert_eq!(it.get_variable("updated_option"), Some(Value::Int(1)));
+        assert_eq!(it.get_variable("preview_finished"), None);
+        assert_eq!(it.current_host_wait_start(), Some((5, 20)));
+
+        it.advance_line();
+        assert!(matches!(
+            it.step().unwrap(),
+            ExecutionResult::Wait(Event::Wait {
+                reason: WaitReason::Stop { .. }
+            })
+        ));
+        assert_eq!(it.get_variable("preview_finished"), Some(Value::Int(1)));
+        assert_eq!(it.get_variable("left_menu"), None);
         assert_eq!(it.current_host_wait_start(), Some((4, 10)));
     }
 
