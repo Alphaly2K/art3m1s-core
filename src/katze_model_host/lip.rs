@@ -132,7 +132,7 @@ impl LipSync {
             let key = (index + 1, key.trim().to_ascii_lowercase());
             let (Some(profile), Some(vars)) = (
                 self.profiles.get(&key),
-                differences.0.get(&key.0).and_then(|p| p.get(&key.1)),
+                differences.patterns.get(&key.0).and_then(|p| p.get(&key.1)),
             ) else {
                 continue;
             };

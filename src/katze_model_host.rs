@@ -1,4 +1,7 @@
+mod difference;
 mod lip;
+
+use difference::{Assignments, Differences, Scale, Selection};
 
 use crate::emote_playback::EmotePlayback;
 use art3m1s_emote::{EmoteModel, PsbDocument};
@@ -23,6 +26,7 @@ const ABSENT: i32 = 1;
 const ERROR: i32 = -5;
 const MAX_PSZ: usize = 128 * 1024 * 1024;
 const MAX_FRAME_SIDE: i32 = 4096;
+const DIFFERENCE_EFFECTS_SETTING: u32 = 2;
 const LIP_SYNC_SETTING: u32 = 5;
 const FADE_SETTING: u32 = 6;
 
@@ -95,7 +99,7 @@ struct Host {
     open: Open,
     set_options: Select,
     set_body_options: SetName,
-    set_effects_mode: Unused,
+    set_effects_mode: SetMode,
     set_tone: Unused,
     effects_active: SetMode,
     frame: Frame,
@@ -112,7 +116,7 @@ struct Host {
     attribute: Unused,
     set_differences: Select,
     current_differences: GetBytes,
-    set_difference_scale: Unused,
+    set_difference_scale: unsafe extern "C" fn(u64, u64, u32, Bytes, f32) -> i32,
     clear_effects: Action,
     update_lip_sync: UpdateLipSync,
     start_lip_track: Unused,
@@ -132,7 +136,7 @@ const fn host(context: u64) -> Host {
         open,
         set_options,
         set_body_options,
-        set_effects_mode: None,
+        set_effects_mode,
         set_tone: None,
         effects_active,
         frame,
@@ -147,9 +151,9 @@ const fn host(context: u64) -> Host {
         start_action,
         action_active: None,
         attribute: None,
-        set_differences: set_options,
+        set_differences,
         current_differences,
-        set_difference_scale: None,
+        set_difference_scale,
         clear_effects,
         update_lip_sync,
         start_lip_track: None,
@@ -167,6 +171,7 @@ struct SessionHost {
     callbacks: Host,
     encoding: &'static Encoding,
     fade: AtomicI32,
+    difference_effects: AtomicI32,
     lip_sync: AtomicI32,
 }
 
@@ -185,6 +190,7 @@ pub unsafe extern "C" fn art3m1s_katze_model_host_v0(label: *const c_char) -> *c
         callbacks: host(0),
         encoding: Encoding::for_label(label).unwrap_or(SHIFT_JIS),
         fade: AtomicI32::new(0),
+        difference_effects: AtomicI32::new(1),
         lip_sync: AtomicI32::new(1),
     }));
     unsafe { (*session).callbacks.context = session as u64 };
@@ -209,6 +215,7 @@ impl SessionHost {
         match id {
             LIP_SYNC_SETTING => Some(&self.lip_sync),
             FADE_SETTING => Some(&self.fade),
+            DIFFERENCE_EFFECTS_SETTING => Some(&self.difference_effects),
             _ => None,
         }
     }
@@ -233,6 +240,7 @@ unsafe extern "C" fn set_setting(context: u64, setting: u32, _: Bytes, value: i3
 unsafe extern "C" fn reset_settings(context: u64) -> i32 {
     let session = unsafe { session(context) };
     session.fade.store(0, Ordering::Relaxed);
+    session.difference_effects.store(1, Ordering::Relaxed);
     session.lip_sync.store(1, Ordering::Relaxed);
     OK
 }
@@ -270,7 +278,7 @@ unsafe extern "C" fn open(context: u64, input: *const Input, token: *mut u64) ->
         model.body = Differences::parse(&decode(input.body_table));
         let initial = decode(input.initial_motion);
         model.play(&initial);
-        model.select(unsafe { input.options.view() }, encoding);
+        model.select(unsafe { input.options.view() }, encoding, false);
         unsafe { token.write(Box::into_raw(Box::new(model)) as u64) };
         Ok(OK)
     })
@@ -283,13 +291,55 @@ unsafe extern "C" fn close(_: u64, token: u64) {
     });
 }
 
-unsafe extern "C" fn set_options(context: u64, token: u64, options: Bytes, _: u32) -> i32 {
+unsafe extern "C" fn set_options(context: u64, token: u64, options: Bytes, transition: u32) -> i32 {
     guarded(|| {
         let model = unsafe { &mut *(token as *mut Model) };
+        let settings = unsafe { session(context) };
         model.select(
             unsafe { options.view() },
-            unsafe { session(context) }.encoding,
+            settings.encoding,
+            transition != 0 && model.effects_enabled(settings),
         );
+        Ok(OK)
+    })
+}
+
+unsafe extern "C" fn set_differences(context: u64, token: u64, keys: Bytes, mode: u32) -> i32 {
+    unsafe { set_options(context, token, keys, u32::from(mode != 0)) }
+}
+
+unsafe extern "C" fn set_effects_mode(_: u64, token: u64, mode: u32) -> i32 {
+    let model = unsafe { &mut *(token as *mut Model) };
+    model.effects_mode = mode;
+    OK
+}
+
+unsafe extern "C" fn set_difference_scale(
+    context: u64,
+    token: u64,
+    scale: u32,
+    parameter: Bytes,
+    multiplier: f32,
+) -> i32 {
+    if !multiplier.is_finite() {
+        return ABSENT;
+    }
+    guarded(|| {
+        let model = unsafe { &mut *(token as *mut Model) };
+        let scale = match scale {
+            0 => &mut model.difference_speed,
+            1 => &mut model.difference_value,
+            _ => return Ok(ABSENT),
+        };
+        let name = (!parameter.data.is_null()).then(|| {
+            unsafe { session(context) }
+                .encoding
+                .decode(unsafe { parameter.view() })
+                .0
+                .into_owned()
+        });
+        scale.set(name, multiplier);
+        model.differences_dirty = true;
         Ok(OK)
     })
 }
@@ -297,12 +347,15 @@ unsafe extern "C" fn set_options(context: u64, token: u64, options: Bytes, _: u3
 unsafe extern "C" fn set_body_options(context: u64, token: u64, options: Bytes) -> i32 {
     guarded(|| {
         let model = unsafe { &mut *(token as *mut Model) };
-        let keys = unsafe { session(context) }
-            .encoding
-            .decode(unsafe { options.view() })
-            .0;
-        model.body_values = model.body.select(&keys);
-        model.apply();
+        let settings = unsafe { session(context) };
+        let keys = settings.encoding.decode(unsafe { options.view() }).0;
+        let fade = model
+            .body_selection
+            .select(&model.body, &keys, model.effects_enabled(settings));
+        if fade.is_some() {
+            model.pending_chain_fade = fade;
+        }
+        model.differences_dirty = true;
         Ok(OK)
     })
 }
@@ -360,16 +413,27 @@ unsafe extern "C" fn start_fade(_: u64, token: u64, duration: u32) -> i32 {
 }
 
 unsafe extern "C" fn clear_effects(_: u64, token: u64) -> i32 {
-    unsafe { &mut *(token as *mut Model) }.fade = None;
+    let model = unsafe { &mut *(token as *mut Model) };
+    model.fade = None;
+    model.finish_differences();
     OK
 }
 
-unsafe extern "C" fn effects_active(_: u64, token: u64, _: u32) -> i32 {
-    if unsafe { &*(token as *const Model) }.fade.is_some() {
-        OK
-    } else {
-        ABSENT
-    }
+unsafe extern "C" fn effects_active(context: u64, token: u64, time: u32) -> i32 {
+    guarded(|| {
+        let model = unsafe { &mut *(token as *mut Model) };
+        model.advance_differences(time, unsafe { session(context) });
+        Ok(
+            if model.fade.is_some()
+                || model.expression_selection.active()
+                || model.body_selection.active()
+            {
+                OK
+            } else {
+                ABSENT
+            },
+        )
+    })
 }
 
 unsafe extern "C" fn set_feature_mode(_: u64, token: u64, feature: u32, mode: u32) -> i32 {
@@ -414,6 +478,7 @@ unsafe extern "C" fn frame(context: u64, token: u64, time: u32, out: *mut Output
         if !model.lip_enabled || settings.lip_sync.load(Ordering::Relaxed) == 0 {
             model.lip.observe(None);
         }
+        model.advance_differences(time, settings);
         model.advance_frame(time, settings.fade.load(Ordering::Relaxed) != 0)?;
         let pixels = model.output();
         if pixels.bgra.is_empty() {
@@ -472,62 +537,6 @@ fn read_psz(reader: &SourceReader) -> Result<Vec<u8>, String> {
         return Err("Invalid PSZ payload".into());
     }
     Ok(result)
-}
-
-type Assignments = BTreeMap<String, f32>;
-
-#[derive(Default)]
-struct Differences(BTreeMap<usize, BTreeMap<String, Assignments>>);
-
-impl Differences {
-    fn parse(text: &str) -> Self {
-        let mut patterns = Self::default();
-        let mut section = false;
-        let mut current = None;
-        for line in text.lines() {
-            let line = line.trim();
-            if line.starts_with('#') {
-                section = line.eq_ignore_ascii_case("#pattern");
-                current = None;
-            } else if section && !line.starts_with([';', '/']) {
-                let mut fields = line.split_ascii_whitespace();
-                let (Some(name), Some(value)) = (fields.next(), fields.next()) else {
-                    continue;
-                };
-                if let Some(group) = name.strip_prefix('%') {
-                    current = group
-                        .parse()
-                        .ok()
-                        .map(|group| (group, value.trim_matches('"').to_ascii_lowercase()));
-                } else if let Some((group, key)) = &current
-                    && let Ok(value) = value.parse::<f32>()
-                    && value.is_finite()
-                    && value != 99.0
-                {
-                    patterns
-                        .0
-                        .entry(*group)
-                        .or_default()
-                        .entry(key.clone())
-                        .or_default()
-                        .insert(name.trim_matches('"').to_owned(), value);
-                }
-            }
-        }
-        patterns
-    }
-
-    fn select(&self, keys: &str) -> Assignments {
-        keys.split([',', ':'])
-            .enumerate()
-            .filter_map(|(index, key)| {
-                self.0
-                    .get(&(index + 1))?
-                    .get(&key.trim().to_ascii_lowercase())
-            })
-            .flat_map(|values| values.iter().map(|(label, value)| (label.clone(), *value)))
-            .collect()
-    }
 }
 
 #[derive(Clone, Default)]
@@ -609,8 +618,14 @@ struct Model {
     textures: BTreeMap<String, (TextureId, TextureInfo)>,
     expression: Differences,
     body: Differences,
-    expression_values: Assignments,
-    body_values: Assignments,
+    expression_selection: Selection,
+    body_selection: Selection,
+    difference_speed: Scale,
+    difference_value: Scale,
+    effects_mode: u32,
+    differences_dirty: bool,
+    difference_tick: Option<u32>,
+    difference_values: Assignments,
     lip: lip::LipSync,
     lip_enabled: bool,
     lip_values: Assignments,
@@ -621,6 +636,7 @@ struct Model {
     blended: Raster,
     fade: Option<Fade>,
     pending_fade: Option<u32>,
+    pending_chain_fade: Option<u32>,
     last_tick: Option<u32>,
     dirty: bool,
 }
@@ -652,8 +668,14 @@ impl Model {
             textures,
             expression: Differences::default(),
             body: Differences::default(),
-            expression_values: Assignments::new(),
-            body_values: Assignments::new(),
+            expression_selection: Selection::default(),
+            body_selection: Selection::default(),
+            difference_speed: Scale::default(),
+            difference_value: Scale::default(),
+            effects_mode: 1,
+            differences_dirty: true,
+            difference_tick: None,
+            difference_values: Assignments::new(),
             lip: lip::LipSync::default(),
             lip_enabled: true,
             lip_values: Assignments::new(),
@@ -664,6 +686,7 @@ impl Model {
             blended: Raster::default(),
             fade: None,
             pending_fade: None,
+            pending_chain_fade: None,
             last_tick: None,
             dirty: true,
         })
@@ -685,27 +708,69 @@ impl Model {
         true
     }
 
-    fn select(&mut self, options: &[u8], encoding: &'static Encoding) {
+    fn effects_enabled(&self, settings: &SessionHost) -> bool {
+        self.effects_mode != 0 && settings.difference_effects.load(Ordering::Relaxed) != 0
+    }
+
+    fn finish_differences(&mut self) {
+        self.differences_dirty |=
+            self.expression_selection.active() || self.body_selection.active();
+        self.expression_selection.finish();
+        self.body_selection.finish();
+    }
+
+    fn select(&mut self, options: &[u8], encoding: &'static Encoding, animate: bool) {
         self.keys.clear();
         self.keys.extend_from_slice(options);
         let options = encoding.decode(options).0;
-        self.expression_values = self.expression.select(&options);
+        if let Some(duration) =
+            self.expression_selection
+                .select(&self.expression, &options, animate)
+        {
+            self.pending_chain_fade = Some(duration);
+        }
         self.lip.select(&self.expression, &options);
+        self.differences_dirty = true;
+    }
+
+    fn advance_differences(&mut self, time: u32, settings: &SessionHost) {
+        if !self.effects_enabled(settings) {
+            self.finish_differences();
+            self.pending_chain_fade = None;
+        }
+        if !self.differences_dirty
+            && (self.difference_tick == Some(time)
+                || !(self.expression_selection.active() || self.body_selection.active()))
+        {
+            return;
+        }
+        self.differences_dirty = false;
+        self.difference_tick = Some(time);
+        self.difference_values = self
+            .expression_selection
+            .sample(time, &self.difference_speed);
+        self.difference_values
+            .extend(self.body_selection.sample(time, &self.difference_speed));
+        for (label, value) in &mut self.difference_values {
+            *value *= self.difference_value.get(label);
+        }
         self.apply();
     }
 
     fn apply(&mut self) {
         let values: Assignments = self
-            .expression_values
+            .difference_values
             .iter()
-            .chain(&self.body_values)
             .chain(&self.lip_values)
-            .map(|(name, value)| (name.clone(), *value))
+            .map(|(label, value)| (label.clone(), *value))
             .collect();
         if values == self.applied {
             return;
         }
         for (label, value) in &values {
+            if self.applied.get(label) == Some(value) {
+                continue;
+            }
             self.playback.command(EmoteLayerCommand::SetVariable {
                 label: label.clone(),
                 value: *value,
@@ -736,7 +801,8 @@ impl Model {
         if !fade_enabled {
             self.fade = None;
         }
-        if let Some(duration) = self.pending_fade.take() {
+        let chain_fade = self.pending_chain_fade.take();
+        if let Some(duration) = self.pending_fade.take().or(chain_fade) {
             self.fade = if duration != 0 && fade_enabled && self.last_tick.is_some() {
                 Some(Fade {
                     from: self.output().clone(),
