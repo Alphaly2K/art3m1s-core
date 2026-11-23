@@ -1,10 +1,12 @@
-use super::{Assignments, Differences};
+use super::{Assignments, Differences, lip_track::Track};
 use std::collections::BTreeMap;
 
 #[derive(Default)]
 pub(super) struct LipSync {
     profiles: BTreeMap<(usize, String), Profile>,
     active: Vec<Active>,
+    track: Option<Track>,
+    cursor: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -13,6 +15,7 @@ struct Profile {
     linear: bool,
     steps: Vec<Step>,
     rest: f32,
+    track_range: Option<[f32; 2]>,
 }
 
 #[derive(Clone, Copy)]
@@ -68,7 +71,7 @@ impl LipSync {
                 let Some(minimum) = fields.next().and_then(|word| word.parse::<u32>().ok()) else {
                     continue;
                 };
-                fields.next(); // Maximum level belongs to the authored level-track path.
+                fields.next();
                 let Some(values) = fields
                     .map(|word| word.parse::<f32>().ok().filter(|v| v.is_finite()))
                     .collect::<Option<Vec<_>>>()
@@ -99,9 +102,10 @@ impl LipSync {
         }
         let profiles = tables
             .into_iter()
-            .filter_map(|(key, (minimum, linear, values))| {
+            .map(|(key, (minimum, linear, values))| {
                 let steps = flows
-                    .remove(&key)?
+                    .remove(&key)
+                    .unwrap_or_default()
                     .into_iter()
                     .map(|(index, duration_ms, check_end)| Step {
                         value: values.get(index).copied().unwrap_or(values[0]),
@@ -109,20 +113,21 @@ impl LipSync {
                         check_end,
                     })
                     .collect();
-                Some((
+                (
                     key,
                     Profile {
                         minimum,
                         linear,
                         steps,
                         rest: values[0],
+                        track_range: values.get(1..3).and_then(|range| range.try_into().ok()),
                     },
-                ))
+                )
             })
             .collect();
         Self {
             profiles,
-            active: Vec::new(),
+            ..Self::default()
         }
     }
 
@@ -150,16 +155,47 @@ impl LipSync {
         }
     }
 
+    pub(super) fn start_track(&mut self, kind: u32, bytes: &[u8]) -> bool {
+        self.observe(None);
+        self.track = Track::parse(kind, bytes);
+        self.track.is_some()
+    }
+
+    pub(super) fn seek_track(&mut self, tick: u32) {
+        self.cursor = (tick != u32::MAX).then_some(tick);
+    }
+
     pub(super) fn observe(&mut self, levels: Option<&[u32]>) {
+        self.track = None;
+        self.cursor = None;
+        self.observe_pcm(levels);
+    }
+
+    pub(super) fn observe_pcm(&mut self, levels: Option<&[u32]>) {
         for active in &mut self.active {
             active.observe(levels);
         }
     }
 
-    pub(super) fn sample(&mut self, time: u32) -> Assignments {
+    pub(super) fn sample(&mut self, time: u32, enabled: bool) -> Assignments {
         let mut values = Assignments::new();
+        if !enabled {
+            self.observe_pcm(None);
+            return values;
+        }
+        let level = self
+            .track
+            .as_ref()
+            .and_then(|track| track.sample(self.cursor?));
         for active in &mut self.active {
-            if let Some(value) = active.sample(time) {
+            let value = if self.track.is_some() {
+                level
+                    .zip(active.profile.track_range)
+                    .map(|(level, [from, to])| from + (to - from) * level)
+            } else {
+                active.sample(time)
+            };
+            if let Some(value) = value {
                 values.extend(active.labels.iter().map(|label| (label.clone(), value)));
             }
         }
@@ -169,6 +205,9 @@ impl LipSync {
 
 impl Active {
     fn observe(&mut self, levels: Option<&[u32]>) {
+        if self.profile.steps.is_empty() {
+            return;
+        }
         let Some(levels) = levels else {
             self.last_level = 0;
             self.position = None;
@@ -239,18 +278,41 @@ mod tests {
         let mut lip = LipSync::parse(text);
         lip.select(&Differences::parse(text), "neutral");
         lip.observe(Some(&[80, 0, 80, 80]));
-        assert!(lip.sample(96).is_empty());
+        assert!(lip.sample(96, true).is_empty());
         lip.observe(Some(&[0, 30, 80, 80]));
-        assert_eq!(lip.sample(100)["mouth"], 30.0);
+        assert_eq!(lip.sample(100, true)["mouth"], 30.0);
         lip.observe(Some(&[0, 0, 0, 0]));
-        assert_eq!(lip.sample(104)["mouth"], 25.0);
-        assert_eq!(lip.sample(108)["mouth"], 30.0);
-        assert_eq!(lip.sample(112)["mouth"], 20.0);
-        assert!(lip.sample(116).is_empty());
+        assert_eq!(lip.sample(104, true)["mouth"], 25.0);
+        assert_eq!(lip.sample(108, true)["mouth"], 30.0);
+        assert_eq!(lip.sample(112, true)["mouth"], 20.0);
+        assert!(lip.sample(116, true).is_empty());
         lip.observe(Some(&[0, 80]));
-        assert_eq!(lip.sample(u32::MAX - 1)["mouth"], 30.0);
-        assert_eq!(lip.sample(2)["mouth"], 25.0);
+        assert_eq!(lip.sample(u32::MAX - 1, true)["mouth"], 30.0);
+        assert_eq!(lip.sample(2, true)["mouth"], 25.0);
         lip.observe(None);
-        assert!(lip.sample(3).is_empty());
+        assert!(lip.sample(3, true).is_empty());
+    }
+    #[test]
+    fn level_track_uses_the_voice_cursor_and_stops_or_falls_back_cleanly() {
+        let text = "#pattern\n%1 neutral\nmouth 3\n#lip_table\n1 neutral linear 30 65 3 4 8";
+        let mut lip = LipSync::parse(text);
+        lip.select(&Differences::parse(text), "neutral");
+        let data = [-10_i32, 48, 120].map(i32::to_le_bytes).concat();
+        assert!(lip.start_track(2, &data));
+        lip.seek_track(0);
+        assert_eq!(lip.sample(100, true)["mouth"], 4.0);
+        lip.seek_track(1);
+        assert_eq!(lip.sample(100, true)["mouth"], 4.0 + 4.0 * 18.0 / 35.0);
+        lip.seek_track(2);
+        assert_eq!(lip.sample(100, true)["mouth"], 8.0);
+        assert!(lip.sample(100, false).is_empty());
+        lip.seek_track(u32::MAX);
+        assert!(lip.sample(100, true).is_empty());
+        lip.seek_track(3);
+        assert!(lip.sample(100, true).is_empty());
+        lip.seek_track(2);
+        lip.observe(None);
+        assert!(lip.sample(100, true).is_empty());
+        assert!(!lip.start_track(1, &data));
     }
 }

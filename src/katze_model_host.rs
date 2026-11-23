@@ -1,6 +1,7 @@
 mod blink;
 mod difference;
 mod lip;
+mod lip_track;
 
 use difference::{Assignments, Differences, Scale, Selection};
 
@@ -122,13 +123,14 @@ struct Host {
     set_difference_scale: unsafe extern "C" fn(u64, u64, u32, Bytes, f32) -> i32,
     clear_effects: Action,
     update_lip_sync: UpdateLipSync,
-    start_lip_track: Unused,
+    start_lip_track: unsafe extern "C" fn(u64, u64, u32, Bytes, u32) -> i32,
     set_feature_mode: unsafe extern "C" fn(u64, u64, u32, u32) -> i32,
     set_waiting_motion: SetName,
     set_inertia_group: Unused,
     refresh_effects: Unused,
     start_fade: SetMode,
     set_color_filter: Unused,
+    seek_lip_track: SetMode,
 }
 
 const fn host(context: u64) -> Host {
@@ -159,13 +161,14 @@ const fn host(context: u64) -> Host {
         set_difference_scale,
         clear_effects,
         update_lip_sync,
-        start_lip_track: None,
+        start_lip_track,
         set_feature_mode,
         set_waiting_motion,
         set_inertia_group: None,
         refresh_effects: None,
         start_fade,
         set_color_filter: None,
+        seek_lip_track,
     }
 }
 
@@ -472,11 +475,28 @@ unsafe extern "C" fn set_feature_mode(_: u64, token: u64, feature: u32, mode: u3
         LIP_SYNC_SETTING => {
             model.lip_enabled = mode != 0;
             if !model.lip_enabled {
-                model.lip.observe(None);
+                model.lip.observe_pcm(None);
             }
         }
         _ => return ABSENT,
     }
+    OK
+}
+
+unsafe extern "C" fn start_lip_track(_: u64, token: u64, kind: u32, bytes: Bytes, _: u32) -> i32 {
+    guarded(|| {
+        let model = unsafe { &mut *(token as *mut Model) };
+        Ok(if model.lip.start_track(kind, unsafe { bytes.view() }) {
+            OK
+        } else {
+            ABSENT
+        })
+    })
+}
+
+unsafe extern "C" fn seek_lip_track(_: u64, token: u64, tick: u32) -> i32 {
+    let model = unsafe { &mut *(token as *mut Model) };
+    model.lip.seek_track(tick);
     OK
 }
 
@@ -513,9 +533,7 @@ unsafe extern "C" fn frame(
     guarded(|| {
         let model = unsafe { &mut *(token as *mut Model) };
         let settings = unsafe { session(context) };
-        if !model.lip_enabled || settings.lip_sync.load(Ordering::Relaxed) == 0 {
-            model.lip.observe(None);
-        }
+        let lip_enabled = model.lip_enabled && settings.lip_sync.load(Ordering::Relaxed) != 0;
         let blink_enabled = model.blink_enabled && settings.blink.load(Ordering::Relaxed) != 0;
         model.dirty |= model.playback.set_blink_enabled(blink_enabled);
         model.advance_differences(time, settings);
@@ -523,6 +541,7 @@ unsafe extern "C" fn frame(
             time,
             task_tick,
             blink_enabled,
+            lip_enabled,
             settings.fade.load(Ordering::Relaxed) != 0,
         )?;
         let pixels = model.output();
@@ -857,6 +876,7 @@ impl Model {
         time: u32,
         task_tick: u32,
         blink_enabled: bool,
+        lip_enabled: bool,
         fade_enabled: bool,
     ) -> Result<(), String> {
         if !fade_enabled {
@@ -875,7 +895,7 @@ impl Model {
             };
         }
         let blink_values = self.blink.sample(task_tick, blink_enabled);
-        let lip_values = self.lip.sample(time);
+        let lip_values = self.lip.sample(time, lip_enabled);
         if blink_values != self.blink_values || lip_values != self.lip_values {
             self.blink_values = blink_values;
             self.lip_values = lip_values;
