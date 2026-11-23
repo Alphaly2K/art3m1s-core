@@ -10,6 +10,14 @@ type Patterns = BTreeMap<String, Assignments>;
 pub(super) struct Differences {
     pub(super) patterns: BTreeMap<usize, Patterns>,
     chains: BTreeMap<usize, Chain>,
+    shifts: BTreeMap<(usize, String), BTreeMap<String, PatternShift>>,
+    defaults: Assignments,
+}
+
+#[derive(Clone, Copy)]
+struct PatternShift {
+    offset: f32,
+    timing: Timing,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -137,25 +145,64 @@ impl Differences {
                 current = None;
                 continue;
             }
-            if section.eq_ignore_ascii_case("#pattern") {
+            let pattern = section.eq_ignore_ascii_case("#pattern");
+            let shift = section.eq_ignore_ascii_case("#pattern_shift");
+            if pattern || shift {
                 let Some(value) = row.next() else { continue };
                 if let Some(group) = first.strip_prefix('%') {
                     current = group
                         .parse()
                         .ok()
                         .map(|group| (group, value.to_ascii_lowercase()));
+                    if pattern && let Some((group, key)) = &current {
+                        result
+                            .patterns
+                            .entry(*group)
+                            .or_default()
+                            .entry(key.clone())
+                            .or_default();
+                    }
                 } else if let Some((group, key)) = &current
                     && let Ok(value) = value.parse::<f32>()
                     && value.is_finite()
-                    && value != 99.0
                 {
-                    result
-                        .patterns
-                        .entry(*group)
-                        .or_default()
-                        .entry(key.clone())
-                        .or_default()
-                        .insert(first.to_owned(), value);
+                    if shift {
+                        let curve = row.next().map(Curve::parse).unwrap_or_default();
+                        result
+                            .shifts
+                            .entry((*group, key.clone()))
+                            .or_default()
+                            .insert(
+                                first.to_owned(),
+                                PatternShift {
+                                    offset: value,
+                                    timing: Timing {
+                                        curve: if curve == Curve::Fade {
+                                            Curve::Fix
+                                        } else {
+                                            curve
+                                        },
+                                        duration_ms: duration(row.next()),
+                                    },
+                                },
+                            );
+                    } else if value != 99.0 {
+                        result
+                            .patterns
+                            .entry(*group)
+                            .or_default()
+                            .entry(key.clone())
+                            .or_default()
+                            .insert(first.to_owned(), value);
+                    }
+                }
+            } else if section.eq_ignore_ascii_case("#defval") {
+                if let Some(value) = row
+                    .next()
+                    .and_then(|word| word.parse::<f32>().ok())
+                    .filter(|v| v.is_finite())
+                {
+                    result.defaults.insert(first.to_owned(), value);
                 }
             } else if section.eq_ignore_ascii_case("#chain") {
                 let (Ok(group), Some(value)) = (first.parse::<usize>(), row.next()) else {
@@ -215,7 +262,7 @@ struct Track {
 }
 
 impl Track {
-    fn sample(&mut self, time: u32, speed: f32) -> Option<f32> {
+    fn sample(&mut self, time: u32, speed: f32, offset: f32) -> Option<f32> {
         let start = *self.started.get_or_insert(time);
         let progress = (time.wrapping_sub(start) as f32 / self.timing.duration_ms as f32 * speed)
             .clamp(0., 1.);
@@ -224,12 +271,20 @@ impl Track {
         }
         let position = progress * (self.values.len() - 1) as f32;
         let index = position as usize;
-        let Some(next) = self.values.get(index + 1) else {
-            return None;
+        let next = *self.values.get(index + 1)?;
+        let next = if index + 2 == self.values.len() {
+            next + offset
+        } else {
+            next
         };
         let from = self.values[index];
         Some(from + (next - from) * self.timing.curve.ease(position - index as f32))
     }
+}
+
+struct Offset {
+    base: f32,
+    value: f32,
 }
 
 #[derive(Default)]
@@ -237,12 +292,16 @@ pub(super) struct Selection {
     keys: String,
     groups: BTreeMap<usize, Assignments>,
     tracks: BTreeMap<usize, BTreeMap<String, Track>>,
+    shifts: BTreeMap<String, Offset>,
+    shift_tracks: BTreeMap<String, Track>,
+    sampled: Assignments,
 }
 
 impl Selection {
     pub(super) fn select(&mut self, table: &Differences, next: &str, animate: bool) -> Option<u32> {
         let previous = keys(&self.keys).collect::<Vec<_>>();
         let mut fade = None;
+        let mut shifts = BTreeMap::new();
         let groups = previous.len().max(keys(next).count());
         for (index, to) in keys(next)
             .chain(std::iter::repeat(""))
@@ -254,6 +313,11 @@ impl Selection {
                 continue;
             }
             let group = index + 1;
+            if let Some(entries) = table.shifts.get(&(group, to.to_ascii_lowercase()))
+                && table.pattern(group, to).is_some()
+            {
+                shifts.extend(entries.iter().map(|(label, shift)| (label.clone(), *shift)));
+            }
             let timing_and_route = animate
                 .then(|| table.chains.get(&group))
                 .flatten()
@@ -266,6 +330,9 @@ impl Selection {
             }
             self.tracks.remove(&group);
             if let Some(pattern) = table.pattern(group, to) {
+                for label in pattern.keys() {
+                    self.shift_tracks.remove(label);
+                }
                 self.groups.insert(group, pattern.clone());
             } else {
                 self.groups.remove(&group);
@@ -311,26 +378,87 @@ impl Selection {
         if fade.is_some() {
             self.finish();
         }
+        self.select_shifts(table, shifts, animate && fade.is_none());
         fade
+    }
+
+    fn select_shifts(
+        &mut self,
+        table: &Differences,
+        shifts: BTreeMap<String, PatternShift>,
+        animate: bool,
+    ) {
+        for (label, shift) in shifts {
+            if animate && shift.timing.curve == Curve::NoMove {
+                continue;
+            }
+            self.shift_tracks.remove(&label);
+            let default = table.defaults.get(&label).copied().unwrap_or(0.);
+            self.shifts.insert(
+                label.clone(),
+                Offset {
+                    base: default,
+                    value: shift.offset,
+                },
+            );
+            // An active chain keeps its timing. Its final pose receives the offset.
+            if self
+                .tracks
+                .values()
+                .any(|tracks| tracks.contains_key(&label))
+            {
+                continue;
+            }
+            if animate && shift.timing.curve != Curve::Fix && shift.timing.duration_ms != 0 {
+                let from = self.sampled.get(&label).copied().unwrap_or(default);
+                let base = self
+                    .groups
+                    .values()
+                    .rev()
+                    .find_map(|group| group.get(&label))
+                    .copied()
+                    .unwrap_or(default);
+                let target = base + shift.offset;
+                if from != target {
+                    self.shift_tracks.insert(
+                        label,
+                        Track {
+                            values: vec![from, target],
+                            timing: shift.timing,
+                            started: None,
+                        },
+                    );
+                }
+            }
+        }
     }
 
     pub(super) fn finish(&mut self) {
         self.tracks.clear();
+        self.shift_tracks.clear();
     }
 
     pub(super) fn active(&self) -> bool {
-        !self.tracks.is_empty()
+        !self.tracks.is_empty() || !self.shift_tracks.is_empty()
     }
 
     pub(super) fn sample(&mut self, time: u32, speed: &Scale) -> Assignments {
         let mut output = Assignments::new();
+        let offset = |label: &str| self.shifts.get(label).map_or(0., |shift| shift.value);
+        let extend = |output: &mut Assignments, values: &Assignments| {
+            output.extend(
+                values
+                    .iter()
+                    .map(|(label, value)| (label.clone(), *value + offset(label))),
+            );
+        };
         let mut groups = self.groups.iter().peekable();
         self.tracks.retain(|group, tracks| {
             while groups.peek().is_some_and(|(index, _)| *index <= group) {
-                output.extend(groups.next().unwrap().1.clone());
+                extend(&mut output, groups.next().unwrap().1);
             }
             tracks.retain(|label, track| {
-                if let Some(value) = track.sample(time, speed.get(label)) {
+                if let Some(value) = track.sample(time, speed.get(label), offset(label)) {
                     output.insert(label.clone(), value);
                     true
                 } else {
@@ -340,8 +468,22 @@ impl Selection {
             !tracks.is_empty()
         });
         for (_, values) in groups {
-            output.extend(values.clone());
+            extend(&mut output, values);
         }
+        for (label, shift) in &self.shifts {
+            output
+                .entry(label.clone())
+                .or_insert_with(|| shift.base + shift.value);
+        }
+        self.shift_tracks.retain(|label, track| {
+            if let Some(value) = track.sample(time, speed.get(label), 0.) {
+                output.insert(label.clone(), value);
+                true
+            } else {
+                false
+            }
+        });
+        self.sampled.clone_from(&output);
         output
     }
 }
@@ -461,6 +603,54 @@ a c nomove 25
         assert!(selection.active());
         selection.finish();
         assert_eq!(selection.sample(50, &speed)["pose"], 80.);
+        assert!(!selection.active());
+    }
+
+    #[test]
+    fn pattern_shift_changes_the_chain_endpoint_and_can_move_a_separate_parameter() {
+        let table = Differences::parse(
+            "\
+#defval
+jaw 7
+#pattern
+%1 a
+pose 0
+%1 x
+pose 10
+%1 b
+pose 20
+%1 c
+#chain
+1 $rules
+$rules
+a b linear 40 x
+#pattern_shift
+%1 b
+pose 5 sin_fs 60
+jaw 10 linear 10
+%1 c
+jaw -2 fade 40
+",
+        );
+        let mut selection = Selection::default();
+        let scale = Scale::default();
+        selection.select(&table, "a", false);
+        assert_eq!(selection.sample(9, &scale)["pose"], 0.);
+        assert_eq!(selection.select(&table, "b", true), None);
+        for (time, pose, jaw) in [
+            (10, 0., 7.),
+            (15, 2.5, 12.),
+            (30, 10., 17.),
+            (40, 17.5, 17.),
+            (50, 25., 17.),
+        ] {
+            let values = selection.sample(time, &scale);
+            assert_eq!(values["pose"], pose);
+            assert_eq!(values["jaw"], jaw);
+        }
+        assert!(!selection.active());
+        assert_eq!(selection.select(&table, "c", true), None);
+        assert_eq!(selection.sample(55, &scale)["jaw"], 5.);
         assert!(!selection.active());
     }
 }
