@@ -18,6 +18,7 @@ pub(crate) struct EmotePlayback {
     height: u32,
     player: EmotePlayer,
     eye_blinks: Vec<EmoteEyeBlink>,
+    blink_enabled: bool,
 }
 
 struct EmoteEyeBlink {
@@ -56,6 +57,7 @@ impl EmotePlayback {
             height,
             player: EmotePlayer::default(),
             eye_blinks,
+            blink_enabled: true,
         }
     }
 
@@ -99,10 +101,26 @@ impl EmotePlayback {
         self.player.clear_variable(label);
     }
 
+    #[cfg(feature = "katze-model-host")]
+    pub(crate) fn set_blink_enabled(&mut self, enabled: bool) -> bool {
+        if self.blink_enabled == enabled {
+            return false;
+        }
+        self.blink_enabled = enabled;
+        if !enabled {
+            for blink in &mut self.eye_blinks {
+                blink.cancel();
+            }
+        }
+        !self.eye_blinks.is_empty()
+    }
+
     pub(crate) fn advance(&mut self, frames: f32) -> bool {
         let mut changed = self.player.advance_model(&self.model, frames);
-        for blink in &mut self.eye_blinks {
-            changed |= blink.advance(frames);
+        if self.blink_enabled {
+            for blink in &mut self.eye_blinks {
+                changed |= blink.advance(frames);
+            }
         }
         changed
     }
@@ -310,6 +328,15 @@ impl EmoteEyeBlink {
             }
         }
         was_active || !matches!(self.phase, EmoteBlinkPhase::Idle)
+    }
+
+    #[cfg(feature = "katze-model-host")]
+    fn cancel(&mut self) {
+        if self.phase != EmoteBlinkPhase::Idle {
+            self.blink_frame = self.control.begin_frame;
+            self.phase = EmoteBlinkPhase::Idle;
+            self.schedule_next();
+        }
     }
 
     fn apply(&self, variables: &mut BTreeMap<String, f32>) {
@@ -535,5 +562,33 @@ mod tests {
             max_consecutive_closed >= 2,
             "fractional frame steps must render the fully closed eye for more than one frame"
         );
+    }
+
+    #[cfg(feature = "katze-model-host")]
+    #[test]
+    fn cancelling_a_blink_restores_the_selected_eye_value() {
+        let control = EmoteEyeControl {
+            label: "eye".into(),
+            enabled: true,
+            blink_enabled: true,
+            blink_frame_count: 16.,
+            blink_interval_min: 30.,
+            blink_interval_max: 30.,
+            begin_frame: 0.,
+            end_frame: 10.,
+            edges: Vec::new(),
+            nodes: Vec::new(),
+        };
+        let mut blink = EmoteEyeBlink::new(control, 1);
+        blink.advance(38.);
+        let mut variables = BTreeMap::from([("eye".into(), 3.)]);
+        blink.apply(&mut variables);
+        assert_eq!(variables["eye"], 10.);
+
+        blink.cancel();
+        blink.advance(8.);
+        let mut variables = BTreeMap::from([("eye".into(), 3.)]);
+        blink.apply(&mut variables);
+        assert_eq!(variables["eye"], 3.);
     }
 }

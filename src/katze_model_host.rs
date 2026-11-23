@@ -28,6 +28,7 @@ const MAX_PSZ: usize = 128 * 1024 * 1024;
 const MAX_FRAME_SIDE: i32 = 4096;
 const MAX_BODY_OPTIONS_BYTES: usize = 0x2ff;
 const DIFFERENCE_EFFECTS_SETTING: u32 = 2;
+const BLINK_SETTING: u32 = 4;
 const LIP_SYNC_SETTING: u32 = 5;
 const FADE_SETTING: u32 = 6;
 
@@ -173,6 +174,7 @@ struct SessionHost {
     encoding: &'static Encoding,
     fade: AtomicI32,
     difference_effects: AtomicI32,
+    blink: AtomicI32,
     lip_sync: AtomicI32,
 }
 
@@ -192,6 +194,7 @@ pub unsafe extern "C" fn art3m1s_katze_model_host_v0(label: *const c_char) -> *c
         encoding: Encoding::for_label(label).unwrap_or(SHIFT_JIS),
         fade: AtomicI32::new(0),
         difference_effects: AtomicI32::new(1),
+        blink: AtomicI32::new(1),
         lip_sync: AtomicI32::new(1),
     }));
     unsafe { (*session).callbacks.context = session as u64 };
@@ -214,6 +217,7 @@ unsafe fn session(context: u64) -> &'static SessionHost {
 impl SessionHost {
     fn setting(&self, id: u32) -> Option<&AtomicI32> {
         match id {
+            BLINK_SETTING => Some(&self.blink),
             LIP_SYNC_SETTING => Some(&self.lip_sync),
             FADE_SETTING => Some(&self.fade),
             DIFFERENCE_EFFECTS_SETTING => Some(&self.difference_effects),
@@ -242,6 +246,7 @@ unsafe extern "C" fn reset_settings(context: u64) -> i32 {
     let session = unsafe { session(context) };
     session.fade.store(0, Ordering::Relaxed);
     session.difference_effects.store(1, Ordering::Relaxed);
+    session.blink.store(1, Ordering::Relaxed);
     session.lip_sync.store(1, Ordering::Relaxed);
     OK
 }
@@ -459,13 +464,16 @@ unsafe extern "C" fn effects_active(context: u64, token: u64, time: u32) -> i32 
 }
 
 unsafe extern "C" fn set_feature_mode(_: u64, token: u64, feature: u32, mode: u32) -> i32 {
-    if feature != LIP_SYNC_SETTING {
-        return ABSENT;
-    }
     let model = unsafe { &mut *(token as *mut Model) };
-    model.lip_enabled = mode != 0;
-    if !model.lip_enabled {
-        model.lip.observe(None);
+    match feature {
+        BLINK_SETTING => model.blink_enabled = mode != 0,
+        LIP_SYNC_SETTING => {
+            model.lip_enabled = mode != 0;
+            if !model.lip_enabled {
+                model.lip.observe(None);
+            }
+        }
+        _ => return ABSENT,
     }
     OK
 }
@@ -500,6 +508,9 @@ unsafe extern "C" fn frame(context: u64, token: u64, time: u32, out: *mut Output
         if !model.lip_enabled || settings.lip_sync.load(Ordering::Relaxed) == 0 {
             model.lip.observe(None);
         }
+        model.dirty |= model
+            .playback
+            .set_blink_enabled(model.blink_enabled && settings.blink.load(Ordering::Relaxed) != 0);
         model.advance_differences(time, settings);
         model.advance_frame(time, settings.fade.load(Ordering::Relaxed) != 0)?;
         let pixels = model.output();
@@ -650,6 +661,7 @@ struct Model {
     difference_values: Assignments,
     lip: lip::LipSync,
     lip_enabled: bool,
+    blink_enabled: bool,
     lip_values: Assignments,
     applied: Assignments,
     keys: Vec<u8>,
@@ -701,6 +713,7 @@ impl Model {
             difference_values: Assignments::new(),
             lip: lip::LipSync::default(),
             lip_enabled: true,
+            blink_enabled: true,
             lip_values: Assignments::new(),
             applied: Assignments::new(),
             keys: Vec::new(),
