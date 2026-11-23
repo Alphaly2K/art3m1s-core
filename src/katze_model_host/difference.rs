@@ -1,14 +1,22 @@
+use super::MAX_BODY_OPTIONS_BYTES;
 use std::{
     collections::{BTreeMap, BTreeSet},
     f32::consts::{FRAC_PI_2, PI},
 };
 
 pub(super) type Assignments = BTreeMap<String, f32>;
-type Patterns = BTreeMap<String, Assignments>;
+#[derive(Default)]
+struct Pattern {
+    key: String,
+    default: bool,
+    values: Assignments,
+}
+
+type Patterns = BTreeMap<String, Pattern>;
 
 #[derive(Default)]
 pub(super) struct Differences {
-    pub(super) patterns: BTreeMap<usize, Patterns>,
+    patterns: BTreeMap<usize, Patterns>,
     chains: BTreeMap<usize, Chain>,
     shifts: BTreeMap<(usize, String), BTreeMap<String, PatternShift>>,
     defaults: Assignments,
@@ -155,12 +163,14 @@ impl Differences {
                         .ok()
                         .map(|group| (group, value.to_ascii_lowercase()));
                     if pattern && let Some((group, key)) = &current {
-                        result
+                        let entry = result
                             .patterns
                             .entry(*group)
                             .or_default()
                             .entry(key.clone())
                             .or_default();
+                        entry.key = value.to_owned();
+                        entry.default = row.nth(1) == Some("default");
                     }
                 } else if let Some((group, key)) = &current
                     && let Ok(value) = value.parse::<f32>()
@@ -193,6 +203,7 @@ impl Differences {
                             .or_default()
                             .entry(key.clone())
                             .or_default()
+                            .values
                             .insert(first.to_owned(), value);
                     }
                 }
@@ -250,8 +261,41 @@ impl Differences {
         result
     }
 
-    fn pattern(&self, group: usize, key: &str) -> Option<&Assignments> {
-        self.patterns.get(&group)?.get(&key.to_ascii_lowercase())
+    pub(super) fn pattern(&self, group: usize, key: &str) -> Option<&Assignments> {
+        if key == "$" {
+            return None;
+        }
+        self.patterns
+            .get(&group)?
+            .get(&key.to_ascii_lowercase())
+            .map(|pattern| &pattern.values)
+    }
+
+    pub(super) fn default_keys(&self) -> Option<String> {
+        let mut keys = String::new();
+        let last = self
+            .patterns
+            .last_key_value()
+            .map_or(0, |(&group, _)| group);
+        if last.saturating_mul(2).saturating_sub(1) > MAX_BODY_OPTIONS_BYTES {
+            return None;
+        }
+        for group in 1..=last {
+            let key = self
+                .patterns
+                .get(&group)
+                .and_then(|patterns| {
+                    patterns
+                        .values()
+                        .min_by_key(|pattern| (!pattern.default, &pattern.key))
+                })
+                .map_or("$", |pattern| &pattern.key);
+            if group > 1 {
+                keys.push(',');
+            }
+            keys.push_str(key);
+        }
+        Some(keys)
     }
 }
 
@@ -652,5 +696,27 @@ jaw -2 fade 40
         assert_eq!(selection.select(&table, "c", true), None);
         assert_eq!(selection.sample(55, &scale)["jaw"], 5.);
         assert!(!selection.active());
+    }
+
+    #[test]
+    fn default_keys_prefer_marked_patterns_preserve_spelling_and_fill_empty_groups() {
+        let table = Differences::parse(
+            "\
+#pattern
+%1 aa group
+pose 10
+%1 Zz group default
+pose 20
+%3 second group
+pose 3
+%3 First group
+pose 2
+",
+        );
+        let keys = table.default_keys().unwrap();
+        assert_eq!(keys, "Zz,$,First");
+        assert_eq!(table.pattern(1, "Zz").unwrap()["pose"], 20.);
+        assert!(table.pattern(2, "$").is_none());
+        assert_eq!(table.pattern(3, "First").unwrap()["pose"], 2.);
     }
 }

@@ -130,10 +130,9 @@ impl LipSync {
         let mut previous = std::mem::take(&mut self.active);
         for (index, key) in keys.split([',', ':']).enumerate() {
             let key = (index + 1, key.trim().to_ascii_lowercase());
-            let (Some(profile), Some(vars)) = (
-                self.profiles.get(&key),
-                differences.patterns.get(&key.0).and_then(|p| p.get(&key.1)),
-            ) else {
+            let (Some(profile), Some(vars)) =
+                (self.profiles.get(&key), differences.pattern(key.0, &key.1))
+            else {
                 continue;
             };
             if let Some(index) = previous.iter().position(|entry| entry.key == key) {

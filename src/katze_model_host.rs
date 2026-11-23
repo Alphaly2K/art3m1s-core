@@ -26,6 +26,7 @@ const ABSENT: i32 = 1;
 const ERROR: i32 = -5;
 const MAX_PSZ: usize = 128 * 1024 * 1024;
 const MAX_FRAME_SIDE: i32 = 4096;
+const MAX_BODY_OPTIONS_BYTES: usize = 0x2ff;
 const DIFFERENCE_EFFECTS_SETTING: u32 = 2;
 const LIP_SYNC_SETTING: u32 = 5;
 const FADE_SETTING: u32 = 6;
@@ -104,7 +105,7 @@ struct Host {
     effects_active: SetMode,
     frame: Frame,
     close: unsafe extern "C" fn(u64, u64),
-    default_body_options: Unused,
+    default_body_options: GetBytes,
     get_setting: GetSetting,
     set_setting: SetSetting,
     reset_settings: unsafe extern "C" fn(u64) -> i32,
@@ -141,7 +142,7 @@ const fn host(context: u64) -> Host {
         effects_active,
         frame,
         close,
-        default_body_options: None,
+        default_body_options,
         get_setting,
         set_setting,
         reset_settings,
@@ -276,6 +277,13 @@ unsafe extern "C" fn open(context: u64, input: *const Input, token: *mut u64) ->
         model.expression = Differences::parse(&expression);
         model.lip = lip::LipSync::parse(&expression);
         model.body = Differences::parse(&decode(input.body_table));
+        if let Some(keys) = model.body.default_keys() {
+            let (encoded, _, had_errors) = encoding.encode(&keys);
+            if !had_errors && encoded.len() <= MAX_BODY_OPTIONS_BYTES {
+                model.default_body_keys = encoded.into_owned();
+                model.body_selection.select(&model.body, &keys, false);
+            }
+        }
         let initial = decode(input.initial_motion);
         model.play(&initial);
         model.select(unsafe { input.options.view() }, encoding, false);
@@ -348,7 +356,12 @@ unsafe extern "C" fn set_body_options(context: u64, token: u64, options: Bytes) 
     guarded(|| {
         let model = unsafe { &mut *(token as *mut Model) };
         let settings = unsafe { session(context) };
-        let keys = settings.encoding.decode(unsafe { options.view() }).0;
+        let options = if options.len == 0 {
+            &model.default_body_keys
+        } else {
+            unsafe { options.view() }
+        };
+        let keys = settings.encoding.decode(options).0;
         let fade = model
             .body_selection
             .select(&model.body, &keys, model.effects_enabled(settings));
@@ -358,6 +371,15 @@ unsafe extern "C" fn set_body_options(context: u64, token: u64, options: Bytes) 
         model.differences_dirty = true;
         Ok(OK)
     })
+}
+
+unsafe extern "C" fn default_body_options(_: u64, token: u64, out: *mut Bytes) -> i32 {
+    let model = unsafe { &*(token as *const Model) };
+    if model.default_body_keys.is_empty() {
+        return ABSENT;
+    }
+    unsafe { out.write(Bytes::of(&model.default_body_keys)) };
+    OK
 }
 
 unsafe extern "C" fn current_differences(_: u64, token: u64, out: *mut Bytes) -> i32 {
@@ -631,6 +653,7 @@ struct Model {
     lip_values: Assignments,
     applied: Assignments,
     keys: Vec<u8>,
+    default_body_keys: Vec<u8>,
     action: Option<String>,
     raster: Raster,
     blended: Raster,
@@ -681,6 +704,7 @@ impl Model {
             lip_values: Assignments::new(),
             applied: Assignments::new(),
             keys: Vec::new(),
+            default_body_keys: Vec::new(),
             action: None,
             raster: Raster::default(),
             blended: Raster::default(),
