@@ -1,3 +1,5 @@
+mod katze_movie;
+
 use art3m1s_media::MediaSource;
 use art3m1s_media::ffmpeg::{
     FfmpegVideoDecoder, HostPcmBlock, LegacyHostAudioDecoder, RgbaVideoFrame,

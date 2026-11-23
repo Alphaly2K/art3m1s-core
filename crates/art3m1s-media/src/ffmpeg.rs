@@ -12,7 +12,7 @@ use ffmpeg::media::Type;
 use ffmpeg::software::{resampling, scaling};
 use ffmpeg::{ChannelLayout, Error, Packet, Rational};
 use ffmpeg_next as ffmpeg;
-use std::ffi::{c_int, c_void};
+use std::ffi::{CStr, c_int, c_void};
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -205,6 +205,23 @@ struct SourceInput {
     _io_state: Box<SourceIoState>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Demux {
+    Auto,
+    Legacy,
+    Matroska,
+}
+
+impl Demux {
+    fn whitelist(self) -> Option<&'static CStr> {
+        match self {
+            Self::Auto => None,
+            Self::Legacy => Some(c"asf,avi,ogg"),
+            Self::Matroska => Some(c"matroska,webm"),
+        }
+    }
+}
+
 impl SourceInput {
     fn timeline_start_us(&self) -> i64 {
         let start = unsafe { (*self.input.as_ptr()).start_time };
@@ -215,7 +232,7 @@ impl SourceInput {
         }
     }
 
-    fn open(source: Arc<dyn MediaSource>, legacy_host: bool) -> Result<Self, String> {
+    fn open(source: Arc<dyn MediaSource>, demux: Demux) -> Result<Self, String> {
         initialize();
         let mut io_state = Box::new(SourceIoState { source, offset: 0 });
         let io_pointer = (&mut *io_state as *mut SourceIoState).cast::<c_void>();
@@ -248,18 +265,18 @@ impl SourceInput {
         unsafe {
             (*format).pb = avio;
             (*format).flags |= ffmpeg::ffi::AVFMT_FLAG_CUSTOM_IO;
-            if legacy_host {
+            if demux != Demux::Auto {
                 (*format).io_open = Some(reject_secondary_io);
             }
         }
 
         let mut options = ptr::null_mut();
-        if legacy_host {
+        if let Some(whitelist) = demux.whitelist() {
             let result = unsafe {
                 ffmpeg::ffi::av_dict_set(
                     &mut options,
                     c"format_whitelist".as_ptr(),
-                    c"asf,avi,ogg".as_ptr(),
+                    whitelist.as_ptr(),
                     0,
                 )
             };
@@ -311,16 +328,21 @@ unsafe extern "C" fn reject_secondary_io(
 
 impl FfmpegVideoDecoder {
     pub fn open(source: Arc<dyn MediaSource>) -> Result<Self, String> {
-        Self::open_video(source, false)
+        Self::open_video(source, Demux::Auto)
     }
 
     pub fn open_legacy_host_video(source: Arc<dyn MediaSource>) -> Result<Self, String> {
-        Self::open_video(source, true)
+        Self::open_video(source, Demux::Legacy)
     }
 
-    fn open_video(source: Arc<dyn MediaSource>, legacy_host: bool) -> Result<Self, String> {
-        let source = SourceInput::open(source, legacy_host)?;
-        let timestamp_origin_us = if legacy_host {
+    pub fn open_webm(source: Arc<dyn MediaSource>) -> Result<Self, String> {
+        Self::open_video(source, Demux::Matroska)
+    }
+
+    fn open_video(source: Arc<dyn MediaSource>, demux: Demux) -> Result<Self, String> {
+        let source = SourceInput::open(source, demux)?;
+        let hosted = demux != Demux::Auto;
+        let timestamp_origin_us = if hosted {
             source.timeline_start_us()
         } else {
             0
@@ -332,10 +354,11 @@ impl FfmpegVideoDecoder {
             .ok_or_else(|| "no video stream".to_string())?;
         let stream_index = stream.index();
         let time_base = stream.time_base();
-        let theora_hold_end_us =
-            (legacy_host && stream.parameters().id() == ffmpeg::codec::Id::THEORA).then_some(0);
+        let theora_hold_end_us = (demux == Demux::Legacy
+            && stream.parameters().id() == ffmpeg::codec::Id::THEORA)
+            .then_some(0);
         let average = stream.avg_frame_rate();
-        let rate = if legacy_host && !valid_rate(average) {
+        let rate = if hosted && !valid_rate(average) {
             stream.rate()
         } else {
             average
@@ -344,7 +367,7 @@ impl FfmpegVideoDecoder {
         let mut decoder_context =
             ffmpeg::codec::context::Context::from_parameters(stream.parameters())
                 .map_err(|error| error.to_string())?;
-        if legacy_host {
+        if hosted {
             unsafe { (*decoder_context.as_mut_ptr()).max_pixels = HOST_MAX_PIXELS };
         }
         let decoder = decoder_context
@@ -355,7 +378,14 @@ impl FfmpegVideoDecoder {
             width: decoder.width(),
             height: decoder.height(),
             frame_rate: rate.map(|rate| (rate.numerator() as u32, rate.denominator() as u32)),
-            duration: duration_from_stream(&stream),
+            duration: {
+                let stream_duration = duration_from_stream(&stream);
+                if demux == Demux::Matroska && stream_duration.is_zero() {
+                    Duration::from_micros(source.input.duration().max(0) as u64)
+                } else {
+                    stream_duration
+                }
+            },
         };
         let rgba_scaler = scaling::Context::get(
             decoder.format(),
@@ -696,7 +726,15 @@ impl LegacyHostAudioDecoder {
     const TIMESTAMP_JITTER_US: u64 = 5_000;
 
     pub fn open(source: Arc<dyn MediaSource>) -> Result<Option<Self>, String> {
-        let source = SourceInput::open(source, true)?;
+        Self::open_audio(source, Demux::Legacy)
+    }
+
+    pub fn open_webm(source: Arc<dyn MediaSource>) -> Result<Option<Self>, String> {
+        Self::open_audio(source, Demux::Matroska)
+    }
+
+    fn open_audio(source: Arc<dyn MediaSource>, demux: Demux) -> Result<Option<Self>, String> {
+        let source = SourceInput::open(source, demux)?;
         let timestamp_origin_us = source.timeline_start_us();
         let Some(stream) = source.input.streams().best(Type::Audio) else {
             return Ok(None);
