@@ -1,5 +1,6 @@
 mod blink;
 mod difference;
+mod inertia;
 mod lip;
 mod lip_track;
 
@@ -20,7 +21,10 @@ use std::{
     ffi::{CStr, c_char, c_void},
     mem::size_of,
     slice,
-    sync::atomic::{AtomicI32, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicI32, Ordering},
+    },
 };
 
 const OK: i32 = 0;
@@ -126,11 +130,12 @@ struct Host {
     start_lip_track: unsafe extern "C" fn(u64, u64, u32, Bytes, u32) -> i32,
     set_feature_mode: unsafe extern "C" fn(u64, u64, u32, u32) -> i32,
     set_waiting_motion: SetName,
-    set_inertia_group: Unused,
+    set_inertia_group: Option<Select>,
     refresh_effects: Unused,
     start_fade: SetMode,
     set_color_filter: Unused,
     seek_lip_track: SetMode,
+    set_plane_position: unsafe extern "C" fn(u64, u64, f32, f32) -> i32,
 }
 
 const fn host(context: u64) -> Host {
@@ -164,11 +169,12 @@ const fn host(context: u64) -> Host {
         start_lip_track,
         set_feature_mode,
         set_waiting_motion,
-        set_inertia_group: None,
+        set_inertia_group: Some(set_inertia_group),
         refresh_effects: None,
         start_fade,
         set_color_filter: None,
         seek_lip_track,
+        set_plane_position,
     }
 }
 
@@ -180,6 +186,7 @@ struct SessionHost {
     difference_effects: AtomicI32,
     blink: AtomicI32,
     lip_sync: AtomicI32,
+    inertia: Mutex<inertia::Settings>,
 }
 
 /// Creates a model callback table owned by the caller.
@@ -200,6 +207,7 @@ pub unsafe extern "C" fn art3m1s_katze_model_host_v0(label: *const c_char) -> *c
         difference_effects: AtomicI32::new(1),
         blink: AtomicI32::new(1),
         lip_sync: AtomicI32::new(1),
+        inertia: Mutex::default(),
     }));
     unsafe { (*session).callbacks.context = session as u64 };
     session.cast()
@@ -219,6 +227,13 @@ unsafe fn session(context: u64) -> &'static SessionHost {
 }
 
 impl SessionHost {
+    fn group(&self, group: Bytes) -> String {
+        self.encoding
+            .decode(unsafe { group.view() })
+            .0
+            .to_ascii_lowercase()
+    }
+
     fn setting(&self, id: u32) -> Option<&AtomicI32> {
         match id {
             BLINK_SETTING => Some(&self.blink),
@@ -230,19 +245,33 @@ impl SessionHost {
     }
 }
 
-unsafe extern "C" fn get_setting(context: u64, setting: u32, _: Bytes, out: *mut i32) -> i32 {
-    let Some(setting) = (unsafe { session(context) }).setting(setting) else {
-        return ABSENT;
+unsafe extern "C" fn get_setting(context: u64, id: u32, group: Bytes, out: *mut i32) -> i32 {
+    let settings = unsafe { session(context) };
+    let value = if let Some(setting) = settings.setting(id) {
+        Some(setting.load(Ordering::Relaxed))
+    } else {
+        let Ok(inertia) = settings.inertia.lock() else {
+            return ERROR;
+        };
+        inertia.get(id, &settings.group(group))
     };
-    unsafe { out.write(setting.load(Ordering::Relaxed)) };
+    let Some(value) = value else { return ABSENT };
+    unsafe { out.write(value) };
     OK
 }
 
-unsafe extern "C" fn set_setting(context: u64, setting: u32, _: Bytes, value: i32) -> i32 {
-    let Some(setting) = (unsafe { session(context) }).setting(setting) else {
-        return ABSENT;
-    };
-    setting.store(value, Ordering::Relaxed);
+unsafe extern "C" fn set_setting(context: u64, id: u32, group: Bytes, value: i32) -> i32 {
+    let settings = unsafe { session(context) };
+    if let Some(setting) = settings.setting(id) {
+        setting.store(value, Ordering::Relaxed);
+    } else {
+        let Ok(mut inertia) = settings.inertia.lock() else {
+            return ERROR;
+        };
+        if !inertia.set(id, settings.group(group), value) {
+            return ABSENT;
+        }
+    }
     OK
 }
 
@@ -252,6 +281,10 @@ unsafe extern "C" fn reset_settings(context: u64) -> i32 {
     session.difference_effects.store(1, Ordering::Relaxed);
     session.blink.store(1, Ordering::Relaxed);
     session.lip_sync.store(1, Ordering::Relaxed);
+    let Ok(mut inertia) = session.inertia.lock() else {
+        return ERROR;
+    };
+    *inertia = inertia::Settings::default();
     OK
 }
 
@@ -286,7 +319,9 @@ unsafe extern "C" fn open(context: u64, input: *const Input, token: *mut u64) ->
         model.expression = Differences::parse(&expression);
         model.lip = lip::LipSync::parse(&expression);
         model.blink = blink::Blink::parse(&expression);
-        model.body = Differences::parse(&decode(input.body_table));
+        let body = decode(input.body_table);
+        model.body = Differences::parse(&body);
+        model.inertia = inertia::Inertia::parse(&expression, &body);
         if let Some(keys) = model.body.default_keys() {
             let (encoded, _, had_errors) = encoding.encode(&keys);
             if !had_errors && encoded.len() <= MAX_BODY_OPTIONS_BYTES {
@@ -523,6 +558,23 @@ unsafe extern "C" fn update_lip_sync(
     })
 }
 
+unsafe extern "C" fn set_plane_position(_: u64, token: u64, x: f32, y: f32) -> i32 {
+    let model = unsafe { &mut *(token as *mut Model) };
+    model.position = [x, y];
+    OK
+}
+
+unsafe extern "C" fn set_inertia_group(context: u64, token: u64, group: Bytes, mode: u32) -> i32 {
+    guarded(|| {
+        let model = unsafe { &mut *(token as *mut Model) };
+        let group = (!group.data.is_null()).then(|| unsafe { session(context) }.group(group));
+        model
+            .inertia
+            .set_group(group.as_deref(), if group.is_some() { mode } else { 0 });
+        Ok(OK)
+    })
+}
+
 unsafe extern "C" fn frame(
     context: u64,
     token: u64,
@@ -537,13 +589,7 @@ unsafe extern "C" fn frame(
         let blink_enabled = model.blink_enabled && settings.blink.load(Ordering::Relaxed) != 0;
         model.dirty |= model.playback.set_blink_enabled(blink_enabled);
         model.advance_differences(time, settings);
-        model.advance_frame(
-            time,
-            task_tick,
-            blink_enabled,
-            lip_enabled,
-            settings.fade.load(Ordering::Relaxed) != 0,
-        )?;
+        model.advance_frame(time, task_tick, blink_enabled, lip_enabled, settings)?;
         let pixels = model.output();
         if pixels.bgra.is_empty() {
             return Ok(ABSENT);
@@ -691,6 +737,8 @@ struct Model {
     difference_tick: Option<u32>,
     difference_values: Assignments,
     lip: lip::LipSync,
+    inertia: inertia::Inertia,
+    position: [f32; 2],
     lip_enabled: bool,
     blink_enabled: bool,
     blink: blink::Blink,
@@ -745,6 +793,8 @@ impl Model {
             difference_tick: None,
             difference_values: Assignments::new(),
             lip: lip::LipSync::default(),
+            inertia: inertia::Inertia::default(),
+            position: [0.; 2],
             lip_enabled: true,
             blink_enabled: true,
             blink: blink::Blink::default(),
@@ -877,8 +927,9 @@ impl Model {
         task_tick: u32,
         blink_enabled: bool,
         lip_enabled: bool,
-        fade_enabled: bool,
+        settings: &SessionHost,
     ) -> Result<(), String> {
+        let fade_enabled = settings.fade.load(Ordering::Relaxed) != 0;
         if !fade_enabled {
             self.fade = None;
         }
@@ -901,7 +952,7 @@ impl Model {
             self.lip_values = lip_values;
             self.apply();
         }
-        self.render(time)?;
+        self.render(time, task_tick, settings)?;
         if let Some(fade) = &self.fade {
             let elapsed = time.wrapping_sub(fade.started);
             if elapsed >= fade.duration
@@ -917,19 +968,37 @@ impl Model {
         Ok(())
     }
 
-    fn render(&mut self, time: u32) -> Result<(), String> {
+    fn render(&mut self, time: u32, task_tick: u32, settings: &SessionHost) -> Result<(), String> {
         if let Some(last) = self.last_tick.replace(time) {
             if last != time {
                 self.dirty |= self.playback.advance(time.wrapping_sub(last) as f32 * 0.06);
             }
         }
+        let state = if self.inertia.is_empty() {
+            None
+        } else {
+            let mut state = self.playback.render_state();
+            let inertia = settings
+                .inertia
+                .lock()
+                .map_err(|_| "Cannot read inertia settings")?;
+            self.dirty |= self
+                .inertia
+                .sample(task_tick, self.position, &inertia, &state.variables);
+            self.inertia.apply(&mut state.variables);
+            Some(state)
+        };
         if !self.dirty {
             return Ok(());
         }
+        let items = match state {
+            Some(state) => self.playback.evaluate_state(&state)?,
+            None => self.playback.evaluate()?,
+        };
         let mut list = DrawList::new();
         let mut min = Vec2::splat(f32::INFINITY);
         let mut max = Vec2::splat(f32::NEG_INFINITY);
-        for item in self.playback.evaluate()? {
+        for item in items {
             let Some(&(id, info)) = self.textures.get(&item.texture_id) else {
                 continue;
             };

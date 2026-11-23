@@ -126,6 +126,10 @@ impl EmotePlayback {
     }
 
     pub(crate) fn evaluate(&mut self) -> Result<Vec<EmoteDrawItem>, String> {
+        self.evaluate_state(&self.render_state())
+    }
+
+    pub(crate) fn render_state(&self) -> EmoteRenderState {
         let mut state = EmoteRenderState {
             // The base motion is the static model graph entry. Timeline
             // playback drives its parameterized layers independently.
@@ -162,8 +166,15 @@ impl EmotePlayback {
             blink.apply(&mut state.variables);
         }
 
+        state
+    }
+
+    pub(crate) fn evaluate_state(
+        &mut self,
+        state: &EmoteRenderState,
+    ) -> Result<Vec<EmoteDrawItem>, String> {
         EmoteMotionEvaluator::new(&self.model)
-            .evaluate_base_with_history(&state, &mut self.evaluation_history)
+            .evaluate_base_with_history(state, &mut self.evaluation_history)
             .map_err(|error| error.to_string())
     }
 
