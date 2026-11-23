@@ -1,3 +1,5 @@
+mod lip;
+
 use crate::emote_playback::EmotePlayback;
 use art3m1s_emote::{EmoteModel, PsbDocument};
 use art3m1s_render::{
@@ -21,6 +23,7 @@ const ABSENT: i32 = 1;
 const ERROR: i32 = -5;
 const MAX_PSZ: usize = 128 * 1024 * 1024;
 const MAX_FRAME_SIDE: i32 = 4096;
+const LIP_SYNC_SETTING: u32 = 5;
 const FADE_SETTING: u32 = 6;
 
 #[repr(C)]
@@ -80,6 +83,7 @@ type Action = unsafe extern "C" fn(u64, u64) -> i32;
 type SetMode = unsafe extern "C" fn(u64, u64, u32) -> i32;
 type GetSetting = unsafe extern "C" fn(u64, u32, Bytes, *mut i32) -> i32;
 type SetSetting = unsafe extern "C" fn(u64, u32, Bytes, i32) -> i32;
+type UpdateLipSync = unsafe extern "C" fn(u64, u64, u32, *const u32, usize) -> i32;
 type Unused = Option<unsafe extern "C" fn()>;
 
 // Field order and signatures follow KatzeModelHost in the development ABI 0 header.
@@ -110,9 +114,9 @@ struct Host {
     current_differences: GetBytes,
     set_difference_scale: Unused,
     clear_effects: Action,
-    update_lip_sync: Unused,
+    update_lip_sync: UpdateLipSync,
     start_lip_track: Unused,
-    set_feature_mode: Unused,
+    set_feature_mode: unsafe extern "C" fn(u64, u64, u32, u32) -> i32,
     set_waiting_motion: SetName,
     set_inertia_group: Unused,
     refresh_effects: Unused,
@@ -147,9 +151,9 @@ const fn host(context: u64) -> Host {
         current_differences,
         set_difference_scale: None,
         clear_effects,
-        update_lip_sync: None,
+        update_lip_sync,
         start_lip_track: None,
-        set_feature_mode: None,
+        set_feature_mode,
         set_waiting_motion,
         set_inertia_group: None,
         refresh_effects: None,
@@ -163,6 +167,7 @@ struct SessionHost {
     callbacks: Host,
     encoding: &'static Encoding,
     fade: AtomicI32,
+    lip_sync: AtomicI32,
 }
 
 /// Creates a model callback table owned by the caller.
@@ -180,6 +185,7 @@ pub unsafe extern "C" fn art3m1s_katze_model_host_v0(label: *const c_char) -> *c
         callbacks: host(0),
         encoding: Encoding::for_label(label).unwrap_or(SHIFT_JIS),
         fade: AtomicI32::new(0),
+        lip_sync: AtomicI32::new(1),
     }));
     unsafe { (*session).callbacks.context = session as u64 };
     session.cast()
@@ -198,26 +204,36 @@ unsafe fn session(context: u64) -> &'static SessionHost {
     unsafe { &*(context as *const SessionHost) }
 }
 
-unsafe extern "C" fn get_setting(context: u64, setting: u32, _: Bytes, out: *mut i32) -> i32 {
-    if setting != FADE_SETTING {
-        return ABSENT;
+impl SessionHost {
+    fn setting(&self, id: u32) -> Option<&AtomicI32> {
+        match id {
+            LIP_SYNC_SETTING => Some(&self.lip_sync),
+            FADE_SETTING => Some(&self.fade),
+            _ => None,
+        }
     }
-    unsafe { out.write(session(context).fade.load(Ordering::Relaxed)) };
+}
+
+unsafe extern "C" fn get_setting(context: u64, setting: u32, _: Bytes, out: *mut i32) -> i32 {
+    let Some(setting) = (unsafe { session(context) }).setting(setting) else {
+        return ABSENT;
+    };
+    unsafe { out.write(setting.load(Ordering::Relaxed)) };
     OK
 }
 
 unsafe extern "C" fn set_setting(context: u64, setting: u32, _: Bytes, value: i32) -> i32 {
-    if setting != FADE_SETTING {
+    let Some(setting) = (unsafe { session(context) }).setting(setting) else {
         return ABSENT;
-    }
-    unsafe { session(context) }
-        .fade
-        .store(value, Ordering::Relaxed);
+    };
+    setting.store(value, Ordering::Relaxed);
     OK
 }
 
 unsafe extern "C" fn reset_settings(context: u64) -> i32 {
-    unsafe { session(context) }.fade.store(0, Ordering::Relaxed);
+    let session = unsafe { session(context) };
+    session.fade.store(0, Ordering::Relaxed);
+    session.lip_sync.store(1, Ordering::Relaxed);
     OK
 }
 
@@ -242,7 +258,9 @@ unsafe extern "C" fn open(context: u64, input: *const Input, token: *mut u64) ->
         let mut model = Model::load(model)?;
         let encoding = unsafe { session(context) }.encoding;
         let decode = |bytes: Bytes| encoding.decode(unsafe { bytes.view() }).0;
-        model.expression = Differences::parse(&decode(input.expression_table));
+        let expression = decode(input.expression_table);
+        model.expression = Differences::parse(&expression);
+        model.lip = lip::LipSync::parse(&expression);
         model.body = Differences::parse(&decode(input.body_table));
         let initial = decode(input.initial_motion);
         model.play(&initial);
@@ -348,11 +366,49 @@ unsafe extern "C" fn effects_active(_: u64, token: u64, _: u32) -> i32 {
     }
 }
 
+unsafe extern "C" fn set_feature_mode(_: u64, token: u64, feature: u32, mode: u32) -> i32 {
+    if feature != LIP_SYNC_SETTING {
+        return ABSENT;
+    }
+    let model = unsafe { &mut *(token as *mut Model) };
+    model.lip_enabled = mode != 0;
+    if !model.lip_enabled {
+        model.lip.observe(None);
+    }
+    OK
+}
+
+unsafe extern "C" fn update_lip_sync(
+    context: u64,
+    token: u64,
+    playing: u32,
+    levels: *const u32,
+    count: usize,
+) -> i32 {
+    guarded(|| {
+        let model = unsafe { &mut *(token as *mut Model) };
+        let enabled =
+            model.lip_enabled && unsafe { session(context) }.lip_sync.load(Ordering::Relaxed) != 0;
+        let levels = if playing == 0 || !enabled {
+            None
+        } else if count == 0 {
+            Some(&[][..])
+        } else {
+            Some(unsafe { slice::from_raw_parts(levels, count) })
+        };
+        model.lip.observe(levels);
+        Ok(OK)
+    })
+}
+
 unsafe extern "C" fn frame(context: u64, token: u64, time: u32, out: *mut Output) -> i32 {
     guarded(|| {
         let model = unsafe { &mut *(token as *mut Model) };
-        let enabled = unsafe { session(context) }.fade.load(Ordering::Relaxed) != 0;
-        model.advance_frame(time, enabled)?;
+        let settings = unsafe { session(context) };
+        if !model.lip_enabled || settings.lip_sync.load(Ordering::Relaxed) == 0 {
+            model.lip.observe(None);
+        }
+        model.advance_frame(time, settings.fade.load(Ordering::Relaxed) != 0)?;
         let pixels = model.output();
         if pixels.bgra.is_empty() {
             return Ok(ABSENT);
@@ -549,6 +605,9 @@ struct Model {
     body: Differences,
     expression_values: Assignments,
     body_values: Assignments,
+    lip: lip::LipSync,
+    lip_enabled: bool,
+    lip_values: Assignments,
     applied: Assignments,
     keys: Vec<u8>,
     action: Option<String>,
@@ -589,6 +648,9 @@ impl Model {
             body: Differences::default(),
             expression_values: Assignments::new(),
             body_values: Assignments::new(),
+            lip: lip::LipSync::default(),
+            lip_enabled: true,
+            lip_values: Assignments::new(),
             applied: Assignments::new(),
             keys: Vec::new(),
             action: None,
@@ -620,7 +682,9 @@ impl Model {
     fn select(&mut self, options: &[u8], encoding: &'static Encoding) {
         self.keys.clear();
         self.keys.extend_from_slice(options);
-        self.expression_values = self.expression.select(&encoding.decode(options).0);
+        let options = encoding.decode(options).0;
+        self.expression_values = self.expression.select(&options);
+        self.lip.select(&self.expression, &options);
         self.apply();
     }
 
@@ -629,6 +693,7 @@ impl Model {
             .expression_values
             .iter()
             .chain(&self.body_values)
+            .chain(&self.lip_values)
             .map(|(name, value)| (name.clone(), *value))
             .collect();
         if values == self.applied {
@@ -675,6 +740,11 @@ impl Model {
             } else {
                 None
             };
+        }
+        let lip_values = self.lip.sample(time);
+        if lip_values != self.lip_values {
+            self.lip_values = lip_values;
+            self.apply();
         }
         self.render(time)?;
         if let Some(fade) = &self.fade {
