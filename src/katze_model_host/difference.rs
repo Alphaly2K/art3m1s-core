@@ -9,6 +9,7 @@ pub(super) type Assignments = BTreeMap<String, f32>;
 struct Pattern {
     key: String,
     default: bool,
+    first_parameter: Option<String>,
     values: Assignments,
 }
 
@@ -121,13 +122,13 @@ impl Chain {
     }
 }
 
-fn fields(line: &str) -> impl Iterator<Item = &str> {
+pub(super) fn fields(line: &str) -> impl Iterator<Item = &str> {
     line.split_ascii_whitespace()
         .take_while(|word| !word.starts_with([';', '/']))
         .map(|word| word.trim_matches('"'))
 }
 
-fn keys(text: &str) -> impl Iterator<Item = &str> {
+pub(super) fn keys(text: &str) -> impl Iterator<Item = &str> {
     text.split([',', ':']).map(str::trim)
 }
 
@@ -197,14 +198,16 @@ impl Differences {
                                 },
                             );
                     } else if value != 99.0 {
-                        result
+                        let pattern = result
                             .patterns
                             .entry(*group)
                             .or_default()
                             .entry(key.clone())
-                            .or_default()
-                            .values
-                            .insert(first.to_owned(), value);
+                            .or_default();
+                        pattern
+                            .first_parameter
+                            .get_or_insert_with(|| first.to_owned());
+                        pattern.values.insert(first.to_owned(), value);
                     }
                 }
             } else if section.eq_ignore_ascii_case("#defval") {
@@ -269,6 +272,14 @@ impl Differences {
             .get(&group)?
             .get(&key.to_ascii_lowercase())
             .map(|pattern| &pattern.values)
+    }
+
+    pub(super) fn first_parameter(&self, group: usize, key: &str) -> Option<&str> {
+        self.patterns
+            .get(&group)?
+            .get(key)?
+            .first_parameter
+            .as_deref()
     }
 
     pub(super) fn default_keys(&self) -> Option<String> {

@@ -1,3 +1,4 @@
+mod blink;
 mod difference;
 mod lip;
 
@@ -81,7 +82,7 @@ struct Output {
 }
 
 type Open = unsafe extern "C" fn(u64, *const Input, *mut u64) -> i32;
-type Frame = unsafe extern "C" fn(u64, u64, u32, *mut Output) -> i32;
+type Frame = unsafe extern "C" fn(u64, u64, u32, u32, *mut Output) -> i32;
 type Select = unsafe extern "C" fn(u64, u64, Bytes, u32) -> i32;
 type SetName = unsafe extern "C" fn(u64, u64, Bytes) -> i32;
 type GetBytes = unsafe extern "C" fn(u64, u64, *mut Bytes) -> i32;
@@ -281,6 +282,7 @@ unsafe extern "C" fn open(context: u64, input: *const Input, token: *mut u64) ->
         let expression = decode(input.expression_table);
         model.expression = Differences::parse(&expression);
         model.lip = lip::LipSync::parse(&expression);
+        model.blink = blink::Blink::parse(&expression);
         model.body = Differences::parse(&decode(input.body_table));
         if let Some(keys) = model.body.default_keys() {
             let (encoded, _, had_errors) = encoding.encode(&keys);
@@ -501,18 +503,28 @@ unsafe extern "C" fn update_lip_sync(
     })
 }
 
-unsafe extern "C" fn frame(context: u64, token: u64, time: u32, out: *mut Output) -> i32 {
+unsafe extern "C" fn frame(
+    context: u64,
+    token: u64,
+    time: u32,
+    task_tick: u32,
+    out: *mut Output,
+) -> i32 {
     guarded(|| {
         let model = unsafe { &mut *(token as *mut Model) };
         let settings = unsafe { session(context) };
         if !model.lip_enabled || settings.lip_sync.load(Ordering::Relaxed) == 0 {
             model.lip.observe(None);
         }
-        model.dirty |= model
-            .playback
-            .set_blink_enabled(model.blink_enabled && settings.blink.load(Ordering::Relaxed) != 0);
+        let blink_enabled = model.blink_enabled && settings.blink.load(Ordering::Relaxed) != 0;
+        model.dirty |= model.playback.set_blink_enabled(blink_enabled);
         model.advance_differences(time, settings);
-        model.advance_frame(time, settings.fade.load(Ordering::Relaxed) != 0)?;
+        model.advance_frame(
+            time,
+            task_tick,
+            blink_enabled,
+            settings.fade.load(Ordering::Relaxed) != 0,
+        )?;
         let pixels = model.output();
         if pixels.bgra.is_empty() {
             return Ok(ABSENT);
@@ -662,6 +674,8 @@ struct Model {
     lip: lip::LipSync,
     lip_enabled: bool,
     blink_enabled: bool,
+    blink: blink::Blink,
+    blink_values: Assignments,
     lip_values: Assignments,
     applied: Assignments,
     keys: Vec<u8>,
@@ -714,6 +728,8 @@ impl Model {
             lip: lip::LipSync::default(),
             lip_enabled: true,
             blink_enabled: true,
+            blink: blink::Blink::default(),
+            blink_values: Assignments::new(),
             lip_values: Assignments::new(),
             applied: Assignments::new(),
             keys: Vec::new(),
@@ -767,6 +783,7 @@ impl Model {
             self.pending_chain_fade = Some(duration);
         }
         self.lip.select(&self.expression, &options);
+        self.blink.select(&self.expression, &options);
         self.differences_dirty = true;
     }
 
@@ -798,6 +815,7 @@ impl Model {
         let values: Assignments = self
             .difference_values
             .iter()
+            .chain(&self.blink_values)
             .chain(&self.lip_values)
             .map(|(label, value)| (label.clone(), *value))
             .collect();
@@ -834,7 +852,13 @@ impl Model {
         }
     }
 
-    fn advance_frame(&mut self, time: u32, fade_enabled: bool) -> Result<(), String> {
+    fn advance_frame(
+        &mut self,
+        time: u32,
+        task_tick: u32,
+        blink_enabled: bool,
+        fade_enabled: bool,
+    ) -> Result<(), String> {
         if !fade_enabled {
             self.fade = None;
         }
@@ -850,8 +874,10 @@ impl Model {
                 None
             };
         }
+        let blink_values = self.blink.sample(task_tick, blink_enabled);
         let lip_values = self.lip.sample(time);
-        if lip_values != self.lip_values {
+        if blink_values != self.blink_values || lip_values != self.lip_values {
+            self.blink_values = blink_values;
             self.lip_values = lip_values;
             self.apply();
         }
