@@ -238,7 +238,13 @@ unsafe extern "C" fn reset_settings(context: u64) -> i32 {
 }
 
 fn guarded(call: impl FnOnce() -> Result<i32, String>) -> i32 {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)) {
+    let run = || std::panic::catch_unwind(std::panic::AssertUnwindSafe(call));
+    // Session callbacks can run on a Rust worker without an AppKit pool.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let result = objc2::rc::autoreleasepool(|_| run());
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    let result = run();
+    match result {
         Ok(Ok(status)) => status,
         Ok(Err(error)) => {
             eprintln!("CatSystem2 model: {error}");

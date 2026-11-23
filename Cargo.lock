@@ -213,6 +213,7 @@ dependencies = [
  "glow 0.16.0",
  "image 0.25.10",
  "ndk-context",
+ "objc2",
  "pfs-upk-rust",
  "serde",
  "serde_json",

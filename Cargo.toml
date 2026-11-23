@@ -39,6 +39,9 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # 字体光栅化（字形渲染子系统）
 ab_glyph = "0.2"
 
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+objc2 = { version = "0.6.4", optional = true }
+
 [target.'cfg(target_os = "android")'.dependencies]
 ndk-context = { version = "0.1.1", optional = true }
 
@@ -48,7 +51,7 @@ ctt-astcenc = { version = "0.5", optional = true }
 [features]
 default = ["gl-backend"]
 host-abi-v2 = []
-katze-model-host = ["dep:flate2"]
+katze-model-host = ["dep:flate2", "dep:objc2"]
 legacy = [
     "dep:art3m1s-native-render",
     "dep:pfs-upk-rust",
