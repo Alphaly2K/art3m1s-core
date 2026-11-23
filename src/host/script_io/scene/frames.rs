@@ -85,6 +85,7 @@ impl SceneProjection {
         stage_size: [u32; 2],
         groups_enabled: bool,
     ) -> Option<FrameSnapshot> {
+        self.emote.attach(&mut self.compositor);
         let mut textures = CpuTextureView {
             assets: &self.textures,
             video: &self.video_frames,

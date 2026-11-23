@@ -347,6 +347,16 @@ pub fn install(interpreter: &Interpreter) -> Result<()> {
         lua.create_function(|_, path: String| Ok(IoRequest::Read { path }))?,
     )?;
     helpers.set(
+        "png_comments",
+        lua.create_function(|lua, bytes: mlua::String| {
+            let comments = crate::lua_engine::parse_png_text_chunks(&bytes.as_bytes());
+            if comments.is_empty() {
+                return Ok(None);
+            }
+            lua.create_table_from(comments).map(Some)
+        })?,
+    )?;
+    helpers.set(
         "read_module",
         lua.create_function(|_, path: String| {
             let path = path.replace('\\', "/");
@@ -499,6 +509,10 @@ pub fn install(interpreter: &Interpreter) -> Result<()> {
         .call(helpers)?;
     methods.set("file", functions.get::<mlua::Function>("file")?)?;
     methods.set("include", functions.get::<mlua::Function>("include")?)?;
+    methods.set(
+        "loadPngComments",
+        functions.get::<mlua::Function>("load_png_comments")?,
+    )?;
     methods.set(
         "createEmoteLayer",
         functions.get::<mlua::Function>("create_emote_layer")?,

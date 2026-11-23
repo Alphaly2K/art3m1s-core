@@ -4412,6 +4412,51 @@ fn numbered_load_rebuilds_captured_edits_through_host_assets() {
 }
 
 #[test]
+fn hosted_png_comments_position_a_face_sprite_relative_to_the_body() {
+    let (mut session, _, mut host) = playback_project(
+        br#"*top
+[calllua function=draw_actor]
+[stop]
+[lua]
+function draw_actor(e)
+    e:setMagicPath{'portrait', 'characters'}
+    local body = ':portrait/body.png'
+    local face = ':portrait/face.png'
+    assert(e:loadPngComments(body) == nil)
+    assert(e:loadPngComments(':portrait/missing.png') == nil)
+    local comment = e:loadPngComments(face).comment
+    local x, y = comment:match('^pos,(-?%d+),(-?%d+),')
+    e:tag{'lyc', id='actor.body', file=body}
+    e:tag{'lyc', id='actor.face', file=face}
+    e:tag{'lyprop', id='actor', left=8, top=6}
+    e:tag{'lyprop', id='actor.face', left=tonumber(x), top=tonumber(y)}
+end
+[/lua]
+"#,
+    );
+    let body = png_bytes(1, 1, &[0, 100, 255, 255]);
+    let mut face = png_bytes(1, 1, &[255, 100, 0, 255]);
+    let end = face.len() - 12;
+    face.splice(
+        end..end,
+        b"\x00\x00\x00\x14tEXtcomment\x00pos,17,9,1,1\x10\x1d\xb0\xcf"
+            .iter()
+            .copied(),
+    );
+    host.asset("characters/body.png", &body);
+    host.asset("characters/face.png", &face);
+    drive_display_snapshot(&mut session, &mut host, playback_frame(1, 0));
+    let frame = session.frames.latest_snapshot().unwrap();
+    let [body, face] = frame.sprites.as_ref() else {
+        panic!("expected body and face sprites");
+    };
+    assert_eq!(body.layer_id, "actor.body");
+    assert_eq!(&body.transform[4..], &[8.0, 6.0]);
+    assert_eq!(face.layer_id, "actor.face");
+    assert_eq!(&face.transform[4..], &[25.0, 15.0]);
+}
+
+#[test]
 fn emote_models_load_through_host_io_and_publish_the_cpu_atlas() {
     let mut session = session(1, TransportLimits::default(), 4096);
     let mut host = MemoryHost::default();
@@ -4420,6 +4465,8 @@ fn emote_models_load_through_host_io_and_publish_the_cpu_atlas() {
     host.asset(
         "boot.iet",
         br#"*top
+[lyprop id=actor left=100]
+[unhandled_extension_tag]
 [calllua function=load_model]
 [stop]
 [lua]
@@ -4427,11 +4474,13 @@ function load_model(e)
     attempts = (attempts or 0) + 1
     e:setMagicPath{'model', 'models'}
     local ok = pcall(function()
-        e:createEmoteLayer{id='model', files={':model/bad.psb'}, width=4, height=4}
+        e:createEmoteLayer{id='actor.model', files={':model/bad.psb'}, width=4, height=4}
     end)
-    assert(not ok and e:getEmoteLayer{id='model'} == nil)
-    local layer = e:createEmoteLayer{id='model', files={':model/red.psb'}, width=4, height=4}
+    assert(not ok and e:getEmoteLayer{id='actor.model'} == nil)
+    e:tag{'lydel', id='actor'}
+    local layer = e:createEmoteLayer{id='actor.model', files={':model/red.psb'}, width=4, height=4}
     layer:setCoord(-2, -2, 0, 0)
+    e:tag{'lyprop', id='actor', left=1, top=2}
     finished = true
 end
 [/lua]
@@ -4478,8 +4527,8 @@ end
     let frame = session.frames.latest_snapshot().unwrap();
     let sprite = &frame.sprites[0];
     assert_eq!(frame.sprites.len(), 1);
-    assert_eq!(sprite.layer_id, "model");
-    assert_eq!(&sprite.transform[4..], &[0.0, 0.0]);
+    assert_eq!(sprite.layer_id, "actor.model");
+    assert_eq!(&sprite.transform[4..], &[1.0, 2.0]);
     assert!(sprite.emote_material.is_some());
     assert!(
         frame

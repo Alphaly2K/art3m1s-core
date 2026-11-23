@@ -46,6 +46,9 @@ impl ScriptIoSession {
                     }
                 }
             }
+            Some(Event::Custom { tag, .. }) => {
+                diagnostic::script_log(&mut self.transport, "debug", format!("Unknown tag: {tag}"));
+            }
             Some(Event::CallNative { result, .. }) => {
                 if let Some(name) = result {
                     self.interpreter

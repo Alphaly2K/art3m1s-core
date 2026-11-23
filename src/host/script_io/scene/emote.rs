@@ -5,7 +5,8 @@ use art3m1s_emote::{EmoteDrawItem, EmoteModel, PsbDocument};
 use asb_interpreter::EmoteLayerCommand;
 
 const MAX_EMOTE_LAYERS: usize = 128;
-const MAX_EMOTE_BYTES: usize = 128 * 1024 * 1024;
+// Two 128 MiB models can each have a pending replacement during a transition.
+const MAX_EMOTE_BYTES: usize = 512 * 1024 * 1024;
 pub(super) const EMOTE_TEXTURE_BASE: u64 = 1 << 59;
 
 #[derive(Default)]
@@ -18,6 +19,7 @@ pub(super) struct SceneEmote {
 struct Layer {
     active: Model,
     pending: Option<Model>,
+    attach_to_scene: bool,
 }
 
 struct Model {
@@ -30,7 +32,16 @@ struct Model {
 
 impl SceneEmote {
     pub(super) fn retain(&mut self, scene: &crate::compositor::Scene) {
-        self.layers.retain(|id, _| scene.get(id).is_some());
+        self.layers
+            .retain(|id, layer| layer.attach_to_scene || scene.get(id).is_some());
+    }
+
+    pub(super) fn attach(&mut self, compositor: &mut crate::compositor::Compositor) {
+        for (id, layer) in &mut self.layers {
+            if std::mem::take(&mut layer.attach_to_scene) {
+                compositor.ensure_layer(id);
+            }
+        }
     }
 
     pub(super) fn clear(&mut self) {
@@ -128,6 +139,7 @@ impl SceneEmote {
         self.texture_revision = revision;
         if let Some(layer) = self.layers.get_mut(id) {
             layer.pending = Some(instance);
+            layer.attach_to_scene = true;
             Ok(true)
         } else {
             self.layers.insert(
@@ -135,6 +147,7 @@ impl SceneEmote {
                 Layer {
                     active: instance,
                     pending: None,
+                    attach_to_scene: true,
                 },
             );
             Ok(false)
@@ -197,7 +210,8 @@ impl SceneCallbacks {
             .emote
             .create(id, bytes, size)
             .map_err(|error| emote_error(format!("E-Mote model {file}: {error}")))?;
-        scene.compositor.ensure_layer(id);
+        // Lua can queue deletion of the old scene layer before loading its replacement.
+        // Attach the new model after those tags have run.
         scene.dirty = true;
         Ok(pending)
     }

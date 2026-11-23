@@ -87,6 +87,7 @@ struct QueuedWaitCheckpoint {
 #[derive(Debug, Clone, Copy)]
 struct HostWaitTiming {
     start: Option<(u64, u64)>,
+    allow_helper_return: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1792,6 +1793,7 @@ impl Interpreter {
                 TagResult::Jump(line) => {
                     self.last_flush_saw_jump = true;
                     self.arrived_by_jump = true;
+                    self.preserve_host_wait_for_queued_jump()?;
                     self.prune_queued_wait_checkpoints_for_jump();
                     self.current_line = line;
                     // 继续抽干剩余标签而非立即返回——排在 jump 之后的 calllua
@@ -1802,6 +1804,7 @@ impl Interpreter {
                 }
                 TagResult::JumpExternal { file, label } => {
                     self.last_flush_saw_jump = true;
+                    self.preserve_host_wait_for_queued_jump()?;
                     self.prune_queued_wait_checkpoints_for_jump();
                     if self.jump_to_external_script(&file, &label)? {
                         return Ok(Some(ExecutionResult::HostIoPending));
@@ -3093,6 +3096,22 @@ impl Interpreter {
         self.active_queued_wait = Some(self.queued_wait_checkpoints.len() - 1);
     }
 
+    fn preserve_host_wait_for_queued_jump(&mut self) -> Result<()> {
+        // An inline Host handler can jump to a helper that ends in [return].
+        // Give that helper a return frame at the interrupted wait.
+        if self.queued_wait_checkpoints.last().is_some_and(|checkpoint| {
+            checkpoint
+                .host_interrupt
+                .is_some_and(|host| host.allow_helper_return)
+                && self.current_script.as_deref() == Some(checkpoint.script.as_str())
+                && self.current_line == checkpoint.line
+                && same_call_stack(&self.call_stack, &checkpoint.stack)
+        }) {
+            self.push_inline_event_frame()?;
+        }
+        Ok(())
+    }
+
     fn prune_queued_wait_checkpoints_for_jump(&mut self) {
         let depth = self.call_stack.len();
         self.queued_wait_checkpoints
@@ -3352,10 +3371,12 @@ impl Interpreter {
     /// Park the current wait before appending Host-dispatched tags. Returning
     /// to this position re-emits the wait without executing its instruction.
     /// `start` is the Host frame ID and monotonic nanoseconds when the wait began.
+    /// Lua callbacks can jump to a helper that returns to the original wait.
     pub fn park_wait_for_host_dispatch(
         &mut self,
         event: &Event,
         start: Option<(u64, u64)>,
+        allow_helper_return: bool,
     ) -> Result<()> {
         self.check_io_idle()?;
         if !self.resumable_io || self.current_script.is_none() || self.deferred_events.is_some() {
@@ -3370,7 +3391,10 @@ impl Interpreter {
         self.record_queued_wait_checkpoint(event);
         let checkpoint = &mut self.queued_wait_checkpoints[self.active_queued_wait.unwrap()];
         checkpoint.allow_queue = true;
-        checkpoint.host_interrupt = Some(HostWaitTiming { start });
+        checkpoint.host_interrupt = Some(HostWaitTiming {
+            start,
+            allow_helper_return,
+        });
         Ok(())
     }
 
@@ -3714,6 +3738,51 @@ mod tests {
         it.mark_queued_input_wait();
         it.advance_line();
         assert_eq!(it.current_line(), 1);
+    }
+
+    #[test]
+    fn hosted_helper_jump_returns_to_the_interrupted_wait() {
+        let mut it = Interpreter::try_new_hosted(InterpreterConfig::default()).unwrap();
+        it.load_script("story", "*main\n[stop]\n[var name=after_wait data=1]\n")
+            .unwrap();
+        it.load_script(
+            "helper",
+            "*menu\n[wait time=250]\n[var name=opened data=1]\n[return]\n",
+        )
+        .unwrap();
+        it.set_callback(|event| match event {
+            Event::Wait { .. } => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        it.start("story", "main").unwrap();
+        let ExecutionResult::Wait(stop) = it.step().unwrap() else {
+            panic!("expected the story to stop");
+        };
+        it.park_wait_for_host_dispatch(&stop, Some((4, 10)), true)
+            .unwrap();
+        it.append_queued_tags(vec![(
+            "jump".into(),
+            HashMap::from([
+                ("file".into(), "helper".into()),
+                ("label".into(), "menu".into()),
+            ]),
+        )]);
+        assert!(matches!(
+            it.step().unwrap(),
+            ExecutionResult::Wait(Event::Wait {
+                reason: WaitReason::Timed { milliseconds: 250, .. }
+            })
+        ));
+        assert!(it.get_variable("opened").is_none());
+        it.advance_line();
+        assert!(matches!(
+            it.step().unwrap(),
+            ExecutionResult::Wait(Event::Wait { reason: WaitReason::Stop { .. } })
+        ));
+        assert_eq!(it.get_variable("opened"), Some(Value::Int(1)));
+        assert!(it.get_variable("after_wait").is_none());
+        assert!(it.call_stack().is_empty());
+        assert_eq!(it.current_host_wait_start(), Some((4, 10)));
     }
 
     #[test]

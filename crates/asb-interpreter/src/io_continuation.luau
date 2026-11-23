@@ -183,6 +183,10 @@ return {
         if data == nil then error(message, 2) end
         return h.compile(data, path)()
     end,
+    load_png_comments = function(self, path)
+        local data = read(path)
+        if data ~= nil then return h.png_comments(data) end
+    end,
     create_emote_layer = function(self, params)
         local id, path, width, height = h.emote_model_args(params)
         local data, message = read(path)

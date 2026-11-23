@@ -319,6 +319,36 @@ pub trait EngineCallbacks: Send + Sync {
     }
 }
 
+/// Read the Latin-1 `tEXt` entries returned by `loadPngComments`.
+pub fn parse_png_text_chunks(bytes: &[u8]) -> HashMap<String, String> {
+    let mut comments = HashMap::new();
+    let Some(mut chunks) = bytes.strip_prefix(b"\x89PNG\r\n\x1a\n") else {
+        return comments;
+    };
+    while let Some(header) = chunks.get(..8) {
+        let size = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
+        let Some((payload, rest)) = chunks[8..].split_at_checked(size) else {
+            break;
+        };
+        let Some(next) = rest.get(4..) else {
+            break;
+        };
+        match &header[4..] {
+            b"tEXt" => {
+                if let Some(separator) = payload.iter().position(|&byte| byte == 0) {
+                    let key = payload[..separator].iter().copied().map(char::from).collect();
+                    let value = payload[separator + 1..].iter().copied().map(char::from).collect();
+                    comments.insert(key, value);
+                }
+            }
+            b"IEND" => break,
+            _ => {}
+        }
+        chunks = next;
+    }
+    comments
+}
+
 /// 默认的引擎回调实现（所有方法为空操作）
 pub struct DefaultEngineCallbacks;
 

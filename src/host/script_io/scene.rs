@@ -134,8 +134,14 @@ impl ScriptIoSession {
         }
         if !tags.is_empty() {
             if let Some(event) = self.scenario_event.take() {
-                self.interpreter
-                    .park_wait_for_host_dispatch(&event, self.wait_start.take())?;
+                // An explicit target jump replaces the current script position.
+                let allow_helper_return = tags.iter().any(|(tag, _)| tag == "calllua")
+                    && tags.iter().all(|(tag, _)| tag != "jump");
+                self.interpreter.park_wait_for_host_dispatch(
+                    &event,
+                    self.wait_start.take(),
+                    allow_helper_return,
+                )?;
             }
             self.interpreter.append_queued_tags(tags);
             self.completed = false;

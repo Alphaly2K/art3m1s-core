@@ -642,7 +642,7 @@ impl EngineCallbacks for FfiCallbacks {
     fn load_png_comments(&self, path: &str) -> Option<HashMap<String, String>> {
         let resolved = magic_path::resolve_path(&self.magic_paths, path);
         let bytes = self.resources.read_file(&resolved).ok()?;
-        let comments = parse_png_text_chunks(&bytes);
+        let comments = asb_interpreter::lua_engine::parse_png_text_chunks(&bytes);
         if comments.is_empty() {
             None
         } else {
@@ -1208,36 +1208,4 @@ mod tests {
         assert_eq!(callbacks.get_touch_point(0), (320, 240));
         assert_eq!(callbacks.get_touch_point(1), (0, 0));
     }
-}
-
-/// Parse PNG tEXt chunks into `keyword -> text` map.
-fn parse_png_text_chunks(bytes: &[u8]) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    const SIG: usize = 8;
-    if bytes.len() < SIG || &bytes[..SIG] != b"\x89PNG\r\n\x1a\n" {
-        return out;
-    }
-    let mut i = SIG;
-    while i + 8 <= bytes.len() {
-        let len = u32::from_be_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]) as usize;
-        let typ = &bytes[i + 4..i + 8];
-        let data_start = i + 8;
-        let data_end = data_start + len;
-        if data_end > bytes.len() {
-            break;
-        }
-        if typ == b"tEXt" {
-            let data = &bytes[data_start..data_end];
-            if let Some(nul) = data.iter().position(|&b| b == 0) {
-                let keyword: String = data[..nul].iter().map(|&b| b as char).collect();
-                let text: String = data[nul + 1..].iter().map(|&b| b as char).collect();
-                out.insert(keyword, text);
-            }
-        }
-        if typ == b"IEND" {
-            break;
-        }
-        i = data_end + 4;
-    }
-    out
 }
