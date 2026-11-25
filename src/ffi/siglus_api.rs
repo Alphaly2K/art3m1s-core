@@ -752,6 +752,39 @@ pub unsafe extern "C" fn art3m1s_siglus_get_output_api_v1(
     &OUTPUT_API
 }
 
+#[repr(C)]
+pub struct SiglusHostApiV1 {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub magic: u64,
+    pub runtime: &'static SiglusApiV2,
+    pub audio: &'static SiglusAudioApiV1,
+    pub diagnostics: &'static SiglusDiagnosticsApiV1,
+    pub output: &'static SiglusOutputApiV1,
+}
+
+static HOST_API: SiglusHostApiV1 = SiglusHostApiV1 {
+    struct_size: std::mem::size_of::<SiglusHostApiV1>() as u32,
+    abi_version: 1,
+    magic: u64::from_le_bytes(*b"RA3MSHV1"),
+    runtime: &API_V2,
+    audio: &AUDIO_API,
+    diagnostics: &DIAGNOSTICS_API,
+    output: &OUTPUT_API,
+};
+
+/// # Safety
+/// `out_size` must be null or writable for a `usize`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_siglus_get_host_api_v1(
+    out_size: *mut usize,
+) -> *const SiglusHostApiV1 {
+    if !out_size.is_null() {
+        unsafe { out_size.write(std::mem::size_of::<SiglusHostApiV1>()) };
+    }
+    &HOST_API
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
