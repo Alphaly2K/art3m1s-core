@@ -13,6 +13,10 @@ RFVP fork 的 `main` 合并到 `657500be`，包含上游 `xmoezzz/rfvp` 的 `1f0
 
 macOS 通过 RFVP 自身默认构建和 Host 构建检查、Core 的 Metal 聚合库构建、6 项 v1 ABI 测试和 2 项 v2 C 冒烟。Flutter 用合成项目验证了 v1 默认路径、v2 显式启用、帧像素、Host 资源读取及存档写入。
 
+Flutter `a549f43` 在普通播放器中优先使用 RFVP v2。仅提供旧查询的库会自动走 v1，
+也可通过 `RFVP_V2=0` 显式选择 v1。本机验证了两条路径的画面、跳帧、脚本音量和翻译，
+以及 v2 下封包与松散资源读取、编号档及全局存档。
+
 ## Siglus 启动 IO
 
 `siglus_rs` 的 `codex/host-project-io` 分支在 `717ee48` 加入 Host 启动来源。Siglus 从 Host 接收 `Gameexe`、初始 append 和场景归档。启动尺寸、起始场景及运行时表共用解析结果。主归档、append 切换和场景元数据查询走同一入口。Core 的 Rust adapter 已接入该入口，现有目录启动仍可用。
@@ -29,7 +33,7 @@ Siglus 分支 `7fc5c64` 的会话存储处理全局数据、已读标记、设�
 
 Siglus 使用 `art3m1s_siglus_get_host_api_v1` 查询运行时、PCM、设备输出与日志。单独的旧查询仍可用，Flutter 支持加载旧 Core。C 和 Flutter 已针对构建产物验证表大小、运行时版本与无效句柄。Siglus `8954cf5` 的媒体线程调用 Host 分段读文件，播放器 CI 固定到该版本。合成 MPEG 测试覆盖预览、流式推进及帧像素，WebAssembly 已通过编译。
 
-KRKR Core `d27b16b` 提供独立 native ABI v2，支持通过 Host 列表、查询和定位读取回调启动松散文件和 XP3。macOS 合成测试验证了自动资源搜索、XP3 短读、Host 存档和切回目录启动。原生动态插件继续使用目录入口。
+KRKR Core `d27b16b` 提供独立 native ABI v2，支持通过 Host 列表、查询和定位读取回调启动松散文件和 XP3。macOS 合成测试验证了自动资源搜索、XP3 短读、Host 存档和切回目录启动。固定的上游版本只加载内建插件。
 
 Flutter `3f877aa` 在 macOS 的正常构建入口提供 `--katze`。使用干净的 KatzeSystem2 源构建，应用包包含 Host、媒体动态库与许可证。包内 Host 的存档、窗口、文本输入和日志测试均通过。后续完整帧效果覆盖、外部插件和各平台发布验证按引擎分别记录。
 
@@ -76,9 +80,19 @@ Core `e7925a7` 将 Siglus 的 VM 帧与 GPU 绘制分开。Rust Host 可以先�
 ## KRKR 公开 Host 表
 
 KRKR 公开 Host v2 表统一提供会话、日志、音量与项目回调。Host 可用回调启动松散文件或
-XP3，旧的目录入口仍可供依赖本地路径的原生插件使用。Flutter `156c088` 优先加载 Host 表，
+XP3，依赖本地路径的项目可使用目录入口。固定的上游版本只加载内建插件。Flutter `156c088` 优先加载 Host 表，
 目录项目沿用对应的启动入口。macOS C 冒烟交替运行回调和目录项目，验证短读、对应颜色的
 RGBA 帧和关闭后拒绝旧句柄。Dart 通过构建产物验证了新表和旧查询。
+
+## KRKR 软件帧与 KatzeSystem2 兼容路径
+
+KRKR Host 可跳过 GPU 初始化，借用软件合成的 RGBA8 帧。Flutter `abbe97d` 在 GPU 后端
+无法启动时保留应用的存档目录并使用软件帧。macOS 验证了回调短读、内建插件、帧借用与
+释放，以及播放器初始化失败回退、关停和同进程重开。
+
+Flutter `5abef26` 将 KatzeSystem2 和 Siglus 的对话框回复绑定到产生请求的会话。macOS
+的 KatzeSystem2 测试覆盖重开后拒绝迟到的回复、当前回复继续脚本，以及取消输入。`4d04d16`
+使可选媒体库不可用时沿用内建解码器。打包库和缺少可选媒体依赖的启动路径均已验证。
 
 ## KRKR 会话与 KatzeSystem2 接入
 

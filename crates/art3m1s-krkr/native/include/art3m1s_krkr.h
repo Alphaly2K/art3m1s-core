@@ -52,6 +52,8 @@ enum Art3m1sKrkrStatus {
 
 /* Low byte of runtime config flags: shared Art3m1s backend selection. */
 #define ART3M1S_KRKR_CONFIG_BACKEND_MASK 0xffu
+/* With Host v2, request software RGBA8 frames and omit GPU surface creation. */
+#define ART3M1S_KRKR_CONFIG_CPU_FRAMES (1u << 8)
 
 #define ART3M1S_KRKR_AUDIO_CREATE_STREAM 1u
 #define ART3M1S_KRKR_AUDIO_SUBMIT_PCM 2u
@@ -319,6 +321,8 @@ typedef struct Art3m1sKrkrHostApiV2 {
     /* Returns a public runtime handle. Source callbacks can run on workers
      * while KRKR is starting or ticking. They must not reenter the session. */
     ArtKrkrOpenProjectFn open_project;
+    /* Optional. Check struct_size before reading this field. */
+    uint32_t supported_config_flags;
 } Art3m1sKrkrHostApiV2;
 
 ART3M1S_KRKR_EXPORT const Art3m1sKrkrHostApiV2* art3m1s_krkr_get_host_api_v2(size_t* out_size);

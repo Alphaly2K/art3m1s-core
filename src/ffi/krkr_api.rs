@@ -41,7 +41,7 @@ static NATIVE_API: OnceLock<Result<&'static Art3M1sKrkrApiV1, KrkrAbiError>> = O
 struct ApiRuntime {
     api: &'static Art3M1sKrkrApiV1,
     handle: u64,
-    renderer: Arc<Mutex<KrkrRenderer>>,
+    renderer: Option<Arc<Mutex<KrkrRenderer>>>,
     pending_frame_pixels: Vec<u8>,
     pending_frame_id: Option<u64>,
     last_frame_generation: u64,
@@ -207,26 +207,37 @@ fn create_runtime(
         if config_ref.struct_size != std::mem::size_of::<CoreRuntimeConfigV1>() as u32 {
             return STATUS_INVALID_ARGUMENT;
         }
-        let backend_value = (config_ref.flags & ART3M1S_KRKR_CONFIG_BACKEND_MASK) as i32;
-        let selection = match crate::backend::BackendSelection::try_from_legacy_int(backend_value) {
-            Ok(selection) => selection,
-            Err(_) => return ART3M1S_KRKR_STATUS_UNSUPPORTED,
-        };
-        let backend =
-            match crate::backend::create_backend(selection, config_ref.width, config_ref.height) {
+        let renderer = if config_ref.flags & ART3M1S_KRKR_CONFIG_CPU_FRAMES != 0 {
+            None
+        } else {
+            let backend_value = (config_ref.flags & ART3M1S_KRKR_CONFIG_BACKEND_MASK) as i32;
+            let selection =
+                match crate::backend::BackendSelection::try_from_legacy_int(backend_value) {
+                    Ok(selection) => selection,
+                    Err(_) => return ART3M1S_KRKR_STATUS_UNSUPPORTED,
+                };
+            let backend = match crate::backend::create_backend(
+                selection,
+                config_ref.width,
+                config_ref.height,
+            ) {
                 Ok(backend) => backend,
-                Err(_) => return STATUS_ENGINE,
+                Err(error) => {
+                    eprintln!("[KRKR] renderer initialization failed: {error}");
+                    return ART3M1S_KRKR_STATUS_UNSUPPORTED;
+                }
             };
-        let renderer = Arc::new(Mutex::new(KrkrRenderer::new(
-            backend,
-            config_ref.width,
-            config_ref.height,
-        )));
+            Some(Arc::new(Mutex::new(KrkrRenderer::new(
+                backend,
+                config_ref.width,
+                config_ref.height,
+            ))))
+        };
         let Ok(_lifecycle) = LIFECYCLE.lock() else {
             return STATUS_ENGINE;
         };
-        let render_host = KrkrRenderer::host_v1(&renderer);
-        if let Err(status) = set_native_render_host(Some(&render_host)) {
+        let render_host = renderer.as_ref().map(KrkrRenderer::host_v1);
+        if let Err(status) = set_native_render_host(render_host.as_ref()) {
             return status;
         }
 
@@ -356,7 +367,35 @@ unsafe extern "C" fn runtime_acquire_frame(runtime: u64, out_frame: *mut CoreFra
             if runtime.pending_frame_id.is_some() {
                 return ART3M1S_KRKR_STATUS_NO_FRAME;
             }
-            let mut renderer = match runtime.renderer.lock() {
+            let Some(renderer) = &runtime.renderer else {
+                let status = unsafe {
+                    (runtime
+                        .api
+                        .runtime_acquire_frame
+                        .expect("runtime_acquire_frame is required"))(
+                        runtime.handle, out_frame
+                    )
+                };
+                if status == STATUS_OK {
+                    let frame = unsafe { &*out_frame };
+                    if frame.generation == runtime.last_frame_generation {
+                        unsafe {
+                            (runtime
+                                .api
+                                .runtime_release_frame
+                                .expect("runtime_release_frame is required"))(
+                                runtime.handle,
+                                frame.frame_id,
+                            )
+                        };
+                        return ART3M1S_KRKR_STATUS_NO_FRAME;
+                    }
+                    runtime.pending_frame_id = Some(frame.frame_id);
+                    runtime.last_frame_generation = frame.generation;
+                }
+                return status;
+            };
+            let mut renderer = match renderer.lock() {
                 Ok(renderer) => renderer,
                 Err(_) => return STATUS_ENGINE,
             };
@@ -402,6 +441,19 @@ unsafe extern "C" fn runtime_release_frame(runtime: u64, frame_id: u64) -> i32 {
         RUNTIMES.with_mut(runtime, STATUS_INVALID_HANDLE, |runtime| {
             if runtime.pending_frame_id != Some(frame_id) {
                 return STATUS_INVALID_ARGUMENT;
+            }
+            if runtime.renderer.is_none() {
+                let status = unsafe {
+                    (runtime
+                        .api
+                        .runtime_release_frame
+                        .expect("runtime_release_frame is required"))(
+                        runtime.handle, frame_id
+                    )
+                };
+                if status != STATUS_OK {
+                    return status;
+                }
             }
             runtime.pending_frame_id = None;
             runtime.pending_frame_pixels.clear();
@@ -501,7 +553,14 @@ unsafe extern "C" fn runtime_set_external_surface(
 ) -> i32 {
     guard_status(|| {
         RUNTIMES.with_mut(runtime, STATUS_INVALID_HANDLE, |runtime| {
-            let mut renderer = match runtime.renderer.lock() {
+            let Some(renderer) = &runtime.renderer else {
+                return if handle.is_null() && kind == 0 && width == 0 && height == 0 {
+                    STATUS_OK
+                } else {
+                    ART3M1S_KRKR_STATUS_UNSUPPORTED
+                };
+            };
+            let mut renderer = match renderer.lock() {
                 Ok(renderer) => renderer,
                 Err(_) => return STATUS_ENGINE,
             };
@@ -646,6 +705,7 @@ pub struct KrkrHostApiV2 {
     pub diagnostics: &'static Art3m1sKrkrDiagnosticsApiV1,
     pub controls: &'static KrkrControlApiV1,
     pub open_project: art3m1s_krkr::abi::OpenKrkrProject,
+    pub supported_config_flags: u32,
 }
 
 static HOST_API: KrkrHostApiV2 = KrkrHostApiV2 {
@@ -656,6 +716,7 @@ static HOST_API: KrkrHostApiV2 = KrkrHostApiV2 {
     diagnostics: &DIAGNOSTICS_API_V1,
     controls: &CONTROL_API,
     open_project,
+    supported_config_flags: ART3M1S_KRKR_CONFIG_CPU_FRAMES,
 };
 
 /// # Safety
