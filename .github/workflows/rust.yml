@@ -9,7 +9,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RFVP_REPOSITORY: https://github.com/Alphaly2K/rfvp.git
+  RFVP_REVISION: 657500beb80a8839e9c6c2c7e5387d0dd3db22c9
   SIGLUS_REPOSITORY: https://github.com/Alphaly2K/siglus_rs.git
+  SIGLUS_REVISION: 717ee487da853ecde781c5c4b6aedf134d9cd778
 
 jobs:
   build:
@@ -21,9 +23,17 @@ jobs:
       with:
         submodules: recursive
     - name: Checkout RFVP dependency
-      run: git clone --depth 1 "$RFVP_REPOSITORY" "${GITHUB_WORKSPACE}/../rfvp"
+      run: |
+        checkout="${GITHUB_WORKSPACE}/../rfvp"
+        git init "$checkout"
+        git -C "$checkout" fetch --depth 1 "$RFVP_REPOSITORY" "$RFVP_REVISION"
+        git -C "$checkout" switch --detach FETCH_HEAD
     - name: Checkout Siglus dependency
-      run: git clone --depth 1 "$SIGLUS_REPOSITORY" "${GITHUB_WORKSPACE}/../siglus_rs"
+      run: |
+        checkout="${GITHUB_WORKSPACE}/../siglus_rs"
+        git init "$checkout"
+        git -C "$checkout" fetch --depth 1 "$SIGLUS_REPOSITORY" "$SIGLUS_REVISION"
+        git -C "$checkout" switch --detach FETCH_HEAD
     - name: Build
       run: cargo build --verbose
     - name: Check Luau in legacy Artemis

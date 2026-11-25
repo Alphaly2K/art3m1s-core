@@ -13,6 +13,12 @@ RFVP fork 的 `main` 合并到 `657500be`，包含上游 `xmoezzz/rfvp` 的 `1f0
 
 macOS 通过 RFVP 自身默认构建和 Host 构建检查、Core 的 Metal 聚合库构建、6 项 v1 ABI 测试和 2 项 v2 C 冒烟。Flutter 用合成项目验证了 v1 默认路径、v2 显式启用、帧像素、Host 资源读取及存档写入。
 
+## Siglus 启动 IO
+
+`siglus_rs` 的 `codex/host-project-io` 分支在 `717ee48` 加入 Host 启动来源。Siglus 从 Host 接收 `Gameexe`、初始 append 和场景归档。启动尺寸、起始场景及运行时表共用解析结果。主归档、append 切换和场景元数据查询走同一入口。Core 的 Rust adapter 已接入该入口，现有目录启动仍可用。
+
+合成项目验证了以内存字节启动、切换 append、回到初始 append 和 `Gameexe` 只读取一次。Core 构建和 CI 固定到这次验证的 Siglus 提交。普通资源、编号与全局存档、时钟和 Flutter 的会话接口还需迁移。
+
 ## RFVP、Siglus 和 KRKR adapter 迁移准备
 
 | 引擎 | 当前 Host 接入 | 实现入口与待拆边界 |

@@ -13,6 +13,7 @@ use art3m1s_render::{
     TextureData, TextureDesc, TextureId, TextureInfo,
 };
 use siglus_scene_vm::host::{SiglusHost, SiglusHostConfig};
+pub use siglus_scene_vm::host::{SiglusBootSource, SiglusGameexe};
 use siglus_scene_vm::image_manager::{ImageKey, ImageManager};
 use siglus_scene_vm::layer::{
     RenderFrame, RenderSprite, Sprite, SpriteBlend, SpriteFit, SpriteSizeMode,
@@ -82,10 +83,21 @@ pub struct SiglusAdapter {
 
 impl SiglusAdapter {
     pub fn open(config: SiglusHostConfig) -> Result<Self> {
+        Self::open_with(|| SiglusHost::new_external(config))
+    }
+
+    pub fn open_with_boot_source(
+        config: SiglusHostConfig,
+        source: Arc<dyn SiglusBootSource>,
+    ) -> Result<Self> {
+        Self::open_with(|| SiglusHost::new_external_with_boot_source(config, source))
+    }
+
+    fn open_with(build_host: impl FnOnce() -> Result<SiglusHost>) -> Result<Self> {
         #[cfg(feature = "uci-ffmpeg")]
         siglus_scene_vm::assets::install_in_process_decoder(decode_uci_h264);
         Ok(Self {
-            host: SiglusHost::new_external(config)?,
+            host: build_host()?,
             textures: HashMap::new(),
             last_sprite_count: 0,
             last_command_count: 0,
