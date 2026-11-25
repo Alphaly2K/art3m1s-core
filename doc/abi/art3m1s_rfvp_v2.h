@@ -19,6 +19,8 @@ enum {
     ART3M1S_RFVP_V2_VERSION = -4,
     ART3M1S_RFVP_V2_BUSY = -5,
     ART3M1S_RFVP_V2_LIMIT = -6,
+    ART3M1S_RFVP_V2_NOT_FOUND = -7,
+    ART3M1S_RFVP_V2_IO = -8,
 };
 
 enum {
@@ -39,6 +41,38 @@ typedef struct Art3m1sRfvpOpenV2 {
     Art3m1sRfvpBytesV2 project; /* Directory path in UTF-8. */
     Art3m1sRfvpBytesV2 saves; /* Empty selects the project's save directory. */
 } Art3m1sRfvpOpenV2;
+
+enum {
+    ART3M1S_RFVP_V2_ASSETS = 1,
+    ART3M1S_RFVP_V2_SAVES = 2,
+};
+
+typedef int32_t (*Art3m1sRfvpVisitFileV2)(void *visitor_context,
+                                          Art3m1sRfvpBytesV2 key, uint64_t len);
+
+/* Callbacks are copied. Keep their code and context valid through close or a
+ * failed open. Callbacks are serialized and can run on native threads. They
+ * must not reenter the session. Borrowed buffers are valid during each call.
+ * Keys are case-sensitive UTF-8, with '/' for asset paths. Save keys are file
+ * names. Report a missing key as NOT_FOUND. On successful open, file and len
+ * describe a stable seekable byte source. Core closes every successful open.
+ * read_at writes at most capacity bytes and reports zero at EOF.
+ * list visits matching regular files synchronously and stops on visitor error.
+ * The root is "." and the extension has no dot. Save listing requests every
+ * key via an empty extension. write_save atomically replaces the named blob. */
+typedef struct Art3m1sRfvpIoV2 {
+    uint32_t struct_size, nls;
+    uintptr_t context;
+    int32_t (*open)(uintptr_t, uint32_t domain, Art3m1sRfvpBytesV2 key,
+                    uint64_t *file, uint64_t *len);
+    int32_t (*read_at)(uintptr_t, uint64_t file, uint64_t offset,
+                       uint8_t *out, uint64_t capacity, uint64_t *read);
+    void (*close)(uintptr_t, uint64_t file);
+    int32_t (*list)(uintptr_t, uint32_t domain, Art3m1sRfvpBytesV2 root,
+                    Art3m1sRfvpBytesV2 extension, Art3m1sRfvpVisitFileV2, void *);
+    int32_t (*write_save)(uintptr_t, Art3m1sRfvpBytesV2 key, Art3m1sRfvpBytesV2 data);
+    int32_t (*remove_save)(uintptr_t, Art3m1sRfvpBytesV2 key);
+} Art3m1sRfvpIoV2;
 
 enum {
     ART3M1S_RFVP_V2_KEY = 1,
@@ -152,6 +186,7 @@ typedef struct Art3m1sRfvpApiV2 {
     int32_t (*frame_view)(uint64_t lease, Art3m1sRfvpFrameV2 *);
     int32_t (*frame_texture)(uint64_t lease, uint32_t index, Art3m1sRfvpTextureV2 *);
     int32_t (*release_frame)(uint64_t lease);
+    int32_t (*open_with_io)(const Art3m1sRfvpIoV2 *, uint64_t *session);
 } Art3m1sRfvpApiV2;
 
 /* Pass the requested ABI major and the size of the table prefix being used.

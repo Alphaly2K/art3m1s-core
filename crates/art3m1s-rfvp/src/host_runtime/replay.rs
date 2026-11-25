@@ -12,7 +12,8 @@ use rfvp::rendering::external::{
 };
 
 use super::{
-    NativeFrame, NativeSession, RfvpHostInputEvent, RfvpHostRuntimeError, RfvpNls, SessionMode,
+    NativeFrame, NativeSession, RfvpAssetSource, RfvpHostInputEvent, RfvpHostRuntimeError, RfvpNls,
+    RfvpSaveStore,
 };
 
 /// A complete RFVP frame. Upload `textures` before drawing `frame.commands`.
@@ -29,6 +30,7 @@ pub struct RfvpReplayFrame {
 #[derive(Debug)]
 pub enum RfvpReplayError {
     Runtime(RfvpHostRuntimeError),
+    AssetRoot(super::RfvpError),
     MissingTexture(TextureHandle),
     InvalidTexture(TextureHandle),
     FrameStreamStopped,
@@ -38,6 +40,7 @@ impl fmt::Display for RfvpReplayError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Runtime(error) => error.fmt(f),
+            Self::AssetRoot(error) => write!(f, "RFVP asset root: {error}"),
             Self::MissingTexture(handle) => write!(f, "RFVP texture {} is missing", handle.0),
             Self::InvalidTexture(handle) => {
                 write!(f, "invalid RFVP texture data for handle {}", handle.0)
@@ -62,7 +65,7 @@ impl From<RfvpHostRuntimeError> for RfvpReplayError {
     }
 }
 
-/// Drives a directory-backed RFVP game without a GPU backend.
+/// Drives an RFVP game without a GPU backend.
 ///
 /// Keep session calls on the creating thread. RFVP's script globals are
 /// process-wide, so run one game at a time across the RFVP entry points.
@@ -80,14 +83,22 @@ impl RfvpFrameRuntime {
         save_root: Option<&Path>,
         nls: RfvpNls,
     ) -> Result<Self, RfvpReplayError> {
-        let (session, stage_size) = NativeSession::open(
-            game_root.as_ref(),
-            save_root,
-            0,
-            0,
-            nls,
-            SessionMode::Replay,
-        )?;
+        use super::directory::{DirectoryAssets, DirectorySaves};
+        let project = game_root.as_ref();
+        let assets = DirectoryAssets::new(project).map_err(RfvpReplayError::AssetRoot)?;
+        let saves = save_root
+            .map(Path::to_owned)
+            .unwrap_or_else(|| project.join("save"));
+        Self::open_with_io(Arc::new(assets), Arc::new(DirectorySaves(saves)), nls)
+    }
+
+    /// Opens a project whose assets and persistent saves are supplied by the Host.
+    pub fn open_with_io(
+        assets: Arc<dyn RfvpAssetSource>,
+        saves: Arc<dyn RfvpSaveStore>,
+        nls: RfvpNls,
+    ) -> Result<Self, RfvpReplayError> {
+        let (session, stage_size) = NativeSession::open_replay(assets, saves, nls)?;
         Ok(Self {
             session,
             stage_size,
@@ -164,13 +175,27 @@ impl ReplayWorker {
         saves: Option<PathBuf>,
         nls: RfvpNls,
     ) -> Result<Self, RfvpReplayError> {
+        Self::start(move || RfvpFrameRuntime::new_directory(project, saves.as_deref(), nls))
+    }
+
+    pub(crate) fn open_with_io(
+        assets: Arc<dyn RfvpAssetSource>,
+        saves: Arc<dyn RfvpSaveStore>,
+        nls: RfvpNls,
+    ) -> Result<Self, RfvpReplayError> {
+        Self::start(move || RfvpFrameRuntime::open_with_io(assets, saves, nls))
+    }
+
+    fn start(
+        open: impl FnOnce() -> Result<RfvpFrameRuntime, RfvpReplayError> + Send + 'static,
+    ) -> Result<Self, RfvpReplayError> {
         let (jobs, queue) = mpsc::sync_channel::<Job>(0);
         let (ready, started) = mpsc::sync_channel(1);
         let thread = thread::Builder::new()
             .name("rfvp-session".into())
             .spawn(move || {
                 REPLAY_WORKER.set(true);
-                match RfvpFrameRuntime::new_directory(project, saves.as_deref(), nls) {
+                match open() {
                     Ok(mut runtime) => {
                         if ready.send(Ok(runtime.stage_size)).is_ok() {
                             for job in queue {

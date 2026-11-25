@@ -9,14 +9,14 @@ use std::marker::PhantomData;
 use std::path::Path;
 use std::ptr;
 use std::rc::Rc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use art3m1s_render::{
     Extent2D, GpuBackend, NativeSurface, PostProcessPass, PostProcessPipeline, UpscaleConfig,
     UpscaleMode,
 };
 use rfvp::host_abi::runtime::{
-    rfvp_frame_get_commands, rfvp_frame_get_hit_proxies, rfvp_frame_get_size,
+    open_runtime_with_io, rfvp_frame_get_commands, rfvp_frame_get_hit_proxies, rfvp_frame_get_size,
     rfvp_frame_get_textures, rfvp_frame_release, rfvp_resources_create, rfvp_resources_destroy,
     rfvp_resources_mount_directory, rfvp_resources_set_save_root, rfvp_runtime_acquire_frame,
     rfvp_runtime_capabilities, rfvp_runtime_clear_font_override, rfvp_runtime_create,
@@ -57,9 +57,14 @@ use rfvp::rendering::external::{
 
 use crate::{ExternalRenderer, ExternalRendererError, RfvpRenderResult};
 
+mod directory;
 mod replay;
 pub(crate) use replay::ReplayWorker;
 pub use replay::{RfvpFrameRuntime, RfvpReplayError, RfvpReplayFrame, is_replay_worker_thread};
+pub use rfvp::host_api::{
+    RfvpAssetFile, RfvpAssetSource, RfvpError, RfvpFile, RfvpFileInfo, RfvpFileKind, RfvpResult,
+    RfvpSaveStore,
+};
 
 // Bit 11 is the fork's RFVP_CAPABILITY_FONT_OVERRIDE; host-only bits start at 12.
 const RFVP_HOST_CAPABILITY_SPATIAL_UPSCALING: u64 = 1 << 12;
@@ -358,9 +363,8 @@ impl NativeSession {
         width: u32,
         height: u32,
         nls: RfvpNls,
-        mode: SessionMode,
     ) -> Result<(Self, (u32, u32)), RfvpHostRuntimeError> {
-        let permit = SessionPermit::reserve(mode)?;
+        let permit = SessionPermit::reserve(SessionMode::Legacy)?;
         let game_root = game_root
             .to_str()
             .ok_or(RfvpHostRuntimeError::InvalidPath)?;
@@ -440,6 +444,33 @@ impl NativeSession {
             },
             (width, height),
         ))
+    }
+
+    fn open_replay(
+        assets: Arc<dyn RfvpAssetSource>,
+        saves: Arc<dyn RfvpSaveStore>,
+        nls: RfvpNls,
+    ) -> Result<(Self, (u32, u32)), RfvpHostRuntimeError> {
+        let permit = SessionPermit::reserve(SessionMode::Replay)?;
+        let nls = match nls {
+            RfvpNls::ShiftJis => rfvp::script::parser::Nls::ShiftJIS,
+            RfvpNls::Gbk => rfvp::script::parser::Nls::GBK,
+            RfvpNls::Utf8 => rfvp::script::parser::Nls::UTF8,
+        };
+        let handle = open_runtime_with_io(assets, saves, nls)
+            .map_err(RfvpHostRuntimeError::RuntimeCreate)?;
+        let width = unsafe { rfvp_runtime_stage_width(handle) };
+        let height = unsafe { rfvp_runtime_stage_height(handle) };
+        let session = Self {
+            resources: 0,
+            handle,
+            _owner_thread: PhantomData,
+            _permit: permit,
+        };
+        if width == 0 || height == 0 {
+            return Err(RfvpHostRuntimeError::RuntimeCreate(RFVP_STATUS_ENGINE));
+        }
+        Ok((session, (width, height)))
     }
 
     fn step(&self, delta_ms: u32) -> Result<(), RfvpHostRuntimeError> {
@@ -614,7 +645,9 @@ impl Drop for NativeSession {
     fn drop(&mut self) {
         unsafe {
             rfvp_runtime_destroy(self.handle);
-            rfvp_resources_destroy(self.resources);
+            if self.resources != 0 {
+                rfvp_resources_destroy(self.resources);
+            }
         }
     }
 }
@@ -687,14 +720,8 @@ impl RfvpHostRuntime {
         backend: Box<dyn GpuBackend>,
         clear_color: [f32; 4],
     ) -> Result<Self, RfvpHostRuntimeError> {
-        let (runtime, (actual_width, actual_height)) = NativeSession::open(
-            game_root.as_ref(),
-            save_root,
-            width,
-            height,
-            nls,
-            SessionMode::Legacy,
-        )?;
+        let (runtime, (actual_width, actual_height)) =
+            NativeSession::open(game_root.as_ref(), save_root, width, height, nls)?;
         Self::with_output(
             HostSession::Legacy(runtime),
             (width, height),

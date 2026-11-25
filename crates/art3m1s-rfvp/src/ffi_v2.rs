@@ -6,7 +6,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex, TryLockError};
+use std::sync::{Arc, LazyLock, Mutex, TryLockError};
 
 use rfvp::host_api::{
     CommandBlendMode, RectI16, RenderCommand, Rgba8, TextureFilter, TextureFormat,
@@ -16,7 +16,9 @@ use crate::host_runtime::ReplayWorker;
 use crate::{RfvpFrameRuntime, RfvpHostRuntimeError, RfvpNls, RfvpReplayError, RfvpReplayFrame};
 
 pub mod input;
+mod io;
 use input::{Art3m1sRfvpInputEventV1, convert_input_event};
+pub use io::Io;
 
 const MAGIC: u64 = 0x3256_4652_4d33_4152;
 const VERSION: u32 = 2;
@@ -135,6 +137,7 @@ pub struct Api {
     pub frame_view: unsafe extern "C" fn(u64, *mut FrameView) -> i32,
     pub frame_texture: unsafe extern "C" fn(u64, u32, *mut TextureView) -> i32,
     pub release_frame: extern "C" fn(u64) -> i32,
+    pub open_with_io: unsafe extern "C" fn(*const Io, *mut u64) -> i32,
 }
 
 static API: Api = Api {
@@ -149,6 +152,7 @@ static API: Api = Api {
     frame_view,
     frame_texture,
     release_frame,
+    open_with_io,
 };
 
 /// # Safety
@@ -218,22 +222,43 @@ unsafe extern "C" fn open_directory(info: *const OpenInfo, out: *mut u64) -> i32
         let info = unsafe { &*info };
         let project = unsafe { path(&info.project)? }.ok_or(ARGUMENT)?;
         let saves = unsafe { path(&info.saves)? };
-        let nls = match info.nls {
-            1 => RfvpNls::ShiftJis,
-            2 => RfvpNls::Gbk,
-            3 => RfvpNls::Utf8,
-            _ => return Err(ARGUMENT),
-        };
-        let mut session = session_lock()?;
-        if session.is_some() {
-            return Err(BUSY);
-        }
-        let handle = next_handle(false)?;
-        let worker = ReplayWorker::open(PathBuf::from(project), saves.map(PathBuf::from), nls)
-            .map_err(runtime_error)?;
-        *session = Some(Session { handle, worker });
+        let nls = nls(info.nls)?;
+        let handle = open_worker(|| {
+            ReplayWorker::open(PathBuf::from(project), saves.map(PathBuf::from), nls)
+        })?;
         unsafe { write(out, handle) }
     })
+}
+
+unsafe extern "C" fn open_with_io(info: *const Io, out: *mut u64) -> i32 {
+    status(|| {
+        unsafe { write(out, 0)? };
+        let info = unsafe { Io::read(info)? };
+        let nls = nls(info.nls)?;
+        let io = Arc::new(io::Callbacks::new(info));
+        let handle = open_worker(|| ReplayWorker::open_with_io(io.clone(), io, nls))?;
+        unsafe { write(out, handle) }
+    })
+}
+
+fn nls(value: u32) -> Result<RfvpNls, i32> {
+    match value {
+        1 => Ok(RfvpNls::ShiftJis),
+        2 => Ok(RfvpNls::Gbk),
+        3 => Ok(RfvpNls::Utf8),
+        _ => Err(ARGUMENT),
+    }
+}
+
+fn open_worker(open: impl FnOnce() -> Result<ReplayWorker, RfvpReplayError>) -> Result<u64, i32> {
+    let mut session = session_lock()?;
+    if session.is_some() {
+        return Err(BUSY);
+    }
+    let handle = next_handle(false)?;
+    let worker = open().map_err(runtime_error)?;
+    *session = Some(Session { handle, worker });
+    Ok(handle)
 }
 
 extern "C" fn close(handle: u64) -> i32 {

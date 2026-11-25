@@ -28,4 +28,11 @@ with TemporaryDirectory(prefix='rfvp-v2-smoke-') as directory:
                     '-Idoc/abi', 'tools/host-smoke/rfvp_v2.c', library,
                     '-Wl,-rpath,' + str(library.parent), '-o', runner], check=True)
     subprocess.run([runner, game], check=True)
+    io = root / 'io'
+    io.mkdir()
+    subprocess.run([sys.executable, 'tools/host-smoke/rfvp_tile.py', io / 'tile.hcb', '--io'], check=True)
+    subprocess.run([compiler, '-std=c11', '-Wall', '-Wextra', '-Werror', '-pedantic',
+                    '-Idoc/abi', 'tools/host-smoke/rfvp_v2_io.c', library,
+                    '-Wl,-rpath,' + str(library.parent), '-o', runner], check=True)
+    subprocess.run([runner, io / 'tile.hcb', io / 'graph.bin', io / 'loose.hzc'], check=True)
 PY

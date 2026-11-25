@@ -220,6 +220,10 @@ const Art3m1sRfvpApiV1 *art3m1s_rfvp_get_api_v1(size_t *out_size);
 使用 `rfvp-engine` 构建的聚合库也提供下列 Host 入口。它使用同一函数表布局，由 v2
 会话提供完整帧，Host 调用原有的 surface、音频和翻译函数。绘制及 surface 操作仍遵循
 Host 的单线程约定。`runtime_set_log_callback` 为空，日志通过轮询获取。
+目录版 v2 由 Host 提供项目文件和存档存储，存档沿用 `rfvp_global.bin` 和 `rfvp_sNNN.bin`。
+独立 Host 可调用 [RFVP v2 表](abi/art3m1s_rfvp_v2.h) 的 `open_with_io` 注入两套命名空间，
+也可以继续使用 `open_directory`。回调由运行库串行调用，可从原生线程进入。关闭会话后才可释放
+回调上下文。旧 v2 调用方可按原来的函数表前缀长度查询。
 
 ```c
 const Art3m1sRfvpApiV1 *art3m1s_rfvp_get_replay_host_v1(size_t *out_size);

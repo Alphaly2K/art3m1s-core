@@ -1,6 +1,7 @@
 #include "art3m1s_rfvp_v2.h"
 #include <assert.h>
 #include <pthread.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -43,6 +44,7 @@ int main(int argc, char **argv) {
     assert(art3m1s_rfvp_get_api_v2(3, sizeof(*api), &api) == ART3M1S_RFVP_V2_VERSION);
     assert(api == NULL);
     assert(art3m1s_rfvp_get_api_v2(2, sizeof(*api) + 1, &api) == ART3M1S_RFVP_V2_VERSION);
+    assert(art3m1s_rfvp_get_api_v2(2, offsetof(Art3m1sRfvpApiV2, open_with_io), &api) == 0);
     assert(art3m1s_rfvp_get_api_v2(2, sizeof(*api), &api) == 0);
     assert(api->abi_major == 2 && api->struct_size >= sizeof(*api));
     assert(api->magic == ART3M1S_RFVP_V2_MAGIC);
