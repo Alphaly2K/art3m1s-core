@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use art3m1s_log::{Level, Record};
 use art3m1s_render::{Extent2D, FrameTarget, GpuBackend, NativeSurface};
 use art3m1s_siglus::siglus_scene_vm::host::SiglusHostConfig;
-use art3m1s_siglus::{DirectorySaves, SiglusAdapter, is_siglus_project};
+use art3m1s_siglus::{DirectorySaves, SiglusAdapter, SiglusRenderer, is_siglus_project};
 
 pub const ABI_VERSION: u32 = 1;
 pub const ABI_MAGIC: u32 = 0x5349_4731; // SIG1
@@ -242,6 +242,7 @@ pub struct SiglusApiV2 {
 
 struct Runtime {
     adapter: SiglusAdapter,
+    renderer: SiglusRenderer,
     gpu: Box<dyn GpuBackend>,
     width: u32,
     height: u32,
@@ -338,7 +339,7 @@ unsafe extern "C" fn runtime_create_with_save_dir(
         };
         let (width, height) = adapter.logical_size();
         let save_fingerprint =
-            uses_host_saves.then(|| adapter.host().persist_global_if_changed(None));
+            uses_host_saves.then(|| adapter.with_host(|host| host.persist_global_if_changed(None)));
         if width == 0
             || height == 0
             || (width as usize)
@@ -365,6 +366,7 @@ unsafe extern "C" fn runtime_create_with_save_dir(
                 handle,
                 Runtime {
                     adapter,
+                    renderer: SiglusRenderer::default(),
                     gpu,
                     width,
                     height,
@@ -389,10 +391,9 @@ unsafe extern "C" fn runtime_destroy(handle: u64) {
                 if let Some(initial) = runtime.save_fingerprint {
                     runtime
                         .adapter
-                        .host()
-                        .persist_global_if_changed(Some(initial));
+                        .with_host(|host| host.persist_global_if_changed(Some(initial)));
                 }
-                runtime.adapter.release_textures(runtime.gpu.as_mut());
+                runtime.renderer.release_textures(runtime.gpu.as_mut());
                 runtime.gpu.clear_native_surface();
                 if table.is_empty() {
                     end_log_session();
@@ -465,15 +466,16 @@ unsafe extern "C" fn runtime_tick(
             if !matches!(mode, 0..=2) {
                 return STATUS_ARGUMENT;
             }
-            let step = if mode == 2 {
-                rt.adapter.step(dt_ms, rt.gpu.as_mut())
-            } else {
-                rt.adapter.step_without_present(dt_ms, rt.gpu.as_mut())
+            let step = match rt.adapter.step(dt_ms) {
+                Ok(step) => step,
+                Err(error) => return fail(format!("Siglus step: {error:#}")),
             };
-            match step {
-                Ok(exiting) => rt.exiting = exiting,
-                Err(error) => return fail(format!("Siglus frame: {error:#}")),
+            if let Some(frame) = step.frame
+                && let Err(error) = rt.renderer.draw(&frame, rt.gpu.as_mut(), mode == 2)
+            {
+                return fail(format!("Siglus frame: {error:#}"));
             }
+            rt.exiting = step.exiting;
             if let Some(output) = &rt.audio_output {
                 if output.failed() {
                     return fail("Siglus audio device disconnected");

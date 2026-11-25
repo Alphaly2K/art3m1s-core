@@ -1,9 +1,9 @@
-//! Siglus VM to Art3m1s GPU adapter. No Siglus-specific rendering code lives
-//! in the engine fork beyond exposing its frame and image data.
+//! Siglus session and optional drawing support for Art3m1s hosts.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub use siglus_scene_vm;
 
@@ -12,8 +12,8 @@ use art3m1s_render::{
     BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, DrawMesh, FrameTarget, GpuBackend,
     TextureData, TextureDesc, TextureId, TextureInfo,
 };
-use siglus_scene_vm::host::{SiglusHost, SiglusHostConfig};
 pub use siglus_scene_vm::host::{SiglusBootSource, SiglusGameexe, SiglusSaveStore};
+use siglus_scene_vm::host::{SiglusHost, SiglusHostConfig};
 
 mod save_directory;
 pub use save_directory::DirectorySaves;
@@ -21,6 +21,7 @@ use siglus_scene_vm::image_manager::{ImageKey, ImageManager};
 use siglus_scene_vm::layer::{
     RenderFrame, RenderSprite, Sprite, SpriteBlend, SpriteFit, SpriteSizeMode,
 };
+use siglus_scene_vm::platform_time::with_host_time;
 use siglus_scene_vm::render_math::sprite_quad_geometry_rect;
 use siglus_scene_vm::runtime::input::VmMouseButton;
 
@@ -79,9 +80,19 @@ enum TextureKey {
 
 pub struct SiglusAdapter {
     host: SiglusHost,
-    textures: HashMap<TextureKey, CachedTexture>,
-    last_sprite_count: usize,
-    last_command_count: usize,
+    elapsed: Duration,
+}
+
+/// A frame and its image lookup, valid until the session is mutated again.
+pub struct SiglusFrame<'session> {
+    pub size: (u32, u32),
+    pub plan: RenderFrame,
+    pub images: &'session ImageManager,
+}
+
+pub struct SiglusStep<'session> {
+    pub exiting: bool,
+    pub frame: Option<SiglusFrame<'session>>,
 }
 
 impl SiglusAdapter {
@@ -100,15 +111,14 @@ impl SiglusAdapter {
         #[cfg(feature = "uci-ffmpeg")]
         siglus_scene_vm::assets::install_in_process_decoder(decode_uci_h264);
         Ok(Self {
-            host: build_host()?,
-            textures: HashMap::new(),
-            last_sprite_count: 0,
-            last_command_count: 0,
+            host: with_host_time(Duration::ZERO, build_host)?,
+            elapsed: Duration::ZERO,
         })
     }
 
-    pub fn host(&mut self) -> &mut SiglusHost {
-        &mut self.host
+    /// Run an input or service call at the session's current time.
+    pub fn with_host<T>(&mut self, run: impl FnOnce(&mut SiglusHost) -> T) -> T {
+        with_host_time(self.elapsed, || run(&mut self.host))
     }
 
     pub fn logical_size(&self) -> (u32, u32) {
@@ -117,7 +127,7 @@ impl SiglusAdapter {
 
     /// Host input coordinates are expressed in logical stage pixels.
     pub fn pointer_move(&mut self, x: i32, y: i32) {
-        self.host.mouse_move(x as f64, y as f64);
+        self.with_host(|host| host.mouse_move(x as f64, y as f64));
     }
 
     pub fn pointer_button(&mut self, button: i32, pressed: bool) {
@@ -126,88 +136,108 @@ impl SiglusAdapter {
             3 => VmMouseButton::Middle,
             _ => VmMouseButton::Left,
         };
-        if pressed {
-            self.host.mouse_down(button);
-        } else {
-            self.host.mouse_up(button);
-        }
+        self.with_host(|host| {
+            if pressed {
+                host.mouse_down(button);
+            } else {
+                host.mouse_up(button);
+            }
+        });
     }
 
     pub fn touch(&mut self, phase: i32, x: i32, y: i32) {
-        self.host.touch(phase, x as f64, y as f64);
+        self.with_host(|host| host.touch(phase, x as f64, y as f64));
     }
 
     pub fn wheel(&mut self, delta_y: i32) {
-        self.host.mouse_wheel(delta_y);
+        self.with_host(|host| host.mouse_wheel(delta_y));
     }
 
     pub fn key(&mut self, code: i32, pressed: bool) {
-        if pressed {
-            self.host.key_down_code(code);
-        } else {
-            self.host.key_up_code(code);
-        }
-    }
-
-    pub fn last_frame_counts(&self) -> (usize, usize) {
-        (self.last_sprite_count, self.last_command_count)
+        self.with_host(|host| {
+            if pressed {
+                host.key_down_code(code);
+            } else {
+                host.key_up_code(code);
+            }
+        });
     }
 
     /// Fill interleaved stereo f32 samples at 48 kHz. The Host owns the
     /// output device and determines how many frames to request.
     #[cfg(feature = "host-audio")]
     pub fn render_audio(&mut self, output: &mut [f32]) {
-        self.host.render_host_audio(output);
+        self.with_host(|host| host.render_host_audio(output));
     }
 
-    /// Advance the VM and submit a new frame directly to the shared backend.
-    /// A missing frame means the VM did not request a redraw this step.
-    pub fn step(&mut self, dt_ms: u32, gpu: &mut dyn GpuBackend) -> Result<bool> {
-        self.step_inner(dt_ms, gpu, true)
+    /// Advance the VM by Host time. No frame means the stage did not redraw.
+    pub fn step(&mut self, dt_ms: u32) -> Result<SiglusStep<'_>> {
+        self.elapsed += Duration::from_millis(u64::from(dt_ms));
+        let exiting = self.with_host(|host| host.step(dt_ms))?;
+        let frame = self.host.take_external_frame().map(|plan| SiglusFrame {
+            size: self.host.logical_size(),
+            plan,
+            images: self.host.external_images(),
+        });
+        Ok(SiglusStep { exiting, frame })
+    }
+}
+
+/// Drawing adapter for Hosts using the shared Art3m1s GPU backend.
+#[derive(Default)]
+pub struct SiglusRenderer {
+    textures: HashMap<TextureKey, CachedTexture>,
+    last_sprite_count: usize,
+    last_command_count: usize,
+}
+
+impl SiglusRenderer {
+    pub fn last_frame_counts(&self) -> (usize, usize) {
+        (self.last_sprite_count, self.last_command_count)
     }
 
-    /// Headless diagnostics: draw into the backend's main target without
-    /// presenting to a native window or shared texture surface.
-    pub fn step_without_present(&mut self, dt_ms: u32, gpu: &mut dyn GpuBackend) -> Result<bool> {
-        self.step_inner(dt_ms, gpu, false)
-    }
-
-    fn step_inner(&mut self, dt_ms: u32, gpu: &mut dyn GpuBackend, present: bool) -> Result<bool> {
-        let exiting = self.host.step(dt_ms)?;
-        if let Some(frame) = self.host.take_external_frame() {
-            self.last_sprite_count = frame.submitted_sprite_count();
-            let size = self.host.logical_size();
-            let images = self.host.external_images();
-            gpu.begin_access();
-            let rendered: Result<()> = (|| {
-                let mut used = HashSet::new();
-                let draw = convert_frame(&frame, images, size, gpu, &mut self.textures, &mut used)?;
-                self.last_command_count = draw.commands.len();
-                gpu.begin_frame(FrameTarget::Main)
-                    .map_err(anyhow::Error::msg)?;
-                gpu.clear([0.0, 0.0, 0.0, 1.0]);
-                let damage = gpu.render(&draw).damage();
-                gpu.end_frame();
-                if present {
-                    gpu.present(damage).map_err(anyhow::Error::msg)?;
+    pub fn draw(
+        &mut self,
+        frame: &SiglusFrame<'_>,
+        gpu: &mut dyn GpuBackend,
+        present: bool,
+    ) -> Result<()> {
+        self.last_sprite_count = frame.plan.submitted_sprite_count();
+        gpu.begin_access();
+        let rendered = (|| {
+            let mut used = HashSet::new();
+            let draw = convert_frame(
+                &frame.plan,
+                frame.images,
+                frame.size,
+                gpu,
+                &mut self.textures,
+                &mut used,
+            )?;
+            self.last_command_count = draw.commands.len();
+            gpu.begin_frame(FrameTarget::Main)
+                .map_err(anyhow::Error::msg)?;
+            gpu.clear([0.0, 0.0, 0.0, 1.0]);
+            let damage = gpu.render(&draw).damage();
+            gpu.end_frame();
+            if present {
+                gpu.present(damage).map_err(anyhow::Error::msg)?;
+            }
+            self.textures.retain(|key, cached| {
+                if used.contains(key) {
+                    true
+                } else {
+                    gpu.destroy_texture(cached.id);
+                    false
                 }
-                self.textures.retain(|key, cached| {
-                    if used.contains(key) {
-                        true
-                    } else {
-                        gpu.destroy_texture(cached.id);
-                        false
-                    }
-                });
-                Ok(())
-            })();
-            gpu.end_access();
-            rendered?;
-        }
-        Ok(exiting)
+            });
+            Ok(())
+        })();
+        gpu.end_access();
+        rendered
     }
 
-    /// The GPU owner must outlive this adapter. Call before replacing it.
+    /// Release resources before replacing or reusing the GPU backend.
     pub fn release_textures(&mut self, gpu: &mut dyn GpuBackend) {
         gpu.begin_access();
         for texture in self.textures.drain().map(|(_, cached)| cached.id) {

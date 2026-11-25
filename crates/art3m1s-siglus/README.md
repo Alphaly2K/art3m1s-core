@@ -1,12 +1,10 @@
 # art3m1s-siglus
 
-Siglus VM 与 `art3m1s-render` 的宿主兼容接口。与 RFVP 一样，这个 crate
-引用相邻目录中的引擎 fork；原项目只暴露无自带渲染器的 `SiglusHost`
-构造、`RenderFrame` 和图像管理器，贴图上传及绘制转换都留在这里。
+Siglus VM 的 Host 接口。`SiglusAdapter::step` 接收经过的毫秒数并返回退出状态与可选的
+平台无关帧。帧借用会话的图像资源，使用完毕后即可推进下一步。
 
-当前 `SiglusAdapter::step` 可直接提交普通 2D sprite 帧，不经 wgpu 离屏回读。
-若遇到 stage wipe、E-Mote、3D、蒙版或尚未等价实现的颜色/混合效果，
-会返回错误，避免悄悄显示错误画面。引擎退出由返回值传递给调用方。
+使用共享 GPU 后端的 Host 可调用 `SiglusRenderer::draw` 绘制普通 2D sprite 帧。
+目前该绘制适配器会报告无法处理的 stage wipe、E-Mote、3D、蒙版和部分颜色或混合效果。
 
 顶层通过 `siglus-engine` feature 接入独立 FFI 与 Flutter PlayerScene，
 默认不启用。该 feature 同时启用应用包内的 FFmpeg 解码，确保 GUI 环境不依赖

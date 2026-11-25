@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow};
 use art3m1s_render::backend::metal::MetalBackend;
 use art3m1s_render::{Extent2D, GpuBackend, NativeSurface, NativeSurfaceKind};
-use art3m1s_siglus::{SiglusAdapter, is_siglus_project};
+use art3m1s_siglus::{SiglusAdapter, SiglusRenderer, is_siglus_project};
 use objc2_app_kit::NSView;
 use objc2_quartz_core::CAMetalLayer;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -26,6 +26,7 @@ struct App {
     layer: Option<objc2::rc::Retained<CAMetalLayer>>,
     gpu: Option<MetalBackend>,
     adapter: Option<SiglusAdapter>,
+    renderer: SiglusRenderer,
     last_step: Instant,
     next_redraw: Instant,
     error: Option<anyhow::Error>,
@@ -39,6 +40,7 @@ impl App {
             layer: None,
             gpu: None,
             adapter: None,
+            renderer: SiglusRenderer::default(),
             last_step: Instant::now(),
             next_redraw: Instant::now(),
             error: None,
@@ -123,7 +125,13 @@ impl ApplicationHandler for App {
                 let dt = self.last_step.elapsed().as_millis().min(100) as u32;
                 self.last_step = Instant::now();
                 let Some(gpu) = self.gpu.as_mut() else { return };
-                match adapter.step(dt.max(1), gpu) {
+                let result = adapter.step(dt.max(1)).and_then(|step| {
+                    if let Some(frame) = step.frame {
+                        self.renderer.draw(&frame, gpu, true)?;
+                    }
+                    Ok(step.exiting)
+                });
+                match result {
                     Ok(true) => event_loop.exit(),
                     Ok(false) => {}
                     Err(error) => self.fail(event_loop, error),
@@ -140,7 +148,7 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 let point = Self::pointer_position(position, scale);
-                adapter.host().mouse_move(point.0, point.1);
+                adapter.with_host(|host| host.mouse_move(point.0, point.1));
             }
             WindowEvent::PointerButton {
                 state,
@@ -150,20 +158,21 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 let point = Self::pointer_position(position, scale);
-                let host = adapter.host();
-                host.mouse_move(point.0, point.1);
-                if let Some(button) = button.mouse_button().and_then(map_mouse_button) {
-                    match (button, state) {
-                        (VmMouseButton::Left, ElementState::Pressed) => {
-                            host.touch(0, point.0, point.1)
+                adapter.with_host(|host| {
+                    host.mouse_move(point.0, point.1);
+                    if let Some(button) = button.mouse_button().and_then(map_mouse_button) {
+                        match (button, state) {
+                            (VmMouseButton::Left, ElementState::Pressed) => {
+                                host.touch(0, point.0, point.1)
+                            }
+                            (VmMouseButton::Left, ElementState::Released) => {
+                                host.touch(2, point.0, point.1)
+                            }
+                            (button, ElementState::Pressed) => host.mouse_down(button),
+                            (button, ElementState::Released) => host.mouse_up(button),
                         }
-                        (VmMouseButton::Left, ElementState::Released) => {
-                            host.touch(2, point.0, point.1)
-                        }
-                        (button, ElementState::Pressed) => host.mouse_down(button),
-                        (button, ElementState::Released) => host.mouse_up(button),
                     }
-                }
+                });
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let dy = match delta {
@@ -171,7 +180,7 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::PixelDelta(p) => p.y.round() as i32,
                     _ => 0,
                 };
-                adapter.host().mouse_wheel(dy);
+                adapter.wheel(dy);
             }
             WindowEvent::KeyboardInput {
                 event:
@@ -185,23 +194,25 @@ impl ApplicationHandler for App {
             } => {
                 if let Some(key) = map_keycode(code) {
                     match state {
-                        ElementState::Pressed => adapter.host().key_down(key),
-                        ElementState::Released => adapter.host().key_up(key),
+                        ElementState::Pressed => adapter.with_host(|host| host.key_down(key)),
+                        ElementState::Released => adapter.with_host(|host| host.key_up(key)),
                     }
                 }
                 if state == ElementState::Pressed {
                     if let Some(text) = text.as_deref() {
-                        if adapter.host().vm_mut().ctx.editbox_accepts_direct_text() {
-                            adapter.host().text_input(text);
-                        }
+                        adapter.with_host(|host| {
+                            if host.editbox_accepts_direct_text() {
+                                host.text_input(text);
+                            }
+                        });
                     }
                 }
             }
-            WindowEvent::Ime(Ime::Commit(text)) => adapter.host().text_input(&text),
+            WindowEvent::Ime(Ime::Commit(text)) => adapter.with_host(|host| host.text_input(&text)),
             WindowEvent::Ime(Ime::Preedit(text, cursor)) => {
-                adapter.host().ime_preedit(&text, cursor)
+                adapter.with_host(|host| host.ime_preedit(&text, cursor))
             }
-            WindowEvent::Ime(Ime::Disabled) => adapter.host().ime_disabled(),
+            WindowEvent::Ime(Ime::Disabled) => adapter.with_host(|host| host.ime_disabled()),
             _ => {}
         }
     }
