@@ -59,6 +59,30 @@ facade 的 3 个查询入口。独立 KRKR 宿主动态库有 5,982 个外部符
 三条路径先使用内存 Host 和合成夹具验证各自的协议及资源边界，再在本机用发行样本显式验收。
 验收覆盖窗口切换、快速重开、迟到的服务结果、像素及音视频终态。
 
+### RFVP 首批实现与 KatzeSystem2 接入
+
+RFVP 的 `host-runtime` 已通过 `RfvpFileSystem::open` 打开项目根的 `.bin` 封包，并用同一
+Host 句柄读取索引及条目。条目流各自记录游标并限制访问范围，封包数据按需读取。Host 句柄须实现
+`Send`，以保留条目流在工作线程上的用法。原有 v1 目录入口经本地文件 Host 接入同一路径。
+RFVP 分支 `codex/host-pack-io` 的 `66dafc4` 通过内存封包回归、16 项 ABI 测试及相对目录启动取帧。
+Core 的 `rfvp-engine` 已用相同 RFVP 提交检查。RFVP 全套测试中另有八项缺少其外部夹具，
+`no_std` 独立构建仍有上游已有的兼容错误。
+
+KatzeSystem2 的 Flutter 后端通过 `EngineRuntime` 接入播放器。它加载示例 Host 动态库，使用
+库内的 `katze_system2_get_api` 创建和推进会话，并由 `katze_game_*` 处理项目挂载、输入采样、
+异步步进及呈现、设备音频。Flutter `f2a9ee6` 将 Katze 和 RFVP 的纹理创建、帧通知和释放收进
+同一 Host 通道，继续由共享纹理协调器移交表面所有权。静态分析及 26 项 Flutter 定向测试通过。
+
+Katze 后续用一个正式的 native adapter 统一暴露会话、输入、Host 时钟和带请求 ID 的窗口及
+文本输入事件。复用上游 `KatzeHost` 的打开、定位读取、关闭和存储回调，按逻辑命名空间提供资源
+和存档。上游串行会话线程和独立音频混音继续保留，由 adapter 负责把完成结果交回 Host 会话。
+`KatzeFrame` 的三角形和纹理只在回调期间有效，发布可重放帧时应转存帧及其资源版本。CPU 像素和
+原生纹理呈现作为 Host 渲染能力，设备音频由 Host 消费现有混音接口。窗口、影片、模型及文件导出
+服务随 native adapter 迁移，旧示例 Host 入口用于迁移期间的兼容路径。
+
+RFVP 下一步用不创建 GPU 后端的 adapter 入口消费渲染记录，先验证跳过一次呈现后可以用下一帧
+重放纹理，并在共享表中明确帧借用、回收和会话线程契约。进入集成 CI 时固定 RFVP 依赖提交。
+
 ## Artemis 的阶段记录
 
 独立 v2 Core 已在 Linux、macOS 和 Windows 通过 C ABI 与独立 Host CI。macOS Flutter
