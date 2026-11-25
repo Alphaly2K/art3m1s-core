@@ -25,8 +25,8 @@ typedef struct Art3m1sSiglusRuntimeV1 {
                     uint8_t* rgba, size_t capacity, size_t* written);
     /* kind 0 pointer move, 1 button, 2 touch, 3 key, 4 wheel.
      * code is a button, touch phase or key. value is a pressed flag or wheel delta. */
-    int32_t (*input)(uint64_t session, int32_t kind, int32_t x, int32_t y,
-                     int32_t code, int32_t value);
+    int32_t (*input)(uint64_t session, int32_t kind, int32_t code,
+                     int32_t x, int32_t y, int32_t value);
     int32_t (*is_exit_requested)(uint64_t session);
     /* Returns the byte length of the UTF-8 error. A null buffer queries size. */
     size_t (*last_error)(uint8_t* output, size_t capacity);
@@ -74,8 +74,28 @@ typedef struct Art3m1sSiglusHostV1 {
     const Art3m1sSiglusOutputV1* output;
 } Art3m1sSiglusHostV1;
 
+typedef struct Art3m1sSiglusHostV2 {
+    uint32_t struct_size, abi_version;
+    uint64_t magic; /* 0x325648534d334152, "RA3MSHV2" */
+    const Art3m1sSiglusHostV1* base;
+    /* Opt in before the first tick. Without this, dialogs are drawn by the VM. */
+    int32_t (*enable_dialogs)(uint64_t session);
+    /* Sets required to the pending UTF-8 JSON's byte count, or zero.
+     * A null or undersized buffer leaves the pending request unchanged.
+     * Fields: id, kind (0 OK, 1 OK/Cancel, 2 Yes/No, 3 Yes/No/Cancel),
+     * title, message, and buttons (ordered {label, value} objects).
+     * Reads do not consume the request. */
+    int32_t (*read_dialog)(uint64_t session, uint8_t* output, size_t capacity,
+                          size_t* required);
+    /* A reply must use the pending session, request ID and a listed button value. */
+    int32_t (*submit_dialog)(uint64_t session, uint64_t id, int64_t value);
+    /* Sends committed UTF-8. Returns 1 if an edit box handled it, 0 if ignored. */
+    int32_t (*send_text)(uint64_t session, const uint8_t* text, size_t length);
+} Art3m1sSiglusHostV2;
+
 /* All returned tables remain valid while the library is loaded. */
 const Art3m1sSiglusHostV1* art3m1s_siglus_get_host_api_v1(size_t* out_size);
+const Art3m1sSiglusHostV2* art3m1s_siglus_get_host_api_v2(size_t* out_size);
 
 #ifdef __cplusplus
 }

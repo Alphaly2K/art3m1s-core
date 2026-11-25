@@ -15,7 +15,10 @@ use std::sync::{Arc, Mutex};
 
 use art3m1s_log::{Level, Record};
 use art3m1s_render::{Extent2D, FrameTarget, GpuBackend, NativeSurface};
-use art3m1s_siglus::siglus_scene_vm::host::SiglusHostConfig;
+use art3m1s_siglus::siglus_scene_vm::{
+    host::SiglusHostConfig,
+    runtime::native_ui::{NativeMessageBoxKind, NativeMessageBoxRequest, NativeUiBackend},
+};
 use art3m1s_siglus::{DirectorySaves, SiglusAdapter, SiglusRenderer, is_siglus_project};
 
 pub const ABI_VERSION: u32 = 1;
@@ -240,6 +243,44 @@ pub struct SiglusApiV2 {
         unsafe extern "C" fn(*const c_char, *const c_char, i32, *mut u64) -> i32,
 }
 
+#[derive(Default)]
+struct DialogSlot(Mutex<Option<PendingDialog>>);
+
+struct PendingDialog {
+    id: u64,
+    choices: Vec<i64>,
+    payload: Vec<u8>,
+}
+
+impl NativeUiBackend for DialogSlot {
+    fn show_system_messagebox(&self, request: NativeMessageBoxRequest) {
+        let kind = match request.kind {
+            NativeMessageBoxKind::Ok => 0,
+            NativeMessageBoxKind::OkCancel => 1,
+            NativeMessageBoxKind::YesNo => 2,
+            NativeMessageBoxKind::YesNoCancel => 3,
+        };
+        let choices: Vec<_> = request.buttons.iter().map(|button| button.value).collect();
+        let buttons: Vec<_> = request
+            .buttons
+            .iter()
+            .map(|button| serde_json::json!({"label": button.label, "value": button.value}))
+            .collect();
+        let payload = serde_json::json!({
+            "id": request.request_id,
+            "kind": kind,
+            "title": request.title,
+            "message": request.message,
+            "buttons": buttons,
+        });
+        *self.0.lock().unwrap() = Some(PendingDialog {
+            id: request.request_id,
+            choices,
+            payload: payload.to_string().into_bytes(),
+        });
+    }
+}
+
 struct Runtime {
     adapter: SiglusAdapter,
     renderer: SiglusRenderer,
@@ -250,6 +291,7 @@ struct Runtime {
     save_fingerprint: Option<u64>,
     surface_attached: bool,
     audio_output: Option<super::siglus_output::Output>,
+    dialog: Option<Arc<DialogSlot>>,
 }
 
 thread_local! {
@@ -374,6 +416,7 @@ unsafe extern "C" fn runtime_create_with_save_dir(
                     save_fingerprint,
                     surface_attached: false,
                     audio_output: None,
+                    dialog: None,
                 },
             );
         });
@@ -785,10 +828,296 @@ pub unsafe extern "C" fn art3m1s_siglus_get_host_api_v1(
     &HOST_API
 }
 
+unsafe extern "C" fn enable_dialogs(handle: u64) -> i32 {
+    guarded(|| {
+        with_runtime(handle, |rt| {
+            if rt.dialog.is_none() {
+                let slot = Arc::new(DialogSlot::default());
+                rt.adapter.with_host(|host| {
+                    host.vm_mut().ctx.set_native_ui_backend(Some(slot.clone()));
+                });
+                rt.dialog = Some(slot);
+            }
+            STATUS_OK
+        })
+    })
+}
+
+unsafe extern "C" fn read_dialog(
+    handle: u64,
+    out: *mut u8,
+    capacity: usize,
+    required: *mut usize,
+) -> i32 {
+    guarded(|| {
+        if required.is_null() {
+            return STATUS_ARGUMENT;
+        }
+        with_runtime(handle, |rt| {
+            let slot = rt.dialog.as_ref().map(|slot| slot.0.lock().unwrap());
+            let dialog = slot.as_deref().and_then(Option::as_ref);
+            let len = dialog.map_or(0, |dialog| dialog.payload.len());
+            unsafe { required.write(len) };
+            if let Some(dialog) = dialog
+                && !out.is_null()
+                && capacity >= len
+            {
+                unsafe { std::ptr::copy_nonoverlapping(dialog.payload.as_ptr(), out, len) };
+            }
+            STATUS_OK
+        })
+    })
+}
+
+unsafe extern "C" fn submit_dialog(handle: u64, id: u64, value: i64) -> i32 {
+    guarded(|| {
+        with_runtime(handle, |rt| {
+            let Some(slot) = &rt.dialog else {
+                return STATUS_ARGUMENT;
+            };
+            {
+                let mut pending = slot.0.lock().unwrap();
+                let Some(dialog) = pending.as_ref() else {
+                    return STATUS_ARGUMENT;
+                };
+                if dialog.id != id || !dialog.choices.contains(&value) {
+                    return STATUS_ARGUMENT;
+                }
+                *pending = None;
+            }
+            rt.adapter.with_host(|host| {
+                // Releases delivered to the Host dialog do not reach the VM.
+                host.vm_mut().ctx.input.clear_all();
+                host.vm_mut().ctx.script_input.clear_all();
+                host.submit_native_messagebox_result(id, value);
+            });
+            STATUS_OK
+        })
+    })
+}
+
+unsafe extern "C" fn send_text(handle: u64, text: *const u8, len: usize) -> i32 {
+    guarded(|| {
+        if text.is_null() || len == 0 || len > isize::MAX as usize {
+            return STATUS_ARGUMENT;
+        }
+        let Ok(text) = std::str::from_utf8(unsafe { std::slice::from_raw_parts(text, len) }) else {
+            return STATUS_ARGUMENT;
+        };
+        with_runtime(handle, |rt| {
+            rt.adapter.with_host(|host| {
+                if host.vm_mut().ctx.globals.system.messagebox_modal.is_none()
+                    && host.editbox_accepts_direct_text()
+                {
+                    host.text_input(text);
+                    return 1;
+                }
+                STATUS_OK
+            })
+        })
+    })
+}
+
+#[repr(C)]
+pub struct SiglusHostApiV2 {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub magic: u64,
+    pub base: &'static SiglusHostApiV1,
+    pub enable_dialogs: unsafe extern "C" fn(u64) -> i32,
+    pub read_dialog: unsafe extern "C" fn(u64, *mut u8, usize, *mut usize) -> i32,
+    pub submit_dialog: unsafe extern "C" fn(u64, u64, i64) -> i32,
+    pub send_text: unsafe extern "C" fn(u64, *const u8, usize) -> i32,
+}
+
+static HOST_API_V2: SiglusHostApiV2 = SiglusHostApiV2 {
+    struct_size: std::mem::size_of::<SiglusHostApiV2>() as u32,
+    abi_version: 2,
+    magic: u64::from_le_bytes(*b"RA3MSHV2"),
+    base: &HOST_API,
+    enable_dialogs,
+    read_dialog,
+    submit_dialog,
+    send_text,
+};
+
+/// # Safety
+/// `out_size` must be null or writable for a `usize`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_siglus_get_host_api_v2(
+    out_size: *mut usize,
+) -> *const SiglusHostApiV2 {
+    if !out_size.is_null() {
+        unsafe { out_size.write(std::mem::size_of::<SiglusHostApiV2>()) };
+    }
+    &HOST_API_V2
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
     use std::ffi::CString;
+
+    #[cfg(feature = "metal-backend")]
+    #[test]
+    fn host_ui_resume_and_text() {
+        use art3m1s_siglus::siglus_scene_vm::runtime::{
+            constants::cd,
+            globals::{EditBoxListState, SystemMessageBoxButton},
+        };
+
+        struct Project(PathBuf);
+        impl Drop for Project {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let project = Project(std::env::temp_dir().join(format!(
+            "art3m1s-siglus-ui-{}-{}",
+            std::process::id(),
+            NEXT_HANDLE.fetch_add(1, Ordering::Relaxed),
+        )));
+        std::fs::create_dir(&project.0).unwrap();
+        std::fs::write(
+            project.0.join("Gameexe.ini"),
+            "#SCREEN_SIZE = 320, 240\n#MENU_SCENE = \"_start\", 0\n",
+        )
+        .unwrap();
+        const PACK_HEADER: i32 = 23 * 4;
+        const SCENE_HEADER: i32 = 33 * 4;
+        let name: Vec<u16> = "_start".encode_utf16().collect();
+        let name_list = PACK_HEADER + 8;
+        let data_index = name_list + name.len() as i32 * 2;
+        let data_list = data_index + 8;
+        let mut pack = [0i32; 23];
+        pack[0] = PACK_HEADER;
+        pack[13..21].copy_from_slice(&[PACK_HEADER, 1, name_list, 1, data_index, 1, data_list, 1]);
+        let mut scene = [0i32; 33];
+        scene[..3].copy_from_slice(&[SCENE_HEADER, SCENE_HEADER + 4, 1]);
+        scene[9..11].copy_from_slice(&[SCENE_HEADER, 1]);
+        let mut bytes: Vec<_> = pack.into_iter().flat_map(i32::to_le_bytes).collect();
+        bytes.extend(
+            [0, name.len() as i32]
+                .into_iter()
+                .flat_map(i32::to_le_bytes),
+        );
+        bytes.extend(name.into_iter().flat_map(u16::to_le_bytes));
+        bytes.extend([0, SCENE_HEADER + 5].into_iter().flat_map(i32::to_le_bytes));
+        bytes.extend(scene.into_iter().flat_map(i32::to_le_bytes));
+        bytes.extend(0i32.to_le_bytes());
+        bytes.push(cd::EOF);
+        std::fs::write(project.0.join("Scene.pck"), bytes).unwrap();
+
+        let path = CString::new(project.0.to_str().unwrap()).unwrap();
+        let ui = unsafe { &*art3m1s_siglus_get_host_api_v2(std::ptr::null_mut()) };
+        let api = &ui.base.runtime.base;
+        let open = || {
+            let mut handle = 0;
+            assert_eq!(
+                unsafe { (api.runtime_create)(path.as_ptr(), 3, &mut handle) },
+                STATUS_OK,
+                "{}",
+                LAST_ERROR.with(|e| e.borrow().clone())
+            );
+            assert_eq!(unsafe { (ui.enable_dialogs)(handle) }, STATUS_OK);
+            handle
+        };
+        let request = |handle| {
+            with_runtime(handle, |rt| {
+                rt.adapter.with_host(|host| {
+                    let ctx = &mut host.vm_mut().ctx;
+                    ctx.request_system_messagebox(
+                        20,
+                        false,
+                        "続けますか？".into(),
+                        ["YES", "NO", "CANCEL"]
+                            .into_iter()
+                            .enumerate()
+                            .map(|(value, label)| SystemMessageBoxButton {
+                                label: label.into(),
+                                value: value as i64,
+                            })
+                            .collect(),
+                    );
+                    let mut list = EditBoxListState::new(1);
+                    list.boxes[0].created = true;
+                    list.boxes[0].visible = true;
+                    ctx.globals.editbox_lists.insert(0, list);
+                    ctx.globals.focused_editbox = Some((0, 0));
+                });
+                STATUS_OK
+            });
+            let mut required = 0;
+            assert_eq!(
+                unsafe { (ui.read_dialog)(handle, std::ptr::null_mut(), 0, &mut required) },
+                STATUS_OK
+            );
+            assert!(required > 0);
+            let mut payload = vec![0; required];
+            assert_eq!(
+                unsafe {
+                    (ui.read_dialog)(handle, payload.as_mut_ptr(), payload.len(), &mut required)
+                },
+                STATUS_OK
+            );
+            let dialog: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            assert_eq!(dialog["message"], "続けますか？");
+            assert_eq!(dialog["buttons"][2]["value"], 2);
+            dialog["id"].as_u64().unwrap()
+        };
+        let handle = open();
+        let id = request(handle);
+        let text = "雪あかり".as_bytes();
+        assert_eq!(
+            unsafe { (ui.send_text)(handle, text.as_ptr(), text.len()) },
+            0
+        );
+        assert_eq!(
+            unsafe { (ui.submit_dialog)(handle, id + 1, 2) },
+            STATUS_ARGUMENT
+        );
+        assert_eq!(
+            unsafe { (ui.submit_dialog)(handle, id, 3) },
+            STATUS_ARGUMENT
+        );
+        assert_eq!(
+            unsafe {
+                (api.runtime_tick)(handle, 16, 0, std::ptr::null_mut(), 0, std::ptr::null_mut())
+            },
+            STATUS_OK
+        );
+        assert_eq!(unsafe { (api.runtime_is_exit_requested)(handle) }, 0);
+        assert_eq!(unsafe { (ui.submit_dialog)(handle, id, 2) }, STATUS_OK);
+        assert_eq!(
+            unsafe { (ui.send_text)(handle, text.as_ptr(), text.len()) },
+            1
+        );
+        with_runtime(handle, |rt| {
+            rt.adapter.with_host(|host| {
+                let ctx = &host.vm_mut().ctx;
+                assert_eq!(ctx.globals.system.messagebox_modal_result, Some(2));
+                assert_eq!(ctx.globals.editbox_lists[&0].boxes[0].text, "雪あかり");
+            });
+            STATUS_OK
+        });
+        for _ in 0..5 {
+            assert_eq!(
+                unsafe {
+                    (api.runtime_tick)(handle, 16, 0, std::ptr::null_mut(), 0, std::ptr::null_mut())
+                },
+                STATUS_OK,
+                "{}",
+                LAST_ERROR.with(|e| e.borrow().clone())
+            );
+        }
+        assert_eq!(unsafe { (api.runtime_is_exit_requested)(handle) }, 1);
+        unsafe { (api.runtime_destroy)(handle) };
+        let replacement = open();
+        assert_eq!(request(replacement), id);
+        assert_eq!(unsafe { (ui.submit_dialog)(handle, id, 2) }, STATUS_HANDLE);
+        assert_eq!(unsafe { (ui.submit_dialog)(replacement, id, 1) }, STATUS_OK);
+        unsafe { (api.runtime_destroy)(replacement) };
+    }
 
     #[test]
     fn optional_real_game_host_abi_smoke() {
@@ -855,6 +1184,11 @@ mod output_contract_tests {
             16 + 10 * std::mem::size_of::<usize>()
         );
         let mut size = 0;
+        let host1 = unsafe { &*art3m1s_siglus_get_host_api_v1(&mut size) };
+        assert_eq!(size, 16 + 4 * std::mem::size_of::<usize>());
+        let host2 = unsafe { &*art3m1s_siglus_get_host_api_v2(&mut size) };
+        assert_eq!(size, 16 + 5 * std::mem::size_of::<usize>());
+        assert!(std::ptr::eq(host1, host2.base));
         let output = unsafe { &*art3m1s_siglus_get_output_api_v1(&mut size) };
         assert_eq!(size, 16 + 5 * std::mem::size_of::<usize>());
         assert_eq!(output.struct_size as usize, size);
