@@ -20,9 +20,10 @@ pub mod textures;
 pub use commands::{AdaptedFrame, AdapterError, DrawListAdapter};
 #[cfg(feature = "host-runtime")]
 pub use host_runtime::{
-    RfvpAudioSampleFormat, RfvpEncodedAudioKind, RfvpHostAudioCommand, RfvpHostAudioCommandKind,
-    RfvpHostEvent, RfvpHostInputEvent, RfvpHostRuntime, RfvpHostRuntimeError, RfvpNls,
-    RfvpPointerButton, RfvpTouchPhase,
+    RfvpAudioSampleFormat, RfvpEncodedAudioKind, RfvpFrameRuntime, RfvpHostAudioCommand,
+    RfvpHostAudioCommandKind, RfvpHostEvent, RfvpHostInputEvent, RfvpHostRuntime,
+    RfvpHostRuntimeError, RfvpNls, RfvpPointerButton, RfvpReplayError, RfvpReplayFrame,
+    RfvpTouchPhase,
 };
 #[cfg(feature = "host-runtime")]
 pub use profiler::RfvpProfiler;

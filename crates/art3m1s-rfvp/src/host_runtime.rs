@@ -1,13 +1,14 @@
 //! Rust-side RFVP host runtime.
 //!
-//! This module owns the native resources/runtime handles and submits frames to
-//! an `art3m1s-render` backend. No draw-command or texture data crosses into
-//! Dart, and no FFI type is exposed by this API.
+//! RFVP sessions share the same native runtime for legacy GPU presentation
+//! and for Hosts that consume replayable frame data.
 
 use std::ffi::c_void;
 use std::fmt;
+use std::marker::PhantomData;
 use std::path::Path;
 use std::ptr;
+use std::rc::Rc;
 
 use art3m1s_render::{
     Extent2D, GpuBackend, NativeSurface, PostProcessPass, PostProcessPipeline, UpscaleConfig,
@@ -54,6 +55,9 @@ use rfvp::rendering::external::{
 };
 
 use crate::{ExternalRenderer, ExternalRendererError, RfvpRenderResult};
+
+mod replay;
+pub use replay::{RfvpFrameRuntime, RfvpReplayError, RfvpReplayFrame};
 
 // Bit 11 is the fork's RFVP_CAPABILITY_FONT_OVERRIDE; host-only bits start at 12.
 const RFVP_HOST_CAPABILITY_SPATIAL_UPSCALING: u64 = 1 << 12;
@@ -300,45 +304,27 @@ impl From<ExternalRendererError> for RfvpHostRuntimeError {
     }
 }
 
-/// Owns one RFVP resources/runtime pair and renders its frames in Rust.
-///
-/// The type is intentionally not `Send`: RFVP's v1 ABI state is thread-local
-/// and requires resources, runtime, and frame operations to stay on the
-/// creating thread.
-pub struct RfvpHostRuntime {
+struct NativeSession {
     resources: u64,
-    runtime: u64,
-    width: u32,
-    height: u32,
-    last_command_count: usize,
-    last_texture_count: usize,
-    exit_requested: bool,
-    renderer: ExternalRenderer,
-    profiler: crate::profiler::RfvpProfiler,
+    handle: u64,
+    _owner_thread: PhantomData<Rc<()>>,
 }
 
-impl RfvpHostRuntime {
-    /// Creates a runtime and mounts a directory-backed project.
-    pub fn new_directory(
-        game_root: impl AsRef<Path>,
+impl NativeSession {
+    fn open(
+        game_root: &Path,
         save_root: Option<&Path>,
         width: u32,
         height: u32,
         nls: RfvpNls,
-        backend: Box<dyn GpuBackend>,
-        clear_color: [f32; 4],
-    ) -> Result<Self, RfvpHostRuntimeError> {
+    ) -> Result<(Self, (u32, u32)), RfvpHostRuntimeError> {
         let game_root = game_root
-            .as_ref()
             .to_str()
             .ok_or(RfvpHostRuntimeError::InvalidPath)?;
         let save_root = save_root
             .map(|path| path.to_str().ok_or(RfvpHostRuntimeError::InvalidPath))
             .transpose()?;
         let save_root_bytes = save_root.map(str::as_bytes);
-        let requested_width = width;
-        let requested_height = height;
-        let mut backend = backend;
 
         let resources_config = RfvpResourcesConfigV1 {
             struct_size: std::mem::size_of::<RfvpResourcesConfigV1>() as u32,
@@ -402,21 +388,115 @@ impl RfvpHostRuntime {
             }
         };
 
-        if (width != requested_width || height != requested_height)
-            && let Err(error) = backend.resize(Extent2D::new(width, height))
+        Ok((
+            Self {
+                resources,
+                handle: runtime,
+                _owner_thread: PhantomData,
+            },
+            (width, height),
+        ))
+    }
+
+    fn step(&self, delta_ms: u32) -> Result<(), RfvpHostRuntimeError> {
+        let status = unsafe { rfvp_runtime_step(self.handle, delta_ms.max(1)) };
+        if status != RFVP_STATUS_OK {
+            return Err(RfvpHostRuntimeError::Step(status));
+        }
+        Ok(())
+    }
+
+    fn is_exit_requested(&self) -> bool {
+        unsafe { rfvp_runtime_is_exit_requested(self.handle) != 0 }
+    }
+
+    fn push_input(&self, events: &[RfvpHostInputEvent]) -> Result<(), RfvpHostRuntimeError> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let events: Vec<RfvpInputEventV1> = events.iter().copied().map(input_event).collect();
+        let status = unsafe { rfvp_runtime_push_input(self.handle, events.as_ptr(), events.len()) };
+        if status != RFVP_STATUS_OK {
+            return Err(RfvpHostRuntimeError::InputRejected(status));
+        }
+        Ok(())
+    }
+
+    fn take_frame(&self) -> Result<Option<NativeFrame>, RfvpHostRuntimeError> {
+        let mut handle = 0u64;
+        match unsafe { rfvp_runtime_acquire_frame(self.handle, &mut handle) } {
+            RFVP_STATUS_NO_FRAME => Ok(None),
+            RFVP_STATUS_OK => read_frame(&FrameLease(handle)).map(Some),
+            status => Err(RfvpHostRuntimeError::FrameAcquire(status)),
+        }
+    }
+}
+
+impl Drop for NativeSession {
+    fn drop(&mut self) {
+        unsafe {
+            rfvp_runtime_destroy(self.handle);
+            rfvp_resources_destroy(self.resources);
+        }
+    }
+}
+
+struct FrameLease(u64);
+
+impl Drop for FrameLease {
+    fn drop(&mut self) {
+        unsafe { rfvp_frame_release(self.0) }
+    }
+}
+
+struct NativeFrame {
+    width: u32,
+    height: u32,
+    frame: RenderFrame,
+    texture_commands: Vec<RecordedTextureCommand>,
+}
+
+/// Owns one RFVP resources/runtime pair and renders its frames in Rust.
+///
+/// The type is intentionally not `Send`: RFVP's v1 ABI state is thread-local
+/// and requires resources, runtime, and frame operations to stay on the
+/// creating thread.
+pub struct RfvpHostRuntime {
+    runtime: NativeSession,
+    width: u32,
+    height: u32,
+    last_command_count: usize,
+    last_texture_count: usize,
+    exit_requested: bool,
+    renderer: ExternalRenderer,
+    profiler: crate::profiler::RfvpProfiler,
+}
+
+impl RfvpHostRuntime {
+    /// Creates a runtime and mounts a directory-backed project.
+    pub fn new_directory(
+        game_root: impl AsRef<Path>,
+        save_root: Option<&Path>,
+        width: u32,
+        height: u32,
+        nls: RfvpNls,
+        backend: Box<dyn GpuBackend>,
+        clear_color: [f32; 4],
+    ) -> Result<Self, RfvpHostRuntimeError> {
+        let (runtime, (actual_width, actual_height)) =
+            NativeSession::open(game_root.as_ref(), save_root, width, height, nls)?;
+        let mut backend = backend;
+        if (actual_width != width || actual_height != height)
+            && let Err(error) = backend.resize(Extent2D::new(actual_width, actual_height))
         {
-            unsafe { rfvp_runtime_destroy(runtime) };
-            unsafe { rfvp_resources_destroy(resources) };
             return Err(RfvpHostRuntimeError::Render(
                 ExternalRendererError::Backend(error),
             ));
         }
-
         Ok(Self {
-            resources,
             runtime,
-            width,
-            height,
+            width: actual_width,
+            height: actual_height,
             last_command_count: 0,
             last_texture_count: 0,
             exit_requested: false,
@@ -442,7 +522,7 @@ impl RfvpHostRuntime {
     }
 
     pub fn capabilities(&mut self) -> u64 {
-        let rfvp = unsafe { rfvp_runtime_capabilities(self.runtime) };
+        let rfvp = unsafe { rfvp_runtime_capabilities(self.runtime.handle) };
         let spatial = self
             .renderer
             .backend()
@@ -460,19 +540,17 @@ impl RfvpHostRuntime {
         if self.exit_requested {
             return true;
         }
-        self.exit_requested = unsafe { rfvp_runtime_is_exit_requested(self.runtime) != 0 };
+        self.exit_requested = self.runtime.is_exit_requested();
         self.exit_requested
     }
 
     pub fn step(&mut self, delta_ms: u32) -> Result<(), RfvpHostRuntimeError> {
         let started = self.profiler.enabled().then(std::time::Instant::now);
-        let status = unsafe { rfvp_runtime_step(self.runtime, delta_ms.max(1)) };
+        let result = self.runtime.step(delta_ms);
         if let Some(started) = started {
             self.profiler.record_step(started.elapsed());
         }
-        if status != RFVP_STATUS_OK {
-            return Err(RfvpHostRuntimeError::Step(status));
-        }
+        result?;
         self.is_exit_requested();
         Ok(())
     }
@@ -492,22 +570,13 @@ impl RfvpHostRuntime {
         &mut self,
         events: &[RfvpHostInputEvent],
     ) -> Result<(), RfvpHostRuntimeError> {
-        if events.is_empty() {
-            return Ok(());
-        }
-        let events: Vec<RfvpInputEventV1> = events.iter().copied().map(input_event).collect();
-        let status =
-            unsafe { rfvp_runtime_push_input(self.runtime, events.as_ptr(), events.len()) };
-        if status != RFVP_STATUS_OK {
-            return Err(RfvpHostRuntimeError::InputRejected(status));
-        }
-        Ok(())
+        self.runtime.push_input(events)
     }
 
     /// Enables or disables the pull-based event queue (text translation
     /// requests). Disabling clears queued events.
     pub fn set_events_enabled(&mut self, enabled: bool) -> Result<(), RfvpHostRuntimeError> {
-        let status = unsafe { rfvp_runtime_events_enable(self.runtime, i32::from(enabled)) };
+        let status = unsafe { rfvp_runtime_events_enable(self.runtime.handle, i32::from(enabled)) };
         if status != RFVP_STATUS_OK {
             return Err(RfvpHostRuntimeError::EventRead(status));
         }
@@ -518,14 +587,14 @@ impl RfvpHostRuntime {
     pub fn poll_events(&mut self) -> Result<Vec<RfvpHostEvent>, RfvpHostRuntimeError> {
         let mut events = Vec::new();
         loop {
-            let size = unsafe { rfvp_runtime_next_event_size(self.runtime) };
+            let size = unsafe { rfvp_runtime_next_event_size(self.runtime.handle) };
             if size == 0 {
                 break;
             }
             let mut buffer = vec![0u8; size];
             let mut count = 0u32;
             let written = unsafe {
-                rfvp_runtime_poll_events(self.runtime, buffer.as_mut_ptr(), size, &mut count)
+                rfvp_runtime_poll_events(self.runtime.handle, buffer.as_mut_ptr(), size, &mut count)
             };
             if written == 0 || count == 0 {
                 // The record did not fit (or the handle raced); drop it so a
@@ -542,7 +611,7 @@ impl RfvpHostRuntime {
     pub fn set_text_replacements(&mut self, json: &str) -> Result<(), RfvpHostRuntimeError> {
         let status = unsafe {
             rfvp_runtime_set_text_replacements(
-                self.runtime,
+                self.runtime.handle,
                 json.as_ptr(),
                 json.len(),
                 RFVP_SERIALIZATION_JSON,
@@ -558,8 +627,9 @@ impl RfvpHostRuntime {
         &mut self,
         enabled: bool,
     ) -> Result<(), RfvpHostRuntimeError> {
-        let status =
-            unsafe { rfvp_runtime_set_text_translation_enabled(self.runtime, i32::from(enabled)) };
+        let status = unsafe {
+            rfvp_runtime_set_text_translation_enabled(self.runtime.handle, i32::from(enabled))
+        };
         if status != RFVP_STATUS_OK {
             return Err(RfvpHostRuntimeError::TranslationRejected(status));
         }
@@ -570,7 +640,8 @@ impl RfvpHostRuntime {
     }
 
     pub fn set_text_hidpi(&mut self, enabled: bool) -> Result<(), RfvpHostRuntimeError> {
-        let status = unsafe { rfvp_runtime_set_text_hidpi(self.runtime, i32::from(enabled)) };
+        let status =
+            unsafe { rfvp_runtime_set_text_hidpi(self.runtime.handle, i32::from(enabled)) };
         if status != RFVP_STATUS_OK {
             return Err(RfvpHostRuntimeError::TranslationRejected(status));
         }
@@ -583,8 +654,9 @@ impl RfvpHostRuntime {
     /// fallback chain. Invalid font data is rejected and leaves any previous
     /// override untouched.
     pub fn set_font_override(&mut self, data: &[u8]) -> Result<(), RfvpHostRuntimeError> {
-        let status =
-            unsafe { rfvp_runtime_set_font_override(self.runtime, data.as_ptr(), data.len()) };
+        let status = unsafe {
+            rfvp_runtime_set_font_override(self.runtime.handle, data.as_ptr(), data.len())
+        };
         if status != RFVP_STATUS_OK {
             return Err(RfvpHostRuntimeError::FontRejected(status));
         }
@@ -592,7 +664,7 @@ impl RfvpHostRuntime {
     }
 
     pub fn clear_font_override(&mut self) -> Result<(), RfvpHostRuntimeError> {
-        let status = unsafe { rfvp_runtime_clear_font_override(self.runtime) };
+        let status = unsafe { rfvp_runtime_clear_font_override(self.runtime.handle) };
         if status != RFVP_STATUS_OK {
             return Err(RfvpHostRuntimeError::FontRejected(status));
         }
@@ -608,7 +680,8 @@ impl RfvpHostRuntime {
     /// motion/render bits in that order). `None` returns to `RFVP_TRACE*`
     /// env-var behavior. The mask is process-wide.
     pub fn set_trace_mask(&mut self, mask: Option<u32>) -> Result<(), RfvpHostRuntimeError> {
-        let status = unsafe { rfvp_runtime_set_trace_mask(self.runtime, mask.unwrap_or(u32::MAX)) };
+        let status =
+            unsafe { rfvp_runtime_set_trace_mask(self.runtime.handle, mask.unwrap_or(u32::MAX)) };
         if status != RFVP_STATUS_OK {
             return Err(RfvpHostRuntimeError::TraceRejected(status));
         }
@@ -625,8 +698,9 @@ impl RfvpHostRuntime {
         let (pointer, length) = translated
             .map(|text| (text.as_ptr(), text.len()))
             .unwrap_or((ptr::null(), 0));
-        let status =
-            unsafe { rfvp_runtime_submit_text_translation(self.runtime, serial, pointer, length) };
+        let status = unsafe {
+            rfvp_runtime_submit_text_translation(self.runtime.handle, serial, pointer, length)
+        };
         if status != RFVP_STATUS_OK {
             return Err(RfvpHostRuntimeError::TranslationRejected(status));
         }
@@ -653,7 +727,7 @@ impl RfvpHostRuntime {
             payload_size: 0,
             reserved: [0; 2],
         };
-        let status = unsafe { rfvp_runtime_poll_audio_command(self.runtime, &mut command) };
+        let status = unsafe { rfvp_runtime_poll_audio_command(self.runtime.handle, &mut command) };
         if status == RFVP_STATUS_NO_COMMAND {
             return Ok(None);
         }
@@ -726,18 +800,18 @@ impl RfvpHostRuntime {
     pub fn render_pending_frame(
         &mut self,
     ) -> Result<Option<RfvpRenderResult>, RfvpHostRuntimeError> {
-        let mut native_frame = 0u64;
-        let status = unsafe { rfvp_runtime_acquire_frame(self.runtime, &mut native_frame) };
-        if status == RFVP_STATUS_NO_FRAME {
+        let Some(native) = self.runtime.take_frame()? else {
             return Ok(None);
-        }
-        if status != RFVP_STATUS_OK {
-            return Err(RfvpHostRuntimeError::FrameAcquire(status));
-        }
-
-        let frame = self.read_frame(native_frame);
-        unsafe { rfvp_frame_release(native_frame) };
-        let frame = frame?;
+        };
+        self.width = native.width;
+        self.height = native.height;
+        self.last_command_count = native.frame.commands.len();
+        self.last_texture_count = native.texture_commands.len();
+        let frame = ExternalFrame {
+            frame: native.frame,
+            textures: Vec::new(),
+            texture_commands: native.texture_commands,
+        };
         let started = self.profiler.enabled().then(std::time::Instant::now);
         // Unchanged frames are skipped by the renderer and reported as no
         // presentation; callers already treat `None` as "nothing new".
@@ -782,101 +856,83 @@ impl RfvpHostRuntime {
         }
         pixels
     }
-
-    fn read_frame(&mut self, native_frame: u64) -> Result<ExternalFrame, RfvpHostRuntimeError> {
-        let mut width = 0u32;
-        let mut height = 0u32;
-        let status = unsafe { rfvp_frame_get_size(native_frame, &mut width, &mut height) };
-        if status != RFVP_STATUS_OK {
-            return Err(RfvpHostRuntimeError::FrameRead(status));
-        }
-
-        let mut commands_ptr = ptr::null::<RfvpDrawCommandV1>();
-        let mut command_count = 0usize;
-        let status =
-            unsafe { rfvp_frame_get_commands(native_frame, &mut commands_ptr, &mut command_count) };
-        if status != RFVP_STATUS_OK {
-            return Err(RfvpHostRuntimeError::FrameRead(status));
-        }
-
-        let mut textures_ptr = ptr::null::<RfvpTextureCommandV1>();
-        let mut texture_count = 0usize;
-        let status =
-            unsafe { rfvp_frame_get_textures(native_frame, &mut textures_ptr, &mut texture_count) };
-        if status != RFVP_STATUS_OK {
-            return Err(RfvpHostRuntimeError::FrameRead(status));
-        }
-
-        let mut hit_proxies_ptr = ptr::null::<RfvpHitProxyV1>();
-        let mut hit_proxy_count = 0usize;
-        let status = unsafe {
-            rfvp_frame_get_hit_proxies(native_frame, &mut hit_proxies_ptr, &mut hit_proxy_count)
-        };
-        if status != RFVP_STATUS_OK {
-            return Err(RfvpHostRuntimeError::FrameRead(status));
-        }
-
-        let commands = if command_count == 0 {
-            Vec::new()
-        } else {
-            let commands = unsafe { std::slice::from_raw_parts(commands_ptr, command_count) };
-            commands
-                .iter()
-                .map(convert_command)
-                .collect::<Result<Vec<_>, _>>()?
-        };
-
-        let texture_commands = if texture_count == 0 {
-            Vec::new()
-        } else {
-            let textures = unsafe { std::slice::from_raw_parts(textures_ptr, texture_count) };
-            textures
-                .iter()
-                .map(convert_texture)
-                .collect::<Result<Vec<_>, _>>()?
-        };
-
-        let hit_proxies = if hit_proxy_count == 0 {
-            Vec::new()
-        } else {
-            let proxies = unsafe { std::slice::from_raw_parts(hit_proxies_ptr, hit_proxy_count) };
-            proxies
-                .iter()
-                .map(convert_hit_proxy)
-                .collect::<Result<Vec<_>, _>>()?
-        };
-
-        self.last_command_count = commands.len();
-        self.last_texture_count = texture_commands.len();
-        self.width = width;
-        self.height = height;
-        let textures = texture_commands
-            .iter()
-            .filter_map(|command| match command {
-                RecordedTextureCommand::Create(texture) => Some(texture.clone()),
-                RecordedTextureCommand::Update(_) | RecordedTextureCommand::Destroy(_) => None,
-            })
-            .collect();
-        Ok(ExternalFrame {
-            frame: RenderFrame {
-                commands,
-                hit_proxies: HitProxyTable {
-                    proxies: hit_proxies,
-                },
-            },
-            textures,
-            texture_commands,
-        })
-    }
 }
 
-impl Drop for RfvpHostRuntime {
-    fn drop(&mut self) {
-        unsafe {
-            rfvp_runtime_destroy(self.runtime);
-            rfvp_resources_destroy(self.resources);
-        }
+fn read_frame(lease: &FrameLease) -> Result<NativeFrame, RfvpHostRuntimeError> {
+    let native_frame = lease.0;
+    let mut width = 0u32;
+    let mut height = 0u32;
+    let status = unsafe { rfvp_frame_get_size(native_frame, &mut width, &mut height) };
+    if status != RFVP_STATUS_OK {
+        return Err(RfvpHostRuntimeError::FrameRead(status));
     }
+
+    let mut commands_ptr = ptr::null::<RfvpDrawCommandV1>();
+    let mut command_count = 0usize;
+    let status =
+        unsafe { rfvp_frame_get_commands(native_frame, &mut commands_ptr, &mut command_count) };
+    if status != RFVP_STATUS_OK {
+        return Err(RfvpHostRuntimeError::FrameRead(status));
+    }
+
+    let mut textures_ptr = ptr::null::<RfvpTextureCommandV1>();
+    let mut texture_count = 0usize;
+    let status =
+        unsafe { rfvp_frame_get_textures(native_frame, &mut textures_ptr, &mut texture_count) };
+    if status != RFVP_STATUS_OK {
+        return Err(RfvpHostRuntimeError::FrameRead(status));
+    }
+
+    let mut hit_proxies_ptr = ptr::null::<RfvpHitProxyV1>();
+    let mut hit_proxy_count = 0usize;
+    let status = unsafe {
+        rfvp_frame_get_hit_proxies(native_frame, &mut hit_proxies_ptr, &mut hit_proxy_count)
+    };
+    if status != RFVP_STATUS_OK {
+        return Err(RfvpHostRuntimeError::FrameRead(status));
+    }
+
+    let commands = if command_count == 0 {
+        Vec::new()
+    } else {
+        let commands = unsafe { std::slice::from_raw_parts(commands_ptr, command_count) };
+        commands
+            .iter()
+            .map(convert_command)
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    let texture_commands = if texture_count == 0 {
+        Vec::new()
+    } else {
+        let textures = unsafe { std::slice::from_raw_parts(textures_ptr, texture_count) };
+        textures
+            .iter()
+            .map(convert_texture)
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    let hit_proxies = if hit_proxy_count == 0 {
+        Vec::new()
+    } else {
+        let proxies = unsafe { std::slice::from_raw_parts(hit_proxies_ptr, hit_proxy_count) };
+        proxies
+            .iter()
+            .map(convert_hit_proxy)
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    Ok(NativeFrame {
+        width,
+        height,
+        frame: RenderFrame {
+            commands,
+            hit_proxies: HitProxyTable {
+                proxies: hit_proxies,
+            },
+        },
+        texture_commands,
+    })
 }
 
 /// Event drained from the runtime's pull-based event queue.
