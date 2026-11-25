@@ -12,6 +12,7 @@ use art3m1s_render::{
     BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, DrawMesh, FrameTarget, GpuBackend,
     TextureData, TextureDesc, TextureId, TextureInfo,
 };
+use siglus_scene_vm::assets::RgbaImage;
 pub use siglus_scene_vm::host::{SiglusBootSource, SiglusGameexe, SiglusSaveStore};
 use siglus_scene_vm::host::{SiglusHost, SiglusHostConfig};
 
@@ -31,13 +32,6 @@ use siglus_scene_vm::runtime::input::VmMouseButton;
 pub fn is_siglus_project(path: &Path) -> bool {
     siglus_scene_vm::resource::find_scene_pck_path(path).is_ok()
         && siglus_scene_vm::resource::find_initial_gameexe_path(path).is_ok()
-}
-
-#[derive(Clone, Copy)]
-struct CachedTexture {
-    id: TextureId,
-    version: u64,
-    size: TextureInfo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -205,10 +199,140 @@ impl SiglusAdapter {
     }
 }
 
+/// An owned frame with logical texture IDs and no device resources.
+/// Retaining it also retains the exact image revisions used by its commands.
+pub struct SiglusFrameSnapshot {
+    size: (u32, u32),
+    draw: DrawList,
+    textures: Vec<SiglusFrameTexture>,
+    sprite_count: usize,
+}
+
+impl SiglusFrameSnapshot {
+    pub fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    pub fn draw_list(&self) -> &DrawList {
+        &self.draw
+    }
+
+    pub fn textures(&self) -> &[SiglusFrameTexture] {
+        &self.textures
+    }
+}
+
+#[derive(Clone)]
+pub struct SiglusFrameTexture {
+    pub id: TextureId,
+    pub image: Arc<RgbaImage>,
+}
+
+/// Converts the current VM frame into a replayable Host frame.
+#[derive(Default)]
+pub struct SiglusFrameCompiler {
+    textures: HashMap<TextureKey, (u64, SiglusFrameTexture)>,
+    last_texture_id: u64,
+}
+
+impl SiglusFrameCompiler {
+    pub fn compile(&mut self, frame: &SiglusFrame<'_>) -> Result<SiglusFrameSnapshot> {
+        if frame.plan.wipe.is_some() {
+            bail!("Siglus stage wipe requires a two-target compositor");
+        }
+        let mut snapshot = SiglusFrameSnapshot {
+            size: frame.size,
+            draw: DrawList::new(),
+            textures: Vec::new(),
+            sprite_count: frame.plan.submitted_sprite_count(),
+        };
+        let mut used = HashSet::new();
+        for entry in &frame.plan.sprites {
+            let sprite = &entry.sprite;
+            if !sprite.visible || sprite.alpha == 0 {
+                continue;
+            }
+            validate_sprite(sprite)?;
+            let effects = ColorEffects::from_sprite(sprite);
+            let (key, version, image) = match &sprite.image_id {
+                Some(handle) => {
+                    let (image, version) = frame
+                        .images
+                        .get_entry(handle)
+                        .context("Siglus frame references an unavailable image")?;
+                    (
+                        TextureKey::Image(handle.key(), effects),
+                        version,
+                        Some(image),
+                    )
+                }
+                None => (TextureKey::Solid(effects), 0, None),
+            };
+            let size = image.as_ref().map_or(
+                TextureInfo {
+                    width: 1,
+                    height: 1,
+                },
+                |image| TextureInfo {
+                    width: image.width,
+                    height: image.height,
+                },
+            );
+            let Some(mut command) = map_sprite(entry, TextureId(0), size, frame.size)? else {
+                continue;
+            };
+            if self
+                .textures
+                .get(&key)
+                .is_none_or(|(revision, _)| *revision != version)
+            {
+                let image = match image {
+                    Some(image) if effects.is_identity() => image,
+                    image => Arc::new(RgbaImage {
+                        width: size.width,
+                        height: size.height,
+                        center_x: 0,
+                        center_y: 0,
+                        rgba: apply_color_effects(
+                            image
+                                .as_ref()
+                                .map_or(&[255, 255, 255, 255], |i| i.rgba.as_slice()),
+                            effects,
+                        ),
+                    }),
+                };
+                self.last_texture_id = self
+                    .last_texture_id
+                    .checked_add(1)
+                    .context("Siglus texture IDs exhausted")?;
+                self.textures.insert(
+                    key,
+                    (
+                        version,
+                        SiglusFrameTexture {
+                            id: TextureId(self.last_texture_id),
+                            image,
+                        },
+                    ),
+                );
+            }
+            let (_, texture) = &self.textures[&key];
+            if used.insert(key) {
+                snapshot.textures.push(texture.clone());
+            }
+            command.texture = texture.id;
+            snapshot.draw.push(command);
+        }
+        self.textures.retain(|key, _| used.contains(key));
+        Ok(snapshot)
+    }
+}
+
 /// Drawing adapter for Hosts using the shared Art3m1s GPU backend.
 #[derive(Default)]
 pub struct SiglusRenderer {
-    textures: HashMap<TextureKey, CachedTexture>,
+    compiler: SiglusFrameCompiler,
+    textures: HashMap<TextureId, (Arc<RgbaImage>, TextureId)>,
     last_sprite_count: usize,
     last_command_count: usize,
 }
@@ -224,18 +348,45 @@ impl SiglusRenderer {
         gpu: &mut dyn GpuBackend,
         present: bool,
     ) -> Result<()> {
-        self.last_sprite_count = frame.plan.submitted_sprite_count();
+        let snapshot = self.compiler.compile(frame)?;
+        self.draw_snapshot(&snapshot, gpu, present)
+    }
+
+    pub fn draw_snapshot(
+        &mut self,
+        frame: &SiglusFrameSnapshot,
+        gpu: &mut dyn GpuBackend,
+        present: bool,
+    ) -> Result<()> {
         gpu.begin_access();
         let rendered = (|| {
             let mut used = HashSet::new();
-            let draw = convert_frame(
-                &frame.plan,
-                frame.images,
-                frame.size,
-                gpu,
-                &mut self.textures,
-                &mut used,
-            )?;
+            for texture in frame.textures() {
+                used.insert(texture.id);
+                if self
+                    .textures
+                    .get(&texture.id)
+                    .is_some_and(|(image, _)| Arc::ptr_eq(image, &texture.image))
+                {
+                    continue;
+                }
+                let image = &texture.image;
+                let id = gpu
+                    .create_texture(
+                        "siglus frame texture",
+                        TextureDesc::sampled_rgba8(image.width, image.height),
+                        TextureData::Rgba8(&image.rgba),
+                    )
+                    .map_err(anyhow::Error::msg)?;
+                if let Some((_, old)) = self.textures.insert(texture.id, (image.clone(), id)) {
+                    gpu.destroy_texture(old);
+                }
+            }
+            let mut draw = frame.draw_list().clone();
+            for command in &mut draw.commands {
+                command.texture = self.textures[&command.texture].1;
+            }
+            self.last_sprite_count = frame.sprite_count;
             self.last_command_count = draw.commands.len();
             gpu.begin_frame(FrameTarget::Main)
                 .map_err(anyhow::Error::msg)?;
@@ -245,11 +396,11 @@ impl SiglusRenderer {
             if present {
                 gpu.present(damage).map_err(anyhow::Error::msg)?;
             }
-            self.textures.retain(|key, cached| {
+            self.textures.retain(|key, (_, texture)| {
                 if used.contains(key) {
                     true
                 } else {
-                    gpu.destroy_texture(cached.id);
+                    gpu.destroy_texture(*texture);
                     false
                 }
             });
@@ -262,7 +413,7 @@ impl SiglusRenderer {
     /// Release resources before replacing or reusing the GPU backend.
     pub fn release_textures(&mut self, gpu: &mut dyn GpuBackend) {
         gpu.begin_access();
-        for texture in self.textures.drain().map(|(_, cached)| cached.id) {
+        for (_, (_, texture)) in self.textures.drain() {
             gpu.destroy_texture(texture);
         }
         gpu.end_access();
@@ -312,88 +463,6 @@ fn decode_uci_h264(stream: &[u8], pixel_format: &str, expected_len: usize) -> Re
         );
     }
     Ok(pixels)
-}
-
-fn convert_frame(
-    frame: &RenderFrame,
-    images: &ImageManager,
-    size: (u32, u32),
-    gpu: &mut dyn GpuBackend,
-    cache: &mut HashMap<TextureKey, CachedTexture>,
-    used: &mut HashSet<TextureKey>,
-) -> Result<DrawList> {
-    if frame.wipe.is_some() {
-        bail!("Siglus stage wipe requires a two-target compositor");
-    }
-    let mut draw = DrawList::new();
-    for entry in &frame.sprites {
-        let sprite = &entry.sprite;
-        if !sprite.visible || sprite.alpha == 0 {
-            continue;
-        }
-        validate_sprite(sprite)?;
-        let effects = ColorEffects::from_sprite(sprite);
-        let image_entry = sprite
-            .image_id
-            .as_ref()
-            .map(|handle| {
-                images
-                    .get_entry(handle)
-                    .context("Siglus frame references an unavailable image")
-            })
-            .transpose()?;
-        let (key, version, texture_size, rgba): (_, _, _, &[u8]) = match &image_entry {
-            Some((image, version)) => (
-                TextureKey::Image(sprite.image_id.as_ref().unwrap().key(), effects),
-                *version,
-                TextureInfo {
-                    width: image.width,
-                    height: image.height,
-                },
-                &image.rgba,
-            ),
-            None => (
-                TextureKey::Solid(effects),
-                0,
-                TextureInfo {
-                    width: 1,
-                    height: 1,
-                },
-                &[255, 255, 255, 255],
-            ),
-        };
-        used.insert(key);
-        if cache
-            .get(&key)
-            .is_none_or(|cached| cached.version != version)
-        {
-            let adjusted = (!effects.is_identity()).then(|| apply_color_effects(rgba, effects));
-            let pixels = adjusted.as_deref().unwrap_or(rgba);
-            let id = gpu
-                .create_texture(
-                    &format!("siglus-{:?}-{version}", key),
-                    TextureDesc::sampled_rgba8(texture_size.width, texture_size.height),
-                    TextureData::Rgba8(pixels),
-                )
-                .map_err(anyhow::Error::msg)?;
-            if let Some(previous) = cache.insert(
-                key,
-                CachedTexture {
-                    id,
-                    version,
-                    size: texture_size,
-                },
-            ) {
-                gpu.destroy_texture(previous.id);
-            }
-        }
-        let cached = cache[&key];
-        let (texture, texture_size) = (cached.id, cached.size);
-        if let Some(command) = map_sprite(entry, texture, texture_size, size)? {
-            draw.push(command);
-        }
-    }
-    Ok(draw)
 }
 
 fn apply_color_effects(rgba: &[u8], effects: ColorEffects) -> Vec<u8> {
@@ -628,6 +697,60 @@ mod tests {
         let vertices = &command.mesh.unwrap().vertices;
         assert_eq!(vertices[0], [12.0, 34.0, 0.0, 0.0]);
         assert_eq!(vertices[2], [32.0, 44.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn retained_snapshot_keeps_texture_revision() {
+        let mut images = ImageManager::new(PathBuf::from("siglus-frame-test"));
+        let image_id = images.solid_rgba((10, 20, 30, 255));
+        let render = || {
+            RenderFrame::ordinary(vec![RenderSprite::new(
+                None,
+                None,
+                Sprite {
+                    visible: true,
+                    image_id: Some(image_id.clone()),
+                    ..Sprite::default()
+                },
+            )])
+        };
+        let mut compiler = SiglusFrameCompiler::default();
+        let frame = |compiler: &mut SiglusFrameCompiler, images: &ImageManager| {
+            compiler
+                .compile(&SiglusFrame {
+                    size: (320, 240),
+                    plan: render(),
+                    images,
+                })
+                .unwrap()
+        };
+        let first = frame(&mut compiler, &images);
+        let same = frame(&mut compiler, &images);
+        assert_eq!(first.textures()[0].id, same.textures()[0].id);
+        assert!(Arc::ptr_eq(
+            &first.textures()[0].image,
+            &same.textures()[0].image
+        ));
+        images
+            .replace_image(
+                &image_id,
+                RgbaImage {
+                    width: 1,
+                    height: 1,
+                    center_x: 0,
+                    center_y: 0,
+                    rgba: vec![40, 50, 60, 255],
+                },
+            )
+            .unwrap();
+        let second = frame(&mut compiler, &images);
+        assert_ne!(first.textures()[0].id, second.textures()[0].id);
+        assert_eq!(first.textures()[0].image.rgba, [10, 20, 30, 255]);
+        assert_eq!(second.textures()[0].image.rgba, [40, 50, 60, 255]);
+        assert_eq!(
+            second.draw_list().commands[0].texture,
+            second.textures()[0].id
+        );
     }
 
     #[test]

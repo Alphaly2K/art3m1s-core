@@ -9,17 +9,21 @@ use std::collections::{HashMap, VecDeque};
 use std::ffi::{CStr, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use art3m1s_log::{Level, Record};
-use art3m1s_render::{Extent2D, FrameTarget, GpuBackend, NativeSurface};
+use art3m1s_render::{BlendMode, Extent2D, FrameTarget, GpuBackend, NativeSurface};
 use art3m1s_siglus::siglus_scene_vm::{
     host::SiglusHostConfig,
     runtime::native_ui::{NativeMessageBoxKind, NativeMessageBoxRequest, NativeUiBackend},
 };
-use art3m1s_siglus::{DirectorySaves, SiglusAdapter, SiglusRenderer, is_siglus_project};
+use art3m1s_siglus::{
+    DirectorySaves, SiglusAdapter, SiglusFrameCompiler, SiglusFrameSnapshot, SiglusRenderer,
+    is_siglus_project,
+};
 
 pub const ABI_VERSION: u32 = 1;
 pub const ABI_MAGIC: u32 = 0x5349_4731; // SIG1
@@ -283,18 +287,46 @@ impl NativeUiBackend for DialogSlot {
 
 struct Runtime {
     adapter: SiglusAdapter,
-    renderer: SiglusRenderer,
-    gpu: Box<dyn GpuBackend>,
+    presenter: Option<Presenter>,
+    compiler: SiglusFrameCompiler,
+    latest: Option<Rc<SiglusFrameSnapshot>>,
+    explicit_presentation: bool,
     width: u32,
     height: u32,
     exiting: bool,
     save_fingerprint: Option<u64>,
-    surface_attached: bool,
     audio_output: Option<super::siglus_output::Output>,
     dialog: Option<Arc<DialogSlot>>,
 }
 
+struct Presenter {
+    renderer: SiglusRenderer,
+    gpu: Box<dyn GpuBackend>,
+    surface_attached: bool,
+    presented: Option<Rc<SiglusFrameSnapshot>>,
+}
+
+impl Presenter {
+    fn new(backend: i32, width: u32, height: u32) -> Result<Self, String> {
+        let selection = crate::backend::BackendSelection::try_from_legacy_int(backend)?;
+        Ok(Self {
+            renderer: SiglusRenderer::default(),
+            gpu: crate::backend::create_backend(selection, width, height)?,
+            surface_attached: false,
+            presented: None,
+        })
+    }
+}
+
+impl Drop for Presenter {
+    fn drop(&mut self) {
+        self.renderer.release_textures(self.gpu.as_mut());
+        self.gpu.clear_native_surface();
+    }
+}
+
 thread_local! {
+    static FRAME_LEASES: RefCell<HashMap<u64, FrameLease>> = RefCell::new(HashMap::new());
     static RUNTIMES: RefCell<HashMap<u64, Runtime>> = RefCell::new(HashMap::new());
     static LAST_ERROR: RefCell<String> = RefCell::new(String::new());
 }
@@ -349,6 +381,23 @@ unsafe extern "C" fn runtime_create_with_save_dir(
     backend: i32,
     out: *mut u64,
 ) -> i32 {
+    create_runtime(ptr, save_dir, Some(backend), out)
+}
+
+unsafe extern "C" fn create_frame_runtime(
+    ptr: *const c_char,
+    save_dir: *const c_char,
+    out: *mut u64,
+) -> i32 {
+    create_runtime(ptr, save_dir, None, out)
+}
+
+fn create_runtime(
+    ptr: *const c_char,
+    save_dir: *const c_char,
+    backend: Option<i32>,
+    out: *mut u64,
+) -> i32 {
     guarded(|| {
         if out.is_null() {
             return STATUS_ARGUMENT;
@@ -391,12 +440,11 @@ unsafe extern "C" fn runtime_create_with_save_dir(
         {
             return fail("Siglus stage dimensions are invalid");
         }
-        let selection = match crate::backend::BackendSelection::try_from_legacy_int(backend) {
-            Ok(selection) => selection,
-            Err(error) => return fail(error),
-        };
-        let gpu = match crate::backend::create_backend(selection, width, height) {
-            Ok(gpu) => gpu,
+        let presenter = match backend
+            .map(|id| Presenter::new(id, width, height))
+            .transpose()
+        {
+            Ok(presenter) => presenter,
             Err(error) => return fail(format!("Siglus GPU initialization: {error}")),
         };
         let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
@@ -408,13 +456,14 @@ unsafe extern "C" fn runtime_create_with_save_dir(
                 handle,
                 Runtime {
                     adapter,
-                    renderer: SiglusRenderer::default(),
-                    gpu,
+                    presenter,
+                    compiler: SiglusFrameCompiler::default(),
+                    latest: None,
+                    explicit_presentation: backend.is_none(),
                     width,
                     height,
                     exiting: false,
                     save_fingerprint,
-                    surface_attached: false,
                     audio_output: None,
                     dialog: None,
                 },
@@ -436,8 +485,7 @@ unsafe extern "C" fn runtime_destroy(handle: u64) {
                         .adapter
                         .with_host(|host| host.persist_global_if_changed(Some(initial)));
                 }
-                runtime.renderer.release_textures(runtime.gpu.as_mut());
-                runtime.gpu.clear_native_surface();
+                drop(runtime);
                 if table.is_empty() {
                     end_log_session();
                 }
@@ -469,18 +517,23 @@ unsafe extern "C" fn runtime_set_external_surface(
 ) -> i32 {
     guarded(|| {
         with_runtime(handle, |rt| {
+            let Some(presenter) = rt.presenter.as_mut() else {
+                return STATUS_ARGUMENT;
+            };
             if kind == 0 {
-                rt.gpu.clear_native_surface();
-                rt.surface_attached = false;
+                presenter.gpu.clear_native_surface();
+                presenter.surface_attached = false;
+                presenter.presented = None;
                 return STATUS_OK;
             }
             let surface = match NativeSurface::from_legacy_parts(kind, ptr, width, height) {
                 Ok(surface) => surface,
                 Err(error) => return fail(error),
             };
-            match rt.gpu.set_native_surface(surface) {
+            match presenter.gpu.set_native_surface(surface) {
                 Ok(()) => {
-                    rt.surface_attached = true;
+                    presenter.surface_attached = true;
+                    presenter.presented = None;
                     STATUS_OK
                 }
                 Err(error) => fail(error),
@@ -499,24 +552,36 @@ unsafe extern "C" fn runtime_tick(
 ) -> i32 {
     guarded(|| {
         with_runtime(handle, |rt| {
+            if !matches!(mode, 0..=2) || (rt.explicit_presentation && mode != 0) {
+                return STATUS_ARGUMENT;
+            }
             if mode == 1 && (out.is_null() || capacity < rt.width as usize * rt.height as usize * 4)
             {
                 return STATUS_ARGUMENT;
             }
-            if mode == 2 && !rt.surface_attached {
-                return STATUS_ARGUMENT;
-            }
-            if !matches!(mode, 0..=2) {
+            if mode == 2 && !rt.presenter.as_ref().is_some_and(|p| p.surface_attached) {
                 return STATUS_ARGUMENT;
             }
             let step = match rt.adapter.step(dt_ms) {
                 Ok(step) => step,
                 Err(error) => return fail(format!("Siglus step: {error:#}")),
             };
-            if let Some(frame) = step.frame
-                && let Err(error) = rt.renderer.draw(&frame, rt.gpu.as_mut(), mode == 2)
-            {
-                return fail(format!("Siglus frame: {error:#}"));
+            if let Some(frame) = step.frame {
+                let snapshot = match rt.compiler.compile(&frame) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => return fail(format!("Siglus frame: {error:#}")),
+                };
+                if !rt.explicit_presentation {
+                    let presenter = rt.presenter.as_mut().expect("legacy presenter");
+                    if let Err(error) = presenter.renderer.draw_snapshot(
+                        &snapshot,
+                        presenter.gpu.as_mut(),
+                        mode == 2,
+                    ) {
+                        return fail(format!("Siglus frame: {error:#}"));
+                    }
+                }
+                rt.latest = Some(Rc::new(snapshot));
             }
             rt.exiting = step.exiting;
             if let Some(output) = &rt.audio_output {
@@ -532,30 +597,41 @@ unsafe extern "C" fn runtime_tick(
                 }
             }
             if mode == 1 {
-                rt.gpu.begin_access();
-                let pixels = rt
-                    .gpu
-                    .readback_owned(FrameTarget::Main, Extent2D::new(rt.width, rt.height));
-                rt.gpu.end_access();
-                let pixels = match pixels {
-                    Ok(pixels) => pixels,
-                    Err(error) => return fail(error),
-                };
-                if pixels.len() > capacity {
-                    return STATUS_ARGUMENT;
-                }
-                unsafe {
-                    std::ptr::copy_nonoverlapping(pixels.as_ptr(), out, pixels.len());
-                    if !written.is_null() {
-                        *written = pixels.len();
-                    }
-                }
+                let gpu = &mut rt.presenter.as_mut().expect("legacy presenter").gpu;
+                return copy_readback(gpu.as_mut(), rt.width, rt.height, out, capacity, written);
             } else if !written.is_null() {
                 unsafe { *written = 0 };
             }
             STATUS_OK
         })
     })
+}
+
+fn copy_readback(
+    gpu: &mut dyn GpuBackend,
+    width: u32,
+    height: u32,
+    out: *mut u8,
+    capacity: usize,
+    written: *mut usize,
+) -> i32 {
+    gpu.begin_access();
+    let pixels = gpu.readback_owned(FrameTarget::Main, Extent2D::new(width, height));
+    gpu.end_access();
+    let pixels = match pixels {
+        Ok(pixels) => pixels,
+        Err(error) => return fail(error),
+    };
+    if pixels.len() > capacity {
+        return STATUS_ARGUMENT;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(pixels.as_ptr(), out, pixels.len());
+        if !written.is_null() {
+            written.write(pixels.len());
+        }
+    }
+    STATUS_OK
 }
 
 unsafe extern "C" fn runtime_input(
@@ -918,6 +994,274 @@ unsafe extern "C" fn send_text(handle: u64, text: *const u8, len: usize) -> i32 
     })
 }
 
+const NO_FRAME: i32 = 1;
+const MAX_FRAME_LEASES: usize = 16;
+
+#[repr(C)]
+struct FrameMesh {
+    texture_id: u64,
+    blend: u32,
+    clipped: u32,
+    opacity: f32,
+    clip: [f32; 4],
+    vertices: [[f32; 4]; 6],
+}
+
+#[repr(C)]
+pub struct FrameView {
+    width: u32,
+    height: u32,
+    mesh_count: u32,
+    texture_count: u32,
+    meshes: *const FrameMesh,
+}
+
+#[repr(C)]
+pub struct TextureView {
+    id: u64,
+    width: u32,
+    height: u32,
+    rgba: *const u8,
+    rgba_len: usize,
+}
+
+struct FrameLease {
+    frame: Rc<SiglusFrameSnapshot>,
+    meshes: Vec<FrameMesh>,
+}
+
+unsafe extern "C" fn acquire_frame(session: u64, out: *mut u64) -> i32 {
+    guarded(|| {
+        if out.is_null() {
+            return STATUS_ARGUMENT;
+        }
+        unsafe { out.write(0) };
+        with_runtime(session, |rt| {
+            let Some(frame) = &rt.latest else {
+                return NO_FRAME;
+            };
+            FRAME_LEASES.with(|leases| {
+                let mut leases = leases.borrow_mut();
+                if leases.len() >= MAX_FRAME_LEASES {
+                    return fail("Siglus frame lease limit reached");
+                }
+                let id = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+                let mesh = |command: &art3m1s_render::DrawCommand| FrameMesh {
+                    texture_id: command.texture.0,
+                    blend: match command.blend {
+                        BlendMode::Alpha => 0,
+                        BlendMode::Add => 1,
+                        BlendMode::Multiply => 2,
+                        BlendMode::Screen => 3,
+                        _ => unreachable!("unsupported Siglus blend"),
+                    },
+                    clipped: u32::from(command.clip_bounds.is_some()),
+                    opacity: command.opacity,
+                    clip: command.clip_bounds.unwrap_or_default(),
+                    vertices: command
+                        .mesh
+                        .as_ref()
+                        .expect("Siglus mesh")
+                        .vertices
+                        .as_ref()
+                        .try_into()
+                        .expect("Siglus quad"),
+                };
+                leases.insert(
+                    id,
+                    FrameLease {
+                        frame: frame.clone(),
+                        meshes: frame.draw_list().commands.iter().map(mesh).collect(),
+                    },
+                );
+                unsafe { out.write(id) };
+                STATUS_OK
+            })
+        })
+    })
+}
+
+unsafe extern "C" fn frame_view(lease: u64, out: *mut FrameView) -> i32 {
+    guarded(|| {
+        if out.is_null() {
+            return STATUS_ARGUMENT;
+        }
+        FRAME_LEASES.with(|leases| {
+            let leases = leases.borrow();
+            let Some(lease) = leases.get(&lease) else {
+                return STATUS_HANDLE;
+            };
+            let (width, height) = lease.frame.size();
+            unsafe {
+                out.write(FrameView {
+                    width,
+                    height,
+                    mesh_count: lease.meshes.len() as u32,
+                    texture_count: lease.frame.textures().len() as u32,
+                    meshes: if lease.meshes.is_empty() {
+                        std::ptr::null()
+                    } else {
+                        lease.meshes.as_ptr()
+                    },
+                })
+            };
+            STATUS_OK
+        })
+    })
+}
+
+unsafe extern "C" fn frame_texture(lease: u64, index: u32, out: *mut TextureView) -> i32 {
+    guarded(|| {
+        if out.is_null() {
+            return STATUS_ARGUMENT;
+        }
+        FRAME_LEASES.with(|leases| {
+            let leases = leases.borrow();
+            let Some(lease) = leases.get(&lease) else {
+                return STATUS_HANDLE;
+            };
+            let Some(texture) = lease.frame.textures().get(index as usize) else {
+                return STATUS_ARGUMENT;
+            };
+            unsafe {
+                out.write(TextureView {
+                    id: texture.id.0,
+                    width: texture.image.width,
+                    height: texture.image.height,
+                    rgba: texture.image.rgba.as_ptr(),
+                    rgba_len: texture.image.rgba.len(),
+                })
+            };
+            STATUS_OK
+        })
+    })
+}
+
+unsafe extern "C" fn release_frame(lease: u64) -> i32 {
+    guarded(|| {
+        FRAME_LEASES.with(|leases| match leases.borrow_mut().remove(&lease) {
+            Some(_) => STATUS_OK,
+            None => STATUS_HANDLE,
+        })
+    })
+}
+
+unsafe extern "C" fn configure_presenter(session: u64, backend: i32) -> i32 {
+    guarded(|| {
+        with_runtime(session, |rt| {
+            if !rt.explicit_presentation {
+                return STATUS_ARGUMENT;
+            }
+            match Presenter::new(backend, rt.width, rt.height) {
+                Ok(presenter) => {
+                    rt.presenter = Some(presenter);
+                    STATUS_OK
+                }
+                Err(error) => fail(format!("Siglus GPU initialization: {error}")),
+            }
+        })
+    })
+}
+
+unsafe extern "C" fn present_latest(session: u64) -> i32 {
+    guarded(|| {
+        with_runtime(session, |rt| {
+            if !rt.explicit_presentation {
+                return STATUS_ARGUMENT;
+            }
+            let Some(presenter) = rt.presenter.as_mut().filter(|p| p.surface_attached) else {
+                return STATUS_ARGUMENT;
+            };
+            let Some(frame) = &rt.latest else {
+                return NO_FRAME;
+            };
+            if presenter
+                .presented
+                .as_ref()
+                .is_some_and(|previous| Rc::ptr_eq(previous, frame))
+            {
+                return NO_FRAME;
+            }
+            match presenter
+                .renderer
+                .draw_snapshot(frame, presenter.gpu.as_mut(), true)
+            {
+                Ok(()) => {
+                    presenter.presented = Some(frame.clone());
+                    STATUS_OK
+                }
+                Err(error) => fail(format!("Siglus frame: {error:#}")),
+            }
+        })
+    })
+}
+
+unsafe extern "C" fn readback_latest(
+    session: u64,
+    out: *mut u8,
+    capacity: usize,
+    written: *mut usize,
+) -> i32 {
+    guarded(|| {
+        with_runtime(session, |rt| {
+            if !rt.explicit_presentation
+                || out.is_null()
+                || capacity < rt.width as usize * rt.height as usize * 4
+            {
+                return STATUS_ARGUMENT;
+            }
+            let Some(presenter) = rt.presenter.as_mut() else {
+                return STATUS_ARGUMENT;
+            };
+            let Some(frame) = &rt.latest else {
+                return NO_FRAME;
+            };
+            if let Err(error) =
+                presenter
+                    .renderer
+                    .draw_snapshot(frame, presenter.gpu.as_mut(), false)
+            {
+                return fail(format!("Siglus frame: {error:#}"));
+            }
+            copy_readback(
+                presenter.gpu.as_mut(),
+                rt.width,
+                rt.height,
+                out,
+                capacity,
+                written,
+            )
+        })
+    })
+}
+
+#[repr(C)]
+pub struct SiglusFrameApiV1 {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub create_runtime: unsafe extern "C" fn(*const c_char, *const c_char, *mut u64) -> i32,
+    pub acquire: unsafe extern "C" fn(u64, *mut u64) -> i32,
+    pub view: unsafe extern "C" fn(u64, *mut FrameView) -> i32,
+    pub texture: unsafe extern "C" fn(u64, u32, *mut TextureView) -> i32,
+    pub release: unsafe extern "C" fn(u64) -> i32,
+    pub configure_presenter: unsafe extern "C" fn(u64, i32) -> i32,
+    pub present_latest: unsafe extern "C" fn(u64) -> i32,
+    pub readback_latest: unsafe extern "C" fn(u64, *mut u8, usize, *mut usize) -> i32,
+}
+
+static FRAME_API: SiglusFrameApiV1 = SiglusFrameApiV1 {
+    struct_size: std::mem::size_of::<SiglusFrameApiV1>() as u32,
+    abi_version: 1,
+    create_runtime: create_frame_runtime,
+    acquire: acquire_frame,
+    view: frame_view,
+    texture: frame_texture,
+    release: release_frame,
+    configure_presenter,
+    present_latest,
+    readback_latest,
+};
+
 #[repr(C)]
 pub struct SiglusHostApiV2 {
     pub struct_size: u32,
@@ -928,6 +1272,7 @@ pub struct SiglusHostApiV2 {
     pub read_dialog: unsafe extern "C" fn(u64, *mut u8, usize, *mut usize) -> i32,
     pub submit_dialog: unsafe extern "C" fn(u64, u64, i64) -> i32,
     pub send_text: unsafe extern "C" fn(u64, *const u8, usize) -> i32,
+    pub frames: &'static SiglusFrameApiV1,
 }
 
 static HOST_API_V2: SiglusHostApiV2 = SiglusHostApiV2 {
@@ -939,6 +1284,7 @@ static HOST_API_V2: SiglusHostApiV2 = SiglusHostApiV2 {
     read_dialog,
     submit_dialog,
     send_text,
+    frames: &FRAME_API,
 };
 
 /// # Safety
@@ -953,12 +1299,11 @@ pub unsafe extern "C" fn art3m1s_siglus_get_host_api_v2(
     &HOST_API_V2
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::ffi::CString;
 
-    #[cfg(feature = "metal-backend")]
     #[test]
     fn host_ui_resume_and_text() {
         use art3m1s_siglus::siglus_scene_vm::runtime::{
@@ -1014,7 +1359,7 @@ mod tests {
         let open = || {
             let mut handle = 0;
             assert_eq!(
-                unsafe { (api.runtime_create)(path.as_ptr(), 3, &mut handle) },
+                unsafe { (ui.frames.create_runtime)(path.as_ptr(), std::ptr::null(), &mut handle) },
                 STATUS_OK,
                 "{}",
                 LAST_ERROR.with(|e| e.borrow().clone())
@@ -1111,7 +1456,49 @@ mod tests {
             );
         }
         assert_eq!(unsafe { (api.runtime_is_exit_requested)(handle) }, 1);
+        let mut lease = 0;
+        assert_eq!(
+            unsafe { (ui.frames.acquire)(handle, &mut lease) },
+            STATUS_OK
+        );
+        assert_ne!(lease, 0);
+        #[cfg(all(target_os = "macos", feature = "metal-backend"))]
+        {
+            let len = 320 * 240 * 4;
+            let read_recreated_presenter = || {
+                assert_eq!(
+                    unsafe { (ui.frames.configure_presenter)(handle, 3) },
+                    STATUS_OK
+                );
+                let mut rgba = vec![0; len];
+                let mut written = 0;
+                assert_eq!(
+                    unsafe {
+                        (ui.frames.readback_latest)(handle, rgba.as_mut_ptr(), len, &mut written)
+                    },
+                    STATUS_OK
+                );
+                assert_eq!(written, len);
+                rgba
+            };
+            assert_eq!(read_recreated_presenter(), read_recreated_presenter());
+        }
         unsafe { (api.runtime_destroy)(handle) };
+        let view = std::thread::spawn(move || {
+            let mut view = std::mem::MaybeUninit::<FrameView>::uninit();
+            unsafe { (FRAME_API.view)(lease, view.as_mut_ptr()) }
+        })
+        .join()
+        .unwrap();
+        assert_eq!(view, STATUS_HANDLE);
+        let mut view = std::mem::MaybeUninit::<FrameView>::uninit();
+        assert_eq!(
+            unsafe { (ui.frames.view)(lease, view.as_mut_ptr()) },
+            STATUS_OK
+        );
+        let view = unsafe { view.assume_init() };
+        assert_eq!((view.width, view.height), (320, 240));
+        assert_eq!(unsafe { (ui.frames.release)(lease) }, STATUS_OK);
         let replacement = open();
         assert_eq!(request(replacement), id);
         assert_eq!(unsafe { (ui.submit_dialog)(handle, id, 2) }, STATUS_HANDLE);
@@ -1119,6 +1506,7 @@ mod tests {
         unsafe { (api.runtime_destroy)(replacement) };
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn optional_real_game_host_abi_smoke() {
         let Some(path) = std::env::var_os("ART3M1S_SIGLUS_TEST_GAME") else {
@@ -1187,7 +1575,7 @@ mod output_contract_tests {
         let host1 = unsafe { &*art3m1s_siglus_get_host_api_v1(&mut size) };
         assert_eq!(size, 16 + 4 * std::mem::size_of::<usize>());
         let host2 = unsafe { &*art3m1s_siglus_get_host_api_v2(&mut size) };
-        assert_eq!(size, 16 + 5 * std::mem::size_of::<usize>());
+        assert_eq!(size, 16 + 6 * std::mem::size_of::<usize>());
         assert!(std::ptr::eq(host1, host2.base));
         let output = unsafe { &*art3m1s_siglus_get_output_api_v1(&mut size) };
         assert_eq!(size, 16 + 5 * std::mem::size_of::<usize>());
