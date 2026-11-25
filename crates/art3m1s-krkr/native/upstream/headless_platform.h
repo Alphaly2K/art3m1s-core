@@ -1,5 +1,7 @@
 #pragma once
 
+struct Art3m1sKrkrProjectHostV1;
+
 namespace krkrsdl3
 {
 class iTVPRenderBackend;
@@ -10,6 +12,7 @@ class iTVPRenderBackend;
 // objects render through the supplied backend instead.
 bool Art3m1sKrkrHeadlessInit(
     int argc, char* argv[], krkrsdl3::iTVPRenderBackend* backend,
-    const char* save_root_utf8);
+    const char* save_root_utf8, const Art3m1sKrkrProjectHostV1* project = nullptr,
+    const char* archive_key = nullptr);
 bool Art3m1sKrkrHeadlessIterate();
 void Art3m1sKrkrHeadlessQuit();

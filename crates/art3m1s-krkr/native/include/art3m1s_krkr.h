@@ -276,6 +276,39 @@ ART3M1S_KRKR_EXPORT int32_t art3m1s_krkr_native_set_debug(int32_t enabled);
 
 ART3M1S_KRKR_EXPORT int32_t art3m1s_krkr_native_set_master_volume(float volume);
 
+/* The Host retains user_data until runtime_destroy returns. Reads can occur
+ * on the engine's image or media workers. Query returns NO_COMMAND for a
+ * missing key. A successful read may return fewer bytes than requested. */
+/* Emit immediate file names during list_files. The callback is optional. */
+typedef void (*ArtKrkrProjectEmitFileFn)(void* context, const char* filename);
+typedef struct Art3m1sKrkrProjectHostV1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    void* user_data;
+    int32_t (*query_size)(void* user_data, const char* key, uint64_t* size);
+    int32_t (*read_range)(void* user_data, const char* key, uint64_t offset,
+                          uint8_t* output, size_t capacity, size_t* read);
+    int32_t (*list_files)(void* user_data, const char* directory, void* context,
+                          ArtKrkrProjectEmitFileFn emit);
+} Art3m1sKrkrProjectHostV1;
+
+/* An empty archive_key starts a loose project. An XP3 key opens that archive.
+ * save_root must be a directory supplied by the Host. */
+typedef int32_t (*ArtKrkrOpenProjectFn)(const Art3m1sKrkrProjectHostV1* host,
+    const char* archive_key, const char* save_root,
+    const Art3m1sKrkrRuntimeConfigV1* config, uint64_t* runtime);
+
+typedef struct Art3m1sKrkrNativeApiV2 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint64_t magic; /* 0x32564B524D334152, "RA3MKRV2" */
+    const Art3m1sKrkrApiV1* runtime;
+    ArtKrkrOpenProjectFn open_project;
+} Art3m1sKrkrNativeApiV2;
+
+ART3M1S_KRKR_EXPORT const Art3m1sKrkrNativeApiV2* art3m1s_krkr_native_get_api_v2(
+    size_t* out_size);
+
 /* Private setup used by the Rust facade before runtime_create. */
 ART3M1S_KRKR_EXPORT int32_t art3m1s_krkr_native_set_render_host_v1(
     const Art3m1sKrkrRenderHostV1* host);

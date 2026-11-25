@@ -65,6 +65,12 @@ cargo run --manifest-path crates/art3m1s-krkr/Cargo.toml \
   --click 60:640:480
 ```
 
+A native Host can use `art3m1s_krkr_native_get_api_v2` to open a loose project
+or XP3 using its own read callbacks. The runtime table provides input, RGBA
+frames and audio commands. Pass a Host-managed save directory and keep the
+project callbacks valid until the corresponding runtime is destroyed. Games
+that load external native plugins use the directory-based entry point.
+
 The build copies `Res/` from `KRKRSDL3_BUILD_DIR` next to the native host.
 Desktop packages place it beside the executable/library; the iOS app bundle
 places it under `Res/`; Android packages the font as an APK asset and supplies

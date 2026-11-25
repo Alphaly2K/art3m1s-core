@@ -1,6 +1,7 @@
 #include "art3m1s_krkr.h"
 #include "capture_backend.h"
 #include "headless_platform.h"
+#include "host_project.h"
 #include "host_audio.h"
 
 #include <algorithm>
@@ -402,9 +403,10 @@ std::string PrepareSaveRoot(const std::string& game_root, const char* save_root_
 int32_t RuntimeCreateImpl(const char* game_root_utf8,
                           const char* save_root_utf8,
                           const Art3m1sKrkrRuntimeConfigV1* config,
-                          uint64_t* out_runtime)
+                          uint64_t* out_runtime,
+                          const Art3m1sKrkrProjectHostV1* project = nullptr)
 {
-    if (!game_root_utf8 || !config || !out_runtime ||
+    if ((!project && !game_root_utf8) || !config || !out_runtime ||
         config->struct_size != sizeof(Art3m1sKrkrRuntimeConfigV1) ||
         config->width == 0 || config->height == 0)
         return ART3M1S_KRKR_STATUS_INVALID_ARGUMENT;
@@ -413,12 +415,26 @@ int32_t RuntimeCreateImpl(const char* game_root_utf8,
     StartLogCapture();
     art3m1s::krkr::ResetAudioHost();
 
-    std::string game_root = ResolveRuntimeEntry(game_root_utf8);
+    std::string game_root = project
+        ? NormalizeRuntimePath(std::filesystem::current_path().u8string())
+        : ResolveRuntimeEntry(game_root_utf8);
     if (game_root.empty())
         return ART3M1S_KRKR_STATUS_INVALID_ARGUMENT;
     std::string save_root;
     if (save_root_utf8 && *save_root_utf8)
-        save_root = PrepareSaveRoot(game_root, save_root_utf8);
+    {
+        if (project)
+        {
+            auto root = std::filesystem::weakly_canonical(
+                std::filesystem::absolute(std::filesystem::u8path(save_root_utf8)));
+            std::filesystem::create_directories(root);
+            save_root = root.generic_u8string();
+            if (save_root.back() != '/')
+                save_root.push_back('/');
+        }
+        else
+            save_root = PrepareSaveRoot(game_root, save_root_utf8);
+    }
     std::string program = ResolveResourceExecutable();
 #if defined(_KRKRSDL3_ANDROID)
     // Keep the virtual executable path stable and local to the game rather
@@ -444,7 +460,8 @@ int32_t RuntimeCreateImpl(const char* game_root_utf8,
         g_render_host.user_data ? &g_render_host : nullptr;
     auto* capture = new art3m1s::krkr::CaptureBackend(render_host);
     if (!Art3m1sKrkrHeadlessInit(
-            static_cast<int>(argv.size() - 1), argv.data(), capture, save_root.c_str()))
+            static_cast<int>(argv.size() - 1), argv.data(), capture, save_root.c_str(),
+            project, project ? game_root_utf8 : nullptr))
         return ART3M1S_KRKR_STATUS_ENGINE;
     if (!Application || TVPGetWindowCount() <= 0)
     {
@@ -762,22 +779,23 @@ int32_t ProbeProjectNoThrow(const char* game_root_utf8, Art3m1sKrkrProbeV1* out_
     }
 }
 
-int32_t RuntimeCreateNoThrow(const char* game_root_utf8,
-                             const char* save_root_utf8,
-                             const Art3m1sKrkrRuntimeConfigV1* config,
-                             uint64_t* out_runtime) noexcept
+int32_t CreateRuntimeNoThrow(const char* game_root_utf8,
+                            const char* save_root_utf8,
+                            const Art3m1sKrkrRuntimeConfigV1* config,
+                            uint64_t* out_runtime,
+                            const Art3m1sKrkrProjectHostV1* project) noexcept
 {
     try
     {
         const int32_t status =
-            RuntimeCreateImpl(game_root_utf8, save_root_utf8, config, out_runtime);
+            RuntimeCreateImpl(game_root_utf8, save_root_utf8, config, out_runtime, project);
         if (status != ART3M1S_KRKR_STATUS_OK && !Application)
             g_log_capture_active.store(false, std::memory_order_release);
         return status;
     }
     catch (...)
     {
-        if (Application)
+        if (!g_runtime)
         {
             try
             {
@@ -791,6 +809,14 @@ int32_t RuntimeCreateNoThrow(const char* game_root_utf8,
             g_log_capture_active.store(false, std::memory_order_release);
         return ART3M1S_KRKR_STATUS_ENGINE;
     }
+}
+
+int32_t RuntimeCreateNoThrow(const char* game_root_utf8,
+                             const char* save_root_utf8,
+                             const Art3m1sKrkrRuntimeConfigV1* config,
+                             uint64_t* out_runtime) noexcept
+{
+    return CreateRuntimeNoThrow(game_root_utf8, save_root_utf8, config, out_runtime, nullptr);
 }
 
 void RuntimeDestroyNoThrow(uint64_t handle) noexcept
@@ -941,6 +967,20 @@ int32_t RuntimeSetExternalSurfaceNoThrow(
     }
 }
 
+int32_t OpenProjectNoThrow(
+    const Art3m1sKrkrProjectHostV1* host, const char* archive_key, const char* save_root,
+    const Art3m1sKrkrRuntimeConfigV1* config, uint64_t* out_runtime) noexcept
+{
+    if (out_runtime)
+        *out_runtime = 0;
+    if (!host || host->struct_size != sizeof(Art3m1sKrkrProjectHostV1) ||
+        host->abi_version != 1 || !host->query_size || !host->read_range ||
+        !save_root || !*save_root ||
+        (archive_key && *archive_key && !Art3m1sKrkrIsProjectKey(archive_key)))
+        return ART3M1S_KRKR_STATUS_INVALID_ARGUMENT;
+    return CreateRuntimeNoThrow(archive_key, save_root, config, out_runtime, host);
+}
+
 const Art3m1sKrkrApiV1 kApi = {
     sizeof(Art3m1sKrkrApiV1),
     kAbiVersion,
@@ -959,6 +999,10 @@ const Art3m1sKrkrApiV1 kApi = {
     RuntimeSubmitAudioConsumedNoThrow,
     RuntimeIsExitRequestedNoThrow,
     RuntimeSetExternalSurfaceNoThrow,
+};
+
+const Art3m1sKrkrNativeApiV2 kNativeApiV2 = {
+    sizeof(Art3m1sKrkrNativeApiV2), 2, 0x32564B524D334152ULL, &kApi, OpenProjectNoThrow,
 };
 } // namespace
 
@@ -987,6 +1031,14 @@ extern "C" ART3M1S_KRKR_EXPORT const Art3m1sKrkrApiV1* art3m1s_krkr_native_get_a
     if (out_size)
         *out_size = sizeof(Art3m1sKrkrApiV1);
     return &kApi;
+}
+
+extern "C" ART3M1S_KRKR_EXPORT const Art3m1sKrkrNativeApiV2* art3m1s_krkr_native_get_api_v2(
+    size_t* out_size)
+{
+    if (out_size)
+        *out_size = sizeof(kNativeApiV2);
+    return &kNativeApiV2;
 }
 
 extern "C" ART3M1S_KRKR_EXPORT int32_t art3m1s_krkr_native_set_render_host_v1(

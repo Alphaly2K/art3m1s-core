@@ -126,3 +126,11 @@ extern "C" ART3M1S_KRKR_EXPORT int32_t art3m1s_krkr_native_set_master_volume(flo
 {
     return ART3M1S_KRKR_STATUS_UNSUPPORTED;
 }
+
+extern "C" ART3M1S_KRKR_EXPORT const Art3m1sKrkrNativeApiV2* art3m1s_krkr_native_get_api_v2(
+    size_t* out_size)
+{
+    if (out_size)
+        *out_size = 0;
+    return nullptr;
+}

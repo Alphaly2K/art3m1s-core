@@ -139,6 +139,7 @@ set(_art3m1s_sources
     "${CMAKE_CURRENT_SOURCE_DIR}/headless_platform.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/host_audio.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/host_runtime.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/host_project.cpp"
 )
 if(ANDROID)
     list(APPEND _art3m1s_sources "${CMAKE_CURRENT_SOURCE_DIR}/host_android.cpp")
@@ -163,6 +164,7 @@ add_library(art3m1s_krkr_host SHARED ${_all_sources})
 # Static codec and SDL dependencies must not add symbols to the Host ABI.
 set(_host_exports
     art3m1s_krkr_native_get_api_v1
+    art3m1s_krkr_native_get_api_v2
     art3m1s_krkr_native_log_next_bytes
     art3m1s_krkr_native_poll_log
     art3m1s_krkr_native_set_debug
@@ -222,7 +224,7 @@ target_include_directories(
         "${KRKRSDL3_SOURCE_DIR}/core/utils/math"
         "${KRKRSDL3_SOURCE_DIR}/environ"
         "${KRKRSDL3_SOURCE_DIR}/plugins"
-        "${KRKRSDL3_SOURCE_DIR}/tjs2"
+        "${_tjs_overlay}"
 )
 
 if(APPLE AND ART3M1S_FFMPEG_DIR)

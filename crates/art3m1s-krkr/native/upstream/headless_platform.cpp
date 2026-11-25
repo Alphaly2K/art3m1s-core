@@ -1,4 +1,7 @@
 #include "headless_platform.h"
+#include "host_project.h"
+
+#include <exception>
 
 #include "tjsCommHead.h"
 
@@ -37,7 +40,8 @@ void Art3m1sKrkrPumpInput();
 
 bool Art3m1sKrkrHeadlessInit(
     int argc, char* argv[], krkrsdl3::iTVPRenderBackend* backend,
-    const char* save_root_utf8)
+    const char* save_root_utf8, const Art3m1sKrkrProjectHostV1* project,
+    const char* archive_key)
 {
     std::unique_ptr<krkrsdl3::iTVPRenderBackend> pending_backend(backend);
     if (g_initialized || Application || argc < 2 || !backend)
@@ -63,6 +67,9 @@ bool Art3m1sKrkrHeadlessInit(
         return false;
     }
 
+    if (project)
+        Art3m1sKrkrMountProject(*project, archive_key);
+
     g_width = TVPSettings.window_width;
     g_height = TVPSettings.window_height;
     krkrsdl3::TVPSetRenderBackend(pending_backend.release());
@@ -73,6 +80,7 @@ bool Art3m1sKrkrHeadlessInit(
         delete Application;
         Application = nullptr;
         krkrsdl3::TVPShutdownRenderBackend();
+        Art3m1sKrkrUnmountProject();
         SDL_Quit();
         TVPClearAllArguments();
         return false;
@@ -98,16 +106,27 @@ bool Art3m1sKrkrHeadlessIterate()
 
 void Art3m1sKrkrHeadlessQuit()
 {
+    std::exception_ptr error;
     if (Application)
     {
-        Application->OnExit();
+        try
+        {
+            Application->OnExit();
+        }
+        catch (...)
+        {
+            error = std::current_exception();
+        }
         delete Application;
         Application = nullptr;
     }
     krkrsdl3::TVPShutdownRenderBackend();
+    Art3m1sKrkrUnmountProject();
     SDL_Quit();
     TVPClearAllArguments();
     g_initialized = false;
+    if (error)
+        std::rethrow_exception(error);
 }
 
 void TVPSetWindowTitle(const char* title)
