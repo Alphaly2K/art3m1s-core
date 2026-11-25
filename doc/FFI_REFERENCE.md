@@ -648,7 +648,11 @@ KRKR 的 Host 侧语义和生命周期如下：
   Artemis media event 复用给 KRKR。宿主必须每次检查 `struct_size`，并对可选函数指针
   做 NULL 检查。
 
-## Siglus ABI（v1）
+## Siglus ABI
+
+`art3m1s_siglus_get_api_v2(size_t *out_size)` 返回与 v1 布局相同的前缀，`abi_version` 为 2，`struct_size` 为整个 v2 表的大小。表末尾追加 `runtime_create_with_save_dir(const char *root_utf8, const char *save_dir_utf8, int32_t backend, uint64_t *out_handle)`。`save_dir_utf8` 指向此游戏的存档目录，传空指针时使用项目目录内的存档。游戏原有的编号存档、全局数据、设置、已读标记和缩略图会在首次打开时复制到新目录，已有目标文件保留。
+
+### v1
 
 仅当 core 构建包含 `siglus-engine` 时导出
 `const SiglusApiV1 *art3m1s_siglus_get_api_v1(size_t *out_size)`。

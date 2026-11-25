@@ -13,7 +13,10 @@ use art3m1s_render::{
     TextureData, TextureDesc, TextureId, TextureInfo,
 };
 use siglus_scene_vm::host::{SiglusHost, SiglusHostConfig};
-pub use siglus_scene_vm::host::{SiglusBootSource, SiglusGameexe};
+pub use siglus_scene_vm::host::{SiglusBootSource, SiglusGameexe, SiglusSaveStore};
+
+mod save_directory;
+pub use save_directory::DirectorySaves;
 use siglus_scene_vm::image_manager::{ImageKey, ImageManager};
 use siglus_scene_vm::layer::{
     RenderFrame, RenderSprite, Sprite, SpriteBlend, SpriteFit, SpriteSizeMode,

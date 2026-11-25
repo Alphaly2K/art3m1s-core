@@ -9,14 +9,14 @@ use std::collections::{HashMap, VecDeque};
 use std::ffi::{CStr, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use art3m1s_log::{Level, Record};
 use art3m1s_render::{Extent2D, FrameTarget, GpuBackend, NativeSurface};
 use art3m1s_siglus::siglus_scene_vm::host::SiglusHostConfig;
-use art3m1s_siglus::{SiglusAdapter, is_siglus_project};
+use art3m1s_siglus::{DirectorySaves, SiglusAdapter, is_siglus_project};
 
 pub const ABI_VERSION: u32 = 1;
 pub const ABI_MAGIC: u32 = 0x5349_4731; // SIG1
@@ -209,6 +209,7 @@ unsafe extern "C" fn runtime_set_debug(handle: u64, enabled: i32) -> i32 {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct SiglusApiV1 {
     pub struct_size: u32,
     pub abi_version: u32,
@@ -232,12 +233,20 @@ pub struct SiglusApiV1 {
     pub last_error: unsafe extern "C" fn(*mut u8, usize) -> usize,
 }
 
+#[repr(C)]
+pub struct SiglusApiV2 {
+    pub base: SiglusApiV1,
+    pub runtime_create_with_save_dir:
+        unsafe extern "C" fn(*const c_char, *const c_char, i32, *mut u64) -> i32,
+}
+
 struct Runtime {
     adapter: SiglusAdapter,
     gpu: Box<dyn GpuBackend>,
     width: u32,
     height: u32,
     exiting: bool,
+    save_fingerprint: Option<u64>,
     surface_attached: bool,
     audio_output: Option<super::siglus_output::Output>,
 }
@@ -288,6 +297,15 @@ unsafe extern "C" fn probe_project(ptr: *const c_char) -> i32 {
 }
 
 unsafe extern "C" fn runtime_create(ptr: *const c_char, backend: i32, out: *mut u64) -> i32 {
+    unsafe { runtime_create_with_save_dir(ptr, std::ptr::null(), backend, out) }
+}
+
+unsafe extern "C" fn runtime_create_with_save_dir(
+    ptr: *const c_char,
+    save_dir: *const c_char,
+    backend: i32,
+    out: *mut u64,
+) -> i32 {
     guarded(|| {
         if out.is_null() {
             return STATUS_ARGUMENT;
@@ -300,12 +318,27 @@ unsafe extern "C" fn runtime_create(ptr: *const c_char, backend: i32, out: *mut 
         if !is_siglus_project(&path) {
             return fail("directory has no Siglus Scene.pck and Gameexe.dat/ini");
         }
+        let mut config = SiglusHostConfig::new(path);
+        if !save_dir.is_null() {
+            let path = match project_path(save_dir) {
+                Ok(path) => path,
+                Err(status) => return status,
+            };
+            let legacy = config.project_dir.join("savedata");
+            match DirectorySaves::open(&path, &legacy) {
+                Ok(store) => config.save_store = Some(Arc::new(store)),
+                Err(error) => return fail(format!("Siglus save storage: {error:#}")),
+            }
+        }
+        let uses_host_saves = config.save_store.is_some();
         let mut log_session = PendingLogSession(begin_log_session());
-        let adapter = match SiglusAdapter::open(SiglusHostConfig::new(path)) {
+        let mut adapter = match SiglusAdapter::open(config) {
             Ok(adapter) => adapter,
             Err(error) => return fail(format!("Siglus VM initialization: {error:#}")),
         };
         let (width, height) = adapter.logical_size();
+        let save_fingerprint =
+            uses_host_saves.then(|| adapter.host().persist_global_if_changed(None));
         if width == 0
             || height == 0
             || (width as usize)
@@ -336,6 +369,7 @@ unsafe extern "C" fn runtime_create(ptr: *const c_char, backend: i32, out: *mut 
                     width,
                     height,
                     exiting: false,
+                    save_fingerprint,
                     surface_attached: false,
                     audio_output: None,
                 },
@@ -352,6 +386,12 @@ unsafe extern "C" fn runtime_destroy(handle: u64) {
         RUNTIMES.with(|table| {
             let mut table = table.borrow_mut();
             if let Some(mut runtime) = table.remove(&handle) {
+                if let Some(initial) = runtime.save_fingerprint {
+                    runtime
+                        .adapter
+                        .host()
+                        .persist_global_if_changed(Some(initial));
+                }
                 runtime.adapter.release_textures(runtime.gpu.as_mut());
                 runtime.gpu.clear_native_surface();
                 if table.is_empty() {
@@ -527,7 +567,7 @@ unsafe extern "C" fn last_error(out: *mut u8, capacity: usize) -> usize {
     .unwrap_or(0)
 }
 
-static API: SiglusApiV1 = SiglusApiV1 {
+const API_BASE: SiglusApiV1 = SiglusApiV1 {
     struct_size: std::mem::size_of::<SiglusApiV1>() as u32,
     abi_version: ABI_VERSION,
     magic: ABI_MAGIC,
@@ -541,6 +581,17 @@ static API: SiglusApiV1 = SiglusApiV1 {
     runtime_input,
     runtime_is_exit_requested,
     last_error,
+};
+
+static API: SiglusApiV1 = API_BASE;
+
+static API_V2: SiglusApiV2 = SiglusApiV2 {
+    base: SiglusApiV1 {
+        struct_size: std::mem::size_of::<SiglusApiV2>() as u32,
+        abi_version: 2,
+        ..API_BASE
+    },
+    runtime_create_with_save_dir,
 };
 
 static DIAGNOSTICS_API: SiglusDiagnosticsApiV1 = SiglusDiagnosticsApiV1 {
@@ -567,6 +618,14 @@ pub unsafe extern "C" fn art3m1s_siglus_get_api_v1(out_size: *mut usize) -> *con
         unsafe { *out_size = std::mem::size_of::<SiglusApiV1>() };
     }
     &API
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_siglus_get_api_v2(out_size: *mut usize) -> *const SiglusApiV2 {
+    if !out_size.is_null() {
+        unsafe { *out_size = std::mem::size_of::<SiglusApiV2>() };
+    }
+    &API_V2
 }
 
 #[unsafe(no_mangle)]
