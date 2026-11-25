@@ -1,4 +1,6 @@
 use std::ffi::{CString, c_char, c_void};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -9,6 +11,7 @@ use siglus_scene_vm::formats::{
     keys::{GAMEEXE_KEY, SCENE_KEY},
     scene_pck::ScenePckDecodeOptions,
 };
+use siglus_scene_vm::resource::{resolve_game_file, resolve_game_path, with_project_files};
 
 use crate::{
     SiglusAdapter, SiglusBootSource, SiglusGameexe, SiglusHostConfig, SiglusResourceSource,
@@ -231,7 +234,51 @@ impl SiglusBootSource for Boot {
     }
 }
 
+struct DirectoryFiles(PathBuf);
+
+impl DirectoryFiles {
+    fn path(&self, key: &str) -> PathBuf {
+        self.0.join(key)
+    }
+
+    fn resolve_file(&self, key: &str) -> Result<Option<PathBuf>> {
+        let path = self.path(key);
+        with_project_files(None, || resolve_game_file(&path))
+    }
+}
+
+impl SiglusResourceSource for DirectoryFiles {
+    fn query_size(&self, key: &str) -> Result<Option<u64>> {
+        self.resolve_file(key)?
+            .map(|path| Ok(path.metadata()?.len()))
+            .transpose()
+    }
+
+    fn read_range(&self, key: &str, offset: u64, output: &mut [u8]) -> Result<usize> {
+        let path = self
+            .resolve_file(key)?
+            .context("Siglus directory asset missing")?;
+        let mut file = File::open(path)?;
+        file.seek(SeekFrom::Start(offset))?;
+        Ok(file.read(output)?)
+    }
+
+    fn resolve_local_directory(&self, key: &str) -> Result<Option<PathBuf>> {
+        let path = self.path(key);
+        Ok(with_project_files(None, || resolve_game_path(&path))?.filter(|p| p.is_dir()))
+    }
+}
+
 impl SiglusAdapter {
+    /// Reuse the directory bootstrap while sending file reads through the native Host.
+    pub fn open_directory_host(config: SiglusHostConfig) -> Result<Self> {
+        let root = config.project_dir.clone();
+        let files = Arc::new(DirectoryFiles(root.clone()));
+        Self::open_with(Some((root, files)), || {
+            crate::SiglusHost::new_external(config)
+        })
+    }
+
     /// # Safety
     /// The table's functions and context must honor the C Host IO contract.
     pub unsafe fn open_callback_io(callbacks: SiglusProjectIoV1, append: &str) -> Result<Self> {

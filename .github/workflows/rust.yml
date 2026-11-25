@@ -11,7 +11,7 @@ env:
   RFVP_REPOSITORY: https://github.com/Alphaly2K/rfvp.git
   RFVP_REVISION: 657500beb80a8839e9c6c2c7e5387d0dd3db22c9
   SIGLUS_REPOSITORY: https://github.com/Alphaly2K/siglus_rs.git
-  SIGLUS_REVISION: 7fc5c64b0454506d69ce08549035c813fe22f85b
+  SIGLUS_REVISION: 6690204ce83fb351b1d62226c7ef5bf08ca949cc
 
 jobs:
   build:

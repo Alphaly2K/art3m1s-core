@@ -425,7 +425,12 @@ fn create_runtime(
         }
         let uses_host_saves = config.save_store.is_some();
         let log_session = PendingLogSession(begin_log_session());
-        let adapter = match SiglusAdapter::open(config) {
+        let opened = if backend.is_none() {
+            SiglusAdapter::open_directory_host(config)
+        } else {
+            SiglusAdapter::open(config)
+        };
+        let adapter = match opened {
             Ok(adapter) => adapter,
             Err(error) => return fail(format!("Siglus VM initialization: {error:#}")),
         };
@@ -1598,9 +1603,11 @@ mod tests {
             std::process::id(),
             NEXT_HANDLE.fetch_add(1, Ordering::Relaxed),
         )));
-        std::fs::create_dir(&project.0).unwrap();
-        std::fs::write(project.0.join("Gameexe.ini"), GAMEEXE).unwrap();
-        std::fs::write(project.0.join("Scene.pck"), scene_pack()).unwrap();
+        let chapter = project.0.join("Chapter");
+        std::fs::create_dir_all(chapter.join("Fonts")).unwrap();
+        std::fs::write(project.0.join("Select.ini"), "chapter\tChapter\n").unwrap();
+        std::fs::write(chapter.join("gameexe.INI"), GAMEEXE).unwrap();
+        std::fs::write(chapter.join("scene.PCK"), scene_pack()).unwrap();
 
         let path = CString::new(project.0.to_str().unwrap()).unwrap();
         let ui = unsafe { &*art3m1s_siglus_get_host_api_v2(std::ptr::null_mut()) };
@@ -1660,6 +1667,17 @@ mod tests {
             dialog["id"].as_u64().unwrap()
         };
         let handle = open();
+        with_runtime(handle, |rt| {
+            rt.adapter.with_host(|_| {
+                let folder = art3m1s_siglus::siglus_scene_vm::resource::resolve_game_path(
+                    &project.0.join("chapter/fonts"),
+                )
+                .unwrap()
+                .unwrap();
+                assert!(folder.is_dir());
+            });
+            STATUS_OK
+        });
         let id = request(handle);
         let text = "雪あかり".as_bytes();
         assert_eq!(

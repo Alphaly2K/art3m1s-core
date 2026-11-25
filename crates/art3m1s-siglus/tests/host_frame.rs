@@ -73,10 +73,14 @@ fn steps_without_a_gpu_and_isolates_host_time_between_sessions() {
     assert!(!b.with_host(|host| host.vm_mut().is_blocked()));
 }
 
-struct MemoryProject([u8; 58]);
+struct MemoryProject {
+    bmp: [u8; 58],
+    append: String,
+    selection: String,
+}
 
 impl MemoryProject {
-    fn new(rgb: [u8; 3]) -> Self {
+    fn new(rgb: [u8; 3], append: &str) -> Self {
         let mut bmp = [0u8; 58];
         bmp[..2].copy_from_slice(b"BM");
         for (start, value) in [(2, 58u32), (10, 54), (14, 40), (18, 1), (22, 1), (34, 4)] {
@@ -85,20 +89,32 @@ impl MemoryProject {
         bmp[26] = 1;
         bmp[28] = 24;
         bmp[54..57].copy_from_slice(&[rgb[2], rgb[1], rgb[0]]);
-        Self(bmp)
+        Self {
+            bmp,
+            append: append.into(),
+            selection: format!("{append}\tChapter\n"),
+        }
+    }
+
+    fn file(&self, key: &str) -> Option<&[u8]> {
+        if key.eq_ignore_ascii_case("Select.ini") {
+            Some(self.selection.as_bytes())
+        } else if key.eq_ignore_ascii_case(&format!("{}/g00/color.bmp", self.append)) {
+            Some(&self.bmp)
+        } else {
+            None
+        }
     }
 }
 
 impl SiglusResourceSource for MemoryProject {
     fn query_size(&self, key: &str) -> anyhow::Result<Option<u64>> {
-        Ok(key
-            .eq_ignore_ascii_case("g00/color.bmp")
-            .then_some(self.0.len() as u64))
+        Ok(self.file(key).map(|bytes| bytes.len() as u64))
     }
 
     fn read_range(&self, key: &str, offset: u64, output: &mut [u8]) -> anyhow::Result<usize> {
-        anyhow::ensure!(key.eq_ignore_ascii_case("g00/color.bmp"));
-        let data = &self.0[(offset as usize)..];
+        let bytes = self.file(key).expect("known resource");
+        let data = &bytes[offset as usize..];
         let count = data.len().min(output.len()).min(5);
         output[..count].copy_from_slice(&data[..count]);
         Ok(count)
@@ -108,18 +124,18 @@ impl SiglusResourceSource for MemoryProject {
 #[test]
 fn loads_named_images_from_the_active_host_project() {
     let root = PathBuf::from("siglus-memory-project");
-    let open = |rgb| {
+    let open = |rgb, append| {
         let mut config = SiglusHostConfig::new(root.clone());
         config.scene_id = Some(0);
         SiglusAdapter::open_with_project_files(
             config,
             Arc::new(BootSource),
-            Arc::new(MemoryProject::new(rgb)),
+            Arc::new(MemoryProject::new(rgb, append)),
         )
         .unwrap()
     };
-    let mut a = open([0x12, 0x34, 0x56]);
-    let mut b = open([0x78, 0x90, 0xab]);
+    let mut a = open([0x12, 0x34, 0x56], "first");
+    let mut b = open([0x78, 0x90, 0xab], "second");
     for (session, expected) in [
         (&mut a, [0x12, 0x34, 0x56, 0xff]),
         (&mut b, [0x78, 0x90, 0xab, 0xff]),
