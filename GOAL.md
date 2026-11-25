@@ -7,6 +7,12 @@
 - Artemis 的所有平台统一 Luau。RFVP、Siglus 和 KRKR 保留各自的脚本和资源语义，
   按同一 Host 契约迁移 adapter。
 
+## RFVP 上游同步
+
+RFVP fork 的 `main` 合并到 `657500be`，包含上游 `xmoezzz/rfvp` 的 `1f0c2795` 和原有 Host 迁移的 `2d5c2c4`。资源包继续按偏移读取。上游 `RfvpStorage` 接入目录和 Host 回调，保留现有存档键、旧槽位别名和关闭时写入全局存档的行为。
+
+macOS 通过 RFVP 自身默认构建和 Host 构建检查、Core 的 Metal 聚合库构建、6 项 v1 ABI 测试和 2 项 v2 C 冒烟。Flutter 用合成项目验证了 v1 默认路径、v2 显式启用、帧像素、Host 资源读取及存档写入。
+
 ## RFVP、Siglus 和 KRKR adapter 迁移准备
 
 | 引擎 | 当前 Host 接入 | 实现入口与待拆边界 |
