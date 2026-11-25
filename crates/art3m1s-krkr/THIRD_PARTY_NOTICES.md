@@ -15,6 +15,8 @@ commercial games that were not originally developed with KRKRSDL3. If the
 KRKRSDL3 code itself is modified, complete corresponding modifications must
 be made publicly available under the same terms when the binary is distributed.
 
+The TJS object pool change is published in `native/upstream/tjs-pool-reset.patch`.
+
 Distribution builds must retain upstream copyright and license texts and
 publish corresponding source and build materials required by enabled copyleft
 dependencies. The FFmpeg build must use a license configuration compatible

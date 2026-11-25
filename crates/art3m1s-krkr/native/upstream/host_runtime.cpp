@@ -11,9 +11,11 @@
 #include <cstring>
 #include <deque>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -121,8 +123,13 @@ struct Runtime
     std::vector<Art3m1sKrkrInputEventV1> pending_input;
     std::thread worker;
     std::string game_root;
+    std::vector<uint8_t> leased_pixels;
+    uint64_t leased_frame_id = 0;
 };
 
+// The caller serializes API calls. Only the input pump reads the worker pointer.
+std::unique_ptr<Runtime> g_runtime;
+uint64_t g_runtime_handle = 0;
 std::atomic<Runtime*> g_active_runtime{nullptr};
 
 std::string LowerAscii(std::string value)
@@ -359,6 +366,39 @@ tTVPMouseButton ToMouseButton(uint32_t code)
     return mbLeft;
 }
 
+std::string PrepareSaveRoot(const std::string& game_root, const char* save_root_utf8)
+{
+    namespace fs = std::filesystem;
+    auto root = fs::weakly_canonical(fs::absolute(fs::u8path(save_root_utf8)));
+    fs::create_directories(root);
+    auto project = fs::u8path(game_root);
+    if (!fs::is_directory(project))
+        project = project.parent_path();
+    const auto legacy = fs::weakly_canonical(fs::absolute(project / "savedata"));
+    const auto imported = root / ".krkr-imported";
+    if (!fs::exists(imported) && legacy != root)
+    {
+        // A destination inside savedata would be visited by a recursive copy.
+        const auto relative = root.lexically_relative(legacy);
+        if (!relative.empty() && *relative.begin() != "..")
+            throw std::invalid_argument("save destination is inside the previous save directory");
+        if (fs::is_directory(legacy))
+        {
+            fs::copy(legacy, root, fs::copy_options::recursive |
+                fs::copy_options::skip_existing | fs::copy_options::skip_symlinks);
+        }
+        std::ofstream marker(imported, std::ios::binary);
+        marker << "1";
+        marker.close();
+        if (!marker)
+            throw std::runtime_error("could not mark the KRKR save import complete");
+    }
+    auto native = root.generic_u8string();
+    if (native.back() != '/')
+        native.push_back('/');
+    return native;
+}
+
 int32_t RuntimeCreateImpl(const char* game_root_utf8,
                           const char* save_root_utf8,
                           const Art3m1sKrkrRuntimeConfigV1* config,
@@ -368,9 +408,7 @@ int32_t RuntimeCreateImpl(const char* game_root_utf8,
         config->struct_size != sizeof(Art3m1sKrkrRuntimeConfigV1) ||
         config->width == 0 || config->height == 0)
         return ART3M1S_KRKR_STATUS_INVALID_ARGUMENT;
-    if (save_root_utf8 && *save_root_utf8)
-        return ART3M1S_KRKR_STATUS_UNSUPPORTED;
-    if (Application || g_active_runtime.load(std::memory_order_acquire))
+    if (Application || g_runtime)
         return ART3M1S_KRKR_STATUS_ENGINE;
     StartLogCapture();
     art3m1s::krkr::ResetAudioHost();
@@ -378,6 +416,9 @@ int32_t RuntimeCreateImpl(const char* game_root_utf8,
     std::string game_root = ResolveRuntimeEntry(game_root_utf8);
     if (game_root.empty())
         return ART3M1S_KRKR_STATUS_INVALID_ARGUMENT;
+    std::string save_root;
+    if (save_root_utf8 && *save_root_utf8)
+        save_root = PrepareSaveRoot(game_root, save_root_utf8);
     std::string program = ResolveResourceExecutable();
 #if defined(_KRKRSDL3_ANDROID)
     // Keep the virtual executable path stable and local to the game rather
@@ -403,7 +444,7 @@ int32_t RuntimeCreateImpl(const char* game_root_utf8,
         g_render_host.user_data ? &g_render_host : nullptr;
     auto* capture = new art3m1s::krkr::CaptureBackend(render_host);
     if (!Art3m1sKrkrHeadlessInit(
-            static_cast<int>(argv.size() - 1), argv.data(), capture))
+            static_cast<int>(argv.size() - 1), argv.data(), capture, save_root.c_str()))
         return ART3M1S_KRKR_STATUS_ENGINE;
     if (!Application || TVPGetWindowCount() <= 0)
     {
@@ -467,20 +508,23 @@ int32_t RuntimeCreateImpl(const char* game_root_utf8,
             throw;
         }
     }
-    *out_runtime = reinterpret_cast<uint64_t>(runtime.release());
+    g_runtime = std::move(runtime);
+    if (++g_runtime_handle == 0)
+        ++g_runtime_handle;
+    *out_runtime = g_runtime_handle;
     return ART3M1S_KRKR_STATUS_OK;
 }
 
 Runtime* GetRuntime(uint64_t handle)
 {
-    return reinterpret_cast<Runtime*>(handle);
+    return handle == g_runtime_handle ? g_runtime.get() : nullptr;
 }
 
 void RuntimeDestroyImpl(uint64_t handle)
 {
-    Runtime* runtime = GetRuntime(handle);
-    if (!runtime)
+    if (!GetRuntime(handle))
         return;
+    auto runtime = std::move(g_runtime);
     if (runtime->async_ticks)
     {
         runtime->stopping.store(true);
@@ -492,7 +536,6 @@ void RuntimeDestroyImpl(uint64_t handle)
     runtime->capture = nullptr;
     Art3m1sKrkrHeadlessQuit();
     art3m1s::krkr::ResetAudioHost();
-    delete runtime;
     SDL_SetLogPriority(SDL_LOG_CATEGORY_APPLICATION, g_default_app_log_priority);
     SDL_SetLogPriority(SDL_LOG_CATEGORY_AUDIO, g_default_audio_log_priority);
     g_log_capture_active.store(false, std::memory_order_release);
@@ -636,10 +679,16 @@ int32_t RuntimeAcquireFrameImpl(uint64_t handle, Art3m1sKrkrFrameV1* out_frame)
     if (!runtime || !out_frame || out_frame->struct_size != sizeof(Art3m1sKrkrFrameV1))
         return ART3M1S_KRKR_STATUS_INVALID_ARGUMENT;
 
+    if (runtime->async_ticks || runtime->leased_frame_id != 0)
+        return ART3M1S_KRKR_STATUS_NO_FRAME;
+
     const art3m1s::krkr::FrameView frame = runtime->capture->AcquireFrame();
     if (!frame.pixels || !frame.width || !frame.height)
         return ART3M1S_KRKR_STATUS_NO_FRAME;
 
+    const auto length = static_cast<size_t>(frame.stride) * frame.height;
+    runtime->leased_pixels.assign(frame.pixels, frame.pixels + length);
+    runtime->leased_frame_id = frame.frame_id;
     *out_frame = {};
     out_frame->struct_size = sizeof(Art3m1sKrkrFrameV1);
     out_frame->format = ART3M1S_KRKR_FRAME_FORMAT_RGBA8;
@@ -648,9 +697,8 @@ int32_t RuntimeAcquireFrameImpl(uint64_t handle, Art3m1sKrkrFrameV1* out_frame)
     out_frame->stride = frame.stride;
     out_frame->frame_id = frame.frame_id;
     out_frame->generation = frame.generation;
-    out_frame->pixels = frame.pixels;
-    out_frame->pixels_len =
-        static_cast<size_t>(frame.stride) * static_cast<size_t>(frame.height);
+    out_frame->pixels = runtime->leased_pixels.data();
+    out_frame->pixels_len = length;
     return ART3M1S_KRKR_STATUS_OK;
 }
 
@@ -659,9 +707,11 @@ int32_t RuntimeReleaseFrameImpl(uint64_t handle, uint64_t frame_id)
     Runtime* runtime = GetRuntime(handle);
     if (!runtime)
         return ART3M1S_KRKR_STATUS_INVALID_HANDLE;
-    const auto frame = runtime->capture->AcquireFrame();
-    return frame.frame_id == frame_id ? ART3M1S_KRKR_STATUS_OK
-                                      : ART3M1S_KRKR_STATUS_INVALID_ARGUMENT;
+    if (frame_id == 0 || runtime->leased_frame_id != frame_id)
+        return ART3M1S_KRKR_STATUS_INVALID_ARGUMENT;
+    runtime->leased_frame_id = 0;
+    runtime->leased_pixels.clear();
+    return ART3M1S_KRKR_STATUS_OK;
 }
 
 int32_t RuntimePollAudioCommandImpl(uint64_t handle, Art3m1sKrkrAudioCommandV1* out_command)
@@ -942,13 +992,13 @@ extern "C" ART3M1S_KRKR_EXPORT const Art3m1sKrkrApiV1* art3m1s_krkr_native_get_a
 extern "C" ART3M1S_KRKR_EXPORT int32_t art3m1s_krkr_native_set_render_host_v1(
     const Art3m1sKrkrRenderHostV1* host)
 {
-    if (Application)
-        return ART3M1S_KRKR_STATUS_ENGINE;
     if (!host)
     {
         g_render_host = {};
         return ART3M1S_KRKR_STATUS_OK;
     }
+    if (Application)
+        return ART3M1S_KRKR_STATUS_ENGINE;
     if (host->struct_size != sizeof(Art3m1sKrkrRenderHostV1) ||
         host->abi_version != ART3M1S_KRKR_RENDER_HOST_ABI_VERSION ||
         !host->user_data || !host->begin_frame || !host->create_texture ||

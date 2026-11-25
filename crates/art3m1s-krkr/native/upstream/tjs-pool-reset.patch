@@ -1,0 +1,30 @@
+diff --git a/tjs2/tjs.h b/tjs2/tjs.h
+index 635a1a6..edb3134 100644
+--- a/tjs2/tjs.h
++++ b/tjs2/tjs.h
+@@ -298,6 +298,7 @@ public:
+         {
+             freeStack[i] = i;
+         }
++        size = initialCapacity;
+         head = initialCapacity;
+         freeStackSize = initialCapacity;
+     }
+@@ -340,13 +341,13 @@ public:
+         }
+
+         // 重置空闲栈
+-        size_t stackSize = freeStackSize.load(std::memory_order_acquire);
+-        for (size_t i = 0; i < stackSize; ++i)
++        const size_t slotCount = slots.size();
++        for (size_t i = 0; i < slotCount; ++i)
+         {
+             freeStack[i] = i;
+         }
+-        head.store(stackSize, std::memory_order_release);
+-        size.store(0, std::memory_order_release);
++        head.store(slotCount, std::memory_order_release);
++        size.store(slotCount, std::memory_order_release);
+     }
+
+     template<typename Func>

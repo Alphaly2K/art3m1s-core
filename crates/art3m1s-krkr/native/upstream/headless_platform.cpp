@@ -8,6 +8,7 @@
 #define SDL_MAIN_HANDLED 1
 #include <SDL3/SDL_main.h>
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -15,7 +16,9 @@
 #include "PlatformView.h"
 #include "TVPApplication.h"
 #include "TVPCompositor.h"
+#include "TVPDebug.h"
 #include "TVPSettings.h"
+#include "TVPStorage.h"
 #include "TVPSystem.h"
 #include "TVPWindow.h"
 #include "WindowManager.h"
@@ -26,10 +29,6 @@ int g_width = 1280;
 int g_height = 720;
 std::string g_title = "TVP Engine";
 bool g_initialized = false;
-// Kirikiri's TJS object pools are process-global and cannot be reconstructed
-// after TVPUninitScriptEngine(). A second HeadlessInit in the same process
-// previously SIGSEGV'd in tTJSScriptBlock::tTJSScriptBlock. Refuse it.
-bool g_process_consumed = false;
 }
 
 // The embedded host may deliver input while a script is inside showModal().
@@ -37,27 +36,38 @@ bool g_process_consumed = false;
 void Art3m1sKrkrPumpInput();
 
 bool Art3m1sKrkrHeadlessInit(
-    int argc, char* argv[], krkrsdl3::iTVPRenderBackend* backend)
+    int argc, char* argv[], krkrsdl3::iTVPRenderBackend* backend,
+    const char* save_root_utf8)
 {
-    if (g_process_consumed || g_initialized || Application || argc < 2 || !backend)
+    std::unique_ptr<krkrsdl3::iTVPRenderBackend> pending_backend(backend);
+    if (g_initialized || Application || argc < 2 || !backend)
         return false;
     if (!TVPParseArguments(argc, argv))
+    {
+        TVPClearAllArguments();
         return false;
+    }
+    if (save_root_utf8 && *save_root_utf8)
+    {
+        TVPDataPath = TVPNormalizeStorageName(ttstr(save_root_utf8));
+        TVPNativeDataPath = TVPGetLocallyAccessibleName(TVPDataPath);
+        TVPSetLogLocation(TVPNativeDataPath);
+    }
 
     // The embedding host owns main() on every platform. SDL's main wrapper
     // never runs, so mark it ready before initializing the event subsystem.
     SDL_SetMainReady();
     if (!SDL_Init(SDL_INIT_EVENTS))
+    {
+        TVPClearAllArguments();
         return false;
+    }
 
     g_width = TVPSettings.window_width;
     g_height = TVPSettings.window_height;
-    krkrsdl3::TVPSetRenderBackend(backend);
+    krkrsdl3::TVPSetRenderBackend(pending_backend.release());
 
     Application = new tTVPApplication;
-    // StartApplication() constructs the process-global TJS engine. From this
-    // point the process cannot host another KRKR runtime, even if startup fails.
-    g_process_consumed = true;
     if (!Application->StartApplication())
     {
         delete Application;

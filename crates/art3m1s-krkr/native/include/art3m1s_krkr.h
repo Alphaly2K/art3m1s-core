@@ -210,6 +210,7 @@ typedef int32_t (*ArtKrkrRuntimeSetExternalSurfaceFn)(uint64_t runtime,
                                                       uint32_t width,
                                                       uint32_t height);
 
+/* Serialize calls to the native runtime API. A handle is valid through destroy. */
 typedef struct Art3m1sKrkrApiV1 {
     uint32_t struct_size;
     uint32_t abi_version;

@@ -52,6 +52,8 @@ struct ApiRuntime {
 // for same-thread callbacks made by the native KRKR runtime.
 unsafe impl Send for ApiRuntime {}
 
+// Renderer registration, startup and shutdown share native process state.
+static LIFECYCLE: Mutex<()> = Mutex::new(());
 static RUNTIMES: LockedHandleTable<ApiRuntime> = LockedHandleTable::new();
 
 /// Returns the process-lifetime KRKR API table.
@@ -190,6 +192,9 @@ unsafe extern "C" fn runtime_create(
             config_ref.width,
             config_ref.height,
         )));
+        let Ok(_lifecycle) = LIFECYCLE.lock() else {
+            return STATUS_ENGINE;
+        };
         let render_host = KrkrRenderer::host_v1(&renderer);
         if let Err(status) = set_native_render_host(Some(&render_host)) {
             return status;
@@ -237,6 +242,9 @@ unsafe extern "C" fn runtime_destroy(runtime: u64) {
         return;
     }
     let _ = catch_unwind(AssertUnwindSafe(|| {
+        let Ok(_lifecycle) = LIFECYCLE.lock() else {
+            return;
+        };
         let Some(runtime) = RUNTIMES.take(runtime) else {
             return;
         };
@@ -246,6 +254,7 @@ unsafe extern "C" fn runtime_destroy(runtime: u64) {
                 .runtime_destroy
                 .expect("runtime_destroy is required"))(runtime.handle);
         }
+        let _ = set_native_render_host(None);
     }));
 }
 
@@ -321,6 +330,9 @@ unsafe extern "C" fn runtime_acquire_frame(runtime: u64, out_frame: *mut CoreFra
             return STATUS_INVALID_ARGUMENT;
         }
         RUNTIMES.with_mut(runtime, STATUS_INVALID_HANDLE, |runtime| {
+            if runtime.pending_frame_id.is_some() {
+                return ART3M1S_KRKR_STATUS_NO_FRAME;
+            }
             let mut renderer = match runtime.renderer.lock() {
                 Ok(renderer) => renderer,
                 Err(_) => return STATUS_ENGINE,

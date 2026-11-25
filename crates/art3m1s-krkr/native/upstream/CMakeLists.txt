@@ -51,6 +51,7 @@ set(USE_RENDER_GL OFF)
 set(USE_RENDER_VK OFF)
 
 set(_generated_dir "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(_tjs_overlay "${_generated_dir}/tjs2")
 file(MAKE_DIRECTORY "${_generated_dir}")
 
 foreach(_list core environ plugins tjs2)
@@ -66,8 +67,35 @@ foreach(_list core environ plugins tjs2)
         _contents
         "${_contents}"
     )
+    if(_list STREQUAL "tjs2")
+        string(REPLACE "\${KRKRSDL3_SOURCE_DIR}/tjs2" "\${_tjs_overlay}" _contents "${_contents}")
+    endif()
     file(WRITE "${_generated_dir}/cmake_${_list}.txt" "${_contents}")
 endforeach()
+
+# Compile a local copy so the adapter can reset TJS between game sessions.
+find_package(Git REQUIRED)
+file(GLOB _tjs_inputs CONFIGURE_DEPENDS "${KRKRSDL3_SOURCE_DIR}/tjs2/*")
+file(MAKE_DIRECTORY "${_tjs_overlay}")
+foreach(_input IN LISTS _tjs_inputs)
+    get_filename_component(_name "${_input}" NAME)
+    if(NOT IS_DIRECTORY "${_input}" AND NOT _name STREQUAL "tjs.h")
+        configure_file("${_input}" "${_tjs_overlay}/${_name}" COPYONLY)
+    endif()
+endforeach()
+set(_patch_dir "${_generated_dir}/tjs-patch")
+file(MAKE_DIRECTORY "${_patch_dir}/tjs2")
+file(COPY_FILE "${KRKRSDL3_SOURCE_DIR}/tjs2/tjs.h" "${_patch_dir}/tjs2/tjs.h")
+set(_tjs_patch "${CMAKE_CURRENT_SOURCE_DIR}/tjs-pool-reset.patch")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${_tjs_patch}" "${KRKRSDL3_SOURCE_DIR}/tjs2/tjs.h")
+execute_process(
+    COMMAND "${GIT_EXECUTABLE}" --git-dir=${_patch_dir}/no-repository
+            -c core.autocrlf=false apply "${_tjs_patch}"
+    WORKING_DIRECTORY "${_patch_dir}"
+    COMMAND_ERROR_IS_FATAL ANY
+)
+file(COPY_FILE "${_patch_dir}/tjs2/tjs.h" "${_tjs_overlay}/tjs.h" ONLY_IF_DIFFERENT)
 
 include("${_generated_dir}/cmake_core.txt")
 include("${_generated_dir}/cmake_environ.txt")
@@ -131,6 +159,42 @@ if(ART3M1S_KRKR_VALIDATE_SOURCE_LISTS)
 endif()
 
 add_library(art3m1s_krkr_host SHARED ${_all_sources})
+
+# Static codec and SDL dependencies must not add symbols to the Host ABI.
+set(_host_exports
+    art3m1s_krkr_native_get_api_v1
+    art3m1s_krkr_native_log_next_bytes
+    art3m1s_krkr_native_poll_log
+    art3m1s_krkr_native_set_debug
+    art3m1s_krkr_native_set_master_volume
+    art3m1s_krkr_native_set_render_host_v1
+)
+if(ANDROID)
+    list(APPEND _host_exports
+        Java_moe_alphaly_art3m1s_KrkrNativeBridge_nativeSetAssetManager
+        Java_org_tvp_krkrsdl3_KRKRCall_nativeOnMenuItemClick
+        Java_org_tvp_krkrsdl3_KRKRCall_nativeOnMenuDismiss)
+endif()
+set(_export_file "${CMAKE_CURRENT_BINARY_DIR}/krkr-host-exports.txt")
+if(APPLE)
+    set(_export_list "")
+    foreach(_export IN LISTS _host_exports)
+        string(APPEND _export_list "_${_export}\n")
+    endforeach()
+    file(CONFIGURE OUTPUT "${_export_file}" CONTENT "${_export_list}")
+    target_link_options(art3m1s_krkr_host PRIVATE "LINKER:-exported_symbols_list,${_export_file}")
+elseif(UNIX OR ANDROID)
+    set(_export_list "{\n  global:\n")
+    foreach(_export IN LISTS _host_exports)
+        string(APPEND _export_list "    ${_export};\n")
+    endforeach()
+    string(APPEND _export_list "  local: *;\n};\n")
+    file(CONFIGURE OUTPUT "${_export_file}" CONTENT "${_export_list}")
+    target_link_options(art3m1s_krkr_host PRIVATE "LINKER:--version-script,${_export_file}")
+endif()
+if(APPLE OR UNIX OR ANDROID)
+    set_property(TARGET art3m1s_krkr_host APPEND PROPERTY LINK_DEPENDS "${_export_file}")
+endif()
 
 target_compile_definitions(
     art3m1s_krkr_host

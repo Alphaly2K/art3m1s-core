@@ -81,13 +81,14 @@ fn main() {
         .arg(format!("-DCMAKE_BUILD_TYPE={build_type}"));
 
     if upstream {
-        let krkr_source = krkr_source.expect("checked above");
+        let krkr_source = PathBuf::from(krkr_source.expect("checked above"));
+        println!(
+            "cargo:rerun-if-changed={}",
+            krkr_source.join("tjs2").display()
+        );
         let krkr_build = PathBuf::from(krkr_build.expect("checked above"));
         configure
-            .arg(format!(
-                "-DKRKRSDL3_SOURCE_DIR={}",
-                PathBuf::from(krkr_source).display()
-            ))
+            .arg(format!("-DKRKRSDL3_SOURCE_DIR={}", krkr_source.display()))
             .arg(format!("-DKRKRSDL3_BUILD_DIR={}", krkr_build.display()))
             .arg(format!(
                 "-DVCPKG_OVERLAY_TRIPLETS={}",
