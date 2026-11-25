@@ -16,6 +16,8 @@ use siglus_scene_vm::assets::RgbaImage;
 pub use siglus_scene_vm::host::{SiglusBootSource, SiglusGameexe, SiglusSaveStore};
 use siglus_scene_vm::host::{SiglusHost, SiglusHostConfig};
 
+mod project_io;
+pub use project_io::SiglusProjectIoV1;
 mod save_directory;
 pub use save_directory::DirectorySaves;
 use siglus_scene_vm::image_manager::{ImageKey, ImageManager};

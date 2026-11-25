@@ -21,8 +21,8 @@ use art3m1s_siglus::siglus_scene_vm::{
     runtime::native_ui::{NativeMessageBoxKind, NativeMessageBoxRequest, NativeUiBackend},
 };
 use art3m1s_siglus::{
-    DirectorySaves, SiglusAdapter, SiglusFrameCompiler, SiglusFrameSnapshot, SiglusRenderer,
-    is_siglus_project,
+    DirectorySaves, SiglusAdapter, SiglusFrameCompiler, SiglusFrameSnapshot, SiglusProjectIoV1,
+    SiglusRenderer, is_siglus_project,
 };
 
 pub const ABI_VERSION: u32 = 1;
@@ -424,57 +424,104 @@ fn create_runtime(
             }
         }
         let uses_host_saves = config.save_store.is_some();
-        let mut log_session = PendingLogSession(begin_log_session());
-        let mut adapter = match SiglusAdapter::open(config) {
+        let log_session = PendingLogSession(begin_log_session());
+        let adapter = match SiglusAdapter::open(config) {
             Ok(adapter) => adapter,
             Err(error) => return fail(format!("Siglus VM initialization: {error:#}")),
         };
-        let (width, height) = adapter.logical_size();
-        let save_fingerprint =
-            uses_host_saves.then(|| adapter.with_host(|host| host.persist_global_if_changed(None)));
-        if width == 0
-            || height == 0
-            || (width as usize)
-                .checked_mul(height as usize)
-                .and_then(|n| n.checked_mul(4))
-                .is_none()
-        {
-            return fail("Siglus stage dimensions are invalid");
-        }
-        let presenter = match backend
-            .map(|id| Presenter::new(id, width, height))
-            .transpose()
-        {
-            Ok(presenter) => presenter,
-            Err(error) => return fail(format!("Siglus GPU initialization: {error}")),
-        };
-        let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
-        if handle == 0 || handle == u64::MAX {
-            return fail("Siglus runtime handles exhausted");
-        }
-        RUNTIMES.with(|table| {
-            table.borrow_mut().insert(
-                handle,
-                Runtime {
-                    adapter,
-                    presenter,
-                    compiler: SiglusFrameCompiler::default(),
-                    latest: None,
-                    explicit_presentation: backend.is_none(),
-                    width,
-                    height,
-                    exiting: false,
-                    save_fingerprint,
-                    audio_output: None,
-                    host_audio_clock: false,
-                    dialog: None,
-                },
-            );
-        });
-        unsafe { *out = handle };
-        log_session.0 = false;
-        STATUS_OK
+        register_runtime(adapter, backend, uses_host_saves, log_session, out)
     })
+}
+
+unsafe extern "C" fn open_project_io(
+    callbacks: *const SiglusProjectIoV1,
+    append: *const c_char,
+    out: *mut u64,
+) -> i32 {
+    guarded(|| {
+        if out.is_null() {
+            return STATUS_ARGUMENT;
+        }
+        unsafe { out.write(0) };
+        if callbacks.is_null()
+            || unsafe { callbacks.cast::<u32>().read() }
+                < std::mem::size_of::<SiglusProjectIoV1>() as u32
+        {
+            return STATUS_ARGUMENT;
+        }
+        let callbacks = unsafe { callbacks.read() };
+        if !callbacks.is_valid() {
+            return STATUS_ARGUMENT;
+        }
+        let append = if append.is_null() {
+            ""
+        } else {
+            let Ok(append) = unsafe { CStr::from_ptr(append) }.to_str() else {
+                return STATUS_ARGUMENT;
+            };
+            append
+        };
+        let log_session = PendingLogSession(begin_log_session());
+        let adapter = match unsafe { SiglusAdapter::open_callback_io(callbacks, append) } {
+            Ok(adapter) => adapter,
+            Err(error) => return fail(format!("Siglus Host IO initialization: {error:#}")),
+        };
+        register_runtime(adapter, None, true, log_session, out)
+    })
+}
+
+fn register_runtime(
+    mut adapter: SiglusAdapter,
+    backend: Option<i32>,
+    uses_host_saves: bool,
+    mut log_session: PendingLogSession,
+    out: *mut u64,
+) -> i32 {
+    let (width, height) = adapter.logical_size();
+    let save_fingerprint =
+        uses_host_saves.then(|| adapter.with_host(|host| host.persist_global_if_changed(None)));
+    if width == 0
+        || height == 0
+        || (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|n| n.checked_mul(4))
+            .is_none()
+    {
+        return fail("Siglus stage dimensions are invalid");
+    }
+    let presenter = match backend
+        .map(|id| Presenter::new(id, width, height))
+        .transpose()
+    {
+        Ok(presenter) => presenter,
+        Err(error) => return fail(format!("Siglus GPU initialization: {error}")),
+    };
+    let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+    if handle == 0 || handle == u64::MAX {
+        return fail("Siglus runtime handles exhausted");
+    }
+    RUNTIMES.with(|table| {
+        table.borrow_mut().insert(
+            handle,
+            Runtime {
+                adapter,
+                presenter,
+                compiler: SiglusFrameCompiler::default(),
+                latest: None,
+                explicit_presentation: backend.is_none(),
+                width,
+                height,
+                exiting: false,
+                save_fingerprint,
+                audio_output: None,
+                host_audio_clock: false,
+                dialog: None,
+            },
+        );
+    });
+    unsafe { *out = handle };
+    log_session.0 = false;
+    STATUS_OK
 }
 
 unsafe extern "C" fn runtime_destroy(handle: u64) {
@@ -1323,6 +1370,8 @@ pub struct SiglusHostApiV2 {
     pub send_text: unsafe extern "C" fn(u64, *const u8, usize) -> i32,
     pub frames: &'static SiglusFrameApiV1,
     pub output_clock: &'static SiglusOutputClockApiV1,
+    pub open_project_io:
+        unsafe extern "C" fn(*const SiglusProjectIoV1, *const c_char, *mut u64) -> i32,
 }
 
 static HOST_API_V2: SiglusHostApiV2 = SiglusHostApiV2 {
@@ -1336,6 +1385,7 @@ static HOST_API_V2: SiglusHostApiV2 = SiglusHostApiV2 {
     send_text,
     frames: &FRAME_API,
     output_clock: &OUTPUT_CLOCK_API,
+    open_project_io,
 };
 
 /// # Safety
@@ -1355,30 +1405,9 @@ mod tests {
     use super::*;
     use std::ffi::CString;
 
-    #[test]
-    fn host_ui_resume_and_text() {
-        use art3m1s_siglus::siglus_scene_vm::runtime::{
-            constants::cd,
-            globals::{EditBoxListState, SystemMessageBoxButton},
-        };
+    const GAMEEXE: &str = "#SCREEN_SIZE = 320, 240\n#MENU_SCENE = \"_start\", 0\n";
 
-        struct Project(PathBuf);
-        impl Drop for Project {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-        let project = Project(std::env::temp_dir().join(format!(
-            "art3m1s-siglus-ui-{}-{}",
-            std::process::id(),
-            NEXT_HANDLE.fetch_add(1, Ordering::Relaxed),
-        )));
-        std::fs::create_dir(&project.0).unwrap();
-        std::fs::write(
-            project.0.join("Gameexe.ini"),
-            "#SCREEN_SIZE = 320, 240\n#MENU_SCENE = \"_start\", 0\n",
-        )
-        .unwrap();
+    fn scene_pack() -> Vec<u8> {
         const PACK_HEADER: i32 = 23 * 4;
         const SCENE_HEADER: i32 = 33 * 4;
         let name: Vec<u16> = "_start".encode_utf16().collect();
@@ -1401,8 +1430,177 @@ mod tests {
         bytes.extend([0, SCENE_HEADER + 5].into_iter().flat_map(i32::to_le_bytes));
         bytes.extend(scene.into_iter().flat_map(i32::to_le_bytes));
         bytes.extend(0i32.to_le_bytes());
-        bytes.push(cd::EOF);
-        std::fs::write(project.0.join("Scene.pck"), bytes).unwrap();
+        bytes.push(art3m1s_siglus::siglus_scene_vm::runtime::constants::cd::EOF);
+        bytes
+    }
+
+    #[test]
+    fn callback_io_boots_and_reopens_with_host_saves() {
+        use art3m1s_siglus::siglus_scene_vm::runtime::forms::codes::ELM_GLOBAL_G;
+
+        struct Project {
+            data: Vec<u8>,
+            saves: Mutex<HashMap<String, Vec<u8>>>,
+            reads: AtomicU64,
+        }
+        impl Project {
+            fn file(&self, space: u32, key: &str) -> Option<Vec<u8>> {
+                if space == 1 {
+                    return self.saves.lock().unwrap().get(key).cloned();
+                }
+                match key.to_ascii_lowercase().as_str() {
+                    "chapter/gameexe.ini" => Some(GAMEEXE.as_bytes().to_vec()),
+                    "chapter/scene.pck" => Some(self.data.clone()),
+                    _ => None,
+                }
+            }
+        }
+        unsafe extern "C" fn retain(user: *mut c_void) {
+            unsafe { Arc::increment_strong_count(user.cast::<Project>()) };
+        }
+        unsafe extern "C" fn release(user: *mut c_void) {
+            unsafe { Arc::decrement_strong_count(user.cast::<Project>()) };
+        }
+        unsafe extern "C" fn query(
+            user: *mut c_void,
+            space: u32,
+            key: *const c_char,
+            out: *mut u64,
+        ) -> i32 {
+            let project = unsafe { &*user.cast::<Project>() };
+            let key = unsafe { CStr::from_ptr(key) }.to_str().unwrap();
+            let Some(bytes) = project.file(space, key) else {
+                return 1;
+            };
+            unsafe { out.write(bytes.len() as u64) };
+            0
+        }
+        unsafe extern "C" fn read(
+            user: *mut c_void,
+            space: u32,
+            key: *const c_char,
+            offset: u64,
+            output: *mut u8,
+            capacity: usize,
+            out: *mut usize,
+        ) -> i32 {
+            let project = unsafe { &*user.cast::<Project>() };
+            let key = unsafe { CStr::from_ptr(key) }.to_str().unwrap();
+            let Some(bytes) = project.file(space, key) else {
+                return 1;
+            };
+            let bytes = &bytes[offset as usize..];
+            let count = bytes.len().min(capacity).min(13);
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), output, count);
+                out.write(count);
+            }
+            project.reads.fetch_add(1, Ordering::Relaxed);
+            0
+        }
+        unsafe extern "C" fn write(
+            user: *mut c_void,
+            key: *const c_char,
+            bytes: *const u8,
+            len: usize,
+        ) -> i32 {
+            let project = unsafe { &*user.cast::<Project>() };
+            let key = unsafe { CStr::from_ptr(key) }.to_str().unwrap();
+            let bytes = unsafe { std::slice::from_raw_parts(bytes, len) };
+            project
+                .saves
+                .lock()
+                .unwrap()
+                .insert(key.to_owned(), bytes.to_vec());
+            0
+        }
+        unsafe extern "C" fn remove(user: *mut c_void, key: *const c_char) -> i32 {
+            let project = unsafe { &*user.cast::<Project>() };
+            let key = unsafe { CStr::from_ptr(key) }.to_str().unwrap();
+            project.saves.lock().unwrap().remove(key);
+            0
+        }
+
+        let project = Arc::new(Project {
+            data: scene_pack(),
+            saves: Mutex::new(HashMap::new()),
+            reads: AtomicU64::new(0),
+        });
+        let callbacks = SiglusProjectIoV1 {
+            struct_size: std::mem::size_of::<SiglusProjectIoV1>() as u32,
+            abi_version: 1,
+            user_data: Arc::as_ptr(&project).cast_mut().cast(),
+            retain: Some(retain),
+            release: Some(release),
+            query_size: Some(query),
+            read_range: Some(read),
+            write_save: Some(write),
+            remove_save: Some(remove),
+        };
+        let open = || {
+            let mut handle = 0;
+            let status = unsafe {
+                (HOST_API_V2.open_project_io)(&callbacks, c"chapter".as_ptr(), &mut handle)
+            };
+            assert_eq!(
+                status,
+                STATUS_OK,
+                "{}",
+                LAST_ERROR.with(|e| e.borrow().clone())
+            );
+            assert_eq!(Arc::strong_count(&project), 2);
+            handle
+        };
+        let first = open();
+        assert_eq!(unsafe { runtime_stage_width(first) }, 320);
+        assert!(project.reads.load(Ordering::Relaxed) > 2);
+        with_runtime(first, |rt| {
+            rt.adapter.with_host(|host| {
+                host.vm_mut()
+                    .ctx
+                    .globals
+                    .int_lists
+                    .insert(ELM_GLOBAL_G as u32, vec![531]);
+            });
+            STATUS_OK
+        });
+        unsafe { runtime_destroy(first) };
+        assert_eq!(Arc::strong_count(&project), 1);
+        assert!(!project.saves.lock().unwrap().is_empty());
+        let second = open();
+        with_runtime(second, |rt| {
+            rt.adapter.with_host(|host| {
+                assert_eq!(
+                    host.vm_mut().ctx.globals.int_lists[&(ELM_GLOBAL_G as u32)][0],
+                    531
+                );
+            });
+            STATUS_OK
+        });
+        unsafe { runtime_destroy(second) };
+        assert_eq!(Arc::strong_count(&project), 1);
+    }
+
+    #[test]
+    fn host_ui_resume_and_text() {
+        use art3m1s_siglus::siglus_scene_vm::runtime::globals::{
+            EditBoxListState, SystemMessageBoxButton,
+        };
+
+        struct Project(PathBuf);
+        impl Drop for Project {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let project = Project(std::env::temp_dir().join(format!(
+            "art3m1s-siglus-ui-{}-{}",
+            std::process::id(),
+            NEXT_HANDLE.fetch_add(1, Ordering::Relaxed),
+        )));
+        std::fs::create_dir(&project.0).unwrap();
+        std::fs::write(project.0.join("Gameexe.ini"), GAMEEXE).unwrap();
+        std::fs::write(project.0.join("Scene.pck"), scene_pack()).unwrap();
 
         let path = CString::new(project.0.to_str().unwrap()).unwrap();
         let ui = unsafe { &*art3m1s_siglus_get_host_api_v2(std::ptr::null_mut()) };
@@ -1626,7 +1824,7 @@ mod output_contract_tests {
         let host1 = unsafe { &*art3m1s_siglus_get_host_api_v1(&mut size) };
         assert_eq!(size, 16 + 4 * std::mem::size_of::<usize>());
         let host2 = unsafe { &*art3m1s_siglus_get_host_api_v2(&mut size) };
-        assert_eq!(size, 16 + 7 * std::mem::size_of::<usize>());
+        assert_eq!(size, 16 + 8 * std::mem::size_of::<usize>());
         assert!(std::ptr::eq(host1, host2.base));
         let output = unsafe { &*art3m1s_siglus_get_output_api_v1(&mut size) };
         assert_eq!(size, 16 + 5 * std::mem::size_of::<usize>());

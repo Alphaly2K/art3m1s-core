@@ -123,6 +123,25 @@ typedef struct Art3m1sSiglusOutputClockApiV1 {
     int32_t (*pump)(uint64_t session, uint32_t frames);
 } Art3m1sSiglusOutputClockApiV1;
 
+/* The engine retains user_data once while the project is in use. Workers can
+ * hold this reference past runtime.destroy. Release signals the final use.
+ * Callbacks must be thread-safe and must not reenter the current session.
+ * Namespace 0 selects project assets, 1 selects saves. Asset keys are relative
+ * UTF-8 paths with / separators and case-insensitive lookup. Save keys are names.
+ * A query result of 1 means absent. Reads can return fewer bytes than requested.
+ * A write replaces the entire save atomically. Return 0 for success. */
+typedef struct Art3m1sSiglusProjectIoV1 {
+    uint32_t struct_size, abi_version;
+    void* user_data;
+    void (*retain)(void* user_data);
+    void (*release)(void* user_data);
+    int32_t (*query_size)(void* user_data, uint32_t space, const char* key, uint64_t* size);
+    int32_t (*read_range)(void* user_data, uint32_t space, const char* key, uint64_t offset,
+                          uint8_t* output, size_t capacity, size_t* written);
+    int32_t (*write_save)(void* user_data, const char* key, const uint8_t* bytes, size_t len);
+    int32_t (*remove_save)(void* user_data, const char* key);
+} Art3m1sSiglusProjectIoV1;
+
 typedef struct Art3m1sSiglusHostV2 {
     uint32_t struct_size, abi_version;
     uint64_t magic; /* 0x325648534d334152, "RA3MSHV2" */
@@ -144,6 +163,11 @@ typedef struct Art3m1sSiglusHostV2 {
     const Art3m1sSiglusFrameApiV1* frames;
     /* Optional. Check struct_size before reading this field. */
     const Art3m1sSiglusOutputClockApiV1* output_clock;
+    /* Optional. Check struct_size before reading this field. Creates a CPU
+     * session from Scene.pck and Gameexe.dat or UTF-8 Gameexe.ini. Supply any
+     * project decode options through key.toml. Set append to null for the base. */
+    int32_t (*open_project_io)(const Art3m1sSiglusProjectIoV1* io, const char* append,
+                               uint64_t* session);
 } Art3m1sSiglusHostV2;
 
 /* All returned tables remain valid while the library is loaded. */
