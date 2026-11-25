@@ -9,6 +9,7 @@ use std::marker::PhantomData;
 use std::path::Path;
 use std::ptr;
 use std::rc::Rc;
+use std::sync::Mutex;
 
 use art3m1s_render::{
     Extent2D, GpuBackend, NativeSurface, PostProcessPass, PostProcessPipeline, UpscaleConfig,
@@ -200,6 +201,7 @@ pub struct RfvpHostAudioCommand {
 #[derive(Debug)]
 pub enum RfvpHostRuntimeError {
     InvalidPath,
+    SessionBusy,
     ResourcesCreate(i32),
     MountDirectory(i32),
     SetSaveRoot(i32),
@@ -234,6 +236,7 @@ impl fmt::Display for RfvpHostRuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidPath => write!(f, "RFVP path is not valid UTF-8"),
+            Self::SessionBusy => write!(f, "RFVP engine globals are in use"),
             Self::ResourcesCreate(status) => {
                 write!(f, "RFVP resources create failed with status {status}")
             }
@@ -304,10 +307,43 @@ impl From<ExternalRendererError> for RfvpHostRuntimeError {
     }
 }
 
+#[derive(Clone, Copy)]
+enum SessionMode {
+    Legacy,
+    Replay,
+}
+
+static ACTIVE_SESSIONS: Mutex<(usize, bool)> = Mutex::new((0, false));
+
+struct SessionPermit(SessionMode);
+
+impl SessionPermit {
+    fn reserve(mode: SessionMode) -> Result<Self, RfvpHostRuntimeError> {
+        let mut active = ACTIVE_SESSIONS.lock().unwrap();
+        match mode {
+            SessionMode::Legacy if !active.1 => active.0 += 1,
+            SessionMode::Replay if *active == (0, false) => active.1 = true,
+            _ => return Err(RfvpHostRuntimeError::SessionBusy),
+        }
+        Ok(Self(mode))
+    }
+}
+
+impl Drop for SessionPermit {
+    fn drop(&mut self) {
+        let mut active = ACTIVE_SESSIONS.lock().unwrap();
+        match self.0 {
+            SessionMode::Legacy => active.0 -= 1,
+            SessionMode::Replay => active.1 = false,
+        }
+    }
+}
+
 struct NativeSession {
     resources: u64,
     handle: u64,
     _owner_thread: PhantomData<Rc<()>>,
+    _permit: SessionPermit,
 }
 
 impl NativeSession {
@@ -317,7 +353,9 @@ impl NativeSession {
         width: u32,
         height: u32,
         nls: RfvpNls,
+        mode: SessionMode,
     ) -> Result<(Self, (u32, u32)), RfvpHostRuntimeError> {
+        let permit = SessionPermit::reserve(mode)?;
         let game_root = game_root
             .to_str()
             .ok_or(RfvpHostRuntimeError::InvalidPath)?;
@@ -393,6 +431,7 @@ impl NativeSession {
                 resources,
                 handle: runtime,
                 _owner_thread: PhantomData,
+                _permit: permit,
             },
             (width, height),
         ))
@@ -483,8 +522,14 @@ impl RfvpHostRuntime {
         backend: Box<dyn GpuBackend>,
         clear_color: [f32; 4],
     ) -> Result<Self, RfvpHostRuntimeError> {
-        let (runtime, (actual_width, actual_height)) =
-            NativeSession::open(game_root.as_ref(), save_root, width, height, nls)?;
+        let (runtime, (actual_width, actual_height)) = NativeSession::open(
+            game_root.as_ref(),
+            save_root,
+            width,
+            height,
+            nls,
+            SessionMode::Legacy,
+        )?;
         let mut backend = backend;
         if (actual_width != width || actual_height != height)
             && let Err(error) = backend.resize(Extent2D::new(actual_width, actual_height))

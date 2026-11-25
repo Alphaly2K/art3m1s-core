@@ -80,3 +80,15 @@ pub use art3m1s_media as media;
 pub use asb_interpreter as script;
 #[cfg(feature = "legacy")]
 pub use pfs_upk as archive;
+
+#[cfg(feature = "rfvp-host-v2")]
+#[unsafe(no_mangle)]
+/// # Safety
+/// `out` must point to writable, aligned storage for an API table pointer.
+pub unsafe extern "C" fn art3m1s_rfvp_get_api_v2(
+    major: u32,
+    min_size: u32,
+    out: *mut *const art3m1s_rfvp::ffi_v2::Api,
+) -> i32 {
+    unsafe { art3m1s_rfvp::ffi_v2::get_api(major, min_size, out) }
+}

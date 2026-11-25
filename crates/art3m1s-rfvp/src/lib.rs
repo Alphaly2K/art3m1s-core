@@ -7,6 +7,8 @@
 
 pub mod commands;
 #[cfg(feature = "host-runtime")]
+pub mod ffi_v2;
+#[cfg(feature = "host-runtime")]
 pub mod host_runtime;
 #[cfg(feature = "host-runtime")]
 pub mod profiler;

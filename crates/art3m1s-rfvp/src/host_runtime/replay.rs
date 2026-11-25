@@ -8,7 +8,9 @@ use rfvp::rendering::external::{
     RecordedTextureCommand, RecordedTextureCreate, RecordedTextureUpdate,
 };
 
-use super::{NativeFrame, NativeSession, RfvpHostInputEvent, RfvpHostRuntimeError, RfvpNls};
+use super::{
+    NativeFrame, NativeSession, RfvpHostInputEvent, RfvpHostRuntimeError, RfvpNls, SessionMode,
+};
 
 /// A complete RFVP frame. Upload `textures` before drawing `frame.commands`.
 /// Each referenced handle has one texture, in order of first use. Texture
@@ -74,7 +76,14 @@ impl RfvpFrameRuntime {
         save_root: Option<&Path>,
         nls: RfvpNls,
     ) -> Result<Self, RfvpReplayError> {
-        let (session, _) = NativeSession::open(game_root.as_ref(), save_root, 0, 0, nls)?;
+        let (session, _) = NativeSession::open(
+            game_root.as_ref(),
+            save_root,
+            0,
+            0,
+            nls,
+            SessionMode::Replay,
+        )?;
         Ok(Self {
             session,
             textures: FrameTextures::default(),
