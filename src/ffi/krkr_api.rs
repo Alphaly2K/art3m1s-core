@@ -12,13 +12,13 @@
 //! instead of dereferencing raw pointer bits, and facade calls serialize on
 //! the table lock rather than aliasing runtime state across threads.
 
-use std::ffi::c_void;
+use std::ffi::{c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use art3m1s_krkr::abi::KrkrAbiError;
 pub use art3m1s_krkr::abi::{Art3M1sKrkrApiV1, Art3m1sKrkrDiagnosticsApiV1};
+use art3m1s_krkr::abi::{KrkrAbiError, KrkrProjectHostV1};
 use art3m1s_krkr::native;
 use art3m1s_krkr::native::load_api_v1;
 pub use art3m1s_krkr::protocol::*;
@@ -163,15 +163,45 @@ unsafe extern "C" fn runtime_create(
     config: *const CoreRuntimeConfigV1,
     out_runtime: *mut u64,
 ) -> i32 {
-    guard_status(|| {
-        let api = match native_api() {
-            Ok(api) => api,
-            Err(status) => return status,
+    create_runtime(config, out_runtime, |api, out| unsafe {
+        (api.runtime_create.expect("runtime_create is required"))(
+            game_root_utf8,
+            save_root_utf8,
+            config,
+            out,
+        )
+    })
+}
+
+unsafe extern "C" fn open_project(
+    host: *const KrkrProjectHostV1,
+    archive_key: *const c_char,
+    save_root: *const c_char,
+    config: *const CoreRuntimeConfigV1,
+    out_runtime: *mut u64,
+) -> i32 {
+    create_runtime(config, out_runtime, |api, out| {
+        let Some(open_project) = native::load_open_project(api) else {
+            return ART3M1S_KRKR_STATUS_UNSUPPORTED;
         };
+        unsafe { open_project(host, archive_key, save_root, config, out) }
+    })
+}
+
+fn create_runtime(
+    config: *const CoreRuntimeConfigV1,
+    out_runtime: *mut u64,
+    open: impl FnOnce(&'static Art3M1sKrkrApiV1, *mut u64) -> i32,
+) -> i32 {
+    guard_status(|| {
         if out_runtime.is_null() || config.is_null() {
             return STATUS_INVALID_ARGUMENT;
         }
         unsafe { *out_runtime = 0 };
+        let api = match native_api() {
+            Ok(api) => api,
+            Err(status) => return status,
+        };
 
         let config_ref = unsafe { &*config };
         if config_ref.struct_size != std::mem::size_of::<CoreRuntimeConfigV1>() as u32 {
@@ -201,14 +231,7 @@ unsafe extern "C" fn runtime_create(
         }
 
         let mut native_runtime = 0u64;
-        let status = unsafe {
-            (api.runtime_create.expect("runtime_create is required"))(
-                game_root_utf8,
-                save_root_utf8,
-                config,
-                &mut native_runtime,
-            )
-        };
+        let status = open(api, &mut native_runtime);
         let _ = set_native_render_host(None);
         if status != STATUS_OK {
             return status;
@@ -612,4 +635,37 @@ pub unsafe extern "C" fn art3m1s_krkr_get_control_api_v1(
         }
     }
     &CONTROL_API
+}
+
+#[repr(C)]
+pub struct KrkrHostApiV2 {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub magic: u64,
+    pub runtime: &'static Art3M1sKrkrApiV1,
+    pub diagnostics: &'static Art3m1sKrkrDiagnosticsApiV1,
+    pub controls: &'static KrkrControlApiV1,
+    pub open_project: art3m1s_krkr::abi::OpenKrkrProject,
+}
+
+static HOST_API: KrkrHostApiV2 = KrkrHostApiV2 {
+    struct_size: std::mem::size_of::<KrkrHostApiV2>() as u32,
+    abi_version: 2,
+    magic: u64::from_le_bytes(*b"RA3MKHV2"),
+    runtime: &API_V1,
+    diagnostics: &DIAGNOSTICS_API_V1,
+    controls: &CONTROL_API,
+    open_project,
+};
+
+/// # Safety
+/// `out_size` must be null or writable for a `usize`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_krkr_get_host_api_v2(
+    out_size: *mut usize,
+) -> *const KrkrHostApiV2 {
+    if !out_size.is_null() {
+        unsafe { out_size.write(std::mem::size_of::<KrkrHostApiV2>()) };
+    }
+    &HOST_API
 }

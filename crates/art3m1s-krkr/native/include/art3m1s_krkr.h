@@ -301,13 +301,27 @@ typedef int32_t (*ArtKrkrOpenProjectFn)(const Art3m1sKrkrProjectHostV1* host,
 typedef struct Art3m1sKrkrNativeApiV2 {
     uint32_t struct_size;
     uint32_t abi_version;
-    uint64_t magic; /* 0x32564B524D334152, "RA3MKRV2" */
+    uint64_t magic; /* 0x32564B524D334152 */
     const Art3m1sKrkrApiV1* runtime;
     ArtKrkrOpenProjectFn open_project;
 } Art3m1sKrkrNativeApiV2;
 
 ART3M1S_KRKR_EXPORT const Art3m1sKrkrNativeApiV2* art3m1s_krkr_native_get_api_v2(
     size_t* out_size);
+
+typedef struct Art3m1sKrkrHostApiV2 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint64_t magic; /* 0x3256484B4D334152, "RA3MKHV2" */
+    const Art3m1sKrkrApiV1* runtime;
+    const Art3m1sKrkrDiagnosticsApiV1* diagnostics;
+    const Art3m1sKrkrControlApiV1* controls;
+    /* Returns a public runtime handle. Source callbacks can run on workers
+     * while KRKR is starting or ticking. They must not reenter the session. */
+    ArtKrkrOpenProjectFn open_project;
+} Art3m1sKrkrHostApiV2;
+
+ART3M1S_KRKR_EXPORT const Art3m1sKrkrHostApiV2* art3m1s_krkr_get_host_api_v2(size_t* out_size);
 
 /* Private setup used by the Rust facade before runtime_create. */
 ART3M1S_KRKR_EXPORT int32_t art3m1s_krkr_native_set_render_host_v1(

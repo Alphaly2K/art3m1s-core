@@ -4,10 +4,14 @@
 //! unsupported implementation. It validates the C/Rust contract and dynamic
 //! library boundary before the KRKR runtime is linked.
 
-use crate::abi::{ART3M1S_KRKR_API_ABI_VERSION, Art3M1sKrkrApiV1, KrkrAbiError, validate_api_v1};
+use crate::abi::{
+    ART3M1S_KRKR_API_ABI_VERSION, Art3M1sKrkrApiV1, KRKR_NATIVE_API_V2_MAGIC, KrkrAbiError,
+    KrkrNativeApiV2, OpenKrkrProject, validate_api_v1,
+};
 
 unsafe extern "C" {
     fn art3m1s_krkr_native_get_api_v1(out_size: *mut usize) -> *const Art3M1sKrkrApiV1;
+    fn art3m1s_krkr_native_get_api_v2(out_size: *mut usize) -> *const KrkrNativeApiV2;
     fn art3m1s_krkr_native_log_next_bytes() -> usize;
     fn art3m1s_krkr_native_poll_log(output: *mut u8, capacity: usize) -> usize;
     fn art3m1s_krkr_native_set_debug(enabled: i32) -> i32;
@@ -43,6 +47,24 @@ pub fn load_api_v1() -> Result<&'static Art3M1sKrkrApiV1, KrkrAbiError> {
     validate_api_v1(api)?;
     assert_eq!(api.abi_version, ART3M1S_KRKR_API_ABI_VERSION);
     Ok(api)
+}
+
+/// The v2 project entry point shares the native v1 runtime handles.
+pub fn load_open_project(runtime: &Art3M1sKrkrApiV1) -> Option<OpenKrkrProject> {
+    let mut size = 0;
+    let table = unsafe { art3m1s_krkr_native_get_api_v2(&mut size) };
+    if table.is_null() || size != std::mem::size_of::<KrkrNativeApiV2>() {
+        return None;
+    }
+    let table = unsafe { &*table };
+    if table.struct_size as usize != size
+        || table.abi_version != 2
+        || table.magic != KRKR_NATIVE_API_V2_MAGIC
+        || !std::ptr::eq(table.runtime, runtime)
+    {
+        return None;
+    }
+    table.open_project
 }
 
 pub fn probe_null_path() -> i32 {

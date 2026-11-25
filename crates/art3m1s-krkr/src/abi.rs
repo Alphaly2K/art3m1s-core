@@ -133,6 +133,40 @@ pub struct Art3M1sKrkrApiV1 {
     pub runtime_set_external_surface: Option<RuntimeSetExternalSurfaceFn>,
 }
 
+pub const KRKR_NATIVE_API_V2_MAGIC: u64 = 0x3256_4B52_4D33_4152;
+
+type EmitFile = unsafe extern "C" fn(*mut c_void, *const c_char);
+
+#[repr(C)]
+pub struct KrkrProjectHostV1 {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub user_data: *mut c_void,
+    pub query_size: Option<unsafe extern "C" fn(*mut c_void, *const c_char, *mut u64) -> i32>,
+    pub read_range: Option<
+        unsafe extern "C" fn(*mut c_void, *const c_char, u64, *mut u8, usize, *mut usize) -> i32,
+    >,
+    pub list_files:
+        Option<unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_void, EmitFile) -> i32>,
+}
+
+pub type OpenKrkrProject = unsafe extern "C" fn(
+    *const KrkrProjectHostV1,
+    *const c_char,
+    *const c_char,
+    *const Art3m1sKrkrRuntimeConfigV1,
+    *mut u64,
+) -> i32;
+
+#[repr(C)]
+pub struct KrkrNativeApiV2 {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub magic: u64,
+    pub runtime: *const Art3M1sKrkrApiV1,
+    pub open_project: Option<OpenKrkrProject>,
+}
+
 pub fn validate_api_v1(api: &Art3M1sKrkrApiV1) -> Result<(), KrkrAbiError> {
     let expected = std::mem::size_of::<Art3M1sKrkrApiV1>() as u32;
     if api.struct_size != expected {
