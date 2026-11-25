@@ -1,12 +1,12 @@
 #![cfg(feature = "host-audio")]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use art3m1s_siglus::siglus_scene_vm::{
     formats::scene_pck::ScenePckDecodeOptions, host::SiglusHostConfig, runtime::constants::cd,
 };
-use art3m1s_siglus::{SiglusAdapter, SiglusBootSource, SiglusGameexe};
+use art3m1s_siglus::{SiglusAdapter, SiglusBootSource, SiglusGameexe, SiglusResourceSource};
 
 struct BootSource;
 
@@ -71,4 +71,77 @@ fn steps_without_a_gpu_and_isolates_host_time_between_sessions() {
     assert!(b.with_host(|host| host.vm_mut().is_blocked()));
     b.step(25).unwrap();
     assert!(!b.with_host(|host| host.vm_mut().is_blocked()));
+}
+
+struct MemoryProject([u8; 58]);
+
+impl MemoryProject {
+    fn new(rgb: [u8; 3]) -> Self {
+        let mut bmp = [0u8; 58];
+        bmp[..2].copy_from_slice(b"BM");
+        for (start, value) in [(2, 58u32), (10, 54), (14, 40), (18, 1), (22, 1), (34, 4)] {
+            bmp[start..start + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bmp[26] = 1;
+        bmp[28] = 24;
+        bmp[54..57].copy_from_slice(&[rgb[2], rgb[1], rgb[0]]);
+        Self(bmp)
+    }
+}
+
+impl SiglusResourceSource for MemoryProject {
+    fn query_size(&self, key: &str) -> anyhow::Result<Option<u64>> {
+        Ok(key
+            .eq_ignore_ascii_case("g00/color.bmp")
+            .then_some(self.0.len() as u64))
+    }
+
+    fn read_range(&self, key: &str, offset: u64, output: &mut [u8]) -> anyhow::Result<usize> {
+        anyhow::ensure!(key.eq_ignore_ascii_case("g00/color.bmp"));
+        let data = &self.0[(offset as usize)..];
+        let count = data.len().min(output.len()).min(5);
+        output[..count].copy_from_slice(&data[..count]);
+        Ok(count)
+    }
+}
+
+#[test]
+fn loads_named_images_from_the_active_host_project() {
+    let root = PathBuf::from("siglus-memory-project");
+    let open = |rgb| {
+        let mut config = SiglusHostConfig::new(root.clone());
+        config.scene_id = Some(0);
+        SiglusAdapter::open_with_project_files(
+            config,
+            Arc::new(BootSource),
+            Arc::new(MemoryProject::new(rgb)),
+        )
+        .unwrap()
+    };
+    let mut a = open([0x12, 0x34, 0x56]);
+    let mut b = open([0x78, 0x90, 0xab]);
+    for (session, expected) in [
+        (&mut a, [0x12, 0x34, 0x56, 0xff]),
+        (&mut b, [0x78, 0x90, 0xab, 0xff]),
+    ] {
+        session.with_host(|host| {
+            let images = &mut host.vm_mut().ctx.images;
+            let image = images.load_bg("COLOR").unwrap();
+            assert_eq!(images.get(&image).unwrap().rgba, expected);
+            assert!(
+                art3m1s_siglus::siglus_scene_vm::resource::read_file_bytes(
+                    &root.join("../g00/color.bmp")
+                )
+                .is_err()
+            );
+            assert!(images.load_bg("missing").is_err());
+        });
+    }
+    assert!(
+        art3m1s_siglus::siglus_scene_vm::resource::resolve_game_file(Path::new(
+            "siglus-memory-project/g00/color.bmp"
+        ))
+        .unwrap()
+        .is_none()
+    );
 }

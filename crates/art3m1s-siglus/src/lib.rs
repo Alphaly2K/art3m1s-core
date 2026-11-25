@@ -1,7 +1,7 @@
 //! Siglus session and optional drawing support for Art3m1s hosts.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,6 +23,8 @@ use siglus_scene_vm::layer::{
 };
 use siglus_scene_vm::platform_time::with_host_time;
 use siglus_scene_vm::render_math::sprite_quad_geometry_rect;
+pub use siglus_scene_vm::resource::SiglusResourceSource;
+use siglus_scene_vm::resource::with_project_files;
 use siglus_scene_vm::runtime::input::VmMouseButton;
 
 /// Probe only; constructing the host performs full game initialization.
@@ -81,6 +83,7 @@ enum TextureKey {
 pub struct SiglusAdapter {
     host: SiglusHost,
     elapsed: Duration,
+    files: Option<(PathBuf, Arc<dyn SiglusResourceSource>)>,
 }
 
 /// A frame and its image lookup, valid until the session is mutated again.
@@ -97,28 +100,47 @@ pub struct SiglusStep<'session> {
 
 impl SiglusAdapter {
     pub fn open(config: SiglusHostConfig) -> Result<Self> {
-        Self::open_with(|| SiglusHost::new_external(config))
+        Self::open_with(None, || SiglusHost::new_external(config))
     }
 
     pub fn open_with_boot_source(
         config: SiglusHostConfig,
         source: Arc<dyn SiglusBootSource>,
     ) -> Result<Self> {
-        Self::open_with(|| SiglusHost::new_external_with_boot_source(config, source))
+        Self::open_with(None, || {
+            SiglusHost::new_external_with_boot_source(config, source)
+        })
     }
 
-    fn open_with(build_host: impl FnOnce() -> Result<SiglusHost>) -> Result<Self> {
+    /// Mount logical project files for named image and script resource lookups.
+    pub fn open_with_project_files(
+        config: SiglusHostConfig,
+        boot: Arc<dyn SiglusBootSource>,
+        files: Arc<dyn SiglusResourceSource>,
+    ) -> Result<Self> {
+        Self::open_with(Some((config.project_dir.clone(), files)), || {
+            SiglusHost::new_external_with_boot_source(config, boot)
+        })
+    }
+
+    fn open_with(
+        files: Option<(PathBuf, Arc<dyn SiglusResourceSource>)>,
+        build_host: impl FnOnce() -> Result<SiglusHost>,
+    ) -> Result<Self> {
         #[cfg(feature = "uci-ffmpeg")]
         siglus_scene_vm::assets::install_in_process_decoder(decode_uci_h264);
         Ok(Self {
-            host: with_host_time(Duration::ZERO, build_host)?,
+            host: with_project_files(files.clone(), || with_host_time(Duration::ZERO, build_host))?,
             elapsed: Duration::ZERO,
+            files,
         })
     }
 
     /// Run an input or service call at the session's current time.
     pub fn with_host<T>(&mut self, run: impl FnOnce(&mut SiglusHost) -> T) -> T {
-        with_host_time(self.elapsed, || run(&mut self.host))
+        with_project_files(self.files.clone(), || {
+            with_host_time(self.elapsed, || run(&mut self.host))
+        })
     }
 
     pub fn logical_size(&self) -> (u32, u32) {
