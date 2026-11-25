@@ -296,6 +296,7 @@ struct Runtime {
     exiting: bool,
     save_fingerprint: Option<u64>,
     audio_output: Option<super::siglus_output::Output>,
+    host_audio_clock: bool,
     dialog: Option<Arc<DialogSlot>>,
 }
 
@@ -465,6 +466,7 @@ fn create_runtime(
                     exiting: false,
                     save_fingerprint,
                     audio_output: None,
+                    host_audio_clock: false,
                     dialog: None,
                 },
             );
@@ -584,16 +586,11 @@ unsafe extern "C" fn runtime_tick(
                 rt.latest = Some(Rc::new(snapshot));
             }
             rt.exiting = step.exiting;
-            if let Some(output) = &rt.audio_output {
-                if output.failed() {
-                    return fail("Siglus audio device disconnected");
-                }
-                let frames = (dt_ms.min(100) as usize * AUDIO_SAMPLE_RATE as usize / 1000)
-                    .min(output.capacity());
-                if frames > 0 {
-                    let mut pcm = vec![0.0; frames * AUDIO_CHANNELS as usize];
-                    rt.adapter.render_audio(&mut pcm);
-                    output.append(&pcm);
+            if !rt.host_audio_clock {
+                let requested = dt_ms.min(100) as usize * AUDIO_SAMPLE_RATE as usize / 1000;
+                let status = mix_output(rt, requested);
+                if status != STATUS_OK {
+                    return status;
                 }
             }
             if mode == 1 {
@@ -782,21 +779,58 @@ pub struct SiglusOutputApiV1 {
 }
 
 unsafe extern "C" fn output_start(handle: u64) -> i32 {
+    start_output(handle, false)
+}
+
+unsafe extern "C" fn output_start_clocked(handle: u64) -> i32 {
+    start_output(handle, true)
+}
+
+fn start_output(handle: u64, host_clock: bool) -> i32 {
     guarded(|| {
         with_runtime(handle, |rt| {
-            if rt.audio_output.is_some() {
-                return STATUS_OK;
-            }
-            match super::siglus_output::Output::start() {
-                Ok(output) => {
-                    rt.audio_output = Some(output);
-                    STATUS_OK
+            if rt.audio_output.is_none() {
+                match super::siglus_output::Output::start() {
+                    Ok(output) => rt.audio_output = Some(output),
+                    Err(error) => return fail(error),
                 }
-                Err(error) => fail(error),
             }
+            rt.host_audio_clock = host_clock;
+            STATUS_OK
         })
     })
 }
+
+fn mix_output(rt: &mut Runtime, requested: usize) -> i32 {
+    let Some(output) = &rt.audio_output else {
+        return STATUS_OK;
+    };
+    if output.failed() {
+        return fail("Siglus audio device disconnected");
+    }
+    let frames = requested.min(output.capacity());
+    if frames > 0 {
+        let mut pcm = vec![0.0; frames * AUDIO_CHANNELS as usize];
+        rt.adapter.render_audio(&mut pcm);
+        output.append(&pcm);
+    }
+    STATUS_OK
+}
+
+unsafe extern "C" fn output_pump(handle: u64, frames: u32) -> i32 {
+    guarded(|| {
+        if frames as usize > MAX_AUDIO_FRAMES {
+            return STATUS_ARGUMENT;
+        }
+        with_runtime(handle, |rt| {
+            if !rt.host_audio_clock || rt.audio_output.is_none() {
+                return STATUS_ARGUMENT;
+            }
+            mix_output(rt, frames as usize)
+        })
+    })
+}
+
 unsafe extern "C" fn output_stop(handle: u64) -> i32 {
     guarded(|| {
         with_runtime(handle, |rt| {
@@ -1263,6 +1297,21 @@ static FRAME_API: SiglusFrameApiV1 = SiglusFrameApiV1 {
 };
 
 #[repr(C)]
+pub struct SiglusOutputClockApiV1 {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub start: unsafe extern "C" fn(u64) -> i32,
+    pub pump: unsafe extern "C" fn(u64, u32) -> i32,
+}
+
+static OUTPUT_CLOCK_API: SiglusOutputClockApiV1 = SiglusOutputClockApiV1 {
+    struct_size: std::mem::size_of::<SiglusOutputClockApiV1>() as u32,
+    abi_version: 1,
+    start: output_start_clocked,
+    pump: output_pump,
+};
+
+#[repr(C)]
 pub struct SiglusHostApiV2 {
     pub struct_size: u32,
     pub abi_version: u32,
@@ -1273,6 +1322,7 @@ pub struct SiglusHostApiV2 {
     pub submit_dialog: unsafe extern "C" fn(u64, u64, i64) -> i32,
     pub send_text: unsafe extern "C" fn(u64, *const u8, usize) -> i32,
     pub frames: &'static SiglusFrameApiV1,
+    pub output_clock: &'static SiglusOutputClockApiV1,
 }
 
 static HOST_API_V2: SiglusHostApiV2 = SiglusHostApiV2 {
@@ -1285,6 +1335,7 @@ static HOST_API_V2: SiglusHostApiV2 = SiglusHostApiV2 {
     submit_dialog,
     send_text,
     frames: &FRAME_API,
+    output_clock: &OUTPUT_CLOCK_API,
 };
 
 /// # Safety
@@ -1575,7 +1626,7 @@ mod output_contract_tests {
         let host1 = unsafe { &*art3m1s_siglus_get_host_api_v1(&mut size) };
         assert_eq!(size, 16 + 4 * std::mem::size_of::<usize>());
         let host2 = unsafe { &*art3m1s_siglus_get_host_api_v2(&mut size) };
-        assert_eq!(size, 16 + 6 * std::mem::size_of::<usize>());
+        assert_eq!(size, 16 + 7 * std::mem::size_of::<usize>());
         assert!(std::ptr::eq(host1, host2.base));
         let output = unsafe { &*art3m1s_siglus_get_output_api_v1(&mut size) };
         assert_eq!(size, 16 + 5 * std::mem::size_of::<usize>());

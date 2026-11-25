@@ -114,6 +114,15 @@ typedef struct Art3m1sSiglusFrameApiV1 {
     int32_t (*readback_latest)(uint64_t session, uint8_t* rgba, size_t capacity, size_t* written);
 } Art3m1sSiglusFrameApiV1;
 
+typedef struct Art3m1sSiglusOutputClockApiV1 {
+    uint32_t struct_size, abi_version;
+    /* Starts device output. runtime.tick will leave audio mixing to pump. */
+    int32_t (*start)(uint64_t session);
+    /* Queue up to 4800 PCM frames at 48 kHz, limited by device buffer space.
+     * For another output device, use Art3m1sSiglusAudioV1.render_pcm instead. */
+    int32_t (*pump)(uint64_t session, uint32_t frames);
+} Art3m1sSiglusOutputClockApiV1;
+
 typedef struct Art3m1sSiglusHostV2 {
     uint32_t struct_size, abi_version;
     uint64_t magic; /* 0x325648534d334152, "RA3MSHV2" */
@@ -133,6 +142,8 @@ typedef struct Art3m1sSiglusHostV2 {
     int32_t (*send_text)(uint64_t session, const uint8_t* text, size_t length);
     /* Optional. Check struct_size before reading this field. */
     const Art3m1sSiglusFrameApiV1* frames;
+    /* Optional. Check struct_size before reading this field. */
+    const Art3m1sSiglusOutputClockApiV1* output_clock;
 } Art3m1sSiglusHostV2;
 
 /* All returned tables remain valid while the library is loaded. */

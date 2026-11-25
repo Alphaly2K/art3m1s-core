@@ -1,4 +1,4 @@
-//! Device output owns only PCM. The thread-confined VM is mixed by runtime_tick.
+//! Device output drains PCM queued on the session owner thread.
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
