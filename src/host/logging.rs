@@ -8,6 +8,12 @@ struct HostEventSink;
 
 impl Sink for HostEventSink {
     fn log(&self, record: &Record) {
+        #[cfg(feature = "rfvp-engine")]
+        if art3m1s_rfvp::host_runtime::is_replay_worker_thread() {
+            // A player call can be waiting on this worker with its handle locked.
+            crate::ffi::rfvp_api::enqueue_log(record.level().ffi_code(), record.message());
+            return;
+        }
         crate::ffi::log(record.level().ffi_code(), record.message());
         #[cfg(feature = "rfvp-engine")]
         crate::ffi::rfvp_api::dispatch_log(record.level().ffi_code(), record.message());

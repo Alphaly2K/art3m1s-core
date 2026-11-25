@@ -217,6 +217,14 @@ RFVP 有自己的 runtime 句柄、输入事件、音频命令和 surface 调用
 const Art3m1sRfvpApiV1 *art3m1s_rfvp_get_api_v1(size_t *out_size);
 ```
 
+使用 `rfvp-engine` 构建的聚合库也提供下列 Host 入口。它使用同一函数表布局，由 v2
+会话提供完整帧，Host 调用原有的 surface、音频和翻译函数。绘制及 surface 操作仍遵循
+Host 的单线程约定。`runtime_set_log_callback` 为空，日志通过轮询获取。
+
+```c
+const Art3m1sRfvpApiV1 *art3m1s_rfvp_get_replay_host_v1(size_t *out_size);
+```
+
 核心常量如下：
 
 ```c

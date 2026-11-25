@@ -58,7 +58,8 @@ use rfvp::rendering::external::{
 use crate::{ExternalRenderer, ExternalRendererError, RfvpRenderResult};
 
 mod replay;
-pub use replay::{RfvpFrameRuntime, RfvpReplayError, RfvpReplayFrame};
+pub(crate) use replay::ReplayWorker;
+pub use replay::{RfvpFrameRuntime, RfvpReplayError, RfvpReplayFrame, is_replay_worker_thread};
 
 // Bit 11 is the fork's RFVP_CAPABILITY_FONT_OVERRIDE; host-only bits start at 12.
 const RFVP_HOST_CAPABILITY_SPATIAL_UPSCALING: u64 = 1 << 12;
@@ -202,6 +203,8 @@ pub struct RfvpHostAudioCommand {
 pub enum RfvpHostRuntimeError {
     InvalidPath,
     SessionBusy,
+    WorkerStopped,
+    ReplayFrame(Box<RfvpReplayError>),
     ResourcesCreate(i32),
     MountDirectory(i32),
     SetSaveRoot(i32),
@@ -237,6 +240,8 @@ impl fmt::Display for RfvpHostRuntimeError {
         match self {
             Self::InvalidPath => write!(f, "RFVP path is not valid UTF-8"),
             Self::SessionBusy => write!(f, "RFVP engine globals are in use"),
+            Self::WorkerStopped => write!(f, "RFVP session worker stopped"),
+            Self::ReplayFrame(error) => error.fmt(f),
             Self::ResourcesCreate(status) => {
                 write!(f, "RFVP resources create failed with status {status}")
             }
@@ -469,6 +474,140 @@ impl NativeSession {
             status => Err(RfvpHostRuntimeError::FrameAcquire(status)),
         }
     }
+
+    fn set_events_enabled(&mut self, enabled: bool) -> Result<(), RfvpHostRuntimeError> {
+        let status = unsafe { rfvp_runtime_events_enable(self.handle, i32::from(enabled)) };
+        if status != RFVP_STATUS_OK {
+            return Err(RfvpHostRuntimeError::EventRead(status));
+        }
+        Ok(())
+    }
+
+    fn poll_events(&mut self) -> Result<Vec<RfvpHostEvent>, RfvpHostRuntimeError> {
+        let mut events = Vec::new();
+        loop {
+            let size = unsafe { rfvp_runtime_next_event_size(self.handle) };
+            if size == 0 {
+                break;
+            }
+            let mut buffer = vec![0u8; size];
+            let mut count = 0u32;
+            let written = unsafe {
+                rfvp_runtime_poll_events(self.handle, buffer.as_mut_ptr(), size, &mut count)
+            };
+            if written == 0 || count == 0 {
+                // The record did not fit (or the handle raced); drop it so a
+                // corrupt or oversized record cannot wedge the queue.
+                return Err(RfvpHostRuntimeError::EventRead(RFVP_STATUS_ENGINE));
+            }
+            events.push(parse_event_record(&buffer[..written])?);
+        }
+        Ok(events)
+    }
+
+    fn set_text_replacements(&mut self, json: &str) -> Result<(), RfvpHostRuntimeError> {
+        let status = unsafe {
+            rfvp_runtime_set_text_replacements(
+                self.handle,
+                json.as_ptr(),
+                json.len(),
+                RFVP_SERIALIZATION_JSON,
+            )
+        };
+        if status != RFVP_STATUS_OK {
+            return Err(RfvpHostRuntimeError::TranslationRejected(status));
+        }
+        Ok(())
+    }
+
+    fn set_text_translation_enabled(&mut self, enabled: bool) -> Result<(), RfvpHostRuntimeError> {
+        let status =
+            unsafe { rfvp_runtime_set_text_translation_enabled(self.handle, i32::from(enabled)) };
+        if status != RFVP_STATUS_OK {
+            return Err(RfvpHostRuntimeError::TranslationRejected(status));
+        }
+        // Translation requests are observed through the event queue; keep the
+        // two knobs coupled so hosts see requests whenever online translation
+        // is on.
+        self.set_events_enabled(enabled)
+    }
+
+    fn set_text_hidpi(&mut self, enabled: bool) -> Result<(), RfvpHostRuntimeError> {
+        let status = unsafe { rfvp_runtime_set_text_hidpi(self.handle, i32::from(enabled)) };
+        if status != RFVP_STATUS_OK {
+            return Err(RfvpHostRuntimeError::TranslationRejected(status));
+        }
+        Ok(())
+    }
+
+    fn set_font_override(&mut self, data: &[u8]) -> Result<(), RfvpHostRuntimeError> {
+        let status =
+            unsafe { rfvp_runtime_set_font_override(self.handle, data.as_ptr(), data.len()) };
+        if status != RFVP_STATUS_OK {
+            return Err(RfvpHostRuntimeError::FontRejected(status));
+        }
+        Ok(())
+    }
+
+    fn clear_font_override(&mut self) -> Result<(), RfvpHostRuntimeError> {
+        let status = unsafe { rfvp_runtime_clear_font_override(self.handle) };
+        if status != RFVP_STATUS_OK {
+            return Err(RfvpHostRuntimeError::FontRejected(status));
+        }
+        Ok(())
+    }
+
+    fn set_trace_mask(&mut self, mask: Option<u32>) -> Result<(), RfvpHostRuntimeError> {
+        let status = unsafe { rfvp_runtime_set_trace_mask(self.handle, mask.unwrap_or(u32::MAX)) };
+        if status != RFVP_STATUS_OK {
+            return Err(RfvpHostRuntimeError::TraceRejected(status));
+        }
+        Ok(())
+    }
+
+    fn submit_text_translation(
+        &mut self,
+        serial: u64,
+        translated: Option<&str>,
+    ) -> Result<(), RfvpHostRuntimeError> {
+        let (pointer, length) = translated
+            .map(|text| (text.as_ptr(), text.len()))
+            .unwrap_or((ptr::null(), 0));
+        let status =
+            unsafe { rfvp_runtime_submit_text_translation(self.handle, serial, pointer, length) };
+        if status != RFVP_STATUS_OK {
+            return Err(RfvpHostRuntimeError::TranslationRejected(status));
+        }
+        Ok(())
+    }
+
+    fn poll_audio_command(&mut self) -> Result<Option<RfvpHostAudioCommand>, RfvpHostRuntimeError> {
+        let mut command = RfvpAudioCommandV1 {
+            struct_size: std::mem::size_of::<RfvpAudioCommandV1>() as u32,
+            kind: 0,
+            stream_id: 0,
+            sample_format: 0,
+            encoded_kind: 0,
+            sample_rate: 0,
+            channels: 0,
+            repeat: 0,
+            fade_ms: 0,
+            volume: 1.0,
+            pan: 0.0,
+            sample_count: 0,
+            payload: ptr::null(),
+            payload_size: 0,
+            reserved: [0; 2],
+        };
+        let status = unsafe { rfvp_runtime_poll_audio_command(self.handle, &mut command) };
+        if status == RFVP_STATUS_NO_COMMAND {
+            return Ok(None);
+        }
+        if status != RFVP_STATUS_OK {
+            return Err(RfvpHostRuntimeError::AudioCommandRead(status));
+        }
+        convert_audio_command(&command).map(Some)
+    }
 }
 
 impl Drop for NativeSession {
@@ -495,13 +634,39 @@ struct NativeFrame {
     texture_commands: Vec<RecordedTextureCommand>,
 }
 
+enum HostSession {
+    Legacy(NativeSession),
+    Replay(ReplayWorker),
+}
+
+impl HostSession {
+    fn run<R: Send + 'static>(
+        &mut self,
+        call: impl FnOnce(&mut NativeSession) -> R + Send + 'static,
+    ) -> Result<R, RfvpHostRuntimeError> {
+        match self {
+            Self::Legacy(session) => Ok(call(session)),
+            Self::Replay(worker) => worker.run(move |runtime| call(&mut runtime.session)),
+        }
+    }
+
+    fn step(&mut self, delta_ms: u32) -> Result<(), RfvpHostRuntimeError> {
+        match self {
+            Self::Legacy(session) => session.step(delta_ms),
+            Self::Replay(worker) => worker
+                .run(move |runtime| runtime.step(delta_ms))?
+                .map_err(|error| RfvpHostRuntimeError::ReplayFrame(Box::new(error))),
+        }
+    }
+}
+
 /// Owns one RFVP resources/runtime pair and renders its frames in Rust.
 ///
 /// The type is intentionally not `Send`: RFVP's v1 ABI state is thread-local
 /// and requires resources, runtime, and frame operations to stay on the
 /// creating thread.
 pub struct RfvpHostRuntime {
-    runtime: NativeSession,
+    runtime: HostSession,
     width: u32,
     height: u32,
     last_command_count: usize,
@@ -530,6 +695,48 @@ impl RfvpHostRuntime {
             nls,
             SessionMode::Legacy,
         )?;
+        Self::with_output(
+            HostSession::Legacy(runtime),
+            (width, height),
+            (actual_width, actual_height),
+            backend,
+            clear_color,
+        )
+    }
+
+    /// Creates the Flutter Host adapter over a replay session.
+    pub fn new_replay_directory(
+        game_root: impl AsRef<Path>,
+        save_root: Option<&Path>,
+        width: u32,
+        height: u32,
+        nls: RfvpNls,
+        backend: Box<dyn GpuBackend>,
+        clear_color: [f32; 4],
+    ) -> Result<Self, RfvpHostRuntimeError> {
+        let worker = ReplayWorker::open(
+            game_root.as_ref().to_path_buf(),
+            save_root.map(Path::to_path_buf),
+            nls,
+        )
+        .map_err(|error| RfvpHostRuntimeError::ReplayFrame(Box::new(error)))?;
+        let stage = worker.stage_size;
+        Self::with_output(
+            HostSession::Replay(worker),
+            (width, height),
+            stage,
+            backend,
+            clear_color,
+        )
+    }
+
+    fn with_output(
+        runtime: HostSession,
+        (width, height): (u32, u32),
+        (actual_width, actual_height): (u32, u32),
+        backend: Box<dyn GpuBackend>,
+        clear_color: [f32; 4],
+    ) -> Result<Self, RfvpHostRuntimeError> {
         let mut backend = backend;
         if (actual_width != width || actual_height != height)
             && let Err(error) = backend.resize(Extent2D::new(actual_width, actual_height))
@@ -567,7 +774,10 @@ impl RfvpHostRuntime {
     }
 
     pub fn capabilities(&mut self) -> u64 {
-        let rfvp = unsafe { rfvp_runtime_capabilities(self.runtime.handle) };
+        let rfvp = self
+            .runtime
+            .run(|session| unsafe { rfvp_runtime_capabilities(session.handle) })
+            .unwrap_or(0);
         let spatial = self
             .renderer
             .backend()
@@ -585,7 +795,10 @@ impl RfvpHostRuntime {
         if self.exit_requested {
             return true;
         }
-        self.exit_requested = self.runtime.is_exit_requested();
+        self.exit_requested = self
+            .runtime
+            .run(|session| session.is_exit_requested())
+            .unwrap_or(true);
         self.exit_requested
     }
 
@@ -615,82 +828,42 @@ impl RfvpHostRuntime {
         &mut self,
         events: &[RfvpHostInputEvent],
     ) -> Result<(), RfvpHostRuntimeError> {
-        self.runtime.push_input(events)
+        let events = events.to_vec();
+        self.runtime
+            .run(move |session| session.push_input(&events))?
     }
 
     /// Enables or disables the pull-based event queue (text translation
     /// requests). Disabling clears queued events.
     pub fn set_events_enabled(&mut self, enabled: bool) -> Result<(), RfvpHostRuntimeError> {
-        let status = unsafe { rfvp_runtime_events_enable(self.runtime.handle, i32::from(enabled)) };
-        if status != RFVP_STATUS_OK {
-            return Err(RfvpHostRuntimeError::EventRead(status));
-        }
-        Ok(())
+        self.runtime
+            .run(move |session| session.set_events_enabled(enabled))?
     }
 
     /// Drains pending host events.
     pub fn poll_events(&mut self) -> Result<Vec<RfvpHostEvent>, RfvpHostRuntimeError> {
-        let mut events = Vec::new();
-        loop {
-            let size = unsafe { rfvp_runtime_next_event_size(self.runtime.handle) };
-            if size == 0 {
-                break;
-            }
-            let mut buffer = vec![0u8; size];
-            let mut count = 0u32;
-            let written = unsafe {
-                rfvp_runtime_poll_events(self.runtime.handle, buffer.as_mut_ptr(), size, &mut count)
-            };
-            if written == 0 || count == 0 {
-                // The record did not fit (or the handle raced); drop it so a
-                // corrupt or oversized record cannot wedge the queue.
-                return Err(RfvpHostRuntimeError::EventRead(RFVP_STATUS_ENGINE));
-            }
-            events.push(parse_event_record(&buffer[..written])?);
-        }
-        Ok(events)
+        self.runtime.run(move |session| session.poll_events())?
     }
 
     /// Installs the exact text replacement table from a UTF-8 JSON object
     /// mapping source strings to their replacements. An empty blob clears it.
     pub fn set_text_replacements(&mut self, json: &str) -> Result<(), RfvpHostRuntimeError> {
-        let status = unsafe {
-            rfvp_runtime_set_text_replacements(
-                self.runtime.handle,
-                json.as_ptr(),
-                json.len(),
-                RFVP_SERIALIZATION_JSON,
-            )
-        };
-        if status != RFVP_STATUS_OK {
-            return Err(RfvpHostRuntimeError::TranslationRejected(status));
-        }
-        Ok(())
+        let json = json.to_owned();
+        self.runtime
+            .run(move |session| session.set_text_replacements(&json))?
     }
 
     pub fn set_text_translation_enabled(
         &mut self,
         enabled: bool,
     ) -> Result<(), RfvpHostRuntimeError> {
-        let status = unsafe {
-            rfvp_runtime_set_text_translation_enabled(self.runtime.handle, i32::from(enabled))
-        };
-        if status != RFVP_STATUS_OK {
-            return Err(RfvpHostRuntimeError::TranslationRejected(status));
-        }
-        // Translation requests are observed through the event queue; keep the
-        // two knobs coupled so hosts see requests whenever online translation
-        // is on.
-        self.set_events_enabled(enabled)
+        self.runtime
+            .run(move |session| session.set_text_translation_enabled(enabled))?
     }
 
     pub fn set_text_hidpi(&mut self, enabled: bool) -> Result<(), RfvpHostRuntimeError> {
-        let status =
-            unsafe { rfvp_runtime_set_text_hidpi(self.runtime.handle, i32::from(enabled)) };
-        if status != RFVP_STATUS_OK {
-            return Err(RfvpHostRuntimeError::TranslationRejected(status));
-        }
-        Ok(())
+        self.runtime
+            .run(move |session| session.set_text_hidpi(enabled))?
     }
 
     /// Forces a replacement font face (raw TrueType/OpenType bytes) as the
@@ -699,21 +872,14 @@ impl RfvpHostRuntime {
     /// fallback chain. Invalid font data is rejected and leaves any previous
     /// override untouched.
     pub fn set_font_override(&mut self, data: &[u8]) -> Result<(), RfvpHostRuntimeError> {
-        let status = unsafe {
-            rfvp_runtime_set_font_override(self.runtime.handle, data.as_ptr(), data.len())
-        };
-        if status != RFVP_STATUS_OK {
-            return Err(RfvpHostRuntimeError::FontRejected(status));
-        }
-        Ok(())
+        let data = data.to_vec();
+        self.runtime
+            .run(move |session| session.set_font_override(&data))?
     }
 
     pub fn clear_font_override(&mut self) -> Result<(), RfvpHostRuntimeError> {
-        let status = unsafe { rfvp_runtime_clear_font_override(self.runtime.handle) };
-        if status != RFVP_STATUS_OK {
-            return Err(RfvpHostRuntimeError::FontRejected(status));
-        }
-        Ok(())
+        self.runtime
+            .run(move |session| session.clear_font_override())?
     }
 
     /// Toggles the flashing damage-rect debug overlay.
@@ -725,12 +891,8 @@ impl RfvpHostRuntime {
     /// motion/render bits in that order). `None` returns to `RFVP_TRACE*`
     /// env-var behavior. The mask is process-wide.
     pub fn set_trace_mask(&mut self, mask: Option<u32>) -> Result<(), RfvpHostRuntimeError> {
-        let status =
-            unsafe { rfvp_runtime_set_trace_mask(self.runtime.handle, mask.unwrap_or(u32::MAX)) };
-        if status != RFVP_STATUS_OK {
-            return Err(RfvpHostRuntimeError::TraceRejected(status));
-        }
-        Ok(())
+        self.runtime
+            .run(move |session| session.set_trace_mask(mask))?
     }
 
     /// Submits an asynchronous translation result. `None` keeps the original
@@ -740,46 +902,16 @@ impl RfvpHostRuntime {
         serial: u64,
         translated: Option<&str>,
     ) -> Result<(), RfvpHostRuntimeError> {
-        let (pointer, length) = translated
-            .map(|text| (text.as_ptr(), text.len()))
-            .unwrap_or((ptr::null(), 0));
-        let status = unsafe {
-            rfvp_runtime_submit_text_translation(self.runtime.handle, serial, pointer, length)
-        };
-        if status != RFVP_STATUS_OK {
-            return Err(RfvpHostRuntimeError::TranslationRejected(status));
-        }
-        Ok(())
+        let translated = translated.map(str::to_owned);
+        self.runtime
+            .run(move |session| session.submit_text_translation(serial, translated.as_deref()))?
     }
 
     pub fn poll_audio_command(
         &mut self,
     ) -> Result<Option<RfvpHostAudioCommand>, RfvpHostRuntimeError> {
-        let mut command = RfvpAudioCommandV1 {
-            struct_size: std::mem::size_of::<RfvpAudioCommandV1>() as u32,
-            kind: 0,
-            stream_id: 0,
-            sample_format: 0,
-            encoded_kind: 0,
-            sample_rate: 0,
-            channels: 0,
-            repeat: 0,
-            fade_ms: 0,
-            volume: 1.0,
-            pan: 0.0,
-            sample_count: 0,
-            payload: ptr::null(),
-            payload_size: 0,
-            reserved: [0; 2],
-        };
-        let status = unsafe { rfvp_runtime_poll_audio_command(self.runtime.handle, &mut command) };
-        if status == RFVP_STATUS_NO_COMMAND {
-            return Ok(None);
-        }
-        if status != RFVP_STATUS_OK {
-            return Err(RfvpHostRuntimeError::AudioCommandRead(status));
-        }
-        convert_audio_command(&command).map(Some)
+        self.runtime
+            .run(move |session| session.poll_audio_command())?
     }
 
     pub fn drain_audio_commands(
@@ -845,22 +977,33 @@ impl RfvpHostRuntime {
     pub fn render_pending_frame(
         &mut self,
     ) -> Result<Option<RfvpRenderResult>, RfvpHostRuntimeError> {
-        let Some(native) = self.runtime.take_frame()? else {
-            return Ok(None);
-        };
-        self.width = native.width;
-        self.height = native.height;
-        self.last_command_count = native.frame.commands.len();
-        self.last_texture_count = native.texture_commands.len();
-        let frame = ExternalFrame {
-            frame: native.frame,
-            textures: Vec::new(),
-            texture_commands: native.texture_commands,
-        };
         let started = self.profiler.enabled().then(std::time::Instant::now);
-        // Unchanged frames are skipped by the renderer and reported as no
-        // presentation; callers already treat `None` as "nothing new".
-        let result = self.renderer.render_frame(&frame)?;
+        let result = match &mut self.runtime {
+            HostSession::Legacy(runtime) => {
+                let Some(native) = runtime.take_frame()? else {
+                    return Ok(None);
+                };
+                self.width = native.width;
+                self.height = native.height;
+                self.last_command_count = native.frame.commands.len();
+                self.last_texture_count = native.texture_commands.len();
+                self.renderer.render_frame(&ExternalFrame {
+                    frame: native.frame,
+                    textures: Vec::new(),
+                    texture_commands: native.texture_commands,
+                })?
+            }
+            HostSession::Replay(worker) => {
+                let Some(frame) = worker.run(|runtime| runtime.acquire_frame())? else {
+                    return Ok(None);
+                };
+                self.width = frame.width;
+                self.height = frame.height;
+                self.last_command_count = frame.frame.commands.len();
+                self.last_texture_count = frame.textures.len();
+                self.renderer.render_replay_frame(&frame)?
+            }
+        };
         if let Some(started) = started {
             let gpu = self.renderer.backend_mut().take_profile_stats();
             self.profiler.record_render(

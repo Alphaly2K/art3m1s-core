@@ -3,17 +3,16 @@
 use std::collections::HashMap;
 use std::mem::{align_of, size_of};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::Path;
+use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, SyncSender};
 use std::sync::{LazyLock, Mutex, TryLockError};
-use std::thread::{self, JoinHandle};
 
 use rfvp::host_api::{
     CommandBlendMode, RectI16, RenderCommand, Rgba8, TextureFilter, TextureFormat,
 };
 
+use crate::host_runtime::ReplayWorker;
 use crate::{RfvpFrameRuntime, RfvpHostRuntimeError, RfvpNls, RfvpReplayError, RfvpReplayFrame};
 
 pub mod input;
@@ -164,12 +163,9 @@ pub unsafe fn get_api(major: u32, min_size: u32, out: *mut *const Api) -> i32 {
     })
 }
 
-type Job = Box<dyn FnOnce(&mut RfvpFrameRuntime) + Send>;
-
 struct Session {
     handle: u64,
-    jobs: SyncSender<Job>,
-    worker: JoinHandle<()>,
+    worker: ReplayWorker,
 }
 
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
@@ -190,13 +186,7 @@ impl Session {
         &self,
         job: impl FnOnce(&mut RfvpFrameRuntime) -> Result<R, i32> + Send + 'static,
     ) -> Result<R, i32> {
-        let (reply, result) = mpsc::sync_channel(1);
-        self.jobs
-            .send(Box::new(move |runtime| {
-                let _ = reply.send(job(runtime));
-            }))
-            .map_err(|_| ENGINE)?;
-        result.recv().map_err(|_| ENGINE)?
+        self.worker.run(job).map_err(|_| ENGINE)?
     }
 }
 
@@ -239,39 +229,9 @@ unsafe extern "C" fn open_directory(info: *const OpenInfo, out: *mut u64) -> i32
             return Err(BUSY);
         }
         let handle = next_handle(false)?;
-        let (jobs, queue) = mpsc::sync_channel::<Job>(0);
-        let (ready, start) = mpsc::sync_channel(1);
-        let worker = thread::Builder::new()
-            .name("rfvp-session".into())
-            .spawn(move || {
-                match RfvpFrameRuntime::new_directory(
-                    &project,
-                    saves.as_deref().map(Path::new),
-                    nls,
-                ) {
-                    Ok(mut runtime) => {
-                        if ready.send(OK).is_ok() {
-                            for job in queue {
-                                job(&mut runtime);
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        let _ = ready.send(runtime_error(error));
-                    }
-                }
-            })
-            .map_err(|_| ENGINE)?;
-        let start = start.recv().unwrap_or(ENGINE);
-        if start != OK {
-            let _ = worker.join();
-            return Err(start);
-        }
-        *session = Some(Session {
-            handle,
-            jobs,
-            worker,
-        });
+        let worker = ReplayWorker::open(PathBuf::from(project), saves.map(PathBuf::from), nls)
+            .map_err(runtime_error)?;
+        *session = Some(Session { handle, worker });
         unsafe { write(out, handle) }
     })
 }
@@ -285,9 +245,7 @@ extern "C" fn close(handle: u64) -> i32 {
         {
             return Err(HANDLE);
         }
-        let Session { jobs, worker, .. } = current.take().unwrap();
-        drop(jobs);
-        let _ = worker.join();
+        drop(current.take());
         Ok(())
     })
 }

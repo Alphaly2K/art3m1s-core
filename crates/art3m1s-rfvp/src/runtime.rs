@@ -190,7 +190,48 @@ impl ExternalRenderer {
             self.sync_texture_commands(&frame.texture_commands)?;
         }
 
-        let adapted: AdaptedFrame = self.adapter.convert_rfvp_frame(&frame.frame)?;
+        self.render_commands(&frame.frame)
+    }
+
+    #[cfg(feature = "host-runtime")]
+    fn sync_replay_textures(
+        &mut self,
+        frame: &crate::RfvpReplayFrame,
+    ) -> Result<(), ExternalRendererError> {
+        let visible: std::collections::HashSet<_> = frame
+            .textures
+            .iter()
+            .map(|texture| texture.handle)
+            .collect();
+        let unused: Vec<_> = self
+            .textures
+            .keys()
+            .filter(|handle| !visible.contains(handle))
+            .copied()
+            .collect();
+        for handle in unused {
+            self.sync_texture_destroy(RecordedTextureDestroy { handle });
+        }
+        for texture in &frame.textures {
+            self.sync_texture_create(texture)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "host-runtime")]
+    pub(crate) fn render_replay_frame(
+        &mut self,
+        frame: &crate::RfvpReplayFrame,
+    ) -> Result<Option<RfvpRenderResult>, ExternalRendererError> {
+        self.sync_replay_textures(frame)?;
+        self.render_commands(&frame.frame)
+    }
+
+    fn render_commands(
+        &mut self,
+        frame: &rfvp::host_api::RenderFrame,
+    ) -> Result<Option<RfvpRenderResult>, ExternalRendererError> {
+        let adapted: AdaptedFrame = self.adapter.convert_rfvp_frame(frame)?;
         let hit_proxies = adapted.hit_proxies.clone();
 
         let commands: Vec<CommandState> = adapted

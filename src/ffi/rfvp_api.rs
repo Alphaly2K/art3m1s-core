@@ -275,6 +275,26 @@ static API_V1: Art3m1sRfvpApiV1 = Art3m1sRfvpApiV1 {
     runtime_set_damage_visualization: Some(runtime_set_damage_visualization),
 };
 
+static REPLAY_HOST_API_V1: Art3m1sRfvpApiV1 = Art3m1sRfvpApiV1 {
+    runtime_create: Some(replay_runtime_create),
+    runtime_set_log_callback: None,
+    ..API_V1
+};
+
+/// Host presentation and device services for a session driven by RFVP's replay API.
+///
+/// # Safety
+/// A non-null `out_size` must point to writable, aligned storage for a `usize`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn art3m1s_rfvp_get_replay_host_v1(
+    out_size: *mut usize,
+) -> *const Art3m1sRfvpApiV1 {
+    if !out_size.is_null() {
+        unsafe { *out_size = std::mem::size_of::<Art3m1sRfvpApiV1>() };
+    }
+    &REPLAY_HOST_API_V1
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn art3m1s_rfvp_get_api_v1(out_size: *mut usize) -> *const Art3m1sRfvpApiV1 {
     if !out_size.is_null() {
@@ -293,6 +313,61 @@ unsafe extern "C" fn runtime_create(
     backend: i32,
     nls: u32,
     out_runtime: *mut u64,
+) -> i32 {
+    unsafe {
+        create_runtime(
+            game_root_utf8,
+            game_root_len,
+            save_root_utf8,
+            save_root_len,
+            width,
+            height,
+            backend,
+            nls,
+            out_runtime,
+            false,
+        )
+    }
+}
+
+unsafe extern "C" fn replay_runtime_create(
+    game_root_utf8: *const u8,
+    game_root_len: usize,
+    save_root_utf8: *const u8,
+    save_root_len: usize,
+    width: u32,
+    height: u32,
+    backend: i32,
+    nls: u32,
+    out_runtime: *mut u64,
+) -> i32 {
+    unsafe {
+        create_runtime(
+            game_root_utf8,
+            game_root_len,
+            save_root_utf8,
+            save_root_len,
+            width,
+            height,
+            backend,
+            nls,
+            out_runtime,
+            true,
+        )
+    }
+}
+
+unsafe fn create_runtime(
+    game_root_utf8: *const u8,
+    game_root_len: usize,
+    save_root_utf8: *const u8,
+    save_root_len: usize,
+    width: u32,
+    height: u32,
+    backend: i32,
+    nls: u32,
+    out_runtime: *mut u64,
+    replay: bool,
 ) -> i32 {
     guard_status(|| {
         if out_runtime.is_null()
@@ -334,7 +409,12 @@ unsafe extern "C" fn runtime_create(
             Ok(backend) => backend,
             Err(_) => return ART3M1S_RFVP_STATUS_ENGINE,
         };
-        let runtime = match RfvpHostRuntime::new_directory(
+        let create = if replay {
+            RfvpHostRuntime::new_replay_directory
+        } else {
+            RfvpHostRuntime::new_directory
+        };
+        let runtime = match create(
             game_root,
             save_root.map(std::path::Path::new),
             width,
@@ -344,7 +424,12 @@ unsafe extern "C" fn runtime_create(
             [0.0, 0.0, 0.0, 1.0],
         ) {
             Ok(runtime) => runtime,
-            Err(_) => return ART3M1S_RFVP_STATUS_ENGINE,
+            Err(error) => {
+                if replay {
+                    enqueue_log("E", &error.to_string());
+                }
+                return ART3M1S_RFVP_STATUS_ENGINE;
+            }
         };
         let handle = RUNTIMES.insert(ApiRuntime {
             runtime,
@@ -624,22 +709,23 @@ unsafe extern "C" fn poll_log(output: *mut u8, capacity: usize) -> usize {
     .unwrap_or(0)
 }
 
-pub(crate) fn dispatch_log(level: &str, message: &str) {
+pub(crate) fn enqueue_log(level: &str, message: &str) {
     let level = level.as_bytes().first().copied().unwrap_or(b'I') as u32;
     if let Ok(mut queue) = LOG_QUEUE.lock() {
         while queue.len() >= MAX_LOG_RECORDS {
             queue.pop_front();
         }
-        let message = if message.len() > MAX_LOG_MESSAGE {
-            &message[..MAX_LOG_MESSAGE]
-        } else {
-            message
-        };
+        let message = &message[..message.floor_char_boundary(MAX_LOG_MESSAGE)];
         queue.push_back(LogRecord {
             level,
             message: message.as_bytes().to_vec(),
         });
     }
+}
+
+pub(crate) fn dispatch_log(level: &str, message: &str) {
+    enqueue_log(level, message);
+    let level = level.as_bytes().first().copied().unwrap_or(b'I') as u32;
     let callback = RFVP_LOG_CALLBACK.lock().ok().and_then(|slot| *slot);
     let Some((callback, user_data)) = callback else {
         return;
@@ -653,7 +739,6 @@ pub(crate) fn dispatch_log(level: &str, message: &str) {
         );
     }));
 }
-
 
 fn audio_command_v1(command: &RfvpHostAudioCommand, payload: &[u8]) -> Art3m1sRfvpAudioCommandV1 {
     Art3m1sRfvpAudioCommandV1 {

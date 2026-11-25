@@ -1,7 +1,10 @@
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::mpsc::{self, SyncSender};
+use std::thread::{self, JoinHandle};
 
 use rfvp::host_api::{RenderCommand, RenderFrame, TextureFormat, TextureHandle};
 use rfvp::rendering::external::{
@@ -64,7 +67,8 @@ impl From<RfvpHostRuntimeError> for RfvpReplayError {
 /// Keep session calls on the creating thread. RFVP's script globals are
 /// process-wide, so run one game at a time across the RFVP entry points.
 pub struct RfvpFrameRuntime {
-    session: NativeSession,
+    pub(super) session: NativeSession,
+    stage_size: (u32, u32),
     textures: FrameTextures,
     latest: Option<Arc<RfvpReplayFrame>>,
     stopped: bool,
@@ -76,7 +80,7 @@ impl RfvpFrameRuntime {
         save_root: Option<&Path>,
         nls: RfvpNls,
     ) -> Result<Self, RfvpReplayError> {
-        let (session, _) = NativeSession::open(
+        let (session, stage_size) = NativeSession::open(
             game_root.as_ref(),
             save_root,
             0,
@@ -86,6 +90,7 @@ impl RfvpFrameRuntime {
         )?;
         Ok(Self {
             session,
+            stage_size,
             textures: FrameTextures::default(),
             latest: None,
             stopped: false,
@@ -134,6 +139,86 @@ impl RfvpFrameRuntime {
             .take_frame()?
             .map(|native| self.textures.snapshot(native))
             .transpose()
+    }
+}
+
+thread_local! {
+    static REPLAY_WORKER: Cell<bool> = const { Cell::new(false) };
+}
+
+pub fn is_replay_worker_thread() -> bool {
+    REPLAY_WORKER.get()
+}
+
+type Job = Box<dyn FnOnce(&mut RfvpFrameRuntime) + Send>;
+
+pub(crate) struct ReplayWorker {
+    jobs: Option<SyncSender<Job>>,
+    thread: Option<JoinHandle<()>>,
+    pub(crate) stage_size: (u32, u32),
+}
+
+impl ReplayWorker {
+    pub(crate) fn open(
+        project: PathBuf,
+        saves: Option<PathBuf>,
+        nls: RfvpNls,
+    ) -> Result<Self, RfvpReplayError> {
+        let (jobs, queue) = mpsc::sync_channel::<Job>(0);
+        let (ready, started) = mpsc::sync_channel(1);
+        let thread = thread::Builder::new()
+            .name("rfvp-session".into())
+            .spawn(move || {
+                REPLAY_WORKER.set(true);
+                match RfvpFrameRuntime::new_directory(project, saves.as_deref(), nls) {
+                    Ok(mut runtime) => {
+                        if ready.send(Ok(runtime.stage_size)).is_ok() {
+                            for job in queue {
+                                job(&mut runtime);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let _ = ready.send(Err(error));
+                    }
+                }
+            })
+            .map_err(|_| RfvpHostRuntimeError::WorkerStopped)?;
+        let mut worker = Self {
+            jobs: Some(jobs),
+            thread: Some(thread),
+            stage_size: (0, 0),
+        };
+        worker.stage_size = started
+            .recv()
+            .map_err(|_| RfvpHostRuntimeError::WorkerStopped)??;
+        Ok(worker)
+    }
+
+    pub(crate) fn run<R: Send + 'static>(
+        &self,
+        job: impl FnOnce(&mut RfvpFrameRuntime) -> R + Send + 'static,
+    ) -> Result<R, RfvpHostRuntimeError> {
+        let (reply, result) = mpsc::sync_channel(1);
+        self.jobs
+            .as_ref()
+            .ok_or(RfvpHostRuntimeError::WorkerStopped)?
+            .send(Box::new(move |runtime| {
+                let _ = reply.send(job(runtime));
+            }))
+            .map_err(|_| RfvpHostRuntimeError::WorkerStopped)?;
+        result
+            .recv()
+            .map_err(|_| RfvpHostRuntimeError::WorkerStopped)
+    }
+}
+
+impl Drop for ReplayWorker {
+    fn drop(&mut self) {
+        drop(self.jobs.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
