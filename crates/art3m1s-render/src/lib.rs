@@ -7,6 +7,8 @@
 pub mod artemis;
 pub mod backend;
 pub mod draw;
+#[cfg(feature = "emote")]
+pub mod emote;
 pub mod external;
 pub mod hlsl;
 pub mod naming;

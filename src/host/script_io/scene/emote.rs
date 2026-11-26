@@ -1,5 +1,5 @@
 use super::*;
-use crate::emote_playback::EmotePlayback;
+use crate::artemis_emote::ArtemisEmoteLayer;
 use crate::render_pipeline::draw::DrawCommand;
 use art3m1s_emote::{EmoteDrawItem, EmoteModel, PsbDocument};
 use asb_interpreter::EmoteLayerCommand;
@@ -23,7 +23,7 @@ struct Layer {
 }
 
 struct Model {
-    playback: EmotePlayback,
+    playback: ArtemisEmoteLayer,
     textures: HashMap<String, Arc<FrameTexture>>,
     texture_bytes: usize,
     items: Vec<EmoteDrawItem>,
@@ -129,7 +129,7 @@ impl SceneEmote {
             remaining -= size;
         }
         let instance = Model {
-            playback: EmotePlayback::new(model, generation, width, height),
+            playback: ArtemisEmoteLayer::new(model, generation, width, height),
             textures,
             texture_bytes: available - remaining,
             items: Vec::new(),

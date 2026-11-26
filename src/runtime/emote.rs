@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use super::CoreRuntime;
-use crate::emote_playback::EmotePlayback;
+use crate::artemis_emote::ArtemisEmoteLayer;
 use crate::host_files::HostResources;
 use crate::render_pipeline::draw::{DrawCommand, TextureId, TextureInfo, TextureProvider};
 
@@ -46,7 +46,7 @@ struct LayerSlots {
 }
 
 struct EmoteInstance {
-    playback: EmotePlayback,
+    playback: ArtemisEmoteLayer,
     textures: BTreeMap<String, EmoteTextureState>,
     texture_source_bytes: usize,
     resources: HostResources,
@@ -246,7 +246,7 @@ impl EmoteInstance {
             );
         }
         Ok(Self {
-            playback: EmotePlayback::new(model, generation, width, height),
+            playback: ArtemisEmoteLayer::new(model, generation, width, height),
             textures,
             texture_source_bytes,
             resources,
@@ -317,7 +317,7 @@ impl EmoteInstance {
                     if texture.gpu.is_none() {
                         let rgba = self
                             .playback
-                            .model
+                            .model()
                             .atlas()
                             .decode_texture_data_rgba8(texture_id, compressed)
                             .map_err(|error| {
@@ -366,7 +366,7 @@ impl EmoteInstance {
                         rgba
                     } else {
                         self.playback
-                            .model
+                            .model()
                             .atlas()
                             .decode_texture_data_rgba8(texture_id, compressed)
                             .map_err(|error| {
@@ -380,7 +380,7 @@ impl EmoteInstance {
                     )))]
                     let rgba = self
                         .playback
-                        .model
+                        .model()
                         .atlas()
                         .decode_texture_data_rgba8(texture_id, compressed)
                         .map_err(|error| {
@@ -422,7 +422,8 @@ impl EmoteInstance {
 
         Ok(self
             .playback
-            .evaluate()?
+            .evaluate()
+            .map_err(|error| error.to_string())?
             .into_iter()
             .filter_map(|item| {
                 let (texture, info) = self.textures.get(&item.texture_id)?.gpu?;
@@ -524,7 +525,7 @@ mod tests {
                 .unwrap()
         );
         let instance = state.layers["1.0"].active.as_ref().unwrap();
-        assert!(instance.playback.model.source_document().is_none());
+        assert!(instance.playback.model().source_document().is_none());
         assert!(
             instance
                 .textures
@@ -533,7 +534,7 @@ mod tests {
         );
         {
             let instance = state.layers["1.0"].active.as_ref().unwrap();
-            let items = EmoteMotionEvaluator::new(&instance.playback.model)
+            let items = EmoteMotionEvaluator::new(instance.playback.model())
                 .evaluate_base(&EmoteRenderState {
                     motion_time: 0.0,
                     variables: BTreeMap::from([("face_eye_open".to_string(), 5.0)]),
@@ -582,7 +583,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .playback
-                .model
+                .model()
                 .source_document()
                 .is_none()
         );

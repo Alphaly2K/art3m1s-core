@@ -6,6 +6,7 @@ license = "MPL-2.0"
 description = "Backend-neutral rendering API for Art3m1s runtimes"
 
 [dependencies]
+art3m1s-emote = { path = "../art3m1s-emote", default-features = false, optional = true }
 glam = "0.30"
 glow = { version = "0.16", optional = true }
 image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
@@ -57,6 +58,7 @@ naga = { version = "29", optional = true, features = ["wgsl-in", "spv-out"] }
 
 [features]
 default = []
+emote = ["dep:art3m1s-emote"]
 artemis-frame = []
 artemis = ["artemis-frame", "dep:log"]
 gl = ["dep:glow", "dep:image", "dep:libloading", "dep:log"]

@@ -6,13 +6,12 @@ mod lip_track;
 
 use difference::{Assignments, Differences, Scale, Selection};
 
-use crate::emote_playback::EmotePlayback;
-use art3m1s_emote::{EmoteModel, PsbDocument};
+use art3m1s_emote::{EmoteCommand, EmoteModel, EmotePlayback, PsbDocument};
 use art3m1s_render::{
     ALPHA_MASK_SHADER, DrawList, Extent2D, FrameTarget, GpuBackend, TextureData, TextureDesc,
     TextureId, TextureInfo,
+    emote::{EmoteDrawPlacement, draw_command},
 };
-use asb_interpreter::EmoteLayerCommand;
 use encoding_rs::{Encoding, SHIFT_JIS};
 use flate2::{Decompress, FlushDecompress, Status};
 use glam::{Affine2, Vec2};
@@ -459,7 +458,7 @@ unsafe extern "C" fn clear_actions(_: u64, token: u64) -> i32 {
         if let Some(action) = model.action.take() {
             model
                 .playback
-                .command(EmoteLayerCommand::StopTimeline { label: action });
+                .command(EmoteCommand::StopTimeline { label: action });
             model.dirty = true;
         }
         Ok(OK)
@@ -779,7 +778,7 @@ impl Model {
             textures.insert(name.clone(), (id, info));
         }
         Ok(Self {
-            playback: EmotePlayback::new(model, 1, 0, 0),
+            playback: EmotePlayback::new(model, 1),
             gpu,
             textures,
             expression: Differences::default(),
@@ -815,14 +814,14 @@ impl Model {
     }
 
     fn play(&mut self, name: &str) -> bool {
-        if !self.playback.model.timelines().contains_key(name) {
+        if !self.playback.model().timelines().contains_key(name) {
             return false;
         }
         if let Some(previous) = self.action.replace(name.to_owned()) {
             self.playback
-                .command(EmoteLayerCommand::StopTimeline { label: previous });
+                .command(EmoteCommand::StopTimeline { label: previous });
         }
-        self.playback.command(EmoteLayerCommand::PlayTimeline {
+        self.playback.command(EmoteCommand::PlayTimeline {
             label: name.to_owned(),
             flags: 0,
         });
@@ -895,7 +894,7 @@ impl Model {
             if self.applied.get(label) == Some(value) {
                 continue;
             }
-            self.playback.command(EmoteLayerCommand::SetVariable {
+            self.playback.command(EmoteCommand::SetVariable {
                 label: label.clone(),
                 value: *value,
                 frames: 0.,
@@ -996,8 +995,14 @@ impl Model {
             return Ok(());
         }
         let items = match state {
-            Some(state) => self.playback.evaluate_state(&state)?,
-            None => self.playback.evaluate()?,
+            Some(state) => self.playback.evaluate_state(&state),
+            None => self.playback.evaluate(),
+        }
+        .map_err(|error| error.to_string())?;
+        let placement = EmoteDrawPlacement {
+            transform: Affine2::IDENTITY,
+            clip_bounds: None,
+            stencil_namespace: 1,
         };
         let mut list = DrawList::new();
         let mut min = Vec2::splat(f32::INFINITY);
@@ -1006,7 +1011,7 @@ impl Model {
             let Some(&(id, info)) = self.textures.get(&item.texture_id) else {
                 continue;
             };
-            let Some(mut command) = self.playback.draw_command(item, id, info) else {
+            let Some(command) = draw_command(item, id, info, placement) else {
                 continue;
             };
             let mut include = |point| {
@@ -1029,7 +1034,6 @@ impl Model {
                     include(point);
                 }
             }
-            command.clip_bounds = None;
             list.push(command);
         }
         if list.is_empty() {

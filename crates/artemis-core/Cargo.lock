@@ -55,6 +55,7 @@ dependencies = [
 name = "art3m1s-render"
 version = "0.1.0"
 dependencies = [
+ "art3m1s-emote",
  "glam",
 ]
 

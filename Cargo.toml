@@ -21,7 +21,7 @@ required-features = ["game-probes"]
 asb-interpreter = { path = "crates/asb-interpreter", default-features = false }
 art3m1s-emote = { path = "crates/art3m1s-emote", default-features = false }
 art3m1s-log = { path = "crates/art3m1s-log" }
-art3m1s-render = { path = "crates/art3m1s-render", features = ["artemis-frame"] }
+art3m1s-render = { path = "crates/art3m1s-render", features = ["artemis-frame", "emote"] }
 pfs-upk-rust = { path = "crates/pfs-upk-rust", optional = true }
 art3m1s-media = { path = "crates/art3m1s-media", optional = true }
 art3m1s-native-render = { path = "crates/art3m1s-native-render", optional = true }

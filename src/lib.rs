@@ -17,21 +17,24 @@ legacy_exports!(compositor, host, render_pipeline, save, text);
 
 #[cfg(not(feature = "legacy"))]
 pub use host::api;
+mod artemis_emote;
 #[cfg(feature = "legacy")]
 pub mod audio;
 #[cfg(feature = "legacy")]
 pub mod backend;
-mod emote_playback;
+#[cfg(feature = "legacy")]
+pub mod ffi;
 #[cfg(all(
     feature = "katze-model-host",
     any(
         all(feature = "metal-backend", any(target_os = "macos", target_os = "ios")),
-        all(feature = "vulkan-backend", any(target_os = "linux", target_os = "windows", target_os = "android")),
+        all(
+            feature = "vulkan-backend",
+            any(target_os = "linux", target_os = "windows", target_os = "android")
+        ),
     )
 ))]
 mod katze_model_host;
-#[cfg(feature = "legacy")]
-pub mod ffi;
 #[cfg(any(
     feature = "gl-backend",
     feature = "metal-backend",

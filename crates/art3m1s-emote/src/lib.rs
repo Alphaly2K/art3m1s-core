@@ -1,12 +1,13 @@
 //! E-Mote model parsing and playback state.
 //!
-//! The parser and evaluator stay independent from the host runtime, while
-//! `art3m1s-core` owns script bindings, GPU resources and scene composition.
+//! Engines supply model bytes and elapsed time. The runtime evaluates poses
+//! into ordered layers for the caller to compose.
 
 mod atlas;
 mod error;
 mod model;
 mod motion;
+mod playback;
 mod player;
 mod psb;
 mod render;
@@ -20,6 +21,7 @@ pub use motion::{
     EmoteLayerFrame, EmoteMesh, EmoteMotion, EmoteMotionLibrary, EmoteMotionParameter,
     EmoteMotionPriority, EmoteMotionRef,
 };
+pub use playback::EmotePlayback;
 pub use player::{EmoteCommand, EmotePlayer, EmoteTransform, TimelineState, VariableState};
 pub use psb::{PsbDocument, PsbHeader, PsbResourceData, PsbValue, ResourceRef};
 pub use render::{EmoteDrawItem, EmoteEvaluationHistory, EmoteMotionEvaluator, EmoteRenderState};
