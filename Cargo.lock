@@ -130,6 +130,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "android_logger"
+version = "0.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dbb4e440d04be07da1f1bf44fb4495ebd58669372fe0cffa6e48595ac5bd88a3"
+dependencies = [
+ "android_log-sys",
+ "env_filter 0.1.4",
+ "log",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -229,6 +240,8 @@ dependencies = [
  "image 0.25.10",
  "ndk-context",
  "objc2",
+ "pal-asset",
+ "pal-vm",
  "pfs-upk-rust",
  "serde",
  "serde_json",
@@ -344,6 +357,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "atomic-arena"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73e8ed45f88ed32e6827a96b62d8fd4086d72defc754c5c6bd08470c1aaf648e"
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -435,6 +454,15 @@ name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
+
+[[package]]
+name = "block-buffer"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
+dependencies = [
+ "generic-array",
+]
 
 [[package]]
 name = "block-buffer"
@@ -782,6 +810,15 @@ dependencies = [
 
 [[package]]
 name = "cpufeatures"
+version = "0.2.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "cpufeatures"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
@@ -837,6 +874,16 @@ name = "crunchy"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
+
+[[package]]
+name = "crypto-common"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
+dependencies = [
+ "generic-array",
+ "typenum",
+]
 
 [[package]]
 name = "crypto-common"
@@ -903,13 +950,23 @@ dependencies = [
 
 [[package]]
 name = "digest"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
+dependencies = [
+ "block-buffer 0.10.4",
+ "crypto-common 0.1.7",
+]
+
+[[package]]
+name = "digest"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
 dependencies = [
- "block-buffer",
+ "block-buffer 0.12.1",
  "const-oid",
- "crypto-common",
+ "crypto-common 0.2.2",
 ]
 
 [[package]]
@@ -1354,6 +1411,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "generic-array"
+version = "0.14.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
+dependencies = [
+ "typenum",
+ "version_check",
+]
+
+[[package]]
 name = "gethostname"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1445,6 +1512,15 @@ name = "glam"
 version = "0.30.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19fc433e8437a212d1b6f1e68c7824af3aed907da60afa994e7f542d18d12aa9"
+
+[[package]]
+name = "glam"
+version = "0.33.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37bfe73dc8ec21f54d181e5a60554327ec3f1c600c455a75ccbfc65d2106a6c4"
+dependencies = [
+ "mint",
+]
 
 [[package]]
 name = "glifo"
@@ -2016,7 +2092,22 @@ dependencies = [
  "ringbuf",
  "send_wrapper",
  "symphonia",
- "triple_buffer",
+ "triple_buffer 8.1.1",
+]
+
+[[package]]
+name = "kira"
+version = "0.12.1"
+source = "git+https://github.com/Alphaly2K/sena-rs.git?rev=c0cab5af53b71e91bb6ef258f46b03956740caf2#c0cab5af53b71e91bb6ef258f46b03956740caf2"
+dependencies = [
+ "atomic-arena",
+ "glam 0.33.12",
+ "mint",
+ "pastey",
+ "rtrb",
+ "send_wrapper",
+ "symphonia",
+ "triple_buffer 9.0.1",
 ]
 
 [[package]]
@@ -2254,6 +2345,17 @@ dependencies = [
  "oxideav-ac3",
  "oxideav-core",
  "symphonia",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "na_mpeg2_decoder"
+version = "0.1.0"
+source = "git+https://github.com/Alphaly2K/sena-rs.git?rev=c0cab5af53b71e91bb6ef258f46b03956740caf2#c0cab5af53b71e91bb6ef258f46b03956740caf2"
+dependencies = [
+ "bytemuck",
+ "byteorder",
+ "log",
  "thiserror 1.0.69",
 ]
 
@@ -2679,6 +2781,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "pal-asset"
+version = "0.1.0"
+source = "git+https://github.com/Alphaly2K/sena-rs.git?rev=c0cab5af53b71e91bb6ef258f46b03956740caf2#c0cab5af53b71e91bb6ef258f46b03956740caf2"
+dependencies = [
+ "encoding_rs",
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "pal-script"
+version = "0.1.0"
+source = "git+https://github.com/Alphaly2K/sena-rs.git?rev=c0cab5af53b71e91bb6ef258f46b03956740caf2#c0cab5af53b71e91bb6ef258f46b03956740caf2"
+
+[[package]]
+name = "pal-vm"
+version = "0.1.0"
+source = "git+https://github.com/Alphaly2K/sena-rs.git?rev=c0cab5af53b71e91bb6ef258f46b03956740caf2#c0cab5af53b71e91bb6ef258f46b03956740caf2"
+dependencies = [
+ "ab_glyph",
+ "android_logger 0.15.1",
+ "anyhow",
+ "console_error_panic_hook",
+ "encoding_rs",
+ "jpeg-decoder",
+ "js-sys",
+ "kira 0.12.1",
+ "libc",
+ "log",
+ "na_mpeg2_decoder 0.1.0 (git+https://github.com/Alphaly2K/sena-rs.git?rev=c0cab5af53b71e91bb6ef258f46b03956740caf2)",
+ "ndk-context",
+ "pal-asset",
+ "pal-script",
+ "png 0.17.16",
+ "sha2",
+ "symphonia",
+ "wasm-bindgen",
+ "web-sys",
+ "web-time",
+ "windows-sys 0.61.2",
+ "wmv-decoder 0.2.0 (git+https://github.com/Alphaly2K/sena-rs.git?rev=c0cab5af53b71e91bb6ef258f46b03956740caf2)",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2706,6 +2852,12 @@ name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+
+[[package]]
+name = "pastey"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
 name = "peniko"
@@ -3160,6 +3312,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
+name = "rtrb"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "342e1478a6e1c839e7405033eabfdc954d4d5dabd39f34e83420a43a95acfb04"
+
+[[package]]
 name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3355,8 +3513,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
 dependencies = [
  "cfg-if",
- "cpufeatures",
- "digest",
+ "cpufeatures 0.3.1",
+ "digest 0.11.3",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
 ]
 
 [[package]]
@@ -3411,7 +3580,7 @@ dependencies = [
  "hex",
  "image 0.24.9",
  "lewton",
- "na_mpeg2_decoder",
+ "na_mpeg2_decoder 0.1.0",
 ]
 
 [[package]]
@@ -3436,7 +3605,7 @@ name = "siglus_scene_vm"
 version = "1.0.0"
 dependencies = [
  "ab_glyph",
- "android_logger",
+ "android_logger 0.14.1",
  "anyhow",
  "bytemuck",
  "chrono",
@@ -3451,9 +3620,9 @@ dependencies = [
  "getrandom 0.3.4",
  "image 0.24.9",
  "js-sys",
- "kira",
+ "kira 0.9.6",
  "log",
- "na_mpeg2_decoder",
+ "na_mpeg2_decoder 0.1.0",
  "ndk-context",
  "pollster 0.3.0",
  "raw-window-handle",
@@ -3475,7 +3644,7 @@ dependencies = [
  "web-time",
  "wgpu",
  "winit",
- "wmv-decoder",
+ "wmv-decoder 0.2.0",
 ]
 
 [[package]]
@@ -3995,6 +4164,15 @@ name = "triple_buffer"
 version = "8.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "420466259f9fa5decc654c490b9ab538400e5420df8237f84ecbe20368bcf72b"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "triple_buffer"
+version = "9.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ebd806b3ef7a896384cf1e718e7c010e49a80394df74f94a67f6a3037a5749c"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -5190,6 +5368,16 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 [[package]]
 name = "wmv-decoder"
 version = "0.2.0"
+dependencies = [
+ "byteorder",
+ "log",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "wmv-decoder"
+version = "0.2.0"
+source = "git+https://github.com/Alphaly2K/sena-rs.git?rev=c0cab5af53b71e91bb6ef258f46b03956740caf2#c0cab5af53b71e91bb6ef258f46b03956740caf2"
 dependencies = [
  "byteorder",
  "log",

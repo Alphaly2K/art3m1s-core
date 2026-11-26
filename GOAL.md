@@ -1907,3 +1907,9 @@ v1 adapter 可以复用逐步拆出的内部逻辑，但继续暴露原语义。
 完整 `scripts/test-all.sh`（655 passed、9 ignored，含原有未跟踪测试）以及 release 构建通过。
 未执行外部商业游戏 fixture 或可选 CGL 硬件组。macOS 默认 release 动态库的 `nm -gU`
 结果为 `art3m1s_get_api_v1` 和 9 个独立 `pfs_*`，未新增平铺 runtime 符号或 v2 查询入口。
+
+## Sena Host 接入
+
+Sena fork 的 `main` 与上游 `abbd035` 对齐。Core 固定使用 Sena `c0cab5a`，通过版本化 Host 表接收项目资源、存档和输入，并提供 RGBA8 和 PCM。会话和文件回调归打开会话的线程所有。macOS 的 Sena 与 Siglus 联合构建和 Core FFI 回归通过。
+
+Sena 目前使用软件栅格化，由 Flutter 呈现像素。可重放绘制指令、脚本窗口请求以及发行游戏的兼容性仍待验证。

@@ -24,8 +24,10 @@ mod krkr_renderer;
 
 #[cfg(feature = "siglus-engine")]
 pub mod siglus_api;
-#[cfg(feature = "siglus-engine")]
-mod siglus_output;
+#[cfg(any(feature = "siglus-engine", feature = "sena-engine"))]
+mod pcm_output;
+#[cfg(feature = "sena-engine")]
+pub mod sena_api;
 
 #[cfg(any(
     feature = "gl-backend",

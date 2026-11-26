@@ -28,6 +28,8 @@ art3m1s-native-render = { path = "crates/art3m1s-native-render", optional = true
 art3m1s-rfvp = { path = "crates/art3m1s-rfvp", optional = true, features = ["host-runtime"] }
 art3m1s-krkr = { path = "crates/art3m1s-krkr", optional = true }
 art3m1s-siglus = { path = "crates/art3m1s-siglus", optional = true }
+pal-vm = { git = "https://github.com/Alphaly2K/sena-rs.git", rev = "c0cab5af53b71e91bb6ef258f46b03956740caf2", optional = true, default-features = false, features = ["host-audio", "embedded"] }
+pal-asset = { git = "https://github.com/Alphaly2K/sena-rs.git", rev = "c0cab5af53b71e91bb6ef258f46b03956740caf2", optional = true }
 cpal = { version = "0.15.3", optional = true }
 encoding_rs = "0.8"
 flate2 = { version = "1", optional = true }
@@ -70,6 +72,7 @@ rfvp-engine = ["legacy", "rfvp-host-v2"]
 rfvp-host-v2 = ["dep:art3m1s-rfvp"]
 krkr-engine = ["legacy", "dep:art3m1s-krkr", "art3m1s-krkr/native-upstream"]
 siglus-engine = ["legacy", "dep:art3m1s-siglus", "art3m1s-siglus/host-audio", "dep:cpal", "dep:ndk-context"]
+sena-engine = ["dep:pal-vm", "dep:pal-asset", "dep:cpal", "dep:ndk-context"]
 ffmpeg = ["legacy", "art3m1s-media/ffmpeg", "art3m1s-siglus?/uci-ffmpeg"]
 game-probes = ["gl-backend"]
 

@@ -297,7 +297,7 @@ struct Runtime {
     height: u32,
     exiting: bool,
     save_fingerprint: Option<u64>,
-    audio_output: Option<super::siglus_output::Output>,
+    audio_output: Option<super::pcm_output::Output>,
     host_audio_clock: bool,
     dialog: Option<Arc<DialogSlot>>,
 }
@@ -844,7 +844,7 @@ fn start_output(handle: u64, host_clock: bool) -> i32 {
     guarded(|| {
         with_runtime(handle, |rt| {
             if rt.audio_output.is_none() {
-                match super::siglus_output::Output::start() {
+                match super::pcm_output::Output::start() {
                     Ok(output) => rt.audio_output = Some(output),
                     Err(error) => return fail(error),
                 }
