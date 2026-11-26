@@ -1631,7 +1631,7 @@ mod tests {
     #[test]
     fn host_ui_resume_and_text() {
         use art3m1s_siglus::siglus_scene_vm::runtime::globals::{
-            EditBoxListState, SystemMessageBoxButton,
+            EditBoxListState, SyscomPendingProc, SyscomPendingProcKind, SystemMessageBoxButton,
         };
 
         struct Project(PathBuf);
@@ -1764,7 +1764,7 @@ mod tests {
                 LAST_ERROR.with(|e| e.borrow().clone())
             );
         }
-        assert_eq!(unsafe { (api.runtime_is_exit_requested)(handle) }, 1);
+        assert_eq!(unsafe { (api.runtime_is_exit_requested)(handle) }, 0);
         let mut lease = 0;
         assert_eq!(
             unsafe { (ui.frames.acquire)(handle, &mut lease) },
@@ -1792,6 +1792,31 @@ mod tests {
             };
             assert_eq!(read_recreated_presenter(), read_recreated_presenter());
         }
+        assert_eq!(
+            with_runtime(handle, |rt| {
+                rt.adapter.with_host(|host| {
+                    host.vm_mut().ctx.globals.syscom.pending_proc = Some(SyscomPendingProc {
+                        kind: SyscomPendingProcKind::EndGame,
+                        warning: false,
+                        se_play: false,
+                        fade_out: false,
+                        leave_msgbk: false,
+                        save_id: 0,
+                    });
+                });
+                STATUS_OK
+            }),
+            STATUS_OK
+        );
+        for _ in 0..5 {
+            assert_eq!(
+                unsafe {
+                    (api.runtime_tick)(handle, 16, 0, std::ptr::null_mut(), 0, std::ptr::null_mut())
+                },
+                STATUS_OK
+            );
+        }
+        assert_eq!(unsafe { (api.runtime_is_exit_requested)(handle) }, 1);
         unsafe { (api.runtime_destroy)(handle) };
         let view = std::thread::spawn(move || {
             let mut view = std::mem::MaybeUninit::<FrameView>::uninit();
