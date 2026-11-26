@@ -1,6 +1,8 @@
-# Writes a PSB v2 with one synthetic red DXT5 tile to stdout.
+# Writes a PSB v2 with one synthetic red tile to stdout.
+raw = ARGV.delete('--bgra')
+abort 'usage: generate-emote-fixture.rb [--bgra]' unless ARGV.empty?
 texture = {
-  'texture' => {'type' => 'DXT5', 'width' => 4, 'height' => 4,
+  'texture' => {'type' => (raw ? 'RGBA8' : 'DXT5'), 'width' => 4, 'height' => 4,
                 'truncated_width' => 4, 'truncated_height' => 4, 'pixel' => :red},
   'icon' => {'tile' => {'left' => 0, 'top' => 0, 'width' => 4, 'height' => 4,
                         'originX' => 0, 'originY' => 0, 'attr' => 0}}
@@ -11,6 +13,13 @@ motion = {'lastTime' => 1, 'loopTime' => 0, 'layer' => [
 root = {'id' => 'motion', 'source' => {'atlas' => texture},
         'object' => {'chara' => {'motion' => {'main' => motion}}},
         'metadata' => {'base' => {'chara' => 'chara', 'motion' => 'main'}}}
+if raw
+  root['spec'] = 'win'
+  motion['priority'] = [{'time' => 0, 'content' => [0]}]
+  motion['layer'][0]['type'] = 0
+  motion['layer'][0]['frameList'][0]['type'] = 2
+  texture['type'] = 0
+end
 
 def array(values)
   [0x0e, values.length, 0x0e, *values].pack('CvCv*')
@@ -62,8 +71,12 @@ name_data = array((0..bases.keys.max).map { |i| bases[i] }) +
             array((0..parents.keys.max).map { |i| parents.fetch(i, 0) }) + array(terminals)
 string_data = strings.map { |string| string + "\0" }
 string_table = with_offsets.call(string_data).byteslice(0, 4 + 2 * strings.length)
-pixel = [255, 0, 0, 0, 0, 0, 0, 0, 0, 248, 0, 0, 0, 0, 0, 0].pack('C*')
-sections = [name_data, string_table, string_data.join, array([0]), array([16]), pixel, entries]
+pixel = if raw
+          [0, 0, 255, 255].pack('C*') * 16
+        else
+          [255, 0, 0, 0, 0, 0, 0, 0, 0, 248, 0, 0, 0, 0, 0, 0].pack('C*')
+        end
+sections = [name_data, string_table, string_data.join, array([0]), array([pixel.bytesize]), pixel, entries]
 offset = 40
 offsets = sections.map { |data| previous = offset; offset += data.bytesize; previous }
 STDOUT.binmode

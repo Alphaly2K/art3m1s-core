@@ -21,8 +21,8 @@ use art3m1s_siglus::siglus_scene_vm::{
     runtime::native_ui::{NativeMessageBoxKind, NativeMessageBoxRequest, NativeUiBackend},
 };
 use art3m1s_siglus::{
-    DirectorySaves, SiglusAdapter, SiglusFrameCompiler, SiglusFrameSnapshot, SiglusProjectIoV1,
-    SiglusRenderer, is_siglus_project,
+    DirectorySaves, SiglusAdapter, SiglusFrameCompiler, SiglusFrameSnapshot, SiglusFrameTexture,
+    SiglusProjectIoV1, SiglusRenderer, is_siglus_project,
 };
 
 pub const ABI_VERSION: u32 = 1;
@@ -1112,8 +1112,9 @@ pub struct TextureView {
 }
 
 struct FrameLease {
-    frame: Rc<SiglusFrameSnapshot>,
+    size: (u32, u32),
     meshes: Vec<FrameMesh>,
+    textures: Vec<SiglusFrameTexture>,
 }
 
 unsafe extern "C" fn acquire_frame(session: u64, out: *mut u64) -> i32 {
@@ -1131,6 +1132,17 @@ unsafe extern "C" fn acquire_frame(session: u64, out: *mut u64) -> i32 {
                 if leases.len() >= MAX_FRAME_LEASES {
                     return fail("Siglus frame lease limit reached");
                 }
+                let textures = if frame.emote_textures().is_empty() {
+                    frame.textures().to_vec()
+                } else {
+                    let Some(presenter) = &mut rt.presenter else {
+                        return fail("Configure a Siglus presenter before acquiring a frame with E-Mote textures");
+                    };
+                    match presenter.renderer.resolve_textures(frame) {
+                        Ok(textures) => textures,
+                        Err(error) => return fail(format!("Siglus frame textures: {error:#}")),
+                    }
+                };
                 let id = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
                 let mesh = |command: &art3m1s_render::DrawCommand| FrameMesh {
                     texture_id: command.texture.0,
@@ -1156,8 +1168,9 @@ unsafe extern "C" fn acquire_frame(session: u64, out: *mut u64) -> i32 {
                 leases.insert(
                     id,
                     FrameLease {
-                        frame: frame.clone(),
+                        size: frame.size(),
                         meshes: frame.draw_list().commands.iter().map(mesh).collect(),
+                        textures,
                     },
                 );
                 unsafe { out.write(id) };
@@ -1177,13 +1190,13 @@ unsafe extern "C" fn frame_view(lease: u64, out: *mut FrameView) -> i32 {
             let Some(lease) = leases.get(&lease) else {
                 return STATUS_HANDLE;
             };
-            let (width, height) = lease.frame.size();
+            let (width, height) = lease.size;
             unsafe {
                 out.write(FrameView {
                     width,
                     height,
                     mesh_count: lease.meshes.len() as u32,
-                    texture_count: lease.frame.textures().len() as u32,
+                    texture_count: lease.textures.len() as u32,
                     meshes: if lease.meshes.is_empty() {
                         std::ptr::null()
                     } else {
@@ -1206,7 +1219,7 @@ unsafe extern "C" fn frame_texture(lease: u64, index: u32, out: *mut TextureView
             let Some(lease) = leases.get(&lease) else {
                 return STATUS_HANDLE;
             };
-            let Some(texture) = lease.frame.textures().get(index as usize) else {
+            let Some(texture) = lease.textures.get(index as usize) else {
                 return STATUS_ARGUMENT;
             };
             unsafe {

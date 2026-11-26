@@ -100,7 +100,8 @@ typedef struct Art3m1sSiglusFrameApiV1 {
     /* A CPU session. Advance with runtime.tick mode 0. save_dir may be null. */
     int32_t (*create_runtime)(const char* project, const char* save_dir, uint64_t* session);
     /* Returns 1 before the first frame. Each lease remains valid across ticks
-     * and destruction of the session. Use and release it on the acquiring thread. */
+     * and destruction of the session. Use and release it on the acquiring thread.
+     * E-Mote object textures are resolved by the configured presenter at acquire. */
     int32_t (*acquire)(uint64_t session, uint64_t* lease);
     int32_t (*view)(uint64_t lease, Art3m1sSiglusFrameViewV1* view);
     /* The texture ID identifies an immutable straight RGBA8 revision in a session. */

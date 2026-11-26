@@ -16,6 +16,8 @@ use siglus_scene_vm::assets::RgbaImage;
 pub use siglus_scene_vm::host::{SiglusBootSource, SiglusGameexe, SiglusSaveStore};
 use siglus_scene_vm::host::{SiglusHost, SiglusHostConfig};
 
+mod emote;
+pub use emote::{SiglusEmoteRenderer, SiglusEmoteTexture};
 mod project_io;
 pub use project_io::SiglusProjectIoV1;
 mod save_directory;
@@ -202,11 +204,12 @@ impl SiglusAdapter {
 }
 
 /// An owned frame with logical texture IDs and no device resources.
-/// Retaining it also retains the exact image revisions used by its commands.
+/// It retains the exact CPU images and object packets used by its commands.
 pub struct SiglusFrameSnapshot {
     size: (u32, u32),
     draw: DrawList,
     textures: Vec<SiglusFrameTexture>,
+    emote_textures: Vec<SiglusEmoteTexture>,
     sprite_count: usize,
 }
 
@@ -219,8 +222,13 @@ impl SiglusFrameSnapshot {
         &self.draw
     }
 
+    /// CPU textures already available for upload. Object textures are listed separately.
     pub fn textures(&self) -> &[SiglusFrameTexture] {
         &self.textures
+    }
+
+    pub fn emote_textures(&self) -> &[SiglusEmoteTexture] {
+        &self.emote_textures
     }
 }
 
@@ -246,6 +254,7 @@ impl SiglusFrameCompiler {
             size: frame.size,
             draw: DrawList::new(),
             textures: Vec::new(),
+            emote_textures: Vec::new(),
             sprite_count: frame.plan.submitted_sprite_count(),
         };
         let mut used = HashSet::new();
@@ -256,6 +265,26 @@ impl SiglusFrameCompiler {
             }
             validate_sprite(sprite)?;
             let effects = ColorEffects::from_sprite(sprite);
+            if let Some(packet) = &sprite.emote_render {
+                let size = TextureInfo {
+                    width: packet.width,
+                    height: packet.height,
+                };
+                if let Some(mut command) = map_sprite(entry, TextureId(0), size, frame.size)? {
+                    self.last_texture_id = self
+                        .last_texture_id
+                        .checked_add(1)
+                        .context("Siglus texture IDs exhausted")?;
+                    command.texture = TextureId(self.last_texture_id);
+                    snapshot.emote_textures.push(SiglusEmoteTexture::new(
+                        command.texture,
+                        packet.clone(),
+                        effects,
+                    ));
+                    snapshot.draw.push(command);
+                }
+                continue;
+            }
             let (key, version, image) = match &sprite.image_id {
                 Some(handle) => {
                     let (image, version) = frame
@@ -334,6 +363,7 @@ impl SiglusFrameCompiler {
 #[derive(Default)]
 pub struct SiglusRenderer {
     compiler: SiglusFrameCompiler,
+    emote: SiglusEmoteRenderer,
     textures: HashMap<TextureId, (Arc<RgbaImage>, TextureId)>,
     last_sprite_count: usize,
     last_command_count: usize,
@@ -360,10 +390,11 @@ impl SiglusRenderer {
         gpu: &mut dyn GpuBackend,
         present: bool,
     ) -> Result<()> {
+        let textures = self.resolve_textures(frame)?;
         gpu.begin_access();
         let rendered = (|| {
             let mut used = HashSet::new();
-            for texture in frame.textures() {
+            for texture in &textures {
                 used.insert(texture.id);
                 if self
                     .textures
@@ -410,6 +441,14 @@ impl SiglusRenderer {
         })();
         gpu.end_access();
         rendered
+    }
+
+    /// Resolve object targets while preserving the ordinary stage texture IDs.
+    pub fn resolve_textures(
+        &mut self,
+        frame: &SiglusFrameSnapshot,
+    ) -> Result<Vec<SiglusFrameTexture>> {
+        self.emote.resolve_textures(frame)
     }
 
     /// Release resources before replacing or reusing the GPU backend.
@@ -499,8 +538,7 @@ fn validate_sprite(s: &Sprite) -> Result<()> {
     // Siglus's ordinary 2D alpha test discards alpha < 1/255. With this
     // adapter's color-only composition, zero-alpha texels have the same
     // visible result under alpha blending; depth/shadow paths stay rejected.
-    if s.emote_render.is_some()
-        || s.mask_image_id.is_some()
+    if s.mask_image_id.is_some()
         || s.tonecurve_image_id.is_some()
         || s.wipe_src_image_id.is_some()
         || s.fog_texture_image_id.is_some()
@@ -519,8 +557,7 @@ fn validate_sprite(s: &Sprite) -> Result<()> {
         || !s.alpha_blend
     {
         bail!(
-            "Siglus unsupported sprite effect: emote={} mask={} tonecurve={} wipe_source={} fog_texture={} mesh_kind={} billboard={} camera={} z={} pivot_z={} scale_z={} rotate_x={} rotate_y={} light={} fog={} wipe_mode={} mask_mode={} alpha_test={} alpha_blend={}",
-            s.emote_render.is_some(),
+            "Siglus unsupported sprite effect: mask={} tonecurve={} wipe_source={} fog_texture={} mesh_kind={} billboard={} camera={} z={} pivot_z={} scale_z={} rotate_x={} rotate_y={} light={} fog={} wipe_mode={} mask_mode={} alpha_test={} alpha_blend={}",
             s.mask_image_id.is_some(),
             s.tonecurve_image_id.is_some(),
             s.wipe_src_image_id.is_some(),
@@ -699,6 +736,52 @@ mod tests {
         let vertices = &command.mesh.unwrap().vertices;
         assert_eq!(vertices[0], [12.0, 34.0, 0.0, 0.0]);
         assert_eq!(vertices[2], [32.0, 44.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn siglus_emote_objects_defer_texture_rendering_in_stage_order() {
+        use siglus_scene_vm::emote::SiglusEmoteRuntime;
+
+        let psb = include_bytes!("../../../src/host/script_io/fixtures/emote-bgra-red.psb");
+        let player = SiglusEmoteRuntime::from_psb_bytes(psb, None).unwrap();
+        let packet = player.packet(8, 8, 0, 0, true);
+        let images = ImageManager::new(PathBuf::from("siglus-emote-frame-test"));
+        let sprite = |x, emote_render| {
+            RenderSprite::new(
+                None,
+                None,
+                Sprite {
+                    visible: true,
+                    x,
+                    emote_render,
+                    ..Sprite::default()
+                },
+            )
+        };
+        let plan = RenderFrame::ordinary(vec![
+            sprite(2, None),
+            sprite(6, Some(packet.clone())),
+            sprite(10, None),
+        ]);
+        let frame = SiglusFrame {
+            size: (16, 16),
+            plan,
+            images: &images,
+        };
+        let snapshot = SiglusFrameCompiler::default().compile(&frame).unwrap();
+        let [model] = snapshot.emote_textures() else {
+            panic!("expected one deferred object texture");
+        };
+        assert!(Arc::ptr_eq(&model.packet, &packet));
+        let commands = &snapshot.draw_list().commands;
+        assert_eq!(commands.len(), 3);
+        assert_eq!(commands[1].texture, model.id);
+        assert_eq!(commands[0].texture, commands[2].texture);
+        assert_eq!(snapshot.textures().len(), 1);
+        assert_eq!(
+            commands[1].mesh.as_ref().unwrap().vertices[2],
+            [14., 8., 1., 1.]
+        );
     }
 
     #[test]

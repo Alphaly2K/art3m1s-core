@@ -19,12 +19,16 @@ Host 按帧契约管理纹理、执行 GPU 绘制并呈现。各引擎通过自�
 | --- | --- | --- |
 | Artemis | Luau 的图层命令、Host 读取 PSB、帧内 CPU 图集与 E-Mote 材质 | 已使用共享播放和绘制转换。Artemis 层负责图层坐标、裁剪和待切换模型。 |
 | KatzeSystem2 | 版本化模型回调读取 PSZ，按任务时钟返回带原点的 BGRA。Flutter 挂载回调表。 | 模型回调已直接使用共享播放器和绘制转换。PSZ、差分、口型和效果留在兼容层。现有离屏绘制与读回属于该 Host 回调。 |
-| Siglus | Eluna 已生成 `EmoteRenderPacket`、图集和独立的绘制计划。Core 的 `SiglusFrameCompiler` 目前拒绝包含 E-Mote 的精灵。 | 保留 Eluna 播放状态，从现有绘制计划接可重放帧。需要覆盖对象目标、模板阶段、feedback 纹理及 alpha 命中回传。 |
-| KRKR | `emoteplayer.dll` 的 TJS 接口及 `DrawDeviceD3D` 接入已在上游插件源码中。当前 Core adapter 取得合成后的 RGBA。 | 保留插件语义与软件帧路径。若接可重放绘制，从插件提交渲染指令处取数据。 |
-| RFVP | 当前 VM 和帧命令中未发现 E-Mote。适配器消费图片、字形、纯色和裁剪指令。 | 由实际游戏的脚本和资源入口确定接入方式。模型求值可复用共享播放器，画面并入现有帧。 |
+| Siglus | Eluna 生成 `EmoteRenderPacket`、图集和绘制计划。 | 帧编译器保留对象包和舞台顺序。Host 用 Siglus 原有合成器处理遮罩、反馈纹理及 alpha 命中，再把结果作为共享舞台纹理。C 帧租约通过已配置的呈现器解析对象纹理。 |
+| KRKR | 上游内建 `emoteplayer.dll` 和 `DrawDeviceD3D`。 | 通过原生插件保留 TJS 接口。插件绘制到软件图层，Host 可取得合成 RGBA 帧，或通过绘制回调上传合成纹理。 |
+| RFVP | 当前 VM 和帧命令中未发现 E-Mote。 | 本阶段范围为 Artemis、KatzeSystem2、Siglus 和 KRKR。 |
 
-验证覆盖独立 E-Mote crate 的 42 项测试、绘制网格的原有回归、Artemis 从 Host 读取模型并
-发布图集和材质，以及 macOS 上 Katze 回调的 PSZ 短读、两帧 BGRA 像素、原点与销毁流程。
+Artemis 与 KatzeSystem2 的验证覆盖 E-Mote crate 的 42 项测试、网格回归、Artemis 的 Host
+模型读取和材质输出，以及 Katze 回调的 PSZ 短读、BGRA 像素、原点与销毁流程。
+Siglus 的合成回归覆盖舞台顺序、两版对象位置、Metal 帧像素、alpha 命中，以及会话销毁后
+纹理租约的有效性。KRKR 的合成模型通过 TJS 插件加载，软件 RGBA 帧和 Host 绘制回调
+均包含正确的模型与背景颜色。Siglus 对象纹理当前在每个新版本完成一次 GPU 读回，再上传到
+舞台后端。复杂商业游戏场景和其他平台的实际呈现待验证。
 
 ## RFVP 上游同步
 

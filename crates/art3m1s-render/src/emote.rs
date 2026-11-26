@@ -11,7 +11,7 @@ use glam::{Affine2, Vec2};
 pub struct EmoteDrawPlacement {
     /// Maps model coordinates into the destination's coordinate space.
     pub transform: Affine2,
-    /// Optional clip in destination coordinates, as [left, top, right, bottom].
+    /// Optional clip in destination coordinates, as [left, top, width, height].
     pub clip_bounds: Option<[f32; 4]>,
     /// Models in the same draw list must have distinct stencil namespaces.
     pub stencil_namespace: u64,
