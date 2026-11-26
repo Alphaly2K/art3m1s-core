@@ -4,6 +4,8 @@
 //! runtime table is thread-local: a handle called from another thread fails
 //! closed instead of unsafely moving the VM or graphics backend.
 
+mod translation;
+
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{CStr, c_char, c_void};
@@ -1423,9 +1425,14 @@ mod tests {
     use super::*;
     use std::ffi::CString;
 
-    const GAMEEXE: &str = "#SCREEN_SIZE = 320, 240\n#MENU_SCENE = \"_start\", 0\n";
+    pub(super) const GAMEEXE: &str = "#SCREEN_SIZE = 320, 240\n#MENU_SCENE = \"_start\", 0\n";
 
     fn scene_pack() -> Vec<u8> {
+        scene_pack_with_text(None)
+    }
+
+    pub(super) fn scene_pack_with_text(text: Option<&str>) -> Vec<u8> {
+        use art3m1s_siglus::siglus_scene_vm::runtime::{constants::cd, forms::codes::FM_STR};
         const PACK_HEADER: i32 = 23 * 4;
         const SCENE_HEADER: i32 = 33 * 4;
         let name: Vec<u16> = "_start".encode_utf16().collect();
@@ -1436,8 +1443,25 @@ mod tests {
         pack[0] = PACK_HEADER;
         pack[13..21].copy_from_slice(&[PACK_HEADER, 1, name_list, 1, data_index, 1, data_list, 1]);
         let mut scene = [0i32; 33];
-        scene[..3].copy_from_slice(&[SCENE_HEADER, SCENE_HEADER + 4, 1]);
+        scene[0] = SCENE_HEADER;
         scene[9..11].copy_from_slice(&[SCENE_HEADER, 1]);
+        let mut code = Vec::new();
+        let mut strings = Vec::new();
+        if let Some(text) = text {
+            code.push(cd::PUSH);
+            code.extend(FM_STR.to_le_bytes());
+            code.extend(0i32.to_le_bytes());
+            code.push(cd::TEXT);
+            code.extend(0i32.to_le_bytes());
+            let text: Vec<u16> = text.encode_utf16().collect();
+            scene[3..7].copy_from_slice(&[SCENE_HEADER + 4, 1, SCENE_HEADER + 12, 1]);
+            strings.extend(0i32.to_le_bytes());
+            strings.extend((text.len() as i32).to_le_bytes());
+            strings.extend(text.into_iter().flat_map(u16::to_le_bytes));
+        }
+        code.push(cd::EOF);
+        scene[1] = SCENE_HEADER + 4 + strings.len() as i32;
+        scene[2] = code.len() as i32;
         let mut bytes: Vec<_> = pack.into_iter().flat_map(i32::to_le_bytes).collect();
         bytes.extend(
             [0, name.len() as i32]
@@ -1445,10 +1469,15 @@ mod tests {
                 .flat_map(i32::to_le_bytes),
         );
         bytes.extend(name.into_iter().flat_map(u16::to_le_bytes));
-        bytes.extend([0, SCENE_HEADER + 5].into_iter().flat_map(i32::to_le_bytes));
+        bytes.extend(
+            [0, scene[1] + scene[2]]
+                .into_iter()
+                .flat_map(i32::to_le_bytes),
+        );
         bytes.extend(scene.into_iter().flat_map(i32::to_le_bytes));
         bytes.extend(0i32.to_le_bytes());
-        bytes.push(art3m1s_siglus::siglus_scene_vm::runtime::constants::cd::EOF);
+        bytes.extend(strings);
+        bytes.extend(code);
         bytes
     }
 

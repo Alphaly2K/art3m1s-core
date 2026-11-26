@@ -175,6 +175,33 @@ typedef struct Art3m1sSiglusHostV2 {
 const Art3m1sSiglusHostV1* art3m1s_siglus_get_host_api_v1(size_t* out_size);
 const Art3m1sSiglusHostV2* art3m1s_siglus_get_host_api_v2(size_t* out_size);
 
+typedef struct Art3m1sSiglusTranslationText {
+    const uint8_t* data;
+    size_t size;
+} Art3m1sSiglusTranslationText;
+
+typedef struct Art3m1sSiglusTranslationEntry {
+    Art3m1sSiglusTranslationText source, target;
+} Art3m1sSiglusTranslationEntry;
+
+/* The optional table uses the session's owning thread. All strings are UTF-8.
+ * configure copies up to 262144 entries containing up to 64 MiB of data.
+ * Individual strings are limited to 16 KiB. Reconfiguring releases pending text.
+ * poll returns 1 for no request or -4 for insufficient capacity and reports the
+ * required size. A successful poll transfers the request to the caller.
+ * complete accepts NULL to fall back to the original and returns 1 for stale replies.
+ * Unanswered requests fall back to the original after three seconds of session time. */
+typedef struct Art3m1sSiglusTranslationV1 {
+    uint32_t abi_version, struct_size;
+    int32_t (*configure)(uint64_t session, uint32_t online,
+                         const Art3m1sSiglusTranslationEntry* entries, size_t count);
+    int32_t (*poll)(uint64_t session, uint64_t* id, uint8_t* output,
+                    size_t capacity, size_t* written);
+    int32_t (*complete)(uint64_t session, uint64_t id, const Art3m1sSiglusTranslationText* reply);
+} Art3m1sSiglusTranslationV1;
+
+const Art3m1sSiglusTranslationV1* art3m1s_siglus_get_translation_api_v1(void);
+
 #ifdef __cplusplus
 }
 #endif
