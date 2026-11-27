@@ -11,6 +11,10 @@ private enum ArtemisFlutterError: Error {
     case staleReply
 }
 
+protocol ArtemisFlutterTexture: FlutterTexture {
+    var buffer: CVPixelBuffer { get }
+}
+
 /// Keep one instance on the macOS Runner for the lifetime of the Flutter engine.
 @MainActor final class ArtemisFlutterHost {
     static let channelName = "moe.alphaly.art3m1s/artemis_v2"
@@ -22,11 +26,13 @@ private enum ArtemisFlutterError: Error {
     private let dxvkDirectory: String?
     private var mediaLibrary: ArtemisLegacyMediaLibrary?
     private let registry: FlutterTextureRegistry
+    private let makeTexture: ((Int, Int) throws -> ArtemisFlutterTexture)?
     private var channel: FlutterMethodChannel?
     private var sessions: [String: Session] = [:]
 
     init(registry: FlutterTextureRegistry, corePath: String, metalPath: String, mediaPath: String? = nil,
-         angleDirectory: String? = nil, dxvkDirectory: String? = nil) {
+         angleDirectory: String? = nil, dxvkDirectory: String? = nil,
+         makeTexture: ((Int, Int) throws -> ArtemisFlutterTexture)? = nil) {
         self.corePath = corePath
         self.metalPath = metalPath
         self.mediaPath = mediaPath
@@ -37,6 +43,7 @@ private enum ArtemisFlutterError: Error {
             self.dxvkDirectory = nil
         }
         self.registry = registry
+        self.makeTexture = makeTexture
     }
 
     func register(messenger: FlutterBinaryMessenger) {
@@ -62,6 +69,10 @@ private enum ArtemisFlutterError: Error {
             }
         }
         self.channel = channel
+    }
+
+    func texture(id: Int64) -> ArtemisFlutterTexture? {
+        sessions.values.first(where: { $0.texture?.id == id })?.texture?.texture
     }
 
     func close() {
@@ -225,7 +236,7 @@ private enum ArtemisFlutterError: Error {
                 throw ArtemisFlutterError.invalidArguments
             }
             try detach(session)
-            let texture = try Texture(width: width, height: height)
+            let texture = try makeTexture?(width, height) ?? Texture(width: width, height: height)
             try session.core.setSurface(texture.buffer, spatialScale: Float(scale))
             let textureID = registry.register(texture)
             session.texture = (textureID, texture)
@@ -435,7 +446,7 @@ private enum ArtemisFlutterError: Error {
 private extension ArtemisFlutterHost {
     final class Session {
         let core: ArtemisMacSession
-        var texture: (id: Int64, texture: Texture)?
+        var texture: (id: Int64, texture: ArtemisFlutterTexture)?
         var requests: [UInt64: ArtemisMacEvent] = [:]
         var videos: [UInt64: ArtemisFlutterVideo] = [:]
         var videoSuspended = false
@@ -443,7 +454,7 @@ private extension ArtemisFlutterHost {
         init(_ core: ArtemisMacSession) { self.core = core }
     }
 
-    final class Texture: NSObject, FlutterTexture {
+    final class Texture: NSObject, ArtemisFlutterTexture {
         let buffer: CVPixelBuffer
 
         init(width: Int, height: Int) throws {
