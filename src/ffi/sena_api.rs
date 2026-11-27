@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pal_asset::vfs::{HostFiles, with_host_files};
-use pal_vm::scene::{FrameScene, rasterize_scene_rgba};
+use pal_vm::scene::{FrameScene, rasterize_scene_rgba, rasterize_scene_rgba_2x};
 use pal_vm::{Engine, EngineConfig, InputEvent, MouseButton, PalEvent, RuntimeStatus};
 
 const INVALID: i32 = -1;
@@ -253,22 +253,40 @@ unsafe extern "C" fn tick(id: u64, delta_ms: u32, width: *mut u32, height: *mut 
 }
 
 unsafe extern "C" fn rgba(id: u64, out: *mut u8, capacity: usize) -> i32 {
+    copy_rgba(id, out, capacity, false)
+}
+
+fn copy_rgba(id: u64, out: *mut u8, capacity: usize, dense: bool) -> i32 {
     if out.is_null() {
         return INVALID;
     }
     with_runtime(id, |rt| {
         let Some(scene) = &rt.scene else { return 1 };
-        let required = scene.logical_width as usize * scene.logical_height as usize * 4;
+        if dense && (scene.logical_width > LIMIT / 2 || scene.logical_height > LIMIT / 2) {
+            return INVALID;
+        }
+        let required = scene.logical_width as usize
+            * scene.logical_height as usize
+            * if dense { 16 } else { 4 };
         if capacity < required {
             return INVALID;
         }
-        let bytes = rasterize_scene_rgba(scene);
+        let bytes = if dense {
+            rt.engine.enable_dense_text();
+            rasterize_scene_rgba_2x(scene)
+        } else {
+            rasterize_scene_rgba(scene)
+        };
         if bytes.len() != required {
             return ENGINE;
         }
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), out, required) };
         0
     })
+}
+
+unsafe extern "C" fn rgba_2x(id: u64, out: *mut u8, capacity: usize) -> i32 {
+    copy_rgba(id, out, capacity, true)
 }
 
 unsafe extern "C" fn pcm(id: u64, out: *mut i16, frames: usize) -> i32 {
@@ -374,6 +392,7 @@ pub struct SenaApi {
     input: unsafe extern "C" fn(u64, u32, i32, i32, i32, *const c_char) -> i32,
     last_error: unsafe extern "C" fn(*mut u8, usize) -> usize,
     device_audio: extern "C" fn(u64, u32) -> i32,
+    rgba_2x: unsafe extern "C" fn(u64, *mut u8, usize) -> i32,
 }
 
 static API: SenaApi = SenaApi {
@@ -387,6 +406,7 @@ static API: SenaApi = SenaApi {
     input,
     last_error,
     device_audio,
+    rgba_2x,
 };
 
 #[unsafe(no_mangle)]
@@ -500,6 +520,16 @@ mod tests {
             0
         );
         assert!(pixels.chunks_exact(4).all(|p| p[3] == 255));
+        assert_eq!(
+            unsafe { (API.rgba_2x)(id, pixels.as_mut_ptr(), pixels.len()) },
+            INVALID
+        );
+        let mut dense = vec![0; pixels.len() * 4];
+        assert_eq!(
+            unsafe { (API.rgba_2x)(id, dense.as_mut_ptr(), dense.len()) },
+            0
+        );
+        assert!(dense.chunks_exact(4).all(|p| p[3] == 255));
         let mut silence = [1i16; 32];
         assert_eq!(
             unsafe { (API.pcm)(id, silence.as_mut_ptr(), silence.len() / 2) },

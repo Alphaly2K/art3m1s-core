@@ -284,7 +284,7 @@ impl SiglusFrameCompiler {
                 }
                 continue;
             }
-            let (key, version, image) = match &sprite.image_id {
+            let (key, version, image, dense) = match &sprite.image_id {
                 Some(handle) => {
                     let (image, version) = frame
                         .images
@@ -294,9 +294,10 @@ impl SiglusFrameCompiler {
                         TextureKey::Image(handle.key(), effects),
                         version,
                         Some(image),
+                        frame.images.dense_text_image(handle),
                     )
                 }
-                None => (TextureKey::Solid(effects), 0, None),
+                None => (TextureKey::Solid(effects), 0, None, None),
             };
             let size = image.as_ref().map_or(
                 TextureInfo {
@@ -311,6 +312,14 @@ impl SiglusFrameCompiler {
             let Some(mut command) = map_sprite(entry, TextureId(0), size, frame.size)? else {
                 continue;
             };
+            let image = dense.or(image);
+            if let Some(image) = &image {
+                command.size = TextureInfo {
+                    width: image.width,
+                    height: image.height,
+                };
+                command.clip = ClipRect::full(command.size);
+            }
             if self
                 .textures
                 .get(&key)
@@ -319,8 +328,8 @@ impl SiglusFrameCompiler {
                 let image = match image {
                     Some(image) if effects.is_identity() => image,
                     image => Arc::new(RgbaImage {
-                        width: size.width,
-                        height: size.height,
+                        width: command.size.width,
+                        height: command.size.height,
                         center_x: 0,
                         center_y: 0,
                         rgba: apply_color_effects(

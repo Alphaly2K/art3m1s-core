@@ -44,6 +44,9 @@ typedef struct Art3m1sSenaHostV1 {
                      const char* key);
     size_t (*last_error)(uint8_t* output, size_t capacity);
     int32_t (*device_audio)(uint64_t session, uint32_t action);
+    /* Optional struct_size-gated entry. Copies twice the width and height.
+     * Logical dimensions and input coordinates continue to come from tick. */
+    int32_t (*rgba_2x)(uint64_t session, uint8_t* output, size_t capacity);
 } Art3m1sSenaHostV1;
 
 const Art3m1sSenaHostV1* art3m1s_sena_get_api_v1(void);

@@ -12,8 +12,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use art3m1s_render::{
-    Extent2D, GpuBackend, NativeSurface, PostProcessPass, PostProcessPipeline, UpscaleConfig,
-    UpscaleMode,
+    Extent2D, GpuBackend, NativeSurface, NativeSurfaceKind, PostProcessPass, PostProcessPipeline,
+    UpscaleConfig, UpscaleMode,
 };
 use rfvp::host_abi::runtime::{
     open_runtime_with_io, rfvp_frame_get_commands, rfvp_frame_get_hit_proxies, rfvp_frame_get_size,
@@ -25,7 +25,7 @@ use rfvp::host_abi::runtime::{
     rfvp_runtime_push_input, rfvp_runtime_set_font_override, rfvp_runtime_set_text_hidpi,
     rfvp_runtime_set_text_replacements, rfvp_runtime_set_text_translation_enabled,
     rfvp_runtime_set_trace_mask, rfvp_runtime_stage_height, rfvp_runtime_stage_width,
-    rfvp_runtime_step, rfvp_runtime_submit_text_translation,
+    rfvp_runtime_step, rfvp_runtime_submit_text_translation, set_runtime_text_render_scale,
 };
 use rfvp::host_abi::v1::{
     RFVP_AUDIO_CREATE_STREAM, RFVP_AUDIO_DESTROY_STREAM, RFVP_AUDIO_ENCODED_FLAC,
@@ -970,18 +970,32 @@ impl RfvpHostRuntime {
             .backend_mut()
             .set_native_surface(surface)
             .map_err(RfvpHostRuntimeError::Surface)?;
-        self.configure_surface_post_process(width, height);
+        let macos_shared = cfg!(target_os = "macos")
+            && matches!(
+                surface.kind,
+                NativeSurfaceKind::AppleIoSurface | NativeSurfaceKind::AppleMetalTexture
+            );
+        let text_scale = if macos_shared {
+            (width as f32 / self.width.max(1) as f32)
+                .min(height as f32 / self.height.max(1) as f32)
+                .clamp(1.0, 2.0)
+        } else {
+            1.0
+        };
+        self.runtime
+            .run(move |session| set_runtime_text_render_scale(session.handle, text_scale))?;
+        self.configure_surface_post_process(width, height, macos_shared);
         Ok(())
     }
 
-    fn configure_surface_post_process(&mut self, width: u32, height: u32) {
+    fn configure_surface_post_process(&mut self, width: u32, height: u32, host_upscales: bool) {
         let stage_width = self.width;
         let stage_height = self.height;
         let backend = self.renderer.backend_mut();
         let spatial_supported = backend.backend_info().capabilities.spatial_upscaling;
         let use_spatial = spatial_supported && width > stage_width && height > stage_height;
         let mut pipeline = PostProcessPipeline::default();
-        if use_spatial {
+        if use_spatial && !host_upscales {
             pipeline.render_scale = (stage_width as f32 / width as f32)
                 .min(stage_height as f32 / height as f32)
                 .clamp(0.1, 1.0);
@@ -997,6 +1011,9 @@ impl RfvpHostRuntime {
 
     pub fn clear_native_surface(&mut self) {
         self.renderer.backend_mut().clear_native_surface();
+        let _ = self
+            .runtime
+            .run(|session| set_runtime_text_render_scale(session.handle, 1.0));
     }
 
     /// Acquires the pending frame, renders it through `GpuBackend`, and

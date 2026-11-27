@@ -36,6 +36,12 @@ fn main() {
         "KRKRSDL3_SOURCE_DIR and KRKRSDL3_BUILD_DIR are required for the upstream KRKR backend"
     );
     let upstream = upstream_requested && upstream_available;
+    if let Some(source) = krkr_source.as_ref().filter(|_| upstream) {
+        let source = PathBuf::from(source).join("core/media/font");
+        for file in ["FreeTypeImp.cpp", "FreeTypeImp.h"] {
+            println!("cargo:rerun-if-changed={}", source.join(file).display());
+        }
+    }
     if upstream_requested && !upstream {
         println!(
             "cargo:warning=KRKRSDL3 source/build directories are not configured; \

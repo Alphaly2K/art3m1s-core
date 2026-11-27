@@ -2098,7 +2098,7 @@ dependencies = [
 [[package]]
 name = "kira"
 version = "0.12.1"
-source = "git+https://github.com/Alphaly2K/sena-rs.git?rev=c0cab5af53b71e91bb6ef258f46b03956740caf2#c0cab5af53b71e91bb6ef258f46b03956740caf2"
+source = "git+https://github.com/Alphaly2K/sena-rs.git?rev=9787d56625946d9d6974b6a49da01f7f2d7c2c20#9787d56625946d9d6974b6a49da01f7f2d7c2c20"
 dependencies = [
  "atomic-arena",
  "glam 0.33.12",
@@ -2351,7 +2351,7 @@ dependencies = [
 [[package]]
 name = "na_mpeg2_decoder"
 version = "0.1.0"
-source = "git+https://github.com/Alphaly2K/sena-rs.git?rev=c0cab5af53b71e91bb6ef258f46b03956740caf2#c0cab5af53b71e91bb6ef258f46b03956740caf2"
+source = "git+https://github.com/Alphaly2K/sena-rs.git?rev=9787d56625946d9d6974b6a49da01f7f2d7c2c20#9787d56625946d9d6974b6a49da01f7f2d7c2c20"
 dependencies = [
  "bytemuck",
  "byteorder",
@@ -2783,7 +2783,7 @@ dependencies = [
 [[package]]
 name = "pal-asset"
 version = "0.1.0"
-source = "git+https://github.com/Alphaly2K/sena-rs.git?rev=c0cab5af53b71e91bb6ef258f46b03956740caf2#c0cab5af53b71e91bb6ef258f46b03956740caf2"
+source = "git+https://github.com/Alphaly2K/sena-rs.git?rev=9787d56625946d9d6974b6a49da01f7f2d7c2c20#9787d56625946d9d6974b6a49da01f7f2d7c2c20"
 dependencies = [
  "encoding_rs",
  "js-sys",
@@ -2793,12 +2793,12 @@ dependencies = [
 [[package]]
 name = "pal-script"
 version = "0.1.0"
-source = "git+https://github.com/Alphaly2K/sena-rs.git?rev=c0cab5af53b71e91bb6ef258f46b03956740caf2#c0cab5af53b71e91bb6ef258f46b03956740caf2"
+source = "git+https://github.com/Alphaly2K/sena-rs.git?rev=9787d56625946d9d6974b6a49da01f7f2d7c2c20#9787d56625946d9d6974b6a49da01f7f2d7c2c20"
 
 [[package]]
 name = "pal-vm"
 version = "0.1.0"
-source = "git+https://github.com/Alphaly2K/sena-rs.git?rev=c0cab5af53b71e91bb6ef258f46b03956740caf2#c0cab5af53b71e91bb6ef258f46b03956740caf2"
+source = "git+https://github.com/Alphaly2K/sena-rs.git?rev=9787d56625946d9d6974b6a49da01f7f2d7c2c20#9787d56625946d9d6974b6a49da01f7f2d7c2c20"
 dependencies = [
  "ab_glyph",
  "android_logger 0.15.1",
@@ -2810,7 +2810,7 @@ dependencies = [
  "kira 0.12.1",
  "libc",
  "log",
- "na_mpeg2_decoder 0.1.0 (git+https://github.com/Alphaly2K/sena-rs.git?rev=c0cab5af53b71e91bb6ef258f46b03956740caf2)",
+ "na_mpeg2_decoder 0.1.0 (git+https://github.com/Alphaly2K/sena-rs.git?rev=9787d56625946d9d6974b6a49da01f7f2d7c2c20)",
  "ndk-context",
  "pal-asset",
  "pal-script",
@@ -2821,7 +2821,7 @@ dependencies = [
  "web-sys",
  "web-time",
  "windows-sys 0.61.2",
- "wmv-decoder 0.2.0 (git+https://github.com/Alphaly2K/sena-rs.git?rev=c0cab5af53b71e91bb6ef258f46b03956740caf2)",
+ "wmv-decoder 0.2.0 (git+https://github.com/Alphaly2K/sena-rs.git?rev=9787d56625946d9d6974b6a49da01f7f2d7c2c20)",
 ]
 
 [[package]]
@@ -5377,7 +5377,7 @@ dependencies = [
 [[package]]
 name = "wmv-decoder"
 version = "0.2.0"
-source = "git+https://github.com/Alphaly2K/sena-rs.git?rev=c0cab5af53b71e91bb6ef258f46b03956740caf2#c0cab5af53b71e91bb6ef258f46b03956740caf2"
+source = "git+https://github.com/Alphaly2K/sena-rs.git?rev=9787d56625946d9d6974b6a49da01f7f2d7c2c20#9787d56625946d9d6974b6a49da01f7f2d7c2c20"
 dependencies = [
  "byteorder",
  "log",

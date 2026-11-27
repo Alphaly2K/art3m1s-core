@@ -484,6 +484,9 @@ fn register_runtime(
     mut log_session: PendingLogSession,
     out: *mut u64,
 ) -> i32 {
+    if cfg!(target_os = "macos") && backend.is_some() {
+        adapter.with_host(|host| host.set_dense_text(true));
+    }
     let (width, height) = adapter.logical_size();
     let save_fingerprint =
         uses_host_saves.then(|| adapter.with_host(|host| host.persist_global_if_changed(None)));
@@ -1256,6 +1259,9 @@ unsafe extern "C" fn configure_presenter(session: u64, backend: i32) -> i32 {
             match Presenter::new(backend, rt.width, rt.height) {
                 Ok(presenter) => {
                     rt.presenter = Some(presenter);
+                    if cfg!(target_os = "macos") {
+                        rt.adapter.with_host(|host| host.set_dense_text(true));
+                    }
                     STATUS_OK
                 }
                 Err(error) => fail(format!("Siglus GPU initialization: {error}")),
