@@ -3725,6 +3725,16 @@ B
     assert!(first.sprites[0].transform[4] >= 10.0);
     assert!(first.sprites[0].transform[5] >= 5.0);
     let atlas = first.texture(first.sprites[0].texture).unwrap();
+    for sprite in &first.sprites {
+        assert_eq!(
+            sprite.uv_scale[0] * atlas.width as f32,
+            sprite.quad_size[0] * 2.0
+        );
+        assert_eq!(
+            sprite.uv_scale[1] * atlas.height as f32,
+            sprite.quad_size[1] * 2.0
+        );
+    }
     let coverage = |pixels: &[u8]| pixels.iter().skip(3).step_by(4).filter(|&&a| a > 0).count();
     let old_coverage = coverage(atlas.rgba());
     assert!(old_coverage > 0);

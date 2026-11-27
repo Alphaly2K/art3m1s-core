@@ -25,7 +25,7 @@ pub(super) struct SceneText {
 impl Default for SceneText {
     fn default() -> Self {
         Self {
-            renderer: GlyphTextRenderer::with_atlas_limit(16),
+            renderer: GlyphTextRenderer::with_atlas_density(16, 2),
             atlases: HashMap::new(),
             atlas_revision: 0,
             known_faces: HashSet::new(),

@@ -95,6 +95,7 @@ pub struct GlyphTextRenderer {
     fonts: HashMap<String, (FontArc, u64)>,
     atlases: Vec<Atlas>,
     atlas_limit: usize,
+    raster_scale: u32,
     cache: HashMap<(u64, u16, u32), (usize, u32, u32, u32, u32)>,
     /// atlas 里的纯白小块（link type=0 hover 强调的白色方形板用），惰性分配
     white_patch: Option<(usize, u32, u32)>,
@@ -400,10 +401,10 @@ pub(crate) fn layout_glyphs(
 
 impl GlyphTextRenderer {
     pub fn new() -> Self {
-        Self::with_atlas_limit(usize::MAX)
+        Self::with_atlas_density(usize::MAX, 1)
     }
 
-    pub(crate) fn with_atlas_limit(atlas_limit: usize) -> Self {
+    pub(crate) fn with_atlas_density(atlas_limit: usize, raster_scale: u32) -> Self {
         Self {
             state: FontState::new(),
             font: None,
@@ -412,6 +413,7 @@ impl GlyphTextRenderer {
             fonts: HashMap::new(),
             atlases: vec![Atlas::new(0)],
             atlas_limit,
+            raster_scale,
             cache: HashMap::new(),
             white_patch: None,
         }
@@ -468,22 +470,45 @@ impl GlyphTextRenderer {
         let offset_y = sf.ascent() + b.min.y;
         let advance_x = sf.h_advance(glyph_id.with_scale(sz).id);
         let (page, ax, ay, aw, ah) = if w > 0 && h > 0 && w < ATLAS_SZ && h < ATLAS_SZ {
-            let k = (self.font_generation, glyph_id.0, sz.to_bits());
-            if let Some(cached) = self.cache.get(&k).copied() {
+            let key = (self.font_generation, glyph_id.0, sz.to_bits());
+            if let Some(cached) = self.cache.get(&key).copied() {
                 cached
             } else {
-                let (page, x, y) = self.alloc_atlas_region(w + 1, h + 1)?;
-                let mut g = vec![0u8; (w * h) as usize];
-                q.draw(|px, py, v| {
-                    let ix = py as usize * w as usize + px as usize;
-                    if ix < g.len() {
-                        g[ix] = (v * 255.0) as u8;
+                let mut raster = None;
+                let scale = self.raster_scale;
+                if scale > 1
+                    && w * scale < ATLAS_SZ
+                    && h * scale < ATLAS_SZ
+                    && let Some(outline) = sf.outline_glyph(glyph_id.with_scale(sz * scale as f32))
+                {
+                    raster = Some((outline, scale));
+                }
+                let region = raster
+                    .as_ref()
+                    .and_then(|(_, scale)| self.alloc_atlas_region(w * scale + 1, h * scale + 1));
+                let (outline, scale, (page, x, y)) = match (raster, region) {
+                    (Some((outline, scale)), Some(region)) => (outline, scale, region),
+                    _ => (q, 1, self.alloc_atlas_region(w + 1, h + 1)?),
+                };
+                let (aw, ah) = (w * scale, h * scale);
+                let min = outline.px_bounds().min;
+                let dx = (min.x - b.min.x * scale as f32).round() as i32;
+                let dy = (min.y - b.min.y * scale as f32).round() as i32;
+                let mut rgba = vec![0u8; (aw * ah * 4) as usize];
+                for pixel in rgba.chunks_exact_mut(4) {
+                    pixel[..3].fill(255);
+                }
+                outline.draw(|px, py, coverage| {
+                    let px = px as i32 + dx;
+                    let py = py as i32 + dy;
+                    if (0..aw as i32).contains(&px) && (0..ah as i32).contains(&py) {
+                        rgba[((py as u32 * aw + px as u32) * 4 + 3) as usize] =
+                            (coverage * 255.0) as u8;
                     }
                 });
-                let rgba: Vec<u8> = g.iter().flat_map(|&a| [255u8, 255, 255, a]).collect();
-                self.atlases[page].write(x, y, w, h, &rgba);
-                let cached = (page, x, y, w, h);
-                self.cache.insert(k, cached);
+                self.atlases[page].write(x, y, aw, ah, &rgba);
+                let cached = (page, x, y, aw, ah);
+                self.cache.insert(key, cached);
                 cached
             }
         } else {
@@ -1171,7 +1196,7 @@ impl TextRenderer for GlyphTextRenderer {
                     let clip = ClipRect {
                         uv_offset: [g.atlas_x / ATLAS_SZ as f32, g.atlas_y / ATLAS_SZ as f32],
                         uv_scale: [g.atlas_w / ATLAS_SZ as f32, g.atlas_h / ATLAS_SZ as f32],
-                        quad_size: [g.atlas_w, g.atlas_h],
+                        quad_size: [g.width, g.height],
                     };
 
                     // 带 scetween 动画偏移的位置
@@ -1300,7 +1325,7 @@ impl TextRenderer for GlyphTextRenderer {
                         clip: ClipRect {
                             uv_offset: [g.atlas_x / ATLAS_SZ as f32, g.atlas_y / ATLAS_SZ as f32],
                             uv_scale: [g.atlas_w / ATLAS_SZ as f32, g.atlas_h / ATLAS_SZ as f32],
-                            quad_size: [g.atlas_w, g.atlas_h],
+                            quad_size: [g.width, g.height],
                         },
                         clip_bounds: None,
                         shader: None,
