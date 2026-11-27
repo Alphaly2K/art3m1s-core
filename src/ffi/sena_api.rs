@@ -13,6 +13,11 @@ use pal_asset::vfs::{HostFiles, with_host_files};
 use pal_vm::scene::{FrameScene, rasterize_scene_rgba, rasterize_scene_rgba_2x};
 use pal_vm::{Engine, EngineConfig, InputEvent, MouseButton, PalEvent, RuntimeStatus};
 
+mod presenter;
+
+use art3m1s_render::NativeSurface;
+use presenter::Presenter;
+
 const INVALID: i32 = -1;
 const SESSION: i32 = -2;
 const ENGINE: i32 = -3;
@@ -110,6 +115,7 @@ struct Runtime {
     files: Rc<Files>,
     engine: Engine,
     scene: Option<FrameScene>,
+    presenter: Option<Presenter>,
     device: Option<super::pcm_output::Output>,
 }
 
@@ -181,6 +187,7 @@ unsafe extern "C" fn open(files: *const Files, output: *mut u64) -> i32 {
                     files,
                     engine,
                     scene: None,
+                    presenter: None,
                     device: None,
                 },
             )
@@ -380,6 +387,45 @@ extern "C" fn device_audio(id: u64, action: u32) -> i32 {
     })
 }
 
+unsafe extern "C" fn set_surface(
+    id: u64,
+    kind: i32,
+    handle: *mut c_void,
+    width: u32,
+    height: u32,
+) -> i32 {
+    with_runtime(id, |rt| {
+        if kind == 0 {
+            rt.presenter = None;
+            rt.engine.set_host_gpu_renderer(false);
+            return 0;
+        }
+        let Some(scene) = rt.scene.as_ref() else {
+            return INVALID;
+        };
+        let Ok(surface) = NativeSurface::from_legacy_parts(kind, handle, width, height) else {
+            return INVALID;
+        };
+        match Presenter::new(scene, surface) {
+            Ok(presenter) => {
+                rt.presenter = Some(presenter);
+                rt.engine.set_host_gpu_renderer(true);
+                0
+            }
+            Err(error) => failure(error),
+        }
+    })
+}
+
+extern "C" fn present(id: u64) -> i32 {
+    with_runtime(id, |rt| {
+        let (Some(presenter), Some(scene)) = (rt.presenter.as_mut(), rt.scene.as_ref()) else {
+            return INVALID;
+        };
+        presenter.present(scene).map_or_else(failure, |()| 0)
+    })
+}
+
 #[repr(C)]
 pub struct SenaApi {
     size: u32,
@@ -393,6 +439,8 @@ pub struct SenaApi {
     last_error: unsafe extern "C" fn(*mut u8, usize) -> usize,
     device_audio: extern "C" fn(u64, u32) -> i32,
     rgba_2x: unsafe extern "C" fn(u64, *mut u8, usize) -> i32,
+    set_surface: unsafe extern "C" fn(u64, i32, *mut c_void, u32, u32) -> i32,
+    present: extern "C" fn(u64) -> i32,
 }
 
 static API: SenaApi = SenaApi {
@@ -407,6 +455,8 @@ static API: SenaApi = SenaApi {
     last_error,
     device_audio,
     rgba_2x,
+    set_surface,
+    present,
 };
 
 #[unsafe(no_mangle)]

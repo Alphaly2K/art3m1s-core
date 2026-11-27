@@ -699,6 +699,24 @@ impl GlRenderer {
                         glow::ONE,
                     );
                 }
+                BlendMode::Opaque => {
+                    gl.blend_func_separate(glow::ONE, glow::ZERO, glow::ZERO, glow::ONE);
+                }
+                BlendMode::Product => {
+                    gl.blend_func_separate(glow::DST_COLOR, glow::ZERO, glow::ZERO, glow::ONE);
+                }
+                BlendMode::DestinationSquared => {
+                    gl.blend_func_separate(glow::ZERO, glow::DST_COLOR, glow::ZERO, glow::ONE);
+                }
+                BlendMode::Minimum | BlendMode::Maximum | BlendMode::Subtract => {
+                    let operation = match blend {
+                        BlendMode::Minimum => glow::MIN,
+                        BlendMode::Maximum => glow::MAX,
+                        _ => glow::FUNC_REVERSE_SUBTRACT,
+                    };
+                    gl.blend_equation_separate(operation, glow::FUNC_ADD);
+                    gl.blend_func_separate(glow::ONE, glow::ONE, glow::ZERO, glow::ONE);
+                }
                 BlendMode::NativeScreen => {
                     gl.blend_func_separate(
                         glow::ONE_MINUS_DST_COLOR,

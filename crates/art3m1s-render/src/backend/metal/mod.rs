@@ -3851,6 +3851,25 @@ fn apply_blend(
             attachment.setSourceAlphaBlendFactor(MTLBlendFactor::Zero);
             attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::One);
         }
+        PipelineBlend::Draw(mode @ (BlendMode::Opaque | BlendMode::Product
+            | BlendMode::DestinationSquared | BlendMode::Minimum | BlendMode::Maximum
+            | BlendMode::Subtract)) => {
+            use MTLBlendFactor as Factor;
+            use MTLBlendOperation as Operation;
+            let (op, src, dst) = match mode {
+                BlendMode::Opaque => (Operation::Add, Factor::One, Factor::Zero),
+                BlendMode::Product => (Operation::Add, Factor::DestinationColor, Factor::Zero),
+                BlendMode::DestinationSquared => (Operation::Add, Factor::Zero, Factor::DestinationColor),
+                BlendMode::Minimum => (Operation::Min, Factor::One, Factor::One),
+                BlendMode::Maximum => (Operation::Max, Factor::One, Factor::One),
+                _ => (Operation::ReverseSubtract, Factor::One, Factor::One),
+            };
+            attachment.setRgbBlendOperation(op);
+            attachment.setSourceRGBBlendFactor(src);
+            attachment.setDestinationRGBBlendFactor(dst);
+            attachment.setSourceAlphaBlendFactor(Factor::Zero);
+            attachment.setDestinationAlphaBlendFactor(Factor::One);
+        }
         PipelineBlend::Draw(BlendMode::NativeScreen) => {
             attachment.setSourceRGBBlendFactor(MTLBlendFactor::OneMinusDestinationColor);
             attachment.setDestinationRGBBlendFactor(MTLBlendFactor::One);

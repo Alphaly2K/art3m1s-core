@@ -47,6 +47,12 @@ typedef struct Art3m1sSenaHostV1 {
     /* Optional struct_size-gated entry. Copies twice the width and height.
      * Logical dimensions and input coordinates continue to come from tick. */
     int32_t (*rgba_2x)(uint64_t session, uint8_t* output, size_t capacity);
+    /* Optional struct_size-gated Host presentation. Supply the native surface
+     * after tick has published the stage size. Keep it alive until detach
+     * (kind 0) or close. present draws the most recent published scene. */
+    int32_t (*set_surface)(uint64_t session, int32_t kind, void* handle,
+                           uint32_t width, uint32_t height);
+    int32_t (*present)(uint64_t session);
 } Art3m1sSenaHostV1;
 
 const Art3m1sSenaHostV1* art3m1s_sena_get_api_v1(void);

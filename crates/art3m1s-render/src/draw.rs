@@ -164,6 +164,13 @@ pub enum BlendMode {
     NativeMultiply,
     /// Native E-Mote screen mode while preserving destination alpha.
     NativeScreen,
+    /// Replace RGB while preserving destination alpha.
+    Opaque,
+    Product,
+    DestinationSquared,
+    Minimum,
+    Maximum,
+    Subtract,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

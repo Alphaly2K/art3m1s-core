@@ -3889,6 +3889,19 @@ fn blend_state(b: PipelineBlend) -> vk::PipelineColorBlendAttachmentState {
             vk::BlendFactor::DST_COLOR,
             vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
         ),
+        PipelineBlend::Draw(mode @ (BlendMode::Opaque | BlendMode::Product
+            | BlendMode::DestinationSquared | BlendMode::Minimum | BlendMode::Maximum
+            | BlendMode::Subtract)) => {
+            let (op, src, dst) = match mode {
+                BlendMode::Opaque => (vk::BlendOp::ADD, vk::BlendFactor::ONE, vk::BlendFactor::ZERO),
+                BlendMode::Product => (vk::BlendOp::ADD, vk::BlendFactor::DST_COLOR, vk::BlendFactor::ZERO),
+                BlendMode::DestinationSquared => (vk::BlendOp::ADD, vk::BlendFactor::ZERO, vk::BlendFactor::DST_COLOR),
+                BlendMode::Minimum => (vk::BlendOp::MIN, vk::BlendFactor::ONE, vk::BlendFactor::ONE),
+                BlendMode::Maximum => (vk::BlendOp::MAX, vk::BlendFactor::ONE, vk::BlendFactor::ONE),
+                _ => (vk::BlendOp::REVERSE_SUBTRACT, vk::BlendFactor::ONE, vk::BlendFactor::ONE),
+            };
+            native_factors(x, op, src, dst)
+        }
         PipelineBlend::Draw(BlendMode::NativeScreen) => native_factors(
             x,
             vk::BlendOp::ADD,
