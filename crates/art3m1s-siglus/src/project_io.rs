@@ -1,7 +1,7 @@
 use std::ffi::{CString, c_char, c_void};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -11,7 +11,10 @@ use siglus_scene_vm::formats::{
     keys::{GAMEEXE_KEY, SCENE_KEY},
     scene_pck::ScenePckDecodeOptions,
 };
-use siglus_scene_vm::resource::{resolve_game_file, resolve_game_path, with_project_files};
+use siglus_scene_vm::resource::{
+    find_initial_gameexe_path, find_scene_pck_path, resolve_game_file, resolve_game_path,
+    with_project_files,
+};
 
 use crate::{
     SiglusAdapter, SiglusBootSource, SiglusGameexe, SiglusHostConfig, SiglusResourceSource,
@@ -234,17 +237,59 @@ impl SiglusBootSource for Boot {
     }
 }
 
-struct DirectoryFiles(PathBuf);
+struct DirectoryFiles {
+    root: PathBuf,
+    data_gameexe: Option<PathBuf>,
+}
 
 impl DirectoryFiles {
-    fn path(&self, key: &str) -> PathBuf {
-        self.0.join(key)
+    fn new(root: &Path) -> Self {
+        let data_gameexe = with_project_files(None, || {
+            if find_initial_gameexe_path(root).is_ok() {
+                return None;
+            }
+            let data = resolve_game_path(&root.join("Data")).ok().flatten()?;
+            let scene = find_scene_pck_path(root).ok()?;
+            if scene.parent() != Some(data.as_path()) {
+                return None;
+            }
+            let gameexe = find_initial_gameexe_path(&data).ok()?;
+            (gameexe.parent() == Some(data.as_path())).then_some(gameexe)
+        });
+        Self {
+            root: root.to_owned(),
+            data_gameexe,
+        }
     }
 
     fn resolve_file(&self, key: &str) -> Result<Option<PathBuf>> {
-        let path = self.path(key);
-        with_project_files(None, || resolve_game_file(&path))
+        if let Some(gameexe) = &self.data_gameexe
+            && gameexe
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case(key))
+        {
+            return Ok(Some(gameexe.clone()));
+        }
+        with_project_files(None, || resolve_game_file(&self.root.join(key)))
     }
+}
+
+pub(crate) fn probe_directory(root: &Path) -> bool {
+    let files = Arc::new(DirectoryFiles::new(root));
+    with_project_files(Some((root.to_owned(), files)), || {
+        find_scene_pck_path(root).is_ok() && find_initial_gameexe_path(root).is_ok()
+    })
+}
+
+fn containing_project(path: &Path) -> Option<&Path> {
+    if !path.file_name()?.to_str()?.eq_ignore_ascii_case("Data") {
+        return None;
+    }
+    let parent = path.parent()?;
+    let scene = find_scene_pck_path(path).ok()?.canonicalize().ok()?;
+    let parent_scene = find_scene_pck_path(parent).ok()?.canonicalize().ok()?;
+    (scene == parent_scene && probe_directory(parent)).then_some(parent)
 }
 
 impl SiglusResourceSource for DirectoryFiles {
@@ -264,7 +309,7 @@ impl SiglusResourceSource for DirectoryFiles {
     }
 
     fn resolve_local_directory(&self, key: &str) -> Result<Option<PathBuf>> {
-        let path = self.path(key);
+        let path = self.root.join(key);
         Ok(with_project_files(None, || resolve_game_path(&path))?.filter(|p| p.is_dir()))
     }
 }
@@ -272,11 +317,23 @@ impl SiglusResourceSource for DirectoryFiles {
 impl SiglusAdapter {
     /// Reuse the directory bootstrap while sending file reads through the native Host.
     pub fn open_directory_host(config: SiglusHostConfig) -> Result<Self> {
+        Self::open_directory(config, true)
+    }
+
+    pub(crate) fn open_directory(mut config: SiglusHostConfig, mount_files: bool) -> Result<Self> {
+        // Older library scans could register Data itself as the game root.
+        if let Some(parent) = containing_project(&config.project_dir) {
+            config.project_dir = parent.to_owned();
+        }
         let root = config.project_dir.clone();
-        let files = Arc::new(DirectoryFiles(root.clone()));
-        Self::open_with(Some((root, files)), || {
-            crate::SiglusHost::new_external(config)
-        })
+        let files = DirectoryFiles::new(&root);
+        let mount: Option<_> = if mount_files || files.data_gameexe.is_some() {
+            let files: Arc<dyn SiglusResourceSource> = Arc::new(files);
+            Some((root, files))
+        } else {
+            None
+        };
+        Self::open_with(mount, || crate::SiglusHost::new_external(config))
     }
 
     /// # Safety

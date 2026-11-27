@@ -34,8 +34,7 @@ use siglus_scene_vm::runtime::input::VmMouseButton;
 
 /// Probe only; constructing the host performs full game initialization.
 pub fn is_siglus_project(path: &Path) -> bool {
-    siglus_scene_vm::resource::find_scene_pck_path(path).is_ok()
-        && siglus_scene_vm::resource::find_initial_gameexe_path(path).is_ok()
+    project_io::probe_directory(path)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -98,7 +97,7 @@ pub struct SiglusStep<'session> {
 
 impl SiglusAdapter {
     pub fn open(config: SiglusHostConfig) -> Result<Self> {
-        Self::open_with(None, || SiglusHost::new_external(config))
+        Self::open_directory(config, false)
     }
 
     pub fn open_with_boot_source(

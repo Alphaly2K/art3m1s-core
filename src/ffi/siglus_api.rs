@@ -1424,6 +1424,7 @@ pub unsafe extern "C" fn art3m1s_siglus_get_host_api_v2(
 mod tests {
     use super::*;
     use std::ffi::CString;
+    use std::path::Path;
 
     pub(super) const GAMEEXE: &str = "#SCREEN_SIZE = 320, 240\n#MENU_SCENE = \"_start\", 0\n";
 
@@ -1626,6 +1627,48 @@ mod tests {
         });
         unsafe { runtime_destroy(second) };
         assert_eq!(Arc::strong_count(&project), 1);
+    }
+
+    #[test]
+    fn directory_probe_and_frame_host_read_startup_from_data() {
+        struct Project(PathBuf);
+        impl Drop for Project {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let project = Project(std::env::temp_dir().join(format!(
+            "art3m1s-siglus-data-{}-{}",
+            std::process::id(),
+            NEXT_HANDLE.fetch_add(1, Ordering::Relaxed),
+        )));
+        let data = project.0.join("DaTa");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("gameexeEN.INI"), GAMEEXE).unwrap();
+        std::fs::write(data.join("scene.PCK"), scene_pack()).unwrap();
+        let open = |path: &Path, expected: (u32, u32)| {
+            let path = CString::new(path.to_str().unwrap()).unwrap();
+            assert_eq!(unsafe { probe_project(path.as_ptr()) }, 1);
+            let mut runtime = 0;
+            assert_eq!(
+                unsafe { create_frame_runtime(path.as_ptr(), std::ptr::null(), &mut runtime) },
+                STATUS_OK,
+                "{}",
+                LAST_ERROR.with(|error| error.borrow().clone())
+            );
+            assert_eq!(
+                unsafe { (runtime_stage_width(runtime), runtime_stage_height(runtime)) },
+                expected
+            );
+            unsafe { runtime_destroy(runtime) };
+        };
+        open(&project.0, (320, 240));
+        std::fs::write(
+            project.0.join("Gameexe.ini"),
+            GAMEEXE.replace("320, 240", "640, 480"),
+        )
+        .unwrap();
+        open(&data, (640, 480));
     }
 
     #[test]
