@@ -406,7 +406,7 @@ impl SiglusRenderer {
                 let image = &texture.image;
                 let id = gpu
                     .create_texture(
-                        "siglus frame texture",
+                        &format!("siglus frame texture {}", texture.id.0),
                         TextureDesc::sampled_rgba8(image.width, image.height),
                         TextureData::Rgba8(&image.rgba),
                     )

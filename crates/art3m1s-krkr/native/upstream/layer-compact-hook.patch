@@ -1,0 +1,48 @@
+diff --git a/core/script/tjsNativeLayer.cpp b/core/script/tjsNativeLayer.cpp
+--- a/core/script/tjsNativeLayer.cpp
++++ b/core/script/tjsNativeLayer.cpp
+@@ -1,3 +1,5 @@
+ #include "tjsCommHead.h"
++
++#include <unordered_set>
+
+ #include "tjsNativeLayer.h"
+@@ -430,6 +432,23 @@
+ }
+ //---------------------------------------------------------------------------
++// The TJS object pool can discard layer instances without running destructors.
++static std::unordered_set<tTVPCompactEventCallbackIntf*> LayerCompactHooks;
++
++void Art3m1sKrkrClearLayerCompactHooks()
++{
++    for (auto* layer : LayerCompactHooks)
++        TVPRemoveCompactEventHook(layer);
++    LayerCompactHooks.clear();
++}
++
++static void RemoveLayerCompactHook(tTVPCompactEventCallbackIntf* layer)
++{
++    if (LayerCompactHooks.erase(layer))
++        TVPRemoveCompactEventHook(layer);
++}
++
+ tTJSNI_BaseLayer::~tTJSNI_BaseLayer()
+ {
++    RemoveLayerCompactHook(this);
+     tTVPTempBitmapHolder::Release();
+ }
+@@ -562,6 +581,6 @@
+
+     // unregister from compact event hook
+-    if (CompactEventHookInit)
+-        TVPRemoveCompactEventHook(this);
++    RemoveLayerCompactHook(this);
++    CompactEventHookInit = false;
+
+     // cancel events once more
+@@ -573,4 +592,5 @@
+     if (!CompactEventHookInit)
+     {
++        LayerCompactHooks.insert(this);
+         TVPAddCompactEventHook(this);
+         CompactEventHookInit = true;

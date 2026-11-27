@@ -67,7 +67,8 @@ pub use rfvp::host_api::{
 };
 
 // Bit 11 is the fork's RFVP_CAPABILITY_FONT_OVERRIDE; host-only bits start at 12.
-const RFVP_HOST_CAPABILITY_SPATIAL_UPSCALING: u64 = 1 << 12;
+// Host capabilities use the upper half, separate from the RFVP VM ABI.
+const RFVP_HOST_CAPABILITY_SPATIAL_UPSCALING: u64 = 1 << 32;
 
 /// Native NLS used while mounting an RFVP project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

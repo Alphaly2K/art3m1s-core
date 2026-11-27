@@ -37,6 +37,7 @@ bool g_initialized = false;
 // The embedded host may deliver input while a script is inside showModal().
 // Pump it on every nested KRKR iteration, not only on top-level runtime ticks.
 void Art3m1sKrkrPumpInput();
+void Art3m1sKrkrClearLayerCompactHooks();
 
 bool Art3m1sKrkrHeadlessInit(
     int argc, char* argv[], krkrsdl3::iTVPRenderBackend* backend,
@@ -79,6 +80,7 @@ bool Art3m1sKrkrHeadlessInit(
     {
         delete Application;
         Application = nullptr;
+        Art3m1sKrkrClearLayerCompactHooks();
         krkrsdl3::TVPShutdownRenderBackend();
         Art3m1sKrkrUnmountProject();
         SDL_Quit();
@@ -120,6 +122,7 @@ void Art3m1sKrkrHeadlessQuit()
         delete Application;
         Application = nullptr;
     }
+    Art3m1sKrkrClearLayerCompactHooks();
     krkrsdl3::TVPShutdownRenderBackend();
     Art3m1sKrkrUnmountProject();
     SDL_Quit();

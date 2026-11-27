@@ -102,6 +102,23 @@ include("${_generated_dir}/cmake_environ.txt")
 include("${_generated_dir}/cmake_plugins.txt")
 include("${_generated_dir}/cmake_tjs2.txt")
 
+# Track layer callbacks that would otherwise outlive an embedded session.
+set(_layer_source "${KRKRSDL3_SOURCE_DIR}/core/script/tjsNativeLayer.cpp")
+set(_layer_patch "${CMAKE_CURRENT_SOURCE_DIR}/layer-compact-hook.patch")
+set(_layer_overlay "${_patch_dir}/core/script/tjsNativeLayer.cpp")
+file(MAKE_DIRECTORY "${_patch_dir}/core/script")
+file(COPY_FILE "${_layer_source}" "${_layer_overlay}")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${_layer_patch}" "${_layer_source}")
+execute_process(
+    COMMAND "${GIT_EXECUTABLE}" --git-dir=${_patch_dir}/no-repository
+            -c core.autocrlf=false apply "${_layer_patch}"
+    WORKING_DIRECTORY "${_patch_dir}"
+    COMMAND_ERROR_IS_FATAL ANY
+)
+list(REMOVE_ITEM KRKRSDL_CORE_SRC "${_layer_source}")
+list(APPEND KRKRSDL_CORE_SRC "${_layer_overlay}")
+
 if(ANDROID)
     # The upstream Android core assumes SDLActivity and its Java class loader.
     # Our Flutter embed supplies equivalent JNI/UI callbacks itself.

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <exception>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -17,6 +18,7 @@
 namespace
 {
 constexpr std::string_view kDomain = "project/";
+constexpr std::string_view kSaveDirectory = "savedata";
 
 class ProjectStream final : public tTJSBinaryStream
 {
@@ -79,14 +81,20 @@ private:
 class ProjectMedia final : public tTVPStorageMedia
 {
 public:
-    explicit ProjectMedia(Art3m1sKrkrProjectHostV1 host) : host_(host) {}
+    ProjectMedia(Art3m1sKrkrProjectHostV1 host, ttstr save_root)
+        : host_(host), save_root_(std::move(save_root)) {}
 
     void GetName(ttstr& name) override { name = TJS_N("arthost"); }
-    void GetLocallyAccessibleName(ttstr& name) override { name.Clear(); }
+    void GetLocallyAccessibleName(ttstr& name) override
+    {
+        auto key = name.AsStdString();
+        if (!key.empty() && key.back() == '/')
+            key.pop_back();
+        auto local = SavePath(Key(ttstr(key.c_str())));
+        name = local.IsEmpty() ? ttstr() : TVPGetLocallyAccessibleName(local);
+    }
     void GetListAt(const ttstr& name, iTVPStorageLister* lister) override
     {
-        if (!host_.list_files)
-            return;
         auto storage = name.AsStdString();
         if (storage.compare(0, kDomain.size(), kDomain) != 0)
             return;
@@ -94,6 +102,21 @@ public:
         if (!directory.empty() && directory.back() == '/')
             directory.pop_back();
         if (!directory.empty() && !Art3m1sKrkrIsProjectKey(directory.c_str()))
+            return;
+
+        if (const auto saved = SavePath(directory); !saved.IsEmpty())
+        {
+            const auto local = std::filesystem::u8path(TVPGetLocallyAccessibleName(saved).AsStdString());
+            std::error_code error;
+            for (auto it = std::filesystem::directory_iterator(local, error);
+                 !error && it != std::filesystem::directory_iterator(); it.increment(error))
+            {
+                if (it->is_regular_file(error))
+                    lister->Add(ttstr(it->path().filename().u8string().c_str()));
+            }
+            return;
+        }
+        if (!host_.list_files)
             return;
 
         struct Listing
@@ -127,6 +150,8 @@ public:
     {
         uint64_t size = 0;
         const auto key = Key(name);
+        if (const auto saved = SavePath(key); !saved.IsEmpty())
+            return TVPIsExistentStorageNoSearch(saved);
         return !key.empty() && Query(key, name, size);
     }
 
@@ -134,6 +159,8 @@ public:
     {
         uint64_t size = 0;
         auto key = Key(name);
+        if (const auto saved = SavePath(key); !saved.IsEmpty())
+            return TVPCreateStream(saved, flags);
         if (flags != TJS_BS_READ || key.empty() || !Query(key, name, size))
             TVPThrowExceptionMessage(TVPCannotOpenStorage, name);
         return new ProjectStream(host_, std::move(key), size);
@@ -149,6 +176,19 @@ private:
         return Art3m1sKrkrIsProjectKey(key.c_str()) ? key : std::string{};
     }
 
+    ttstr SavePath(std::string_view key) const
+    {
+        // KAG scripts can address savedata relative to the project storage.
+        if (save_root_.IsEmpty() || key.substr(0, kSaveDirectory.size()) != kSaveDirectory)
+            return {};
+        key.remove_prefix(kSaveDirectory.size());
+        if (key.empty())
+            return save_root_;
+        if (key.front() != '/')
+            return {};
+        return save_root_ + ttstr(std::string(key.substr(1)).c_str());
+    }
+
     bool Query(const std::string& key, const ttstr& name, uint64_t& size) const
     {
         const auto status = host_.query_size(host_.user_data, key.c_str(), &size);
@@ -160,6 +200,7 @@ private:
     }
 
     Art3m1sKrkrProjectHostV1 host_;
+    ttstr save_root_;
 };
 
 iTVPStorageMedia* g_project_media = nullptr;
@@ -188,7 +229,7 @@ bool Art3m1sKrkrIsProjectKey(const char* value)
 
 void Art3m1sKrkrMountProject(const Art3m1sKrkrProjectHostV1& host, const char* archive_key)
 {
-    auto media = std::make_unique<ProjectMedia>(host);
+    auto media = std::make_unique<ProjectMedia>(host, TVPDataPath);
     TVPRegisterStorageMedia(media.get());
     g_project_media = media.release();
     TVPNativeProjectDir.Clear();
