@@ -810,6 +810,10 @@ impl GlRenderer {
                 cmd.clip.uv_scale[0],
                 cmd.clip.uv_scale[1],
             );
+            gl.uniform_4_f32_slice(
+                bindings.sample_rect.as_ref(),
+                &crate::shader::sprite_sample_rect(cmd),
+            );
             gl.uniform_1_f32(bindings.opacity.as_ref(), cmd.opacity);
             let c = cmd.color;
             gl.uniform_3_f32(
@@ -1328,6 +1332,7 @@ impl GlRenderer {
             gl.uniform_1_i32(self.program_bindings.grayscale.as_ref(), 0);
             gl.uniform_1_i32(self.program_bindings.negative.as_ref(), 0);
             gl.uniform_1_i32(self.program_bindings.emote_enabled.as_ref(), 0);
+            gl.uniform_4_f32(self.program_bindings.sample_rect.as_ref(), 0., 0., 0., 0.);
             gl.uniform_1_i32(self.program_bindings.sampler.as_ref(), 0);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
@@ -1550,6 +1555,7 @@ struct ProgramBindings {
     negative: Option<glow::UniformLocation>,
     emote_enabled: Option<glow::UniformLocation>,
     present_antialias: Option<glow::UniformLocation>,
+    sample_rect: Option<glow::UniformLocation>,
     emote_uv_rect: Option<glow::UniformLocation>,
     emote_color_tl: Option<glow::UniformLocation>,
     emote_color_tr: Option<glow::UniformLocation>,
@@ -1584,6 +1590,7 @@ impl ProgramBindings {
             negative: get("u_negative"),
             emote_enabled: get("u_emote_enabled"),
             present_antialias: get("u_present_antialias"),
+            sample_rect: get("u_sample_rect"),
             emote_uv_rect: get("u_emote_uv_rect"),
             emote_color_tl: get("u_emote_color_tl"),
             emote_color_tr: get("u_emote_color_tr"),

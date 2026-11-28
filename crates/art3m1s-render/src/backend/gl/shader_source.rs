@@ -84,6 +84,7 @@ uniform int u_grayscale;
 uniform int u_negative;
 uniform int u_emote_enabled;
 uniform int u_present_antialias;
+uniform vec4 u_sample_rect;
 uniform vec4 u_emote_uv_rect;
 uniform vec4 u_emote_color_tl;
 uniform vec4 u_emote_color_tr;
@@ -93,8 +94,32 @@ uniform int u_emote_blend_mode;
 uniform vec4 u_emote_clip_rect;
 uniform vec3 u_emote_wipe;
 
+vec4 sample_sprite() {
+    vec4 rect = u_sample_rect;
+    if (!all(greaterThan(rect.zw, rect.xy))) {
+        return texture(u_sampler, v_uv);
+    }
+    vec2 size = vec2(textureSize(u_sampler, 0));
+    vec2 dx = dFdx(v_uv);
+    vec2 dy = dFdy(v_uv);
+    vec2 inset = min(0.5 / size, (rect.zw - rect.xy) * 0.5);
+    vec2 lo = rect.xy + inset;
+    vec2 hi = max(lo, rect.zw - inset);
+    int nx = int(clamp(ceil(length(dx * size) - 0.001), 1.0, 4.0));
+    int ny = int(clamp(ceil(length(dy * size) - 0.001), 1.0, 4.0));
+    vec4 color = vec4(0.0);
+    for (int y = 0; y < ny; ++y) {
+        for (int x = 0; x < nx; ++x) {
+            vec2 uv = v_uv + dx * ((float(x) + 0.5) / float(nx) - 0.5)
+                           + dy * ((float(y) + 0.5) / float(ny) - 0.5);
+            color += textureLod(u_sampler, clamp(uv, lo, hi), 0.0);
+        }
+    }
+    return color / float(nx * ny);
+}
+
 void main() {
-    vec4 c = texture(u_sampler, v_uv);
+    vec4 c = sample_sprite();
     if (u_present_antialias != 0) {
         vec2 texel = 1.0 / vec2(textureSize(u_sampler, 0));
         const vec4 luma = vec4(0.299, 0.587, 0.114, 0.25);

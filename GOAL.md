@@ -1913,3 +1913,9 @@ v1 adapter 可以复用逐步拆出的内部逻辑，但继续暴露原语义。
 Sena fork 的 `main` 与上游 `abbd035` 对齐。Core 固定使用 Sena `c0cab5a`，通过版本化 Host 表接收项目资源、存档和输入，并提供 RGBA8 和 PCM。会话和文件回调归打开会话的线程所有。macOS 的 Sena 与 Siglus 联合构建和 Core FFI 回归通过。
 
 Sena 目前使用软件栅格化，由 Flutter 呈现像素。可重放绘制指令、脚本窗口请求以及发行游戏的兼容性仍待验证。
+
+## CatSystem2 与 SoftPal 精灵变换采样
+
+CatSystem2 的 Metal Host 为精灵合成使用纹理的缩小层级，更新画布面块时重新生成对应层级。显式点采样和脚本离屏读取按原有规则处理。SoftPal 的 GPU Host 针对缩小、旋转和非整数缩放在源图块内过滤，像素对齐的整数缩放保留点采样。PAL 专用效果和 CPU 输出仍使用引擎栅格器。
+
+macOS 的像素读回验证了棋盘纹理缩小、点采样、CatSystem2 画布更新和 SoftPal 旋转时的图块隔离。Windows 目标的 Vulkan 后端通过交叉编译检查，实机验证待补。

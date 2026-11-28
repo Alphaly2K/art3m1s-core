@@ -22,6 +22,7 @@ struct SpriteUniforms {
     emote_blend_mode: vec4<f32>,
     emote_clip_rect: vec4<f32>,
     emote_wipe: vec4<f32>,
+    sample_rect: vec4<f32>,
 }
 
 struct EffectUniforms {
@@ -84,7 +85,29 @@ fn present_antialias_fragment(in: RasterData) -> @location(0) vec4<f32> {
 
 @fragment
 fn sprite_fragment(in: RasterData) -> @location(0) vec4<f32> {
-    var color = textureSample(source_texture, linear_sampler, in.uv);
+    let rect = uniforms.sprite.sample_rect;
+    var color: vec4<f32>;
+    if all(rect.zw > rect.xy) {
+        let size = vec2<f32>(textureDimensions(source_texture));
+        let dx = dpdx(in.uv);
+        let dy = dpdy(in.uv);
+        let inset = min(0.5 / size, (rect.zw - rect.xy) * 0.5);
+        let lo = rect.xy + inset;
+        let hi = max(lo, rect.zw - inset);
+        let nx = i32(clamp(ceil(length(dx * size) - 0.001), 1.0, 4.0));
+        let ny = i32(clamp(ceil(length(dy * size) - 0.001), 1.0, 4.0));
+        color = vec4<f32>(0.0);
+        for (var y = 0; y < ny; y += 1) {
+            for (var x = 0; x < nx; x += 1) {
+                let uv = in.uv + dx * ((f32(x) + 0.5) / f32(nx) - 0.5)
+                               + dy * ((f32(y) + 0.5) / f32(ny) - 0.5);
+                color += textureSampleLevel(source_texture, linear_sampler, clamp(uv, lo, hi), 0.0);
+            }
+        }
+        color /= f32(nx * ny);
+    } else {
+        color = textureSample(source_texture, linear_sampler, in.uv);
+    }
     if (uniforms.sprite.opacity_flags.w != 0.0) {
         let clip = uniforms.sprite.emote_clip_rect;
         if (in.model_position.x < clip.x || in.model_position.y < clip.y ||

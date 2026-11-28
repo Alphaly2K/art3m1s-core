@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use art3m1s_render::{
     BlendMode, ClipRect, ColorFilter, DrawCommand, DrawList, Extent2D, FrameTarget, GpuBackend,
-    NativeSurface, SPRITE_NEAREST_SHADER, ShaderEffect, TextureData, TextureDesc, TextureId,
-    TextureInfo, TextureUpdate,
+    NativeSurface, SPRITE_NEAREST_SHADER, SPRITE_RESAMPLE_SHADER, ShaderEffect, TextureData,
+    TextureDesc, TextureId, TextureInfo, TextureUpdate,
 };
 use glam::{Affine2, Vec2};
 use pal_vm::scene::{
@@ -148,7 +148,9 @@ impl Presenter {
             }
             for draw in &scene.commands {
                 match draw {
-                    PalDraw::Sprite(sprite) if sprite.dst.is_drawable() => {
+                    PalDraw::Sprite(sprite)
+                        if sprite.dst.is_drawable() && sprite.src.is_drawable() =>
+                    {
                         let Some(texture) = self.textures.get(&sprite.texture_id) else {
                             continue;
                         };
@@ -168,14 +170,29 @@ impl Presenter {
                             (bottom_left - top_left) / sprite.dst.h,
                             top_left,
                         );
-                        if !sprite.smooth_upscale {
-                            draw.shader = Some(ShaderEffect {
-                                name: SPRITE_NEAREST_SHADER.into(),
-                                uniforms: Default::default(),
-                                mask_texture: None,
-                                user_texture: None,
-                            });
-                        }
+                        let src_size = Vec2::new(
+                            sprite.src.w * texture.size.width as f32,
+                            sprite.src.h * texture.size.height as f32,
+                        );
+                        let scale = (Vec2::new(sprite.dst.w, sprite.dst.h) / src_size).abs();
+                        let position = Vec2::new(sprite.dst.x, sprite.dst.y);
+                        let aligned = |v: Vec2| (v - v.round()).abs().max_element() < 0.001;
+                        let preserve_texels = !sprite.smooth_upscale
+                            && sprite.rotation[2].rem_euclid(512.) == 0.
+                            && scale.min_element() >= 0.999
+                            && aligned(scale)
+                            && aligned(position);
+                        draw.shader = Some(ShaderEffect {
+                            name: if preserve_texels {
+                                SPRITE_NEAREST_SHADER
+                            } else {
+                                SPRITE_RESAMPLE_SHADER
+                            }
+                            .into(),
+                            uniforms: Default::default(),
+                            mask_texture: None,
+                            user_texture: None,
+                        });
                         list.push(draw);
                     }
                     PalDraw::SolidQuad(quad) if quad.dst.is_drawable() => list.push(command(

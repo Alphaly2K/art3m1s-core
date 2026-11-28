@@ -35,7 +35,7 @@ pub use post_process::{
 };
 pub use shader::{
     ALPHA_MASK_SHADER, GROUP_COMPOSITE_SHADER, RULE_TRANS_SHADER, SPRITE_NEAREST_SHADER,
-    SPRITE_SHADER,
+    SPRITE_RESAMPLE_SHADER, SPRITE_SHADER,
 };
 pub use types::{
     BackendCapabilities, BackendInfo, BackendKind, BackendStability, Extent2D, FrameTarget,

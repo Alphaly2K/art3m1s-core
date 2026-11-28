@@ -15,6 +15,32 @@ pub(crate) const PRESENT_ANTIALIAS_SHADER: &str = "__art3m1s_present_antialias";
 /// keeping this as a named sprite variant lets adapters preserve that state
 /// without changing the `DrawCommand` layout or the C ABI.
 pub const SPRITE_NEAREST_SHADER: &str = "sprite-nearest";
+/// Sprite sampling constrained to its source rectangle, with filtering across
+/// the projected pixel footprint when the sprite is reduced.
+pub const SPRITE_RESAMPLE_SHADER: &str = "sprite-resample";
+
+#[cfg(any(feature = "gl", feature = "metal", feature = "vulkan"))]
+pub(crate) fn sprite_sample_rect(command: &crate::draw::DrawCommand) -> [f32; 4] {
+    if !command
+        .shader
+        .as_ref()
+        .is_some_and(|shader| shader.name == SPRITE_RESAMPLE_SHADER)
+    {
+        return [0.0; 4];
+    }
+    let [left, top] = command.clip.uv_offset;
+    let [width, height] = command.clip.uv_scale;
+    let right = left + width;
+    let bottom = top + height;
+    [
+        left.min(right),
+        top.min(bottom),
+        left.max(right),
+        top.max(bottom),
+    ]
+    .map(|edge| edge.clamp(0., 1.))
+}
+
 pub const ALPHA_MASK_SHADER: &str = "alpha-mask";
 pub const GROUP_COMPOSITE_SHADER: &str = "group-composite";
 /// `[trans type=2]` rule-image transition shader identity.

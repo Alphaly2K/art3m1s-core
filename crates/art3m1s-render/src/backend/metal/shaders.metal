@@ -31,6 +31,7 @@ struct SpriteUniforms {
     float4 emote_blend_mode;
     float4 emote_clip_rect;
     float4 emote_wipe;
+    float4 sample_rect;
 };
 
 struct EffectUniforms {
@@ -57,7 +58,30 @@ fragment float4 sprite_fragment(
     texture2d<float> source [[texture(0)]],
     sampler linear_sampler [[sampler(0)]],
     constant SpriteUniforms &uniforms [[buffer(0)]]) {
-    float4 color = source.sample(linear_sampler, in.uv);
+    float4 rect = uniforms.sample_rect;
+    float4 color;
+    if (all(rect.zw > rect.xy)) {
+        float2 size = float2(source.get_width(), source.get_height());
+        float2 dx = dfdx(in.uv);
+        float2 dy = dfdy(in.uv);
+        // Keep each bilinear tap inside the sprite's atlas cell.
+        float2 inset = min(0.5 / size, (rect.zw - rect.xy) * 0.5);
+        float2 lo = rect.xy + inset;
+        float2 hi = max(lo, rect.zw - inset);
+        int nx = int(clamp(ceil(length(dx * size) - 0.001), 1.0, 4.0));
+        int ny = int(clamp(ceil(length(dy * size) - 0.001), 1.0, 4.0));
+        color = float4(0.0);
+        for (int y = 0; y < ny; ++y) {
+            for (int x = 0; x < nx; ++x) {
+                float2 uv = in.uv + dx * ((float(x) + 0.5) / float(nx) - 0.5)
+                                  + dy * ((float(y) + 0.5) / float(ny) - 0.5);
+                color += source.sample(linear_sampler, clamp(uv, lo, hi), level(0.0));
+            }
+        }
+        color /= float(nx * ny);
+    } else {
+        color = source.sample(linear_sampler, in.uv);
+    }
     if (uniforms.opacity_flags.w != 0.0) {
         float4 clip = uniforms.emote_clip_rect;
         if (in.model_position.x < clip.x || in.model_position.y < clip.y ||

@@ -43,6 +43,7 @@ struct SpriteUniforms {
     emote_blend_mode: [f32; 4],
     emote_clip_rect: [f32; 4],
     emote_wipe: [f32; 4],
+    sample_rect: [f32; 4],
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -632,7 +633,9 @@ impl VulkanBackend {
 
     fn shader_kind(&self, effect: Option<&ShaderEffect>) -> ShaderKind {
         match effect.map(|effect| effect.name.as_str()) {
-            Some(crate::shader::SPRITE_NEAREST_SHADER) => ShaderKind::Sprite,
+            Some(crate::shader::SPRITE_NEAREST_SHADER | crate::shader::SPRITE_RESAMPLE_SHADER) => {
+                ShaderKind::Sprite
+            }
             Some(crate::shader::PRESENT_ANTIALIAS_SHADER) => ShaderKind::PresentAntialias,
             Some(crate::shader::ALPHA_MASK_SHADER) => ShaderKind::AlphaMask,
             Some(crate::shader::GROUP_COMPOSITE_SHADER) => ShaderKind::GroupComposite,
@@ -3876,6 +3879,7 @@ fn sprite_uniforms(c: &DrawCommand) -> SpriteUniforms {
         emote_color_br: colors[3],
         emote_blend_mode: [m.map(|x| x.blend_mode as f32).unwrap_or(0.), 0., 0., 0.],
         emote_clip_rect: m.map(|x| x.clip_rect).unwrap_or([0., 0., 1., 1.]),
+        sample_rect: crate::shader::sprite_sample_rect(c),
         emote_wipe: m
             .map(|x| [x.wipe[0], x.wipe[1], x.wipe[2], 0.])
             .unwrap_or([0.; 4]),
@@ -4175,9 +4179,9 @@ mod tests {
     #[test]
     fn uniform_block_matches_wgsl_layout() {
         assert_eq!(std::mem::size_of::<VertexUniforms>(), 96);
-        assert_eq!(std::mem::size_of::<SpriteUniforms>(), 160);
+        assert_eq!(std::mem::size_of::<SpriteUniforms>(), 176);
         assert_eq!(std::mem::size_of::<EffectUniforms>(), 48);
-        assert_eq!(std::mem::size_of::<UniformBlock>(), 304);
+        assert_eq!(std::mem::size_of::<UniformBlock>(), 320);
     }
 
     #[test]

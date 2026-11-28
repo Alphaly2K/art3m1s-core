@@ -87,6 +87,7 @@ struct SpriteUniforms {
     emote_blend_mode: [f32; 4],
     emote_clip_rect: [f32; 4],
     emote_wipe: [f32; 4],
+    sample_rect: [f32; 4],
 }
 
 #[repr(C)]
@@ -3561,7 +3562,9 @@ impl MetalBackend {
 
     fn shader_kind(&self, effect: Option<&ShaderEffect>) -> ShaderKind {
         match effect.map(|effect| effect.name.as_str()) {
-            Some(crate::shader::SPRITE_NEAREST_SHADER) => ShaderKind::Sprite,
+            Some(crate::shader::SPRITE_NEAREST_SHADER | crate::shader::SPRITE_RESAMPLE_SHADER) => {
+                ShaderKind::Sprite
+            }
             Some(DXVK_STRAIGHT_ALPHA_INPUT) => ShaderKind::Unpremultiply,
             Some(crate::shader::PRESENT_ANTIALIAS_SHADER) => ShaderKind::PresentAntialias,
             Some(crate::shader::ALPHA_MASK_SHADER) => ShaderKind::AlphaMask,
@@ -4000,6 +4003,7 @@ fn sprite_uniforms(command: &DrawCommand) -> SpriteUniforms {
         emote_clip_rect: material
             .map(|value| value.clip_rect)
             .unwrap_or([0.0, 0.0, 1.0, 1.0]),
+        sample_rect: crate::shader::sprite_sample_rect(command),
         emote_wipe: material
             .map(|value| [value.wipe[0], value.wipe[1], value.wipe[2], 0.0])
             .unwrap_or([0.0; 4]),
