@@ -1342,7 +1342,9 @@ impl GlRenderer {
                 glow::LINEAR as i32,
             );
             self.record_draw(6, 1);
+            gl.uniform_1_i32(self.program_bindings.present_antialias.as_ref(), 1);
             gl.draw_arrays(glow::TRIANGLES, 0, 6);
+            gl.uniform_1_i32(self.program_bindings.present_antialias.as_ref(), 0);
             gl.flush();
 
             gl.disable(glow::SCISSOR_TEST);
@@ -1547,6 +1549,7 @@ struct ProgramBindings {
     grayscale: Option<glow::UniformLocation>,
     negative: Option<glow::UniformLocation>,
     emote_enabled: Option<glow::UniformLocation>,
+    present_antialias: Option<glow::UniformLocation>,
     emote_uv_rect: Option<glow::UniformLocation>,
     emote_color_tl: Option<glow::UniformLocation>,
     emote_color_tr: Option<glow::UniformLocation>,
@@ -1580,6 +1583,7 @@ impl ProgramBindings {
             grayscale: get("u_grayscale"),
             negative: get("u_negative"),
             emote_enabled: get("u_emote_enabled"),
+            present_antialias: get("u_present_antialias"),
             emote_uv_rect: get("u_emote_uv_rect"),
             emote_color_tl: get("u_emote_color_tl"),
             emote_color_tr: get("u_emote_color_tr"),
@@ -1809,6 +1813,60 @@ mod tests {
 
         assert_eq!(raw_pixel(&pixels, 0, 1), [255, 0, 0, 255]);
         assert_eq!(raw_pixel(&pixels, 0, 0), [0, 0, 255, 255]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn texture_present_smooths_a_diagonal() {
+        let Ok((gl, _context, _)) =
+            platform::create_offscreen_context(platform::GfxBackend::Cgl, 8, 8)
+        else {
+            return;
+        };
+        let renderer = GlRenderer::new(gl.clone(), 8, 8, ShaderProfile::GlCore330).unwrap();
+        let (target, _) = unsafe { platform::create_fbo_target(&gl, 8, 8).unwrap() };
+        let (_, source) = unsafe { platform::create_fbo_target(&gl, 8, 8).unwrap() };
+        let diagonal: Vec<u8> = (0..8)
+            .flat_map(|y| {
+                (0..8).flat_map(move |x| {
+                    let value = if x >= y { 255 } else { 0 };
+                    [value, value, value, 255]
+                })
+            })
+            .collect();
+        let mut pixels = [0u8; 8 * 8 * 4];
+        unsafe {
+            gl.bind_texture(glow::TEXTURE_2D, Some(source));
+            gl.tex_sub_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                0,
+                0,
+                8,
+                8,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(&diagonal)),
+            );
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target));
+        }
+        renderer.present_texture(source, 8, 8, None, false).unwrap();
+        unsafe {
+            gl.read_pixels(
+                0,
+                0,
+                8,
+                8,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut pixels)),
+            );
+        }
+        let pixel = |x: usize, y: usize| &pixels[(y * 8 + x) * 4..][..4];
+        assert_eq!(pixel(6, 1), [255; 4]);
+        assert_eq!(pixel(1, 6), [0, 0, 0, 255]);
+        assert!((180..=240).contains(&pixel(3, 3)[0]));
+        assert!((15..=75).contains(&pixel(3, 4)[0]));
     }
 
     #[cfg(target_os = "macos")]

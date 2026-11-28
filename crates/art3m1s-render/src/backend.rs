@@ -254,6 +254,8 @@ pub trait GpuBackend: TextureProvider {
 
     fn set_native_surface(&mut self, surface: NativeSurface) -> Result<(), String>;
     fn clear_native_surface(&mut self);
+    /// Presents the scene. Backends may expand the logical damage rectangle
+    /// for filters that sample neighboring pixels.
     fn present(&mut self, damage: Option<[f32; 4]>) -> Result<(), String>;
 
     fn register_hlsl_shader(

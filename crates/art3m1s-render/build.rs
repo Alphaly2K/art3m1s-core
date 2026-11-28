@@ -52,6 +52,11 @@ fn compile_vulkan_shaders() {
             "vulkan_sprite.frag.spv",
         ),
         (
+            "present_antialias_fragment",
+            naga::ShaderStage::Fragment,
+            "vulkan_present_antialias.frag.spv",
+        ),
+        (
             "alpha_mask_fragment",
             naga::ShaderStage::Fragment,
             "vulkan_alpha_mask.frag.spv",

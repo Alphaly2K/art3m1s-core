@@ -7,6 +7,8 @@
 use crate::draw::ShaderEffect;
 
 pub const SPRITE_SHADER: &str = "sprite";
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+pub(crate) const PRESENT_ANTIALIAS_SHADER: &str = "__art3m1s_present_antialias";
 /// Sprite draw that must sample with a nearest filter.
 ///
 /// RFVP uses nearest sampling for its text atlases and gaiji glyph textures;

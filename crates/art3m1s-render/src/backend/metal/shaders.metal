@@ -105,6 +105,30 @@ fragment float4 sprite_fragment(
     return color;
 }
 
+// Smooth oblique edges without softening already aligned horizontal and vertical lines.
+fragment float4 present_antialias_fragment(
+    RasterData in [[stage_in]],
+    texture2d<float> source [[texture(0)]],
+    sampler linear_sampler [[sampler(0)]]) {
+    float2 texel = 1.0 / float2(float(source.get_width()), float(source.get_height()));
+    const float4 luma = float4(0.299, 0.587, 0.114, 0.25);
+    float4 center = source.sample(linear_sampler, in.uv);
+    float2 dx = float2(texel.x, 0.0);
+    float2 dy = float2(0.0, texel.y);
+    float2 gradient = float2(
+        dot(source.sample(linear_sampler, in.uv + dx) - source.sample(linear_sampler, in.uv - dx), luma),
+        dot(source.sample(linear_sampler, in.uv + dy) - source.sample(linear_sampler, in.uv - dy), luma));
+    float major = max(abs(gradient.x), abs(gradient.y));
+    float minor = min(abs(gradient.x), abs(gradient.y));
+    if (major < 0.08 || minor < major * 0.2) {
+        return center;
+    }
+    float2 offset = gradient * texel * (0.5 / major);
+    float4 sides = source.sample(linear_sampler, in.uv + offset, level(0.0))
+                 + source.sample(linear_sampler, in.uv - offset, level(0.0));
+    return center * 0.5 + sides * 0.25;
+}
+
 fragment float4 unpremultiply_fragment(
     RasterData in [[stage_in]],
     texture2d<float> source [[texture(0)]],

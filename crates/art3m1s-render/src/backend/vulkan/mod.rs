@@ -185,6 +185,7 @@ struct Swapchain {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ShaderKind {
     Sprite,
+    PresentAntialias,
     AlphaMask,
     GroupComposite,
     RuleTransition,
@@ -216,6 +217,7 @@ struct PipelineKey {
 struct ShaderModules {
     vertex: vk::ShaderModule,
     sprite: vk::ShaderModule,
+    present_antialias: vk::ShaderModule,
     alpha_mask: vk::ShaderModule,
     group: vk::ShaderModule,
     rule: vk::ShaderModule,
@@ -251,6 +253,8 @@ pub struct VulkanBackend {
     white: Image,
     transparent: Image,
     main: PrivateTarget,
+    antialias_target: Option<PrivateTarget>,
+    antialias_ready: bool,
     scene_size: Extent2D,
     output_size: Extent2D,
     post_process: PostProcessPipeline,
@@ -484,6 +488,8 @@ impl VulkanBackend {
             scene_size: Extent2D::new(width, height),
             output_size: Extent2D::new(width, height),
             post_process: PostProcessPipeline::default(),
+            antialias_target: None,
+            antialias_ready: false,
             active: None,
             textures: HashMap::new(),
             names: HashMap::new(),
@@ -618,6 +624,7 @@ impl VulkanBackend {
         )?;
         let old = std::mem::replace(&mut self.main, new);
         self.destroy_private(old);
+        self.clear_antialias_target();
         self.clear_private_caches();
         self.last_overlay = None;
         Ok(())
@@ -626,6 +633,7 @@ impl VulkanBackend {
     fn shader_kind(&self, effect: Option<&ShaderEffect>) -> ShaderKind {
         match effect.map(|effect| effect.name.as_str()) {
             Some(crate::shader::SPRITE_NEAREST_SHADER) => ShaderKind::Sprite,
+            Some(crate::shader::PRESENT_ANTIALIAS_SHADER) => ShaderKind::PresentAntialias,
             Some(crate::shader::ALPHA_MASK_SHADER) => ShaderKind::AlphaMask,
             Some(crate::shader::GROUP_COMPOSITE_SHADER) => ShaderKind::GroupComposite,
             Some(crate::shader::RULE_TRANS_SHADER) => ShaderKind::RuleTransition,
@@ -733,6 +741,13 @@ fn create_shaders(device: &Device) -> Result<ShaderModules, String> {
         sprite: module(
             device,
             include_bytes!(concat!(env!("OUT_DIR"), "/vulkan_sprite.frag.spv")),
+        )?,
+        present_antialias: module(
+            device,
+            include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/vulkan_present_antialias.frag.spv"
+            )),
         )?,
         alpha_mask: module(
             device,
@@ -1990,21 +2005,29 @@ impl GpuBackend for VulkanBackend {
         self.clear_current(target, color, None);
     }
     fn end_frame(&mut self) {
-        self.end_open_pass();
-        let Some(mut a) = self.active.take() else {
+        let Some((target, view)) = self.active.as_ref().map(|frame| (frame.target, frame.view))
+        else {
             return;
         };
-        self.scratch_capacity = self
-            .scratch_capacity
-            .max(a.scratch.cursor.next_power_of_two());
-        barrier(
-            &self.device,
-            a.command,
-            a.view.image,
+        self.image_barrier(
+            view.image,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         );
-        self.set_target_layout(a.target, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+        self.set_target_layout(target, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+        if target == FrameTarget::Main {
+            self.antialias_ready = false;
+            if self.swapchain.is_some() {
+                match self.render_antialias_target() {
+                    Ok(()) => self.antialias_ready = true,
+                    Err(error) => log::warn!("Vulkan presentation antialias pass failed: {error}"),
+                }
+            }
+        }
+        let mut a = self.active.take().expect("frame is still active");
+        self.scratch_capacity = self
+            .scratch_capacity
+            .max(a.scratch.cursor.next_power_of_two());
         if let Err(error) = unsafe { self.device.end_command_buffer(a.command) } {
             self.fail("ending frame command buffer", error);
             self.discard_active(a);
@@ -2188,6 +2211,7 @@ impl GpuBackend for VulkanBackend {
     }
     fn clear_native_surface(&mut self) {
         self.destroy_swapchain();
+        self.clear_antialias_target();
         self.output_size = self.scene_size;
         let extent = self
             .post_process
@@ -3054,6 +3078,10 @@ impl VulkanBackend {
                 self.shaders.sprite,
                 CString::new("sprite_fragment").unwrap(),
             ),
+            ShaderKind::PresentAntialias => (
+                self.shaders.present_antialias,
+                CString::new("present_antialias_fragment").unwrap(),
+            ),
             ShaderKind::AlphaMask => (
                 self.shaders.alpha_mask,
                 CString::new("alpha_mask_fragment").unwrap(),
@@ -3393,6 +3421,75 @@ impl VulkanBackend {
             }
         }
     }
+    fn clear_antialias_target(&mut self) {
+        self.antialias_ready = false;
+        if let Some(target) = self.antialias_target.take() {
+            self.destroy_private(target);
+        }
+    }
+
+    fn render_antialias_target(&mut self) -> Result<(), String> {
+        let source_size = self.main.image.desc.extent;
+        if self.antialias_target.is_none() {
+            self.antialias_target = Some(create_private_target(
+                &self.device,
+                &self.memory,
+                self.main.pass,
+                source_size,
+                TextureFormat::Rgba8Unorm,
+            )?);
+        }
+        let target = self.antialias_target.as_ref().unwrap();
+        let view = private_view(target);
+        self.image_barrier(
+            view.image,
+            target.image.layout,
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+        );
+        let command = DrawCommand {
+            texture: TextureId(0),
+            size: TextureInfo {
+                width: source_size.width,
+                height: source_size.height,
+            },
+            transform: glam::Affine2::IDENTITY,
+            opacity: 1.0,
+            blend: BlendMode::Alpha,
+            color: ColorFilter::default(),
+            clip: ClipRect {
+                uv_offset: [0.0; 2],
+                uv_scale: [1.0; 2],
+                quad_size: [self.scene_size.width as f32, self.scene_size.height as f32],
+            },
+            clip_bounds: None,
+            shader: Some(ShaderEffect {
+                name: crate::shader::PRESENT_ANTIALIAS_SHADER.into(),
+                uniforms: Default::default(),
+                mask_texture: None,
+                user_texture: None,
+            }),
+            mesh: None,
+            stencil: None,
+            native_emote: None,
+        };
+        let result = self.encode_draw(
+            view,
+            &command,
+            None,
+            Some(self.main.image.view),
+            None,
+            Some(PipelineBlend::Replace),
+        );
+        self.image_barrier(
+            view.image,
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        );
+        self.antialias_target.as_mut().unwrap().image.layout =
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+        result
+    }
+
     fn present_impl(&mut self) -> Result<(), String> {
         self.check_operational()?;
         if self.active.is_some() {
@@ -3436,12 +3533,17 @@ impl VulkanBackend {
             )
         }
         .map_err(|e| format!("begin present command: {e}"))?;
+        let source = self
+            .antialias_target
+            .as_ref()
+            .filter(|_| self.antialias_ready)
+            .map_or(&self.main.image, |target| &target.image);
         let old = s.layouts[index as usize];
         barrier(
             &self.device,
             frame.command,
-            self.main.image.raw,
-            self.main.image.layout,
+            source.raw,
+            source.layout,
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
         );
         barrier(
@@ -3451,7 +3553,7 @@ impl VulkanBackend {
             old,
             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
         );
-        let src = self.main.image.desc.extent;
+        let src = source.desc.extent;
         let blit = [vk::ImageBlit::default()
             .src_subresource(layers())
             .src_offsets([
@@ -3474,7 +3576,7 @@ impl VulkanBackend {
         unsafe {
             self.device.cmd_blit_image(
                 frame.command,
-                self.main.image.raw,
+                source.raw,
                 vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                 s.images[index as usize],
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
@@ -3485,9 +3587,9 @@ impl VulkanBackend {
         barrier(
             &self.device,
             frame.command,
-            self.main.image.raw,
+            source.raw,
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-            self.main.image.layout,
+            source.layout,
         );
         barrier(
             &self.device,
@@ -3550,6 +3652,7 @@ impl Drop for VulkanBackend {
     fn drop(&mut self) {
         let _ = unsafe { self.device.device_wait_idle() };
         self.destroy_swapchain();
+        self.clear_antialias_target();
         if let Some(active) = self.active.take() {
             self.discard_active(active);
         }
@@ -3617,6 +3720,8 @@ impl Drop for VulkanBackend {
             }
             self.device.destroy_shader_module(self.shaders.vertex, None);
             self.device.destroy_shader_module(self.shaders.sprite, None);
+            self.device
+                .destroy_shader_module(self.shaders.present_antialias, None);
             self.device
                 .destroy_shader_module(self.shaders.alpha_mask, None);
             self.device.destroy_shader_module(self.shaders.group, None);

@@ -832,7 +832,10 @@ impl GpuBackend for GlBackend {
         let damage = if surface.kind == NativeSurfaceKind::AndroidNativeWindow {
             None
         } else {
-            damage
+            damage.map(|rect| {
+                let extent = self.main_target.desc.extent;
+                crate::post_process::expand_antialias_damage(rect, extent, extent)
+            })
         };
         self.platform_context.bind_external_surface()?;
         if let Err(error) = self.renderer.present_texture(

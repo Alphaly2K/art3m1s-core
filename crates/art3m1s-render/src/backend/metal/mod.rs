@@ -302,6 +302,7 @@ enum MetalSurface {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ShaderKind {
     Sprite,
+    PresentAntialias,
     Unpremultiply,
     AlphaMask,
     GroupComposite,
@@ -3521,6 +3522,7 @@ impl MetalBackend {
         let vertex_name = NSString::from_str("sprite_vertex");
         let fragment_name = NSString::from_str(match key.shader {
             ShaderKind::Sprite => "sprite_fragment",
+            ShaderKind::PresentAntialias => "present_antialias_fragment",
             ShaderKind::Unpremultiply => "unpremultiply_fragment",
             ShaderKind::AlphaMask => "alpha_mask_fragment",
             ShaderKind::GroupComposite => "group_composite_fragment",
@@ -3561,6 +3563,7 @@ impl MetalBackend {
         match effect.map(|effect| effect.name.as_str()) {
             Some(crate::shader::SPRITE_NEAREST_SHADER) => ShaderKind::Sprite,
             Some(DXVK_STRAIGHT_ALPHA_INPUT) => ShaderKind::Unpremultiply,
+            Some(crate::shader::PRESENT_ANTIALIAS_SHADER) => ShaderKind::PresentAntialias,
             Some(crate::shader::ALPHA_MASK_SHADER) => ShaderKind::AlphaMask,
             Some(crate::shader::GROUP_COMPOSITE_SHADER) => ShaderKind::GroupComposite,
             Some(crate::shader::RULE_TRANS_SHADER) => ShaderKind::RuleTransition,
@@ -3673,8 +3676,19 @@ impl MetalBackend {
                 uv_scale: [1.0, 1.0],
                 quad_size: [self.scene_size.width as f32, self.scene_size.height as f32],
             },
-            clip_bounds: damage,
-            shader: None,
+            clip_bounds: damage.map(|rect| {
+                crate::post_process::expand_antialias_damage(
+                    rect,
+                    self.scene_size,
+                    Extent2D::new(source.width() as u32, source.height() as u32),
+                )
+            }),
+            shader: Some(ShaderEffect {
+                name: crate::shader::PRESENT_ANTIALIAS_SHADER.into(),
+                uniforms: Default::default(),
+                mask_texture: None,
+                user_texture: None,
+            }),
             mesh: None,
             stencil: None,
             native_emote: None,
@@ -4435,12 +4449,15 @@ mod tests {
     }
 
     #[test]
-    fn shared_present_keeps_undamaged_pixels() {
-        let Ok(mut backend) = MetalBackend::new(2, 2) else {
-            return;
+    fn shared_present_smooths_diagonal_and_updates_damage_halo() {
+        let mut backend = match MetalBackend::new(8, 8) {
+            Ok(backend) => backend,
+            Err(error) if error == "Metal system device is unavailable" => return,
+            Err(error) => panic!("{error}"),
         };
+        let size = Extent2D::new(8, 8);
         let surface = backend
-            .create_render_target("present-surface", RenderTargetDesc::sampled_rgba8(2, 2))
+            .create_render_target("present-surface", RenderTargetDesc::sampled_rgba8(8, 8))
             .unwrap();
         backend
             .begin_frame(FrameTarget::Offscreen(surface.id))
@@ -4448,28 +4465,36 @@ mod tests {
         backend.clear([0.0, 1.0, 0.0, 1.0]);
         backend.end_frame();
 
-        let red = backend
+        let diagonal: Vec<_> = (0..8)
+            .flat_map(|y| {
+                (0..8).flat_map(move |x| {
+                    let value = if x >= y { 255 } else { 0 };
+                    [value, value, value, 255]
+                })
+            })
+            .collect();
+        let source = backend
             .create_texture(
-                "red",
-                TextureDesc::sampled_rgba8(1, 1),
-                TextureData::Rgba8(&[255, 0, 0, 255]),
+                "diagonal",
+                TextureDesc::sampled_rgba8(8, 8),
+                TextureData::Rgba8(&diagonal),
             )
-            .expect("red texture");
+            .unwrap();
         let mut frame = DrawList::new();
         frame.push(DrawCommand {
-            texture: red,
+            texture: source,
             size: TextureInfo {
-                width: 1,
-                height: 1,
+                width: 8,
+                height: 8,
             },
             transform: glam::Affine2::IDENTITY,
             opacity: 1.0,
             blend: BlendMode::Alpha,
             color: ColorFilter::default(),
             clip: ClipRect {
-                uv_offset: [0.0, 0.0],
-                uv_scale: [1.0, 1.0],
-                quad_size: [2.0, 2.0],
+                uv_offset: [0.0; 2],
+                uv_scale: [1.0; 2],
+                quad_size: [8.0; 2],
             },
             clip_bounds: None,
             shader: None,
@@ -4480,30 +4505,35 @@ mod tests {
         backend.begin_frame(FrameTarget::Main).unwrap();
         backend.render(&frame);
         backend.end_frame();
-
-        let texture = backend
-            .textures
-            .get(&surface.color)
-            .expect("present surface texture")
-            .raw
-            .clone();
-        let handle = Retained::as_ptr(&texture) as *mut std::ffi::c_void;
         backend
             .set_native_surface(NativeSurface {
                 kind: NativeSurfaceKind::AppleMetalTexture,
-                handle,
-                extent: Extent2D::new(2, 2),
+                handle: Retained::as_ptr(&backend.textures[&surface.color].raw)
+                    as *mut std::ffi::c_void,
+                extent: size,
             })
             .unwrap();
-        backend.present(Some([0.0, 0.0, 1.0, 1.0])).unwrap();
+        backend.present(Some([3.0, 3.0, 4.0, 4.0])).unwrap();
 
         let pixels = backend
-            .readback_owned(FrameTarget::Offscreen(surface.id), Extent2D::new(2, 2))
+            .readback_owned(FrameTarget::Offscreen(surface.id), size)
             .unwrap();
-        assert_eq!(&pixels[0..4], &[255, 0, 0, 255]);
-        assert_eq!(&pixels[4..8], &[0, 255, 0, 255]);
-        assert_eq!(&pixels[8..12], &[0, 255, 0, 255]);
-        assert_eq!(&pixels[12..16], &[0, 255, 0, 255]);
+        let pixel = |x: usize, y: usize| -> [u8; 4] {
+            let offset = (y * 8 + x) * 4;
+            pixels[offset..offset + 4].try_into().unwrap()
+        };
+        assert_eq!(pixel(0, 0), [0, 255, 0, 255]);
+        assert_eq!(pixel(5, 2), [255; 4]);
+        let bright = pixel(3, 3);
+        let dark = pixel(3, 4);
+        assert!((180..=240).contains(&bright[0]), "edge pixel: {bright:?}");
+        assert!((15..=75).contains(&dark[0]), "halo pixel: {dark:?}");
+        assert_eq!(bright[3], 255);
+        assert_eq!(dark[3], 255);
+        assert_eq!(
+            backend.readback_owned(FrameTarget::Main, size).unwrap(),
+            diagonal
+        );
     }
 
     #[test]

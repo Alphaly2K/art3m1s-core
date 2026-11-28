@@ -59,6 +59,30 @@ fn sprite_vertex(input: VertexInput) -> RasterData {
 }
 
 @fragment
+fn present_antialias_fragment(in: RasterData) -> @location(0) vec4<f32> {
+    let texel = 1.0 / vec2<f32>(textureDimensions(source_texture));
+    let luma = vec4<f32>(0.299, 0.587, 0.114, 0.25);
+    let center = textureSampleLevel(source_texture, linear_sampler, in.uv, 0.0);
+    let dx = vec2<f32>(texel.x, 0.0);
+    let dy = vec2<f32>(0.0, texel.y);
+    let gradient = vec2<f32>(
+        dot(textureSampleLevel(source_texture, linear_sampler, in.uv + dx, 0.0) -
+            textureSampleLevel(source_texture, linear_sampler, in.uv - dx, 0.0), luma),
+        dot(textureSampleLevel(source_texture, linear_sampler, in.uv + dy, 0.0) -
+            textureSampleLevel(source_texture, linear_sampler, in.uv - dy, 0.0), luma),
+    );
+    let major = max(abs(gradient.x), abs(gradient.y));
+    let minor = min(abs(gradient.x), abs(gradient.y));
+    if major < 0.08 || minor < major * 0.2 {
+        return center;
+    }
+    let offset = gradient * texel * (0.5 / major);
+    let sides = textureSampleLevel(source_texture, linear_sampler, in.uv + offset, 0.0) +
+                textureSampleLevel(source_texture, linear_sampler, in.uv - offset, 0.0);
+    return center * 0.5 + sides * 0.25;
+}
+
+@fragment
 fn sprite_fragment(in: RasterData) -> @location(0) vec4<f32> {
     var color = textureSample(source_texture, linear_sampler, in.uv);
     if (uniforms.sprite.opacity_flags.w != 0.0) {

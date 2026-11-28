@@ -83,6 +83,7 @@ uniform vec3 u_multiply;
 uniform int u_grayscale;
 uniform int u_negative;
 uniform int u_emote_enabled;
+uniform int u_present_antialias;
 uniform vec4 u_emote_uv_rect;
 uniform vec4 u_emote_color_tl;
 uniform vec4 u_emote_color_tr;
@@ -94,6 +95,25 @@ uniform vec3 u_emote_wipe;
 
 void main() {
     vec4 c = texture(u_sampler, v_uv);
+    if (u_present_antialias != 0) {
+        vec2 texel = 1.0 / vec2(textureSize(u_sampler, 0));
+        const vec4 luma = vec4(0.299, 0.587, 0.114, 0.25);
+        vec2 dx = vec2(texel.x, 0.0);
+        vec2 dy = vec2(0.0, texel.y);
+        vec2 gradient = vec2(
+            dot(texture(u_sampler, v_uv + dx) - texture(u_sampler, v_uv - dx), luma),
+            dot(texture(u_sampler, v_uv + dy) - texture(u_sampler, v_uv - dy), luma));
+        float major = max(abs(gradient.x), abs(gradient.y));
+        float minor = min(abs(gradient.x), abs(gradient.y));
+        if (major >= 0.08 && minor >= major * 0.2) {
+            vec2 offset = gradient * texel * (0.5 / major);
+            vec4 sides = textureLod(u_sampler, v_uv + offset, 0.0) +
+                         textureLod(u_sampler, v_uv - offset, 0.0);
+            c = c * 0.5 + sides * 0.25;
+        }
+        frag_color = c;
+        return;
+    }
     if (u_emote_enabled != 0) {
         if (v_model_position.x < u_emote_clip_rect.x ||
             v_model_position.y < u_emote_clip_rect.y ||

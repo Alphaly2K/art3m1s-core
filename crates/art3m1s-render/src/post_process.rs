@@ -5,6 +5,21 @@
 
 use crate::{Extent2D, TextureFormat};
 
+#[cfg(any(feature = "gl", feature = "metal"))]
+pub(crate) fn expand_antialias_damage(
+    [left, top, right, bottom]: [f32; 4],
+    scene: Extent2D,
+    source: Extent2D,
+) -> [f32; 4] {
+    if right <= left || bottom <= top {
+        return [left, top, right, bottom];
+    }
+    // The edge filter reads adjacent texels through a linear sampler.
+    let x = 2.0 * scene.width as f32 / source.width.max(1) as f32;
+    let y = 2.0 * scene.height as f32 / source.height.max(1) as f32;
+    [left - x, top - y, right + x, bottom + y]
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RenderDimensions {
     /// The target where the scene DrawList is rasterized.
